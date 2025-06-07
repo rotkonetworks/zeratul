@@ -1,4 +1,5 @@
-use crate::{ReedSolomon, fft};
+use crate::ReedSolomon;
+use crate::fft_simple;
 use binary_fields::BinaryFieldElement;
 
 /// Reed-Solomon encoder
@@ -12,12 +13,12 @@ pub fn encode<F: BinaryFieldElement>(rs: &ReedSolomon<F>, message: &[F]) -> Vec<
     encoded[..message.len()].copy_from_slice(message);
     
     // Apply FFT encoding
-    fft::fft(&mut encoded, &rs.twiddles, false);
+    fft_simple::fft_systematic(&mut encoded);
     
     encoded
 }
 
 /// Encode in-place
-pub fn encode_in_place<F: BinaryFieldElement>(rs: &ReedSolomon<F>, data: &mut [F]) {
-    fft::fft(data, &rs.twiddles, false);
+pub fn encode_in_place<F: BinaryFieldElement>(_rs: &ReedSolomon<F>, data: &mut [F]) {
+    fft_simple::fft_systematic(data);
 }

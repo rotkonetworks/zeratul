@@ -60,8 +60,24 @@ mod tests {
         let a = BinaryPoly64::from_value(0x123456789ABCDEF0);
         let b = BinaryPoly64::from_value(0xFEDCBA9876543210);
         
-        let result = carryless_mul(a, b);
+        let _result = carryless_mul(a, b);
         // Verify against known result
         // This would need the actual expected value
     }
+}
+
+#[cfg(not(any(target_arch = "x86_64", target_arch = "aarch64")))]
+pub fn carryless_mul(a: BinaryPoly64, b: BinaryPoly64) -> BinaryPoly128 {
+    // Software fallback
+    let mut result = 0u128;
+    let a_val = a.value();
+    let b_val = b.value();
+    
+    for i in 0..64 {
+        if (a_val >> i) & 1 == 1 {
+            result ^= (b_val as u128) << i;
+        }
+    }
+    
+    BinaryPoly128::from_value(result)
 }

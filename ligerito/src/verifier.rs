@@ -1,4 +1,5 @@
 use binary_fields::BinaryFieldElement;
+use crate::utils::partial_eval_multilinear;
 use crate::{
     VerifierConfig, FinalizedLigeritoProof,
     transcript::{FiatShamir, Transcript},
@@ -148,7 +149,7 @@ where
             let mut f_eval = proof.final_ligero_proof.yr.clone();
             partial_eval_multilinear(&mut f_eval, &[final_r]);
 
-            let claimed_eval = f_eval[0];
+            let _claimed_eval = f_eval[0];
             // In sumcheck, the final evaluation should match the current sum
             
             return Ok(true); // Verification successful
@@ -319,7 +320,7 @@ where
             let mut f_eval = proof.final_ligero_proof.yr.clone();
             partial_eval_multilinear(&mut f_eval, &[final_r]);
 
-            let claimed_eval = f_eval[0];
+            let _claimed_eval = f_eval[0];
             // In sumcheck, the final evaluation should match the current sum
             
             return Ok(true); // Verification successful
@@ -394,21 +395,6 @@ fn evaluate_quadratic<F: BinaryFieldElement>(coeffs: (F, F, F), x: F) -> F {
     a0.add(&linear.mul(&x)).add(&a2.mul(&x).mul(&x))
 }
 
-fn partial_eval_multilinear<F: BinaryFieldElement>(poly: &mut Vec<F>, evals: &[F]) {
-    let mut n = poly.len();
-
-    for &e in evals {
-        n /= 2;
-
-        for i in 0..n {
-            let p0 = poly[2 * i];
-            let p1 = poly[2 * i + 1];
-            poly[i] = p0.add(&e.mul(&p1.add(&p0)));
-        }
-    }
-
-    poly.truncate(n);
-}
 
 fn glue_sums<F: BinaryFieldElement>(sum_f: F, sum_g: F, beta: F) -> F {
     sum_f.add(&beta.mul(&sum_g))

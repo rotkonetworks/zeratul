@@ -1,6 +1,7 @@
 //! Binary Reed-Solomon encoding using FFT
 //! Implements O(n log n) encoding from the paper
 
+mod fft_simple;
 mod fft;
 mod encode;
 
@@ -25,7 +26,7 @@ impl<F: BinaryFieldElement> ReedSolomon<F> {
         let log_message_length = message_length.trailing_zeros() as usize;
         let log_block_length = block_length.trailing_zeros() as usize;
         
-        let twiddles = fft::compute_twiddles(log_block_length, F::zero());
+        let twiddles = fft_simple::compute_twiddles_systematic(log_block_length);
         
         Self {
             log_message_length,

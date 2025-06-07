@@ -131,3 +131,23 @@ mod tests {
         assert!(!is_power_of_two(1023));
     }
 }
+
+/// Multilinear polynomial partial evaluation
+pub fn partial_eval_multilinear<F: BinaryFieldElement>(
+    poly: &mut Vec<F>, 
+    evals: &[F]
+) {
+    let mut n = poly.len();
+
+    for &e in evals {
+        n /= 2;
+
+        for i in 0..n {
+            let p0 = poly[2 * i];
+            let p1 = poly[2 * i + 1];
+            poly[i] = p0.add(&e.mul(&p1.add(&p0)));
+        }
+    }
+
+    poly.truncate(n);
+}
