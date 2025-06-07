@@ -1,0 +1,39 @@
+[package]
+name = "ligerito"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+binary-fields = { path = "../binary-fields", features = ["serde"] }
+reed-solomon = { path = "../reed-solomon" }
+merkle-tree = { path = "../merkle-tree", features = ["serde"] }
+
+# Crypto
+sha2 = { workspace = true }
+merlin = { workspace = true }
+blake3 = { workspace = true }
+
+# Parallelism
+rayon = { workspace = true }
+
+# Random
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+bytemuck = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+
+[[example]]
+name = "prove_verify"
+path = "../examples/prove_verify.rs"
+
+# [[bench]]
+# name = "ligerito_bench"
+# harness = false
