@@ -1,0 +1,49 @@
+[workspace]
+members = [
+    "binary-fields",
+    "reed-solomon", 
+    "merkle-tree",
+    "ligerito"
+]
+resolver = "2"
+
+[workspace.package]
+authors = ["Ligerito Contributors"]
+# authors = ["rotko <hq@rotko.net>"]
+# description = "Implementation of Ligerito polynomial commitment scheme"
+# repository = "https://github.com/rotkonetworks/zeratul"
+# keywords = ["cryptography", "ligerito", "polynomial", "commitment", "zero-knowledge"]
+# categories = ["cryptography", "no-std"]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/your-org/ligerito-rust"
+
+[workspace.dependencies]
+# Core dependencies
+sha2 = "0.10"
+rayon = "1.8"
+rand = "0.8"
+rand_chacha = "0.3"
+hex = "0.4"
+thiserror = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+
+# Crypto primitives
+merlin = "3.0"
+blake3 = "1.5"
+
+# Performance
+wide = "0.7"
+bytemuck = "1.14"
+
+# Testing
+criterion = "0.5"
+proptest = "1.4"
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+
+[profile.bench]
+inherits = "release"
