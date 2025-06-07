@@ -85,6 +85,14 @@ pub fn fft<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], parallel: bool) {
     }
 }
 
+
+
+/// FFT butterfly operation (matching Julia's fft_mul!)
+
+/// Inverse FFT
+
+
+/// Inverse FFT butterfly operation
 fn fft_sequential<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], idx: usize) {
     if v.len() == 1 {
         return;
@@ -92,9 +100,7 @@ fn fft_sequential<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], idx: usize
     
     fft_mul(v, twiddles[idx - 1]);
     
-    let v_len = v.len();
     let mid = v.len() / 2;
-    let v_len = v.len();
     let (u, w) = v.split_at_mut(mid);
     
     fft_sequential(u, twiddles, 2 * idx);
@@ -110,7 +116,6 @@ fn fft_parallel<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], idx: usize) 
     
     let v_len = v.len();
     let mid = v.len() / 2;
-    let v_len = v.len();
     let (u, w) = v.split_at_mut(mid);
     
     // Parallel threshold - tune based on benchmarks
@@ -129,7 +134,6 @@ fn fft_parallel<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], idx: usize) 
 fn fft_mul<F: BinaryFieldElement>(v: &mut [F], lambda: F) {
     let v_len = v.len();
     let mid = v.len() / 2;
-    let v_len = v.len();
     let (u, w) = v.split_at_mut(mid);
     
     // Parallel for large vectors
@@ -161,7 +165,6 @@ fn ifft_sequential<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], idx: usiz
         return;
     }
     
-    let v_len = v.len();
     let mid = v.len() / 2;
     let (lo, hi) = v.split_at_mut(mid);
     
@@ -173,7 +176,6 @@ fn ifft_sequential<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], idx: usiz
 
 /// Inverse FFT butterfly operation
 fn ifft_mul<F: BinaryFieldElement>(v: &mut [F], lambda: F) {
-    let v_len = v.len();
     let mid = v.len() / 2;
     let (lo, hi) = v.split_at_mut(mid);
     

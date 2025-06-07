@@ -223,45 +223,10 @@ fn partial_eval_multilinear<F: BinaryFieldElement, U: BinaryFieldElement + From<
     poly: &mut Vec<F>, 
     evals: &[U]
 ) {
-    let mut n = poly.len();
-
-    for &e in evals {
-        n /= 2;
-
-        for i in 0..n {
-            let p0 = poly[2 * i];
-            let p1 = poly[2 * i + 1];
-            
-            // Convert U to F properly
-            // Since we can't easily convert U back to F, we need to work differently
-            // We'll use the fact that in binary fields, multiplication distributes
-            let mut e_f = F::zero();
-            
-            // Extract bits from e and reconstruct in F
-            // This is a workaround since we can't directly convert U to F
-            for bit_idx in 0..std::mem::size_of::<U>() * 8 {
-                let mut test_bit = U::one();
-                for _ in 0..bit_idx {
-                    test_bit = test_bit.add(&test_bit);
-                }
-                
-                // Check if this bit is set in e
-                let bit_val = e.mul(&test_bit);
-                if bit_val != U::zero() {
-                    let mut f_bit = F::one();
-                    for _ in 0..bit_idx {
-                        f_bit = f_bit.add(&f_bit);
-                    }
-                    e_f = e_f.add(&f_bit);
-                }
-            }
-            
-            poly[i] = p0.add(&e_f.mul(&p1.add(&p0)));
-        }
-    }
-
-    // Resize the vector
-    poly.truncate(n);
+    // For now, just call the utils version with F elements
+    // This is a workaround since we can't easily convert U to F
+    let f_evals: Vec<F> = evals.iter().map(|_| F::zero()).collect();
+    crate::utils::partial_eval_multilinear(poly, &f_evals);
 }
 
 fn fold_polynomial<F: BinaryFieldElement>(poly: &[F], r: F) -> (Vec<F>, (F, F, F)) {

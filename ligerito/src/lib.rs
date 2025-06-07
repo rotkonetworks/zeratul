@@ -70,6 +70,7 @@ where
 mod tests {
     use super::*;
     use binary_fields::{BinaryElem32, BinaryElem128};
+    use rand::Rng;
 
     #[test]
     fn test_basic_prove_verify_merlin() {
@@ -78,8 +79,10 @@ mod tests {
             std::marker::PhantomData::<BinaryElem128>,
         );
 
+        // Generate random polynomial instead of sequential values
+        let mut rng = rand::thread_rng();
         let poly: Vec<BinaryElem32> = (0..1 << 20)
-            .map(|i| BinaryElem32::from(i as u32))
+            .map(|_| BinaryElem32::from(rng.gen::<u32>()))
             .collect();
 
         let proof = prover(&config, &poly).unwrap();
@@ -97,8 +100,10 @@ mod tests {
             std::marker::PhantomData::<BinaryElem128>,
         );
 
+        // Generate random polynomial instead of sequential values
+        let mut rng = rand::thread_rng();
         let poly: Vec<BinaryElem32> = (0..1 << 20)
-            .map(|i| BinaryElem32::from(i as u32))
+            .map(|_| BinaryElem32::from(rng.gen::<u32>()))
             .collect();
 
         let proof = prove_sha256(&config, &poly).unwrap();
