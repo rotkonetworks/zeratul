@@ -6,8 +6,8 @@ This is a Rust implementation of the Ligerito polynomial commitment scheme
 described in [this paper](https://angeris.github.io/papers/ligerito.pdf) by
 Andrija Novakovic and Guillermo Angeris.
 
-**⚠️ WARNING: This code is experimental and has not been audited. It is intended
-for research purposes only.**
+**⚠️ WARNING: yoo this code is vibecoded and has not been audited, so likely
+worse than. rolling your own crpyto.**
 
 ## Features
 
@@ -34,27 +34,31 @@ The implementation is organized as a Rust workspace with the following crates:
 
 ## Building
 
-```bash # Clone the repository git clone
-https://github.com/your-org/ligerito-rust cd ligerito-rust
+```bash 
+# Clone the repository git clone
+https://github.com/rotkonetworks/zeratul cd zeratul
 
 # Build in release mode cargo build --release
 
 # Run tests cargo test
 
-# Run benchmarks cargo bench ```
+# Run benchmarks cargo bench
+```
 
 ## Usage
 
 ### Running the Example
 
-```bash # Run with default settings cargo run --release --example prove_verify
+```bash
+# Run with default settings cargo run --release --example prove_verify
 
 # Run with multiple threads cargo run --release --example prove_verify --
 --threads 8 ```
 
 ### Basic API
 
-```rust use ligerito::{prover, verifier, hardcoded_config_24,
+```rust
+use ligerito::{prover, verifier, hardcoded_config_24,
 hardcoded_config_24_verifier}; use binary_fields::{BinaryElem32, BinaryElem128};
 
 // Create configuration let config = hardcoded_config_24(
@@ -70,22 +74,14 @@ is_valid = verifier(&verifier_config, &proof)?; ```
 
 ## Performance
 
-Performance benchmarks on a modern CPU (example):
-
-| Polynomial Size | Proving Time | Verification Time | Proof Size |
-|----------------|--------------|-------------------|------------| | 2^20
-| ~1.2s        | ~0.1s            | ~3.2 MB    | | 2^24           | ~20s
-| ~0.5s            | ~12.8 MB   | | 2^28           | ~320s        | ~2s
-| ~51.2 MB   |
-
-*Note: Times vary based on CPU and thread count*
+TODO
 
 ## Configuration
 
 We provide several pre-configured parameter sets:
 
 - `hardcoded_config_20`: For 2^20 polynomials
-- `hardcoded_config_24`: For 2^24 polynomials  
+- `hardcoded_config_24`: For 2^24 polynomials
 - `hardcoded_config_28`: For 2^28 polynomials
 - `hardcoded_config_30`: For 2^30 polynomials
 
@@ -98,7 +94,7 @@ Each configuration has a corresponding verifier configuration.
 - Uses Rust's type system for compile-time safety
 - SIMD operations use platform intrinsics directly
 - Parallelization via `rayon` instead of Julia's `@threads`
-- Fiat-Shamir uses `merlin` for proper domain separation
+- Fiat-Shamir uses `merlin` or `sha2` for proper domain separation
 
 ### TODO
 
@@ -146,41 +142,3 @@ Implementation](https://github.com/bcc-research/CryptoUtilities.jl)
 
 Thanks to Andrija Novakovic and Guillermo Angeris for the Ligerito construction
 and the reference Julia implementation.
-
-```
-zeratul/
-├── Cargo.toml
-├── README.md
-├── binary-fields/
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       ├── elem.rs
-│       ├── poly.rs
-│       └── simd.rs
-├── reed-solomon/
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       ├── fft.rs
-│       └── encode.rs
-├── merkle-tree/
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       └── batch.rs
-├── ligerito/
-│   ├── Cargo.toml
-│   └── src/
-│       ├── lib.rs
-│       ├── configs.rs
-│       ├── data_structures.rs
-│       ├── transcript.rs
-│       ├── utils.rs
-│       ├── sumcheck_polys.rs
-│       ├── ligero.rs
-│       ├── prover.rs
-│       └── verifier.rs
-└── examples/
-    └── prove_verify.rs
-```
