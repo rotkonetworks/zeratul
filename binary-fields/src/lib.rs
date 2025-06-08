@@ -22,6 +22,24 @@ pub trait BinaryFieldElement: Send + Sync +
     fn mul(&self, other: &Self) -> Self;
     fn inv(&self) -> Self;
     fn pow(&self, exp: u64) -> Self;
+    
+    fn from_bits(bits: u64) -> Self {
+        let mut result = Self::zero();
+        let mut current_bit = 0u64;
+        
+        while current_bit < 64 && (bits >> current_bit) != 0 {
+            if (bits >> current_bit) & 1 == 1 {
+                // Add x^current_bit
+                let mut power = Self::one();
+                for _ in 0..current_bit {
+                    power = power.add(&power);
+                }
+                result = result.add(&power);
+            }
+            current_bit += 1;
+        }
+        result
+    }
 }
 
 pub trait BinaryPolynomial: 
