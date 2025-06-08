@@ -120,9 +120,49 @@ pub fn verify_ligero<T, U>(
     T: BinaryFieldElement + Send + Sync,
     U: BinaryFieldElement + Send + Sync + From<T>,
 {
+    println!("verify_ligero: {} queries, {} rows, yr len: {}", 
+             queries.len(), opened_rows.len(), yr.len());
+    
     let gr = evaluate_lagrange_basis(challenges);
     let n = yr.len().trailing_zeros() as usize;
     let sks_vks: Vec<T> = eval_sk_at_vks(1 << n);
+
+    // Check first query serially for debugging
+    if !queries.is_empty() {
+        let query = queries[0];
+        let row = &opened_rows[0];
+        
+        println!("First query: {}", query);
+        
+        // Compute dot product
+        let dot = row.iter()
+            .zip(gr.iter())
+            .fold(U::zero(), |acc, (&r, &g)| {
+                let r_u = U::from(r);
+                acc.add(&r_u.mul(&g))
+            });
+
+        println!("Dot product: {:?}", dot);
+
+        let qf = T::from_bits((query - 1) as u64);
+        println!("qf: {:?}", qf);
+
+        let mut local_sks_x = vec![T::zero(); sks_vks.len()];
+        let mut local_basis = vec![U::zero(); 1 << n];
+
+        let scale = U::one();
+        evaluate_scaled_basis_inplace(&mut local_sks_x, &mut local_basis, &sks_vks, qf, scale);
+
+        let e = yr.iter()
+            .zip(local_basis.iter())
+            .fold(U::zero(), |acc, (&y, &b)| {
+                let y_u = U::from(y);
+                acc.add(&y_u.mul(&b))
+            });
+
+        println!("Expected: {:?}", e);
+        println!("Match: {}", e == dot);
+    }
 
     // Parallel verification
     queries.par_iter()
@@ -136,22 +176,9 @@ pub fn verify_ligero<T, U>(
                     acc.add(&r_u.mul(&g))
                 });
 
-            // Compute expected value
-            // Create field element from query index
-            let mut qf = T::zero();
-            let mut v = (query - 1) as u64;
-            let mut power = T::one();
-            
-            // Build field element bit by bit
-            for _ in 0..64 {
-                if v & 1 == 1 {
-                    qf = qf.add(&power);
-                }
-                power = power.add(&power);  // Double
-                v >>= 1;
-                if v == 0 { break; }
-            }
-            
+            // Create field element from query index (0-based in storage, but queries are 1-based)
+            let qf = T::from_bits((query - 1) as u64);
+
             let mut local_sks_x = vec![T::zero(); sks_vks.len()];
             let mut local_basis = vec![U::zero(); 1 << n];
 
