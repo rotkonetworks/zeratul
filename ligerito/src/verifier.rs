@@ -13,18 +13,19 @@ use sha2::{Sha256, Digest};
 const S: usize = 148;
 const LOG_INV_RATE: usize = 2;
 
-/// Hash a row of field elements
+/// Hash a row of field elements  
 fn hash_row<F: BinaryFieldElement>(row: &[F]) -> Hash {
     let mut hasher = Sha256::new();
     
-    for elem in row {
-        let elem_bytes = unsafe {
-            std::slice::from_raw_parts(
-                elem as *const F as *const u8,
-                std::mem::size_of::<F>()
-            )
-        };
-        hasher.update(elem_bytes);
+    // SECURITY FIX: Replace unsafe memory access with proper field element serialization
+    for (i, elem) in row.iter().enumerate() {
+        // Hash the element index first for position-dependence
+        hasher.update(&(i as u32).to_le_bytes());
+        
+        // Serialize the field element in a safe, deterministic way
+        // This approach works regardless of the underlying polynomial type
+        let elem_bytes = format!("{:?}", elem.poly().value()).into_bytes();
+        hasher.update(&elem_bytes);
     }
     
     hasher.finalize().into()
@@ -149,8 +150,12 @@ where
             let mut f_eval = proof.final_ligero_proof.yr.clone();
             partial_eval_multilinear(&mut f_eval, &[final_r]);
 
-            let _claimed_eval = f_eval[0];
-            // In sumcheck, the final evaluation should match the current sum
+            let claimed_eval = f_eval[0];
+            // SECURITY FIX: Add missing final sumcheck verification
+            // The final evaluation must match the current sum for verification to succeed
+            if U::from(claimed_eval) != current_sum {
+                return Ok(false); // Verification failed - invalid proof
+            }
             
             return Ok(true); // Verification successful
         }
@@ -320,8 +325,12 @@ where
             let mut f_eval = proof.final_ligero_proof.yr.clone();
             partial_eval_multilinear(&mut f_eval, &[final_r]);
 
-            let _claimed_eval = f_eval[0];
-            // In sumcheck, the final evaluation should match the current sum
+            let claimed_eval = f_eval[0];
+            // SECURITY FIX: Add missing final sumcheck verification
+            // The final evaluation must match the current sum for verification to succeed
+            if U::from(claimed_eval) != current_sum {
+                return Ok(false); // Verification failed - invalid proof
+            }
             
             return Ok(true); // Verification successful
         }
