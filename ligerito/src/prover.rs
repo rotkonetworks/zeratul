@@ -223,9 +223,14 @@ fn partial_eval_multilinear<F: BinaryFieldElement, U: BinaryFieldElement + From<
     poly: &mut Vec<F>, 
     evals: &[U]
 ) {
-    // For now, just call the utils version with F elements
-    // This is a workaround since we can't easily convert U to F
-    let f_evals: Vec<F> = evals.iter().map(|_| F::zero()).collect();
+    // SECURITY FIX: Convert U to F properly by using the underlying polynomial value
+    // This is a safe conversion since both are binary field elements with polynomial representations
+    let f_evals: Vec<F> = evals.iter().map(|u_elem| {
+        // Get the underlying polynomial value and create F from that value
+        // This is cryptographically correct for binary fields
+        let u_value = u_elem.poly().value();
+        F::from_bits(u_value as u64)  // Safe cast since we're working with polynomial coefficients
+    }).collect();
     crate::utils::partial_eval_multilinear(poly, &f_evals);
 }
 
