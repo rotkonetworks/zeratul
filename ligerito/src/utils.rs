@@ -59,32 +59,35 @@ pub fn evaluate_scaled_basis_inplace<F: BinaryFieldElement, U: BinaryFieldElemen
     sks_vks: &[F],
     qf: F,
     scale: U,
-) {
-    // Evaluate the s_k polynomials at point qf
-    for (i, sk_vk) in sks_vks.iter().enumerate() {
-        if i < sks_x.len() {
-            // s_k(qf) computation
-            sks_x[i] = sk_vk.mul(&qf);
-        }
-    }
-    
-    // Build the multilinear basis evaluation
+) where
+    U: From<F>,  // Add this constraint
+{
     let n = basis.len();
     let log_n = n.trailing_zeros() as usize;
-    
-    // Start with all ones scaled by the scale factor
+
+    // Initialize basis with scale
     for i in 0..n {
         basis[i] = scale;
     }
-    
-    // Apply the multilinear extension formula
+
+    // For binary fields, the multilinear basis evaluation is simpler
+    // We evaluate the polynomial at the binary representation of the index
+
+    // Convert qf to U for computations
+    let qf_u = U::from(qf);
+    let one_u = U::one();
+
+    // Build the multilinear basis
     let mut stride = 1;
-    for _ in 0..log_n {
+    for bit_idx in 0..log_n {
         for i in 0..n {
             if (i / stride) % 2 == 1 {
-                // This basis function has x_bit = 1
-                let idx = i - stride;
-                basis[i] = basis[idx].mul(&scale);
+                // Multiply by qf for this bit
+                basis[i] = basis[i].mul(&qf_u);
+            } else {
+                // Multiply by (1 + qf) for this bit (in binary fields, 1 - x = 1 + x)
+                let one_plus_qf = one_u.add(&qf_u);
+                basis[i] = basis[i].mul(&one_plus_qf);
             }
         }
         stride *= 2;

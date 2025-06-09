@@ -6,13 +6,24 @@ This is a Rust implementation of the Ligerito polynomial commitment scheme
 described in [this paper](https://angeris.github.io/papers/ligerito.pdf) by
 Andrija Novakovic and Guillermo Angeris.
 
-**⚠️ WARNING: yoo this code is vibecoded and has not been audited, so likely
-worse than. rolling your own crpyto.**
+**⚠️ WARNING: This code is vibecoded and has not been audited, so likely
+worse than rolling your own crypto.**
+
+## Current Status
+
+**🚧 WORK IN PROGRESS 🚧**
+
+The implementation is incomplete. Major missing components:
+- Binary field FFT for Reed-Solomon encoding is not implemented
+- Field element conversions need proper irreducible polynomial reduction
+- Polynomial evaluation functions need to be completed
+
+Currently failing tests indicate these missing pieces.
 
 ## Features
 
 - Binary extension fields GF(2^n) with SIMD acceleration
-- FFT-based Reed-Solomon encoding with O(n log n) complexity
+- FFT-based Reed-Solomon encoding with O(n log n) complexity (NOT YET IMPLEMENTED)
 - Batched Merkle tree openings
 - Recursive Ligero with sumcheck protocol
 - Multi-threaded proving and verification
@@ -35,14 +46,18 @@ The implementation is organized as a Rust workspace with the following crates:
 ## Building
 
 ```bash 
-# Clone the repository git clone
-https://github.com/rotkonetworks/zeratul cd zeratul
+# Clone the repository
+git clone https://github.com/rotkonetworks/zeratul
+cd zeratul
 
-# Build in release mode cargo build --release
+# Build in release mode
+cargo build --release
 
-# Run tests cargo test
+# Run tests (currently failing due to incomplete implementation)
+cargo test
 
-# Run benchmarks cargo bench
+# Run benchmarks
+cargo bench
 ```
 
 ## Usage
@@ -50,31 +65,39 @@ https://github.com/rotkonetworks/zeratul cd zeratul
 ### Running the Example
 
 ```bash
-# Run with default settings cargo run --release --example prove_verify
+# Run with default settings
+cargo run --release --example prove_verify
 
-# Run with multiple threads cargo run --release --example prove_verify --
---threads 8 ```
+# Run with multiple threads
+cargo run --release --example prove_verify -- --threads 8
+```
 
 ### Basic API
 
 ```rust
-use ligerito::{prover, verifier, hardcoded_config_24,
-hardcoded_config_24_verifier}; use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito::{prover, verifier, hardcoded_config_24, hardcoded_config_24_verifier};
+use binary_fields::{BinaryElem32, BinaryElem128};
 
-// Create configuration let config = hardcoded_config_24(
-std::marker::PhantomData::<BinaryElem32>,
-std::marker::PhantomData::<BinaryElem128>,);
+// Create configuration
+let config = hardcoded_config_24(
+    std::marker::PhantomData::<BinaryElem32>,
+    std::marker::PhantomData::<BinaryElem128>,
+);
 
-// Your polynomial let poly: Vec<BinaryElem32> = vec![/* your data */];
+// Your polynomial
+let poly: Vec<BinaryElem32> = vec![/* your data */];
 
-// Generate proof let proof = prover(&config, &poly)?;
+// Generate proof
+let proof = prover(&config, &poly)?;
 
-// Verify proof let verifier_config = hardcoded_config_24_verifier(); let
-is_valid = verifier(&verifier_config, &proof)?; ```
+// Verify proof
+let verifier_config = hardcoded_config_24_verifier();
+let is_valid = verifier(&verifier_config, &proof)?;
+```
 
 ## Performance
 
-TODO
+TODO (pending complete implementation)
 
 ## Configuration
 
@@ -101,28 +124,43 @@ Each configuration has a corresponding verifier configuration.
 The following components need completion:
 
 1. **Binary Fields**:
-   - [ ] Field inversion via extended Euclidean algorithm
+   - [x] Field addition and multiplication
+   - [x] Field inversion via Fermat's little theorem
+   - [ ] Field reduction with proper irreducible polynomials
    - [ ] Field embedding (beta root computation)
-   - [ ] Software fallback for carryless multiplication
+   - [x] Software fallback for carryless multiplication
 
 2. **Reed-Solomon**:
+   - [ ] Binary field FFT implementation
    - [ ] Non-systematic encoding implementation
+   - [ ] Evaluation point generation (beta values)
    - [ ] Short twiddle extraction from long twiddles
 
-3. **Sumcheck**:
-   - [ ] Multilinear polynomial implementation
-   - [ ] Sumcheck prover/verifier instances
-   - [ ] Polynomial folding operations
+3. **Ligero Verification**:
+   - [ ] Proper polynomial evaluation at Reed-Solomon points
+   - [ ] Consistency check implementation
+   - [ ] Integration with FFT evaluations
 
-4. **Utilities**:
-   - [ ] s_k polynomial evaluation
-   - [ ] Scaled basis evaluation
+4. **Sumcheck**:
+   - [x] Multilinear polynomial partial evaluation
+   - [x] Sumcheck prover/verifier instances
+   - [x] Polynomial folding operations
+
+5. **Utilities**:
+   - [ ] s_k polynomial evaluation (proper implementation)
+   - [ ] Scaled basis evaluation for Reed-Solomon
+
+## Known Issues
+
+- Tests are currently failing due to missing Reed-Solomon FFT implementation
+- The verification always fails with error value 2017229001 because encoding is not happening
+- Field element conversions may not properly handle irreducible polynomial reduction
 
 ## Contributing
 
 This is a research implementation. Contributions should focus on:
 
-1. Completing the TODO items
+1. Completing the TODO items (especially FFT implementation)
 2. Improving performance
 3. Adding comprehensive tests
 4. Documenting the algorithms
@@ -133,10 +171,8 @@ MIT License - see LICENSE file for details
 
 ## References
 
-- [Ligerito: Lightweight Sublinear Arguments Without a Trusted
-Setup](https://angeris.github.io/papers/ligerito.pdf)
-- [Original Julia
-Implementation](https://github.com/bcc-research/CryptoUtilities.jl)
+- [Ligerito: Lightweight Sublinear Arguments Without a Trusted Setup](https://angeris.github.io/papers/ligerito.pdf)
+- [Original Julia Implementation](https://github.com/bcc-research/ligerito-impl.git)
 
 ## Acknowledgments
 
