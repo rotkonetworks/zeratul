@@ -23,8 +23,8 @@ fn hash_row<F: BinaryFieldElement>(row: &[F]) -> Hash {
         hasher.update(&(i as u32).to_le_bytes());
         
         // Serialize the field element in a safe, deterministic way
-        // This approach works regardless of the underlying polynomial type
-        let elem_bytes = format!("{:?}", elem.poly().value()).into_bytes();
+        // Use the field element's Debug trait which is guaranteed to be implemented
+        let elem_bytes = format!("{:?}", elem).into_bytes();
         hasher.update(&elem_bytes);
     }
     
