@@ -1,4 +1,4 @@
-use binary_fields::BinaryFieldElement;
+use binary_fields::{BinaryFieldElement, BinaryPolynomial};
 use crate::utils::partial_eval_multilinear;
 use crate::{
     VerifierConfig, FinalizedLigeritoProof,
@@ -153,7 +153,7 @@ where
             let claimed_eval = f_eval[0];
             // SECURITY FIX: Add missing final sumcheck verification
             // The final evaluation must match the current sum for verification to succeed
-            if U::from(claimed_eval) != current_sum {
+            if claimed_eval != current_sum {
                 return Ok(false); // Verification failed - invalid proof
             }
             
@@ -328,7 +328,7 @@ where
             let claimed_eval = f_eval[0];
             // SECURITY FIX: Add missing final sumcheck verification
             // The final evaluation must match the current sum for verification to succeed
-            if U::from(claimed_eval) != current_sum {
+            if claimed_eval != current_sum {
                 return Ok(false); // Verification failed - invalid proof
             }
             

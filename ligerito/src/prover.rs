@@ -1,4 +1,4 @@
-use binary_fields::BinaryFieldElement;
+use binary_fields::{BinaryFieldElement, BinaryPolynomial};
 use crate::{
     ProverConfig, LigeritoProof, FinalizedLigeritoProof, RecursiveLigeroCommitment,
     RecursiveLigeroProof, FinalLigeroProof, SumcheckTranscript,
