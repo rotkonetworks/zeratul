@@ -1,7 +1,5 @@
 // reed-solomon/src/encode.rs
-
-use crate::ReedSolomon;
-use crate::fft;
+use crate::{ReedSolomon, fft, short_from_long_twiddles};
 use binary_fields::BinaryFieldElement;
 
 /// Encode a message using Reed-Solomon
@@ -13,7 +11,7 @@ pub fn encode<F: BinaryFieldElement>(rs: &ReedSolomon<F>, message: &[F]) -> Vec<
     encoded
 }
 
-/// Encode in-place
+/// Encode in-place (systematic encoding)
 pub fn encode_in_place<F: BinaryFieldElement>(rs: &ReedSolomon<F>, data: &mut [F]) {
     let message_len = rs.message_length();
     
@@ -29,32 +27,19 @@ pub fn encode_in_place<F: BinaryFieldElement>(rs: &ReedSolomon<F>, data: &mut [F
     fft::fft(data, &rs.twiddles, false);
 }
 
-/// Extract short twiddles from long twiddles
-fn short_from_long_twiddles<F: BinaryFieldElement>(
-    long_twiddles: &[F],
-    log_n: usize,
-    log_k: usize
-) -> Vec<F> {
-    let k = 1 << log_k;
-    let mut short_twiddles = vec![F::zero(); k - 1];
+/// Non-systematic encoding for Ligero
+pub fn encode_non_systematic<F: BinaryFieldElement>(
+    rs: &ReedSolomon<F>, 
+    data: &mut [F]
+) {
+    assert_eq!(data.len(), rs.block_length());
     
-    let mut jump = 1 << (log_n - log_k);
-    if jump > 0 && jump <= long_twiddles.len() {
-        short_twiddles[0] = long_twiddles[jump - 1];
+    // Scale by pi polynomials before FFT
+    let message_len = rs.message_length();
+    for i in 0..message_len {
+        data[i] = data[i].mul(&rs.pis[i]);
     }
     
-    let mut idx = 1;
-    for i in 1..log_k {
-        jump *= 2;
-        let take = 1 << i;
-        
-        for j in 0..take {
-            if jump - 1 + j < long_twiddles.len() && idx + j < short_twiddles.len() {
-                short_twiddles[idx + j] = long_twiddles[jump - 1 + j];
-            }
-        }
-        idx += take;
-    }
-    
-    short_twiddles
+    // Apply FFT to get evaluations
+    fft::fft(data, &rs.twiddles, false);
 }
