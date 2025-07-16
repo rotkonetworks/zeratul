@@ -4,7 +4,7 @@ use crate::{
     RecursiveLigeroProof, FinalLigeroProof, SumcheckTranscript,
     transcript::{FiatShamir, Transcript},
     ligero::ligero_commit,
-    sumcheck_polys::induce_sumcheck_poly_parallel,
+    sumcheck_polys::induce_sumcheck_poly_debug,
     utils::{eval_sk_at_vks, partial_eval_multilinear},
     data_structures::finalize,
 };
@@ -74,7 +74,7 @@ where
     });
 
     // Induce sumcheck polynomial
-    let (basis_poly, enforced_sum) = induce_sumcheck_poly_parallel(
+    let (basis_poly, _) = induce_sumcheck_poly_debug(
         n,
         &sks_vks,
         &opened_rows,
@@ -83,10 +83,11 @@ where
         alpha,
     );
 
-    // Initialize sumcheck
+    // Initialize sumcheck with the sum of basis polynomial evaluations
+    let basis_sum = basis_poly.iter().fold(U::zero(), |acc, &x| acc.add(&x));
     let mut sumcheck_transcript = vec![];
     let mut current_poly = basis_poly;
-    let mut current_sum = enforced_sum;
+    let mut current_sum = basis_sum; // Use basis sum
 
     // First sumcheck round absorb
     fs.absorb_elem(current_sum);
@@ -171,7 +172,7 @@ where
         let n = current_poly.len().trailing_zeros() as usize;
         let sks_vks: Vec<U> = eval_sk_at_vks(1 << n);
 
-        let (basis_poly, enforced_sum) = induce_sumcheck_poly_parallel(
+        let (basis_poly, _) = induce_sumcheck_poly_debug(
             n,
             &sks_vks,
             &opened_rows,
@@ -179,15 +180,18 @@ where
             &queries,
             alpha,
         );
+        
+        // Use the sum of basis polynomial for sumcheck
+        let basis_sum = basis_poly.iter().fold(U::zero(), |acc, &x| acc.add(&x));
 
         // Glue sumcheck absorb
-        let glue_sum = current_sum.add(&enforced_sum);
+        let glue_sum = current_sum.add(&basis_sum);
         fs.absorb_elem(glue_sum);
 
         // Glue polynomials
         let beta = fs.get_challenge::<U>();
         current_poly = glue_polynomials(&current_poly, &basis_poly, beta);
-        current_sum = glue_sums(current_sum, enforced_sum, beta);
+        current_sum = glue_sums(current_sum, basis_sum, beta);
 
         wtns_prev = wtns_next;
     }

@@ -4,6 +4,10 @@ use binary_fields::BinaryFieldElement;
 
 /// Evaluate Lagrange basis at given points
 pub fn evaluate_lagrange_basis<F: BinaryFieldElement>(rs: &[F]) -> Vec<F> {
+    if rs.is_empty() {
+        return vec![F::one()];
+    }
+    
     let one = F::one();
     let mut current_layer = vec![one.add(&rs[0]), rs[0]];
     let mut len = 2;
@@ -149,6 +153,30 @@ mod tests {
 
         let basis = evaluate_lagrange_basis(&rs);
         assert_eq!(basis.len(), 8); // 2^3
+    }
+    
+    #[test]
+    fn test_lagrange_basis_all_ones() {
+        use binary_fields::BinaryElem32;
+        
+        // Test with all ones
+        let rs = vec![
+            BinaryElem32::one(),
+            BinaryElem32::one(),
+            BinaryElem32::one(),
+            BinaryElem32::one(),
+        ];
+        
+        let basis = evaluate_lagrange_basis(&rs);
+        assert_eq!(basis.len(), 16); // 2^4
+        
+        // When all rs[i] = 1, then 1 + rs[i] = 0 in binary fields
+        // So most entries should be zero
+        println!("Lagrange basis with all ones: {:?}", &basis[..4]);
+        
+        // The pattern should be mostly zeros since 1+1=0 in binary fields
+        let non_zero_count = basis.iter().filter(|&&x| x != BinaryElem32::zero()).count();
+        println!("Non-zero entries: {}/{}", non_zero_count, basis.len());
     }
 
     #[test]

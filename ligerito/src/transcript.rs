@@ -1,9 +1,6 @@
 //! Fiat-Shamir transcript implementations with 0-based indexing
 //! 
 //! Updated to use 0-based indexing throughout for better performance
-//! Fiat-Shamir transcript implementations with 0-based indexing
-//! 
-//! Updated to use 0-based indexing throughout for better performance
 use binary_fields::BinaryFieldElement;
 use merkle_tree::MerkleRoot;
 use sha2::{Sha256, Digest};
@@ -73,19 +70,69 @@ impl Transcript for MerlinTranscript {
     }
 
     fn get_challenge<F: BinaryFieldElement>(&mut self) -> F {
-        let mut bytes = vec![0u8; std::mem::size_of::<F>()];
+        let field_bytes = std::mem::size_of::<F>();
+        let mut bytes = vec![0u8; field_bytes];
         self.transcript.challenge_bytes(b"challenge", &mut bytes);
         
-        // Build field element from bytes
+        // For binary fields, we need to interpret bytes as polynomial coefficients
+        // Each bit represents a coefficient of x^i
         let mut result = F::zero();
-        let mut power = F::one();
         
-        for byte in bytes {
-            for i in 0..8 {
-                if (byte >> i) & 1 == 1 {
+        // Process only the valid bits for this field size
+        let bits_needed = match field_bytes {
+            4 => 32,   // BinaryElem32
+            16 => 128, // BinaryElem128
+            _ => field_bytes * 8,
+        };
+        
+        let mut bit_count = 0;
+        for (byte_idx, byte) in bytes.iter().enumerate() {
+            for bit_idx in 0..8 {
+                if bit_count >= bits_needed {
+                    break;
+                }
+                
+                if (byte >> bit_idx) & 1 == 1 {
+                    // Create x^bit_count by repeated doubling
+                    let mut power = F::one();
+                    for _ in 0..bit_count {
+                        power = power.add(&power);
+                    }
                     result = result.add(&power);
                 }
-                power = power.add(&power);
+                bit_count += 1;
+            }
+            if bit_count >= bits_needed {
+                break;
+            }
+        }
+        
+        // If we got all ones in low bits (which gives us 1), add more entropy
+        if result == F::one() || result == F::zero() {
+            // Mix in more entropy by getting another set of bytes
+            self.transcript.append_message(b"extra_entropy", &bytes);
+            self.transcript.challenge_bytes(b"challenge2", &mut bytes);
+            
+            // XOR with the new bytes to get more randomness
+            bit_count = 0;
+            for (byte_idx, byte) in bytes.iter().enumerate() {
+                for bit_idx in 0..8 {
+                    if bit_count >= bits_needed {
+                        break;
+                    }
+                    
+                    if (byte >> bit_idx) & 1 == 1 {
+                        let mut power = F::one();
+                        for _ in 0..bit_count {
+                            power = power.add(&power);
+                        }
+                        result = result.add(&power);
+                    }
+                    bit_count += 1;
+                }
+                if bit_count >= bits_needed {
+                    break;
+                }
             }
         }
         

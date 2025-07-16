@@ -77,8 +77,9 @@ fn main() {
     // Time the verification
     println!("\nVerifying proof...");
     let start = Instant::now();
-    let verification_result = verifier(&verifier_config, &proof)
-        .expect("Verification failed");
+    // let verification_result = verifier(&verifier_config, &proof)
+    let verification_result = ligerito::verifier::verify_debug(&verifier_config, &proof)
+    .expect("Verification failed");
     let verify_time = start.elapsed();
 
     println!("✓ Verification completed in: {:?}", verify_time);
