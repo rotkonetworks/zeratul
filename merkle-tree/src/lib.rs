@@ -2,26 +2,18 @@
 //! Merkle tree with batch opening support
 //! Matches the Julia BatchedMerkleTree implementation
 
-mod batch;
-
+pub mod batch;
 pub use batch::{BatchedMerkleProof, prove_batch, verify_batch};
 
 use sha2::{Sha256, Digest};
 use bytemuck::Pod;
 
-/// Hash type for Merkle tree nodes
 pub type Hash = [u8; 32];
 
-/// Complete Merkle tree structure
-#[derive(Clone, Debug)]
 pub struct CompleteMerkleTree {
-    /// Tree layers, from leaves to root
     pub layers: Vec<Vec<Hash>>,
 }
 
-/// Merkle root
-#[derive(Clone, Debug, PartialEq, Eq)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MerkleRoot {
     pub root: Option<Hash>,
 }
@@ -32,12 +24,10 @@ impl MerkleRoot {
     }
 }
 
-/// Check if a number is a power of two
 pub fn is_power_of_two(n: usize) -> bool {
     n > 0 && (n & (n - 1)) == 0
 }
 
-/// Hash a leaf value
 pub fn hash_leaf<T: Pod>(leaf: &T) -> Hash {
     let bytes = bytemuck::bytes_of(leaf);
     let mut hasher = Sha256::new();
@@ -45,7 +35,6 @@ pub fn hash_leaf<T: Pod>(leaf: &T) -> Hash {
     hasher.finalize().into()
 }
 
-/// Hash two sibling nodes
 pub fn hash_siblings(left: &Hash, right: &Hash) -> Hash {
     let mut hasher = Sha256::new();
     hasher.update(left);
@@ -53,23 +42,21 @@ pub fn hash_siblings(left: &Hash, right: &Hash) -> Hash {
     hasher.finalize().into()
 }
 
-/// Build a complete Merkle tree from leaves
 pub fn build_merkle_tree<T: Pod>(leaves: &[T]) -> CompleteMerkleTree {
-    // Allow empty trees (matching Julia)
     if leaves.is_empty() {
         return CompleteMerkleTree { layers: vec![] };
     }
-    
-    assert!(is_power_of_two(leaves.len()), "Number of leaves must be a power of 2");
 
-    // Hash all leaves
+    if !is_power_of_two(leaves.len()) {
+        panic!("Number of leaves must be a power of 2");
+    }
+
     let mut current_layer: Vec<Hash> = leaves.iter()
-        .map(hash_leaf)
+        .map(|leaf| hash_leaf(leaf))
         .collect();
 
     let mut layers = vec![current_layer.clone()];
 
-    // Build tree bottom-up
     while current_layer.len() > 1 {
         let next_layer: Vec<Hash> = current_layer
             .chunks_exact(2)
@@ -84,7 +71,6 @@ pub fn build_merkle_tree<T: Pod>(leaves: &[T]) -> CompleteMerkleTree {
 }
 
 impl CompleteMerkleTree {
-    /// Get the root of the tree
     pub fn get_root(&self) -> MerkleRoot {
         MerkleRoot {
             root: self.layers.last()
@@ -93,7 +79,6 @@ impl CompleteMerkleTree {
         }
     }
 
-    /// Get the depth of the tree
     pub fn get_depth(&self) -> usize {
         if self.layers.is_empty() {
             0
@@ -102,21 +87,12 @@ impl CompleteMerkleTree {
         }
     }
 
-    /// Prove multiple leaf indices (1-based, matching Julia)
     pub fn prove(&self, queries: &[usize]) -> BatchedMerkleProof {
-        batch::prove_batch(self, queries)
-    }
-
-    /// Prove multiple leaf indices (0-based, Rust convention)
-    pub fn prove_0_based(&self, queries: &[usize]) -> BatchedMerkleProof {
-        let queries_1_based: Vec<usize> = queries.iter()
-            .map(|&q| q + 1)
-            .collect();
-        batch::prove_batch(self, &queries_1_based)
+        prove_batch(self, queries)
     }
 }
 
-/// Verify a batched Merkle proof (1-based indices, matching Julia)
+/// Verify a batched Merkle proof (0-based indices)
 pub fn verify<T: Pod>(
     root: &MerkleRoot,
     proof: &BatchedMerkleProof,
@@ -124,21 +100,7 @@ pub fn verify<T: Pod>(
     leaves: &[T],
     leaf_indices: &[usize],
 ) -> bool {
-    batch::verify_batch(root, proof, depth, leaves, leaf_indices)
-}
-
-/// Verify a batched Merkle proof (0-based indices, Rust convention)
-pub fn verify_0_based<T: Pod>(
-    root: &MerkleRoot,
-    proof: &BatchedMerkleProof,
-    depth: usize,
-    leaves: &[T],
-    leaf_indices: &[usize],
-) -> bool {
-    let indices_1_based: Vec<usize> = leaf_indices.iter()
-        .map(|&i| i + 1)
-        .collect();
-    batch::verify_batch(root, proof, depth, leaves, &indices_1_based)
+    verify_batch(root, proof, depth, leaves, leaf_indices)
 }
 
 #[cfg(test)]
@@ -151,7 +113,7 @@ mod tests {
         let leaves: Vec<u64> = vec![];
         let tree = build_merkle_tree(&leaves);
         let root = tree.get_root();
-        
+
         assert!(root.root.is_none());
         assert_eq!(tree.get_depth(), 0);
     }
@@ -161,7 +123,7 @@ mod tests {
         let leaves = vec![42u64];
         let tree = build_merkle_tree(&leaves);
         let root = tree.get_root();
-        
+
         assert!(root.root.is_some());
         assert_eq!(tree.get_depth(), 0);
     }
@@ -180,43 +142,20 @@ mod tests {
     }
 
     #[test]
-    fn test_batch_proof_1_based() {
+    fn test_batch_proof() {
         let leaves: Vec<u64> = (0..16).collect();
         let tree = build_merkle_tree(&leaves);
         let root = tree.get_root();
 
-        // Use 1-based indices (Julia convention)
-        let queries = vec![1, 3, 7, 10];
-        let proof = tree.prove(&queries);
-
-        let queried_leaves: Vec<u64> = queries.iter()
-            .map(|&i| leaves[i - 1]) // Convert to 0-based for array access
-            .collect();
-
-        assert!(verify(
-            &root,
-            &proof,
-            tree.get_depth(),
-            &queried_leaves,
-            &queries
-        ));
-    }
-
-    #[test]
-    fn test_batch_proof_0_based() {
-        let leaves: Vec<u64> = (0..16).collect();
-        let tree = build_merkle_tree(&leaves);
-        let root = tree.get_root();
-
-        // Use 0-based indices (Rust convention)
+        // Use 0-based indices
         let queries = vec![0, 2, 6, 9];
-        let proof = tree.prove_0_based(&queries);
+        let proof = tree.prove(&queries);
 
         let queried_leaves: Vec<u64> = queries.iter()
             .map(|&i| leaves[i])
             .collect();
 
-        assert!(verify_0_based(
+        assert!(verify(
             &root,
             &proof,
             tree.get_depth(),
@@ -231,7 +170,7 @@ mod tests {
         let tree = build_merkle_tree(&leaves);
         let root = tree.get_root();
 
-        let queries = vec![1, 3, 7, 10];
+        let queries = vec![0, 2, 6, 9];
         let proof = tree.prove(&queries);
 
         // Use wrong leaves
@@ -264,9 +203,9 @@ mod tests {
         let tree = build_merkle_tree(&leaves);
         let root = tree.get_root();
 
-        // Generate random queries (1-based)
+        // Generate random queries (0-based)
         let mut rng = thread_rng();
-        let mut queries: Vec<usize> = (1..=num_leaves).collect();
+        let mut queries: Vec<usize> = (0..num_leaves).collect();
         queries.shuffle(&mut rng);
         queries.truncate(num_queries);
         queries.sort_unstable();
@@ -274,7 +213,7 @@ mod tests {
         let proof = tree.prove(&queries);
 
         let queried_leaves: Vec<[u16; 4]> = queries.iter()
-            .map(|&q| leaves[q - 1])
+            .map(|&q| leaves[q])
             .collect();
 
         assert!(verify(
@@ -297,26 +236,26 @@ mod tests {
     fn test_debug_batch_proof() {
         let leaves: Vec<u64> = (0..16).collect();
         let tree = build_merkle_tree(&leaves);
-        
+
         println!("Tree layers:");
         for (i, layer) in tree.layers.iter().enumerate() {
             println!("  Layer {}: {} nodes", i, layer.len());
         }
-        
-        let queries = vec![1, 3, 7, 10];
+
+        let queries = vec![0, 2, 6, 9];
         let proof = tree.prove(&queries);
-        
+
         println!("Proof size: {} siblings", proof.siblings.len());
-        
+
         let queried_leaves: Vec<u64> = queries.iter()
-            .map(|&i| leaves[i - 1])
+            .map(|&i| leaves[i])
             .collect();
-            
+
         println!("Verifying with:");
-        println!("  Queries (1-based): {:?}", queries);
+        println!("  Queries (0-based): {:?}", queries);
         println!("  Leaves: {:?}", queried_leaves);
         println!("  Depth: {}", tree.get_depth());
-            
+
         let is_valid = verify(
             &tree.get_root(),
             &proof,
@@ -324,7 +263,7 @@ mod tests {
             &queried_leaves,
             &queries
         );
-        
+
         println!("Verification result: {}", is_valid);
         assert!(is_valid);
     }
@@ -334,13 +273,13 @@ mod tests {
         // Test with just 4 leaves for easier debugging
         let leaves: Vec<u64> = vec![0, 1, 2, 3];
         let tree = build_merkle_tree(&leaves);
-        
+
         // Test single query first
-        let queries = vec![1]; // First leaf (1-based)
+        let queries = vec![0]; // First leaf (0-based)
         let proof = tree.prove(&queries);
-        
+
         let queried_leaves = vec![leaves[0]];
-        
+
         let is_valid = verify(
             &tree.get_root(),
             &proof,
@@ -348,17 +287,17 @@ mod tests {
             &queried_leaves,
             &queries
         );
-        
+
         assert!(is_valid, "Single query verification failed");
-        
+
         // Test multiple queries
-        let queries = vec![1, 3]; // First and third leaves (1-based)
+        let queries = vec![0, 2]; // First and third leaves (0-based)
         let proof = tree.prove(&queries);
-        
+
         let queried_leaves: Vec<u64> = queries.iter()
-            .map(|&i| leaves[i - 1])
+            .map(|&i| leaves[i])
             .collect();
-        
+
         let is_valid = verify(
             &tree.get_root(),
             &proof,
@@ -366,7 +305,7 @@ mod tests {
             &queried_leaves,
             &queries
         );
-        
+
         assert!(is_valid, "Multiple query verification failed");
     }
 }
