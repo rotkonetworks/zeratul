@@ -2,9 +2,6 @@
 use bytemuck::Pod;
 use crate::{CompleteMerkleTree, MerkleRoot, Hash, hash_leaf, hash_siblings};
 
-/// Batched Merkle proof
-#[derive(Clone, Debug)]
-#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BatchedMerkleProof {
     pub siblings: Vec<Hash>,
 }
@@ -15,7 +12,7 @@ impl BatchedMerkleProof {
     }
 }
 
-/// Create a batched proof for multiple queries (1-based indices)
+/// Create a batched proof for multiple queries (0-based indices)
 pub fn prove_batch(tree: &CompleteMerkleTree, queries: &[usize]) -> BatchedMerkleProof {
     let mut siblings = Vec::new();
     let depth = tree.get_depth();
@@ -24,13 +21,11 @@ pub fn prove_batch(tree: &CompleteMerkleTree, queries: &[usize]) -> BatchedMerkl
         return BatchedMerkleProof { siblings };
     }
 
-    // Convert from 1-based to 0-based indices (matching Julia)
-    let mut queries_buff: Vec<usize> = queries.iter()
-        .map(|&q| q.saturating_sub(1))
-        .collect();
+    // Work with 0-based indices directly
+    let mut queries_buff = queries.to_vec();
     let mut queries_cnt = queries_buff.len();
 
-    // Process each layer (matching Julia exactly)
+    // Process each layer
     for layer_idx in 0..depth {
         queries_cnt = ith_layer(
             &tree.layers[layer_idx],
@@ -43,7 +38,56 @@ pub fn prove_batch(tree: &CompleteMerkleTree, queries: &[usize]) -> BatchedMerkl
     BatchedMerkleProof { siblings }
 }
 
-/// Process one layer of the tree (matching Julia's ith_layer! exactly)
+/// Verify a batched proof (0-based indices)
+pub fn verify_batch<T: Pod>(
+    root: &MerkleRoot,
+    proof: &BatchedMerkleProof,
+    depth: usize,
+    leaves: &[T],
+    leaf_indices: &[usize],
+) -> bool {
+    let Some(expected_root) = root.root else {
+        return false;
+    };
+
+    if depth == 0 {
+        // Single leaf tree
+        if leaves.len() == 1 && leaf_indices.len() == 1 && leaf_indices[0] == 0 {
+            let leaf_hash = hash_leaf(&leaves[0]);
+            return leaf_hash == expected_root;
+        }
+        return false;
+    }
+
+    // Hash leaves
+    let mut layer: Vec<Hash> = leaves.iter()
+        .map(hash_leaf)
+        .collect();
+
+    // Work with 0-based indices directly
+    let mut queries = leaf_indices.to_vec();
+
+    let mut curr_cnt = queries.len();
+    let mut proof_cnt = 0;
+
+    // Process each layer
+    for _ in 0..depth {
+        let (next_cnt, next_proof_cnt) = verify_ith_layer(
+            &mut layer,
+            &mut queries,
+            curr_cnt,
+            &proof.siblings,
+            proof_cnt,
+        );
+
+        curr_cnt = next_cnt;
+        proof_cnt = next_proof_cnt;
+    }
+
+    // Check if we've consumed all proof elements and reached the expected root
+    curr_cnt == 1 && proof_cnt == proof.siblings.len() && layer[0] == expected_root
+}
+
 fn ith_layer(
     current_layer: &[Hash],
     queries_len: usize,
@@ -81,59 +125,6 @@ fn ith_layer(
     next_queries_len
 }
 
-/// Verify a batched proof (1-based indices)
-pub fn verify_batch<T: Pod>(
-    root: &MerkleRoot,
-    proof: &BatchedMerkleProof,
-    depth: usize,
-    leaves: &[T],
-    leaf_indices: &[usize],
-) -> bool {
-    let Some(expected_root) = root.root else {
-        return false;
-    };
-
-    if depth == 0 {
-        // Single leaf tree
-        if leaves.len() == 1 && leaf_indices.len() == 1 && leaf_indices[0] == 1 {
-            let leaf_hash = hash_leaf(&leaves[0]);
-            return leaf_hash == expected_root;
-        }
-        return false;
-    }
-
-    // Hash leaves
-    let mut layer: Vec<Hash> = leaves.iter()
-        .map(hash_leaf)
-        .collect();
-
-    // Convert from 1-based to 0-based indices (matching Julia)
-    let mut queries: Vec<usize> = leaf_indices.iter()
-        .map(|&q| q.saturating_sub(1))
-        .collect();
-
-    let mut curr_cnt = queries.len();
-    let mut proof_cnt = 0;
-
-    // Process each layer (matching Julia exactly)
-    for _ in 0..depth {
-        let (next_cnt, next_proof_cnt) = verify_ith_layer(
-            &mut layer,
-            &mut queries,
-            curr_cnt,
-            &proof.siblings,
-            proof_cnt,
-        );
-
-        curr_cnt = next_cnt;
-        proof_cnt = next_proof_cnt;
-    }
-
-    // Check if we've consumed all proof elements and reached the expected root
-    curr_cnt == 1 && proof_cnt == proof.siblings.len() && layer[0] == expected_root
-}
-
-/// Verify one layer (matching Julia's verify_ith_layer! exactly)
 fn verify_ith_layer(
     layer: &mut Vec<Hash>,
     queries: &mut Vec<usize>,
