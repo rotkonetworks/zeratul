@@ -40,6 +40,10 @@ where
     T: BinaryFieldElement + Send + Sync,
     U: BinaryFieldElement + Send + Sync + From<T>,
 {
+    println!("\n=== DEBUG Verifier Start ===");
+    println!("Config: recursive_steps={}, initial_dim={}", 
+             config.recursive_steps, config.initial_dim);
+    
     // Initialize Fiat-Shamir
     let mut fs = FiatShamir::new_merlin();
 
@@ -50,6 +54,7 @@ where
     let partial_evals_0: Vec<U> = (0..config.initial_k)
         .map(|_| fs.get_challenge())
         .collect();
+    println!("Got {} initial challenges", partial_evals_0.len());
 
     // First recursive commitment
     fs.absorb_root(&proof.recursive_commitments[0].root);
@@ -57,11 +62,13 @@ where
     // Verify initial proof
     let depth = config.initial_dim + LOG_INV_RATE;
     let queries = fs.get_distinct_queries(1 << depth, S);
+    println!("Initial proof verification: depth={}, queries={:?}", depth, &queries[..queries.len().min(5)]);
 
     // Hash the opened rows for verification
     let hashed_leaves: Vec<Hash> = proof.initial_ligero_proof.opened_rows.iter()
         .map(|row| hash_row(row))
         .collect();
+    println!("Hashed {} leaves for initial proof", hashed_leaves.len());
 
     let res = merkle_tree::verify(
         &proof.initial_ligero_cm.root,
@@ -71,7 +78,9 @@ where
         &queries,
     );
 
+    println!("Initial Merkle proof verification: {}", res);
     if !res {
+        println!("FAILED at initial Merkle proof!");
         return Ok(false);
     }
 
@@ -87,6 +96,7 @@ where
         &queries,
         alpha,
     );
+    println!("Induced sumcheck polynomial, enforced_sum: {:?}", enforced_sum);
 
     // Verify sumcheck
     let mut current_sum = enforced_sum;
@@ -96,15 +106,18 @@ where
     fs.absorb_elem(current_sum);
 
     for i in 0..config.recursive_steps {
+        println!("\nRecursive step {}/{}", i+1, config.recursive_steps);
         let mut rs = Vec::new();
 
         // Sumcheck rounds
-        for _ in 0..config.ks[i] {
+        for j in 0..config.ks[i] {
             // Verify claimed sum
             let coeffs = proof.sumcheck_transcript.transcript[transcript_idx];
             let claimed_sum = evaluate_quadratic(coeffs, U::zero()).add(&evaluate_quadratic(coeffs, U::one()));
 
+            println!("  Sumcheck round {}: claimed_sum={:?}, current_sum={:?}", j, claimed_sum, current_sum);
             if claimed_sum != current_sum {
+                println!("  FAILED: Sumcheck mismatch!");
                 return Ok(false);
             }
 
@@ -120,10 +133,12 @@ where
 
         // Final round
         if i == config.recursive_steps - 1 {
+            println!("\nFinal round:");
             fs.absorb_elems(&proof.final_ligero_proof.yr);
 
             let depth = config.log_dims[i] + LOG_INV_RATE;
             let queries = fs.get_distinct_queries(1 << depth, S);
+            println!("Final proof: depth={}, queries={:?}", depth, &queries[..queries.len().min(5)]);
 
             // Hash final opened rows
             let hashed_final: Vec<Hash> = proof.final_ligero_proof.opened_rows.iter()
@@ -138,11 +153,14 @@ where
                 &queries,
             );
 
+            println!("Final Merkle proof verification: {}", res);
             if !res {
+                println!("FAILED at final Merkle proof!");
                 return Ok(false);
             }
 
             // Verify Ligero consistency
+            println!("\nVerifying Ligero consistency:");
             verify_ligero(&queries, &proof.final_ligero_proof.opened_rows, &proof.final_ligero_proof.yr, &rs);
 
             // Final sumcheck verification
@@ -151,12 +169,18 @@ where
             partial_eval_multilinear(&mut f_eval, &[final_r]);
 
             let claimed_eval = f_eval[0];
+            println!("\nFinal sumcheck verification:");
+            println!("  claimed_eval: {:?}", claimed_eval);
+            println!("  current_sum: {:?}", current_sum);
+            
             // SECURITY FIX: Add missing final sumcheck verification
             // The final evaluation must match the current sum for verification to succeed
             if claimed_eval != current_sum {
+                println!("  FAILED: Final sumcheck mismatch!");
                 return Ok(false); // Verification failed - invalid proof
             }
             
+            println!("✓ All checks passed!");
             return Ok(true); // Verification successful
         }
 

@@ -12,6 +12,8 @@ pub mod prover;
 pub mod verifier;
 
 pub use configs::{
+    hardcoded_config_12, hardcoded_config_12_verifier,
+    hardcoded_config_16, hardcoded_config_16_verifier,
     hardcoded_config_20, hardcoded_config_20_verifier,
     hardcoded_config_24, hardcoded_config_24_verifier,
     hardcoded_config_28, hardcoded_config_28_verifier,
@@ -131,5 +133,42 @@ mod tests {
         let result = verifier(&verifier_config, &proof).unwrap();
 
         assert!(result);
+    }
+
+    #[test]
+    fn test_tiny_debug() {
+        // Very small test with debug output
+        let config = hardcoded_config_12(
+            std::marker::PhantomData::<BinaryElem32>,
+            std::marker::PhantomData::<BinaryElem128>,
+        );
+
+        // Simple polynomial - just constant 1
+        let poly = vec![BinaryElem32::one(); 1 << 12];
+
+        println!("\n=== Debug Test ===");
+        println!("Polynomial size: {}", poly.len());
+        println!("First few coefficients: {:?}", &poly[..4]);
+
+        let proof = prover(&config, &poly).expect("Proving failed");
+
+        println!("\nProof components:");
+        println!("  Initial commitment: {:?}", proof.initial_ligero_cm.root);
+        println!("  Recursive commitments: {}", proof.recursive_commitments.len());
+        println!("  Recursive proofs: {}", proof.recursive_proofs.len());
+        println!("  Sumcheck rounds: {}", proof.sumcheck_transcript.transcript.len());
+
+        let verifier_config = hardcoded_config_12_verifier();
+        let result = verifier(&verifier_config, &proof).expect("Verification error");
+
+        println!("\nVerification result: {}", result);
+
+        if !result {
+            // Let's check the final polynomial evaluation
+            println!("\nDEBUG: Final ligero proof yr length: {}", proof.final_ligero_proof.yr.len());
+            println!("First few yr values: {:?}", &proof.final_ligero_proof.yr[..4.min(proof.final_ligero_proof.yr.len())]);
+        }
+
+        assert!(result, "Verification failed - there's a bug!");
     }
 }
