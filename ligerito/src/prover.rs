@@ -4,7 +4,7 @@ use crate::{
     RecursiveLigeroProof, FinalLigeroProof, SumcheckTranscript,
     transcript::{FiatShamir, Transcript},
     ligero::ligero_commit,
-    sumcheck_polys::induce_sumcheck_poly_parallel,
+    sumcheck_polys::induce_sumcheck_poly_debug,
     utils::{eval_sk_at_vks, partial_eval_multilinear},
     data_structures::finalize,
 };
@@ -73,8 +73,7 @@ where
         merkle_proof: mtree_proof,
     });
 
-    // Induce sumcheck polynomial
-    let (basis_poly, enforced_sum) = induce_sumcheck_poly_parallel(
+    let (basis_poly, enforced_sum) = induce_sumcheck_poly_debug(
         n,
         &sks_vks,
         &opened_rows,
@@ -83,10 +82,9 @@ where
         alpha,
     );
 
-    // Initialize sumcheck
     let mut sumcheck_transcript = vec![];
     let mut current_poly = basis_poly;
-    let mut current_sum = enforced_sum;
+    let mut current_sum = enforced_sum; // Use enforced_sum directly
 
     // First sumcheck round absorb
     fs.absorb_elem(current_sum);
@@ -171,7 +169,7 @@ where
         let n = current_poly.len().trailing_zeros() as usize;
         let sks_vks: Vec<U> = eval_sk_at_vks(1 << n);
 
-        let (basis_poly, enforced_sum) = induce_sumcheck_poly_parallel(
+        let (basis_poly, enforced_sum) = induce_sumcheck_poly_debug(
             n,
             &sks_vks,
             &opened_rows,
@@ -179,7 +177,7 @@ where
             &queries,
             alpha,
         );
-
+        
         // Glue sumcheck absorb
         let glue_sum = current_sum.add(&enforced_sum);
         fs.absorb_elem(glue_sum);
@@ -221,6 +219,214 @@ where
     // Use SHA256 with seed 1234 to match Julia
     let fs = FiatShamir::new_sha256(1234);
     prove_with_transcript(config, poly, fs)
+}
+
+/// Debug version of prove with detailed logging
+pub fn prove_debug<T, U>(
+    config: &ProverConfig<T, U>,
+    poly: &[T],
+) -> crate::Result<FinalizedLigeritoProof<T, U>>
+where
+    T: BinaryFieldElement + Send + Sync,
+    U: BinaryFieldElement + Send + Sync + From<T>,
+{
+    println!("\n=== PROVER DEBUG ===");
+    
+    let mut fs = FiatShamir::new_merlin();
+    let mut proof = LigeritoProof::<T, U>::new();
+
+    // Initial commitment
+    println!("Creating initial commitment...");
+    let wtns_0 = ligero_commit(poly, config.initial_dims.0, config.initial_dims.1, &config.initial_reed_solomon);
+    let cm_0 = RecursiveLigeroCommitment {
+        root: wtns_0.tree.get_root(),
+    };
+    proof.initial_ligero_cm = Some(cm_0.clone());
+    fs.absorb_root(&cm_0.root);
+    println!("Initial commitment root: {:?}", cm_0.root);
+
+    // Get initial challenges
+    let partial_evals_0: Vec<T> = (0..config.initial_k)
+        .map(|i| {
+            let challenge = fs.get_challenge();
+            println!("Initial challenge {}: {:?}", i, challenge);
+            challenge
+        })
+        .collect();
+
+    // Partial evaluation
+    println!("\nPerforming partial evaluation...");
+    let mut f_evals = poly.to_vec();
+    partial_eval_multilinear(&mut f_evals, &partial_evals_0);
+    println!("Partial eval complete, new size: {}", f_evals.len());
+
+    // Convert to extension field
+    let partial_evals_0_u: Vec<U> = partial_evals_0.iter().map(|&x| U::from(x)).collect();
+    let f_evals_u: Vec<U> = f_evals.iter().map(|&x| U::from(x)).collect();
+
+    // First recursive step
+    println!("\nFirst recursive step...");
+    let wtns_1 = ligero_commit(&f_evals_u, config.dims[0].0, config.dims[0].1, &config.reed_solomon_codes[0]);
+    let cm_1 = RecursiveLigeroCommitment {
+        root: wtns_1.tree.get_root(),
+    };
+    proof.recursive_commitments.push(cm_1.clone());
+    fs.absorb_root(&cm_1.root);
+
+    // Query selection
+    let rows = wtns_0.mat.len();
+    println!("\nSelecting queries from {} rows...", rows);
+    let queries = fs.get_distinct_queries(rows, S);
+    println!("Selected queries (0-based): {:?}", &queries[..queries.len().min(5)]);
+    
+    let alpha = fs.get_challenge::<U>();
+    println!("Alpha challenge: {:?}", alpha);
+
+    // Prepare for sumcheck
+    let n = f_evals.len().trailing_zeros() as usize;
+    println!("\nPreparing sumcheck, n = {}", n);
+    let sks_vks: Vec<T> = eval_sk_at_vks(1 << n);
+
+    let opened_rows: Vec<Vec<T>> = queries.iter()
+        .map(|&q| wtns_0.mat[q].clone())
+        .collect();
+
+    let mtree_proof = wtns_0.tree.prove(&queries);
+    proof.initial_ligero_proof = Some(RecursiveLigeroProof {
+        opened_rows: opened_rows.clone(),
+        merkle_proof: mtree_proof,
+    });
+
+    println!("\nInducing sumcheck polynomial...");
+    let (basis_poly, enforced_sum) = induce_sumcheck_poly_debug(
+        n,
+        &sks_vks,
+        &opened_rows,
+        &partial_evals_0_u,
+        &queries,
+        alpha,
+    );
+    println!("Enforced sum: {:?}", enforced_sum);
+
+    let mut sumcheck_transcript = vec![];
+    let mut current_poly = basis_poly;
+    let mut current_sum = enforced_sum;
+
+    // First sumcheck round absorb
+    fs.absorb_elem(current_sum);
+
+    // Process recursive rounds
+    let mut wtns_prev = wtns_1;
+
+    for i in 0..config.recursive_steps {
+        println!("\n--- Recursive step {}/{} ---", i+1, config.recursive_steps);
+        let mut rs = Vec::new();
+
+        // Sumcheck rounds
+        for j in 0..config.ks[i] {
+            let ri = fs.get_challenge::<U>();
+            println!("  Round {}: challenge = {:?}", j, ri);
+            
+            // Fold polynomial
+            let (new_poly, coeffs) = fold_polynomial(&current_poly, ri);
+            println!("  Fold coeffs: {:?}", coeffs);
+            sumcheck_transcript.push(coeffs);
+            
+            rs.push(ri);
+            current_poly = new_poly;
+
+            // Update sum
+            current_sum = evaluate_quadratic(coeffs, ri);
+            println!("  New sum: {:?}", current_sum);
+            fs.absorb_elem(current_sum);
+        }
+
+        // Final round
+        if i == config.recursive_steps - 1 {
+            println!("\nFinal round - creating proof...");
+            fs.absorb_elems(&current_poly);
+
+            let rows = wtns_prev.mat.len();
+            let queries = fs.get_distinct_queries(rows, S);
+
+            let opened_rows: Vec<Vec<U>> = queries.iter()
+                .map(|&q| wtns_prev.mat[q].clone())
+                .collect();
+
+            let mtree_proof = wtns_prev.tree.prove(&queries);
+
+            proof.final_ligero_proof = Some(FinalLigeroProof {
+                yr: current_poly.clone(),
+                opened_rows,
+                merkle_proof: mtree_proof,
+            });
+
+            proof.sumcheck_transcript = Some(SumcheckTranscript { transcript: sumcheck_transcript });
+
+            println!("Proof generation complete!");
+            return finalize(proof);
+        }
+
+        // Continue recursion
+        println!("\nContinuing recursion...");
+        let wtns_next = ligero_commit(
+            &current_poly,
+            config.dims[i + 1].0,
+            config.dims[i + 1].1,
+            &config.reed_solomon_codes[i + 1],
+        );
+
+        let cm_next = RecursiveLigeroCommitment {
+            root: wtns_next.tree.get_root(),
+        };
+        proof.recursive_commitments.push(cm_next.clone());
+        fs.absorb_root(&cm_next.root);
+
+        let rows = wtns_prev.mat.len();
+        let queries = fs.get_distinct_queries(rows, S);
+        let alpha = fs.get_challenge::<U>();
+
+        let opened_rows: Vec<Vec<U>> = queries.iter()
+            .map(|&q| wtns_prev.mat[q].clone())
+            .collect();
+
+        let mtree_proof = wtns_prev.tree.prove(&queries);
+        proof.recursive_proofs.push(RecursiveLigeroProof {
+            opened_rows: opened_rows.clone(),
+            merkle_proof: mtree_proof,
+        });
+
+        // Update for next round
+        let n = current_poly.len().trailing_zeros() as usize;
+        let sks_vks: Vec<U> = eval_sk_at_vks(1 << n);
+
+        println!("\nInducing next sumcheck polynomial...");
+        let (basis_poly, enforced_sum) = induce_sumcheck_poly_debug(
+            n,
+            &sks_vks,
+            &opened_rows,
+            &rs,
+            &queries,
+            alpha,
+        );
+        println!("Next enforced sum: {:?}", enforced_sum);
+        
+        // Glue sumcheck
+        let glue_sum = current_sum.add(&enforced_sum);
+        fs.absorb_elem(glue_sum);
+        println!("Glue sum: {:?}", glue_sum);
+
+        // Glue polynomials
+        let beta = fs.get_challenge::<U>();
+        println!("Beta challenge: {:?}", beta);
+        current_poly = glue_polynomials(&current_poly, &basis_poly, beta);
+        current_sum = glue_sums(current_sum, enforced_sum, beta);
+        println!("Updated current sum: {:?}", current_sum);
+
+        wtns_prev = wtns_next;
+    }
+
+    unreachable!("Should have returned in final round");
 }
 
 // Helper functions
@@ -265,4 +471,62 @@ fn glue_polynomials<F: BinaryFieldElement>(f: &[F], g: &[F], beta: F) -> Vec<F> 
 
 fn glue_sums<F: BinaryFieldElement>(sum_f: F, sum_g: F, beta: F) -> F {
     sum_f.add(&beta.mul(&sum_g))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use binary_fields::{BinaryElem32, BinaryElem128};
+    use crate::configs;
+
+    #[test]
+    fn test_fold_polynomial() {
+        // Test with a simple polynomial
+        let poly = vec![
+            BinaryElem32::from(1),
+            BinaryElem32::from(2),
+            BinaryElem32::from(3),
+            BinaryElem32::from(4),
+        ];
+        
+        let r = BinaryElem32::from(5);
+        let (new_poly, (s0, s1, s2)) = fold_polynomial(&poly, r);
+        
+        assert_eq!(new_poly.len(), 2);
+        
+        // Check sums
+        assert_eq!(s0, BinaryElem32::from(1).add(&BinaryElem32::from(3)));
+        assert_eq!(s2, BinaryElem32::from(2).add(&BinaryElem32::from(4)));
+    }
+
+    #[test]
+    fn test_evaluate_quadratic() {
+        let coeffs = (
+            BinaryElem32::from(1),
+            BinaryElem32::from(2),
+            BinaryElem32::from(3),
+        );
+        
+        // Test at x = 0
+        let val0 = evaluate_quadratic(coeffs, BinaryElem32::zero());
+        assert_eq!(val0, BinaryElem32::from(1));
+        
+        // Test at x = 1
+        let val1 = evaluate_quadratic(coeffs, BinaryElem32::one());
+        // a0 + (a1 - a0 - a2) + a2 = a1
+        assert_eq!(val1, BinaryElem32::from(2));
+    }
+
+    #[test]
+    fn test_glue_polynomials() {
+        let f = vec![BinaryElem32::from(1), BinaryElem32::from(2)];
+        let g = vec![BinaryElem32::from(3), BinaryElem32::from(4)];
+        let beta = BinaryElem32::from(5);
+        
+        let result = glue_polynomials(&f, &g, beta);
+        
+        assert_eq!(result.len(), 2);
+        assert_eq!(result[0], BinaryElem32::from(1).add(&beta.mul(&BinaryElem32::from(3))));
+        assert_eq!(result[1], BinaryElem32::from(2).add(&beta.mul(&BinaryElem32::from(4))));
+    }
 }

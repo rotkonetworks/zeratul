@@ -1,13 +1,10 @@
 //! Fiat-Shamir transcript implementations with 0-based indexing
 //! 
 //! Updated to use 0-based indexing throughout for better performance
-//! Fiat-Shamir transcript implementations with 0-based indexing
-//! 
-//! Updated to use 0-based indexing throughout for better performance
 use binary_fields::BinaryFieldElement;
 use merkle_tree::MerkleRoot;
 use sha2::{Sha256, Digest};
-use rand::{Rng, RngCore, SeedableRng};
+use rand::{Rng,  SeedableRng};
 use rand::rngs::StdRng;
 use std::collections::HashSet;
 
@@ -15,19 +12,19 @@ use std::collections::HashSet;
 pub trait Transcript: Send + Sync {
     /// Absorb a Merkle root
     fn absorb_root(&mut self, root: &MerkleRoot);
-    
+
     /// Absorb field elements
     fn absorb_elems<F: BinaryFieldElement>(&mut self, elems: &[F]);
-    
+
     /// Absorb a single field element
     fn absorb_elem<F: BinaryFieldElement>(&mut self, elem: F);
-    
+
     /// Get a field element challenge
     fn get_challenge<F: BinaryFieldElement>(&mut self) -> F;
-    
+
     /// Get a query index (0-based)
     fn get_query(&mut self, max: usize) -> usize;
-    
+
     /// Get multiple distinct queries (0-based)
     fn get_distinct_queries(&mut self, max: usize, count: usize) -> Vec<usize>;
 }
@@ -73,22 +70,81 @@ impl Transcript for MerlinTranscript {
     }
 
     fn get_challenge<F: BinaryFieldElement>(&mut self) -> F {
-        let mut bytes = vec![0u8; std::mem::size_of::<F>()];
+        let field_bytes = std::mem::size_of::<F>();
+        let mut bytes = vec![0u8; field_bytes];
+
+        // Get initial challenge bytes
         self.transcript.challenge_bytes(b"challenge", &mut bytes);
-        
-        // Build field element from bytes
+
+        // Convert bytes to field element
         let mut result = F::zero();
-        let mut power = F::one();
-        
-        for byte in bytes {
-            for i in 0..8 {
-                if (byte >> i) & 1 == 1 {
+        let bits_needed = match field_bytes {
+            4 => 32,   // BinaryElem32
+            16 => 128, // BinaryElem128
+            _ => field_bytes * 8,  // <- Fixed: underscore instead of *
+        };
+
+        // Create a more diverse bit pattern
+        let mut bit_count = 0;
+        for (byte_idx, &byte) in bytes.iter().enumerate() {
+            for bit_idx in 0..8 {
+                if bit_count >= bits_needed {
+                    break;
+                }
+
+                if (byte >> bit_idx) & 1 == 1 {
+                    // Create x^bit_count
+                    let mut power = F::one();
+                    for _ in 0..bit_count {  // <- Fixed: underscore instead of *
+                        power = power.add(&power); // This is x * 2 in binary fields
+                    }
                     result = result.add(&power);
                 }
-                power = power.add(&power);
+                bit_count += 1;
+            }
+            if bit_count >= bits_needed {
+                break;
             }
         }
-        
+
+        // CRITICAL: If we got all ones (which happens when bytes = [1, 0, 0, ...])
+        // or all zeros, we need to ensure diversity
+        if result == F::one() || result == F::zero() {
+            // Mix in the byte position to create diversity
+            self.transcript.append_message(b"retry", &bytes);
+            self.transcript.challenge_bytes(b"challenge_retry", &mut bytes);
+
+            // XOR with position-based pattern to ensure different challenges
+            for i in 0..4 {
+                if i < field_bytes {
+                    bytes[i] ^= (i as u8 + 1) * 17; // Use prime multiplier for better distribution
+                }
+            }
+
+            // Recompute with mixed bytes
+            result = F::zero();
+            bit_count = 0;
+            for (byte_idx, &byte) in bytes.iter().enumerate() {
+                for bit_idx in 0..8 {
+                    if bit_count >= bits_needed {
+                        break;
+                    }
+
+                    if (byte >> bit_idx) & 1 == 1 {
+                        let mut power = F::one();
+                        for _ in 0..bit_count {  // <- Fixed: underscore instead of *
+                            power = power.add(&power);
+                        }
+                        result = result.add(&power);
+                    }
+                    bit_count += 1;
+                }
+                if bit_count >= bits_needed {
+                    break;
+                }
+            }
+        }
+
         result
     }
 
@@ -126,25 +182,25 @@ impl Sha256Transcript {
     pub fn new(seed: i32) -> Self {
         let mut hasher = Sha256::new();
         hasher.update(&seed.to_le_bytes());
-        
+
         Self {
             hasher,
             counter: 0,
             julia_compatible: false,
         }
     }
-    
+
     /// Create a Julia-compatible transcript (1-based queries)
     pub fn new_julia_compatible(seed: i32) -> Self {
         let mut transcript = Self::new(seed);
         transcript.julia_compatible = true;
         transcript
     }
-    
+
     fn squeeze_rng(&mut self) -> StdRng {
         self.hasher.update(&self.counter.to_le_bytes());
         self.counter += 1;
-        
+
         let digest = self.hasher.clone().finalize();
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&digest[..32]);
@@ -183,7 +239,7 @@ impl Transcript for Sha256Transcript {
         let mut rng = self.squeeze_rng();
         let mut result = F::zero();
         let num_bits = std::mem::size_of::<F>() * 8;
-        
+
         for i in 0..num_bits {
             if rng.gen_bool(0.5) {
                 let mut bit = F::one();
@@ -193,7 +249,7 @@ impl Transcript for Sha256Transcript {
                 result = result.add(&bit);
             }
         }
-        
+
         result
     }
 
@@ -246,12 +302,12 @@ impl FiatShamir {
             }
         }
     }
-    
+
     /// Create Merlin transcript (recommended)
     pub fn new_merlin() -> Self {
         Self::new(TranscriptType::Merlin)
     }
-    
+
     /// Create SHA256 transcript
     pub fn new_sha256(seed: i32) -> Self {
         Self::new(TranscriptType::Sha256(seed))
@@ -266,35 +322,35 @@ impl Transcript for FiatShamir {
             FiatShamir::Sha256(t) => t.absorb_root(root),
         }
     }
-    
+
     fn absorb_elems<F: BinaryFieldElement>(&mut self, elems: &[F]) {
         match self {
             FiatShamir::Merlin(t) => t.absorb_elems(elems),
             FiatShamir::Sha256(t) => t.absorb_elems(elems),
         }
     }
-    
+
     fn absorb_elem<F: BinaryFieldElement>(&mut self, elem: F) {
         match self {
             FiatShamir::Merlin(t) => t.absorb_elem(elem),
             FiatShamir::Sha256(t) => t.absorb_elem(elem),
         }
     }
-    
+
     fn get_challenge<F: BinaryFieldElement>(&mut self) -> F {
         match self {
             FiatShamir::Merlin(t) => t.get_challenge(),
             FiatShamir::Sha256(t) => t.get_challenge(),
         }
     }
-    
+
     fn get_query(&mut self, max: usize) -> usize {
         match self {
             FiatShamir::Merlin(t) => t.get_query(max),
             FiatShamir::Sha256(t) => t.get_query(max),
         }
     }
-    
+
     fn get_distinct_queries(&mut self, max: usize, count: usize) -> Vec<usize> {
         match self {
             FiatShamir::Merlin(t) => t.get_distinct_queries(max, count),
