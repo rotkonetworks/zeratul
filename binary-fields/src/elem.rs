@@ -347,3 +347,40 @@ impl BinaryFieldElement for BinaryElem64 {
         result
     }
 }
+
+// Field embeddings for Ligerito
+impl From<BinaryElem16> for BinaryElem32 {
+    fn from(elem: BinaryElem16) -> Self {
+        BinaryElem32::from(elem.0.value() as u32)
+    }
+}
+
+impl From<BinaryElem16> for BinaryElem64 {
+    fn from(elem: BinaryElem16) -> Self {
+        BinaryElem64(BinaryPoly64::new(elem.0.value() as u64))
+    }
+}
+
+impl From<BinaryElem16> for BinaryElem128 {
+    fn from(elem: BinaryElem16) -> Self {
+        BinaryElem128::from(elem.0.value() as u128)
+    }
+}
+
+impl From<BinaryElem32> for BinaryElem64 {
+    fn from(elem: BinaryElem32) -> Self {
+        BinaryElem64(BinaryPoly64::new(elem.0.value() as u64))
+    }
+}
+
+impl From<BinaryElem32> for BinaryElem128 {
+    fn from(elem: BinaryElem32) -> Self {
+        BinaryElem128::from(elem.0.value() as u128)
+    }
+}
+
+impl From<BinaryElem64> for BinaryElem128 {
+    fn from(elem: BinaryElem64) -> Self {
+        BinaryElem128::from(elem.0.value() as u128)
+    }
+}
