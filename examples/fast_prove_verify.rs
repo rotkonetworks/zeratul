@@ -1,7 +1,7 @@
 //! Fast example of proving and verifying with Ligerito
 //! This uses a smaller polynomial size for quick demonstration
 use binary_fields::{BinaryElem32, BinaryElem128};
-use ligerito::{prover, ProverConfig, VerifierConfig};
+use ligerito::{prover, verifier, ProverConfig, VerifierConfig};
 use reed_solomon::reed_solomon;
 use rand::Rng;
 use std::time::Instant;
@@ -61,12 +61,12 @@ fn main() {
 
     // Warm up (optional, helps with timing)
     println!("Warming up...");
-    let _ = prover(&config, &poly).expect("Warmup failed");
+    let _ = ligerito::prove_sha256(&config, &poly).expect("Warmup failed");
 
     // Time the proof generation
     println!("\nGenerating proof...");
     let start = Instant::now();
-    let proof = prover(&config, &poly).expect("Proving failed");
+    let proof = ligerito::prove_sha256(&config, &poly).expect("Proving failed");
     let prove_time = start.elapsed();
 
     println!("✓ Proof generated in: {:?}", prove_time);
@@ -75,9 +75,8 @@ fn main() {
     // Time the verification
     println!("\nVerifying proof...");
     let start = Instant::now();
-    // let verification_result = verifier(&verifier_config, &proof)
-    let verification_result = ligerito::verifier::verify_debug(&verifier_config, &proof)
-    .expect("Verification failed");
+    let verification_result = ligerito::verify_sha256(&verifier_config, &proof)
+        .expect("Verification failed");
     let verify_time = start.elapsed();
 
     println!("✓ Verification completed in: {:?}", verify_time);
@@ -108,13 +107,13 @@ mod tests {
         let poly: Vec<BinaryElem32> = vec![BinaryElem32::one(); 1 << 12];
         
         let start = Instant::now();
-        let proof = prover(&config, &poly).expect("Proving failed");
+        let proof = ligerito::prove_sha256(&config, &poly).expect("Proving failed");
         let prove_time = start.elapsed();
         
         assert!(prove_time.as_secs() < 5, "Proving took too long: {:?}", prove_time);
         
         let verifier_config = create_small_verifier_config();
-        let result = verifier(&verifier_config, &proof).expect("Verification failed");
+        let result = ligerito::verify_sha256(&verifier_config, &proof).expect("Verification failed");
         assert!(result);
     }
 }
