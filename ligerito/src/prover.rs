@@ -1,11 +1,11 @@
-use binary_fields::{BinaryFieldElement, BinaryPolynomial};
+use binary_fields::BinaryFieldElement;
 use crate::{
     ProverConfig, LigeritoProof, FinalizedLigeritoProof, RecursiveLigeroCommitment,
     RecursiveLigeroProof, FinalLigeroProof, SumcheckTranscript,
     transcript::{FiatShamir, Transcript},
     ligero::ligero_commit,
     sumcheck_polys::induce_sumcheck_poly_parallel,
-    utils::eval_sk_at_vks,
+    utils::{eval_sk_at_vks, partial_eval_multilinear},
     data_structures::finalize,
 };
 
@@ -32,14 +32,17 @@ where
     proof.initial_ligero_cm = Some(cm_0.clone());
     fs.absorb_root(&cm_0.root);
 
-    // Get initial challenges
-    let partial_evals_0: Vec<U> = (0..config.initial_k)
+    // Get initial challenges - get them as T type (base field)
+    let partial_evals_0: Vec<T> = (0..config.initial_k)
         .map(|_| fs.get_challenge())
         .collect();
 
     // Partial evaluation of multilinear polynomial
     let mut f_evals = poly.to_vec();
     partial_eval_multilinear(&mut f_evals, &partial_evals_0);
+
+    // Convert to U type for extension field operations
+    let partial_evals_0_u: Vec<U> = partial_evals_0.iter().map(|&x| U::from(x)).collect();
 
     // First recursive step - convert to U type
     let f_evals_u: Vec<U> = f_evals.iter().map(|&x| U::from(x)).collect();
@@ -52,18 +55,19 @@ where
 
     // Query selection
     let rows = wtns_0.mat.len();
-    let queries = fs.get_distinct_queries(rows, S);
+    let queries = fs.get_distinct_queries(rows, S);  // Returns 0-based indices
     let alpha = fs.get_challenge::<U>();
 
     // Prepare for sumcheck
     let n = f_evals.len().trailing_zeros() as usize;
     let sks_vks: Vec<T> = eval_sk_at_vks(1 << n);
 
+    // Use 0-based queries directly for array access
     let opened_rows: Vec<Vec<T>> = queries.iter()
-        .map(|&q| wtns_0.mat[q - 1].clone())
+        .map(|&q| wtns_0.mat[q].clone())
         .collect();
 
-    let mtree_proof = wtns_0.tree.prove(&queries);
+    let mtree_proof = wtns_0.tree.prove(&queries);  // prove() expects 0-based
     proof.initial_ligero_proof = Some(RecursiveLigeroProof {
         opened_rows: opened_rows.clone(),
         merkle_proof: mtree_proof,
@@ -74,7 +78,7 @@ where
         n,
         &sks_vks,
         &opened_rows,
-        &partial_evals_0,
+        &partial_evals_0_u,
         &queries,
         alpha,
     );
@@ -114,13 +118,14 @@ where
             fs.absorb_elems(&current_poly);
 
             let rows = wtns_prev.mat.len();
-            let queries = fs.get_distinct_queries(rows, S);
+            let queries = fs.get_distinct_queries(rows, S);  // 0-based
 
+            // Use 0-based queries directly for array access
             let opened_rows: Vec<Vec<U>> = queries.iter()
-                .map(|&q| wtns_prev.mat[q - 1].clone())
+                .map(|&q| wtns_prev.mat[q].clone())
                 .collect();
 
-            let mtree_proof = wtns_prev.tree.prove(&queries);
+            let mtree_proof = wtns_prev.tree.prove(&queries);  // 0-based
 
             proof.final_ligero_proof = Some(FinalLigeroProof {
                 yr: current_poly.clone(),
@@ -148,14 +153,15 @@ where
         fs.absorb_root(&cm_next.root);
 
         let rows = wtns_prev.mat.len();
-        let queries = fs.get_distinct_queries(rows, S);
+        let queries = fs.get_distinct_queries(rows, S);  // 0-based
         let alpha = fs.get_challenge::<U>();
 
+        // Use 0-based queries directly for array access
         let opened_rows: Vec<Vec<U>> = queries.iter()
-            .map(|&q| wtns_prev.mat[q - 1].clone())
+            .map(|&q| wtns_prev.mat[q].clone())
             .collect();
 
-        let mtree_proof = wtns_prev.tree.prove(&queries);
+        let mtree_proof = wtns_prev.tree.prove(&queries);  // 0-based
         proof.recursive_proofs.push(RecursiveLigeroProof {
             opened_rows: opened_rows.clone(),
             merkle_proof: mtree_proof,
@@ -218,22 +224,6 @@ where
 }
 
 // Helper functions
-
-fn partial_eval_multilinear<F: BinaryFieldElement, U: BinaryFieldElement + From<F>>(
-    poly: &mut Vec<F>, 
-    evals: &[U]
-) {
-    // SECURITY FIX: Convert U to F by using a safe approach that works with generic types
-    // We'll use the field element's bit representation through a more robust conversion
-    let f_evals: Vec<F> = evals.iter().map(|u_elem| {
-        // Use the Debug representation to get a deterministic conversion
-        // This preserves the cryptographic properties while being type-safe
-        let elem_str = format!("{:?}", u_elem);
-        let hash_value = elem_str.bytes().fold(0u64, |acc, b| acc.wrapping_mul(31).wrapping_add(b as u64));
-        F::from_bits(hash_value)
-    }).collect();
-    crate::utils::partial_eval_multilinear(poly, &f_evals);
-}
 
 fn fold_polynomial<F: BinaryFieldElement>(poly: &[F], r: F) -> (Vec<F>, (F, F, F)) {
     let n = poly.len() / 2;

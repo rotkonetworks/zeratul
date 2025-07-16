@@ -1,8 +1,15 @@
-//! Fiat-Shamir transcript implementations
-//! Supports both Merlin and SHA256-based transcripts
-
+//! Fiat-Shamir transcript implementations with 0-based indexing
+//! 
+//! Updated to use 0-based indexing throughout for better performance
+//! Fiat-Shamir transcript implementations with 0-based indexing
+//! 
+//! Updated to use 0-based indexing throughout for better performance
 use binary_fields::BinaryFieldElement;
 use merkle_tree::MerkleRoot;
+use sha2::{Sha256, Digest};
+use rand::{Rng, RngCore, SeedableRng};
+use rand::rngs::StdRng;
+use std::collections::HashSet;
 
 /// Trait for Fiat-Shamir transcripts
 pub trait Transcript: Send + Sync {
@@ -18,10 +25,10 @@ pub trait Transcript: Send + Sync {
     /// Get a field element challenge
     fn get_challenge<F: BinaryFieldElement>(&mut self) -> F;
     
-    /// Get a query index
+    /// Get a query index (0-based)
     fn get_query(&mut self, max: usize) -> usize;
     
-    /// Get multiple distinct queries
+    /// Get multiple distinct queries (0-based)
     fn get_distinct_queries(&mut self, max: usize, count: usize) -> Vec<usize>;
 }
 
@@ -89,12 +96,12 @@ impl Transcript for MerlinTranscript {
         let mut bytes = [0u8; 8];
         self.transcript.challenge_bytes(b"query", &mut bytes);
         let value = u64::from_le_bytes(bytes);
-        (value as usize) % max + 1
+        (value as usize) % max  // Returns 0..max-1 (0-based)
     }
 
     fn get_distinct_queries(&mut self, max: usize, count: usize) -> Vec<usize> {
         let mut queries = Vec::with_capacity(count);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
 
         while queries.len() < count {
             let q = self.get_query(max);
@@ -108,51 +115,51 @@ impl Transcript for MerlinTranscript {
     }
 }
 
-/// SHA256-based Fiat-Shamir transcript (Julia-compatible)
+/// SHA256-based Fiat-Shamir transcript (Julia-compatible mode)
 pub struct Sha256Transcript {
-    hasher: sha2::Sha256,
+    hasher: Sha256,
     counter: u32,
+    julia_compatible: bool,
 }
 
 impl Sha256Transcript {
     pub fn new(seed: i32) -> Self {
-        use sha2::Digest;
-        
-        let mut hasher = sha2::Sha256::new();
+        let mut hasher = Sha256::new();
         hasher.update(&seed.to_le_bytes());
         
         Self {
             hasher,
             counter: 0,
+            julia_compatible: false,
         }
     }
     
-    fn squeeze_rng(&mut self) -> rand::rngs::StdRng {
-        use sha2::Digest;
-        use rand::SeedableRng;
-        
+    /// Create a Julia-compatible transcript (1-based queries)
+    pub fn new_julia_compatible(seed: i32) -> Self {
+        let mut transcript = Self::new(seed);
+        transcript.julia_compatible = true;
+        transcript
+    }
+    
+    fn squeeze_rng(&mut self) -> StdRng {
         self.hasher.update(&self.counter.to_le_bytes());
         self.counter += 1;
         
         let digest = self.hasher.clone().finalize();
         let mut seed = [0u8; 32];
         seed.copy_from_slice(&digest[..32]);
-        rand::rngs::StdRng::from_seed(seed)
+        StdRng::from_seed(seed)
     }
 }
 
 impl Transcript for Sha256Transcript {
     fn absorb_root(&mut self, root: &MerkleRoot) {
-        use sha2::Digest;
-        
         if let Some(hash) = &root.root {
             self.hasher.update(hash);
         }
     }
 
     fn absorb_elems<F: BinaryFieldElement>(&mut self, elems: &[F]) {
-        use sha2::Digest;
-        
         let bytes = unsafe {
             std::slice::from_raw_parts(
                 elems.as_ptr() as *const u8,
@@ -163,8 +170,6 @@ impl Transcript for Sha256Transcript {
     }
 
     fn absorb_elem<F: BinaryFieldElement>(&mut self, elem: F) {
-        use sha2::Digest;
-        
         let bytes = unsafe {
             std::slice::from_raw_parts(
                 &elem as *const F as *const u8,
@@ -175,8 +180,6 @@ impl Transcript for Sha256Transcript {
     }
 
     fn get_challenge<F: BinaryFieldElement>(&mut self) -> F {
-        use rand::Rng;
-        
         let mut rng = self.squeeze_rng();
         let mut result = F::zero();
         let num_bits = std::mem::size_of::<F>() * 8;
@@ -195,15 +198,17 @@ impl Transcript for Sha256Transcript {
     }
 
     fn get_query(&mut self, max: usize) -> usize {
-        use rand::Rng;
-        
         let mut rng = self.squeeze_rng();
-        rng.gen_range(1..=max)
+        if self.julia_compatible {
+            rng.gen_range(1..=max) - 1  // Generate 1-based, return 0-based
+        } else {
+            rng.gen_range(0..max)  // Direct 0-based
+        }
     }
 
     fn get_distinct_queries(&mut self, max: usize, count: usize) -> Vec<usize> {
         let mut queries = Vec::with_capacity(count);
-        let mut seen = std::collections::HashSet::new();
+        let mut seen = HashSet::new();
 
         while queries.len() < count {
             let q = self.get_query(max);
@@ -247,7 +252,7 @@ impl FiatShamir {
         Self::new(TranscriptType::Merlin)
     }
     
-    /// Create SHA256 transcript (Julia-compatible)
+    /// Create SHA256 transcript
     pub fn new_sha256(seed: i32) -> Self {
         Self::new(TranscriptType::Sha256(seed))
     }

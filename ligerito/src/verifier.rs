@@ -1,4 +1,4 @@
-use binary_fields::{BinaryFieldElement, BinaryPolynomial};
+use binary_fields::BinaryFieldElement;
 use crate::utils::partial_eval_multilinear;
 use crate::{
     VerifierConfig, FinalizedLigeritoProof,

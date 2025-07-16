@@ -63,9 +63,9 @@ where
                 let alpha_pow = alpha_pows[i];
                 local_sum = local_sum.add(&dot.mul(&alpha_pow));
 
-                // Create field element from query index
+                // Create field element from query index (0-based)
                 let mut qf = T::zero();
-                let mut v = (query - 1) as u64;
+                let mut v = query as u64;
                 let mut power = T::one();
                 
                 // Build field element bit by bit
@@ -136,9 +136,9 @@ where
         let alpha_pow = alpha_pows[i];
         enforced_sum = enforced_sum.add(&dot.mul(&alpha_pow));
 
-        // Create field element from query index
+        // Create field element from query index (0-based)
         let mut qf = T::zero();
-        let mut v = (query - 1) as u64;
+        let mut v = query as u64;
         let mut power = T::one();
         
         // Build field element bit by bit
