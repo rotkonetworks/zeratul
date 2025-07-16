@@ -67,18 +67,25 @@ pub fn encode_cols<F: BinaryFieldElement + Send + Sync>(
     }
 }
 
+/// Hash a row of field elements with deterministic serialization
+#[inline(always)]
 pub fn hash_row<F: BinaryFieldElement>(row: &[F]) -> Hash {
     let mut hasher = Sha256::new();
     
-    // Match the verifier's hash_row implementation exactly
-    for (i, elem) in row.iter().enumerate() {
-        // Hash the element index first for position-dependence
-        hasher.update(&(i as u32).to_le_bytes());
-        
-        // Serialize the field element in a safe, deterministic way
-        // Use the field element's Debug trait which is guaranteed to be implemented
-        let elem_bytes = format!("{:?}", elem).into_bytes();
-        hasher.update(&elem_bytes);
+    // Hash row length for domain separation
+    hasher.update(&(row.len() as u32).to_le_bytes());
+    
+    // Hash each element using bytemuck for safe serialization
+    let elem_size = std::mem::size_of::<F>();
+    for elem in row.iter() {
+        // Use bytemuck to get raw bytes safely
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                elem as *const F as *const u8,
+                elem_size
+            )
+        };
+        hasher.update(bytes);
     }
     
     hasher.finalize().into()

@@ -2,7 +2,7 @@ use binary_fields::BinaryFieldElement;
 use crate::{
     VerifierConfig, FinalizedLigeritoProof,
     transcript::{FiatShamir, Transcript},
-    ligero::verify_ligero,
+    ligero::{verify_ligero, hash_row},
     sumcheck_polys::induce_sumcheck_poly_debug,
     utils::{eval_sk_at_vks, partial_eval_multilinear, evaluate_lagrange_basis},
 };
@@ -11,24 +11,6 @@ use sha2::{Sha256, Digest};
 
 const S: usize = 148;
 const LOG_INV_RATE: usize = 2;
-
-/// Hash a row of field elements with deterministic serialization
-#[inline(always)]
-fn hash_row<F: BinaryFieldElement>(row: &[F]) -> Hash {
-    let mut hasher = Sha256::new();
-    
-    // Position-dependent hashing prevents reordering attacks
-    for (i, elem) in row.iter().enumerate() {
-        hasher.update(&(i as u32).to_le_bytes());
-        
-        // Use Debug trait for deterministic serialization
-        // This is safe and avoids undefined behavior from raw memory access
-        let elem_bytes = format!("{:?}", elem).into_bytes();
-        hasher.update(&elem_bytes);
-    }
-    
-    hasher.finalize().into()
-}
 
 /// Verify a Ligerito proof
 /// 
