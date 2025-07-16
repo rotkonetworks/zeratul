@@ -21,7 +21,7 @@ pub use configs::{
 };
 pub use data_structures::*;
 pub use prover::{prove, prove_sha256, prove_with_transcript};
-pub use verifier::{verify, verify_sha256, verify_with_transcript};
+pub use verifier::{verify, verify_sha256, verify_with_transcript, verify_debug};
 pub use transcript::{FiatShamir, TranscriptType};
 
 use binary_fields::BinaryFieldElement;

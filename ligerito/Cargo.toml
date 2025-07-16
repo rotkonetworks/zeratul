@@ -38,6 +38,10 @@ path = "../examples/prove_verify.rs"
 name = "fast_prove_verify"
 path = "../examples/fast_prove_verify.rs"
 
+[[example]]
+name = "tiny_debug"
+path = "../examples/tiny_debug.rs"
+
 # [[bench]]
 # name = "ligerito_bench"
 # harness = false
