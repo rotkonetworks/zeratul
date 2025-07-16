@@ -14,6 +14,8 @@ pub struct CompleteMerkleTree {
     pub layers: Vec<Vec<Hash>>,
 }
 
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct MerkleRoot {
     pub root: Option<Hash>,
 }
