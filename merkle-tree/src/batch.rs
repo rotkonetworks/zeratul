@@ -1,3 +1,4 @@
+// src/batch.rs
 use bytemuck::Pod;
 use crate::{CompleteMerkleTree, MerkleRoot, Hash, hash_leaf, hash_siblings};
 
@@ -14,20 +15,27 @@ impl BatchedMerkleProof {
     }
 }
 
-/// Create a batched proof for multiple queries
+/// Create a batched proof for multiple queries (1-based indices)
 pub fn prove_batch(tree: &CompleteMerkleTree, queries: &[usize]) -> BatchedMerkleProof {
     let mut siblings = Vec::new();
     let depth = tree.get_depth();
 
-    // Make mutable copy of queries
-    let mut queries_buff: Vec<usize> = queries.to_vec();
+    if depth == 0 || queries.is_empty() {
+        return BatchedMerkleProof { siblings };
+    }
+
+    // Convert from 1-based to 0-based indices (matching Julia)
+    let mut queries_buff: Vec<usize> = queries.iter()
+        .map(|&q| q.saturating_sub(1))
+        .collect();
     let mut queries_cnt = queries_buff.len();
 
-    // Process each layer
+    // Process each layer (matching Julia exactly)
     for layer_idx in 0..depth {
-        queries_cnt = process_layer(
+        queries_cnt = ith_layer(
             &tree.layers[layer_idx],
-            &mut queries_buff[..queries_cnt],
+            queries_cnt,
+            &mut queries_buff,
             &mut siblings,
         );
     }
@@ -35,50 +43,45 @@ pub fn prove_batch(tree: &CompleteMerkleTree, queries: &[usize]) -> BatchedMerkl
     BatchedMerkleProof { siblings }
 }
 
-/// Process one layer of the tree
-fn process_layer(
-    layer: &[Hash],
-    queries: &mut [usize],
+/// Process one layer of the tree (matching Julia's ith_layer! exactly)
+fn ith_layer(
+    current_layer: &[Hash],
+    queries_len: usize,
+    queries: &mut Vec<usize>,
     proof: &mut Vec<Hash>,
 ) -> usize {
-    let mut next_cnt = 0;
+    let mut next_queries_len = 0;
     let mut i = 0;
 
-    while i < queries.len() {
+    while i < queries_len {
         let query = queries[i];
         let sibling = query ^ 1;
 
-        // Update query for next layer
-        queries[next_cnt] = query >> 1;
-        next_cnt += 1;
+        queries[next_queries_len] = query >> 1;
+        next_queries_len += 1;
 
-        if i == queries.len() - 1 {
-            // Last query, always include sibling
-            proof.push(layer[sibling]);
+        if i == queries_len - 1 {
+            proof.push(current_layer[sibling]);
             break;
         }
 
         if query % 2 != 0 {
-            // Odd query, include sibling
-            proof.push(layer[sibling]);
+            proof.push(current_layer[sibling]);
             i += 1;
         } else {
-            // Even query
             if queries[i + 1] != sibling {
-                // Next query is not the sibling, include it
-                proof.push(layer[sibling]);
+                proof.push(current_layer[sibling]);
                 i += 1;
             } else {
-                // Next query is the sibling, skip it
                 i += 2;
             }
         }
     }
 
-    next_cnt
+    next_queries_len
 }
 
-/// Verify a batched proof
+/// Verify a batched proof (1-based indices)
 pub fn verify_batch<T: Pod>(
     root: &MerkleRoot,
     proof: &BatchedMerkleProof,
@@ -90,85 +93,92 @@ pub fn verify_batch<T: Pod>(
         return false;
     };
 
-    // Hash leaves and prepare for verification
+    if depth == 0 {
+        // Single leaf tree
+        if leaves.len() == 1 && leaf_indices.len() == 1 && leaf_indices[0] == 1 {
+            let leaf_hash = hash_leaf(&leaves[0]);
+            return leaf_hash == expected_root;
+        }
+        return false;
+    }
+
+    // Hash leaves
     let mut layer: Vec<Hash> = leaves.iter()
         .map(hash_leaf)
         .collect();
 
-    // Make mutable copy of indices
-    let mut queries: Vec<usize> = leaf_indices.to_vec();
-    let mut curr_cnt = queries.len();
-    let mut proof_idx = 0;
+    // Convert from 1-based to 0-based indices (matching Julia)
+    let mut queries: Vec<usize> = leaf_indices.iter()
+        .map(|&q| q.saturating_sub(1))
+        .collect();
 
-    // Process each layer
+    let mut curr_cnt = queries.len();
+    let mut proof_cnt = 0;
+
+    // Process each layer (matching Julia exactly)
     for _ in 0..depth {
-        let (next_cnt, next_proof_idx) = verify_layer(
+        let (next_cnt, next_proof_cnt) = verify_ith_layer(
             &mut layer,
-            &mut queries[..curr_cnt],
+            &mut queries,
+            curr_cnt,
             &proof.siblings,
-            proof_idx,
+            proof_cnt,
         );
 
         curr_cnt = next_cnt;
-        proof_idx = next_proof_idx;
+        proof_cnt = next_proof_cnt;
     }
 
     // Check if we've consumed all proof elements and reached the expected root
-    proof_idx == proof.siblings.len() && layer[0] == expected_root
+    curr_cnt == 1 && proof_cnt == proof.siblings.len() && layer[0] == expected_root
 }
 
-/// Verify one layer
-fn verify_layer(
+/// Verify one layer (matching Julia's verify_ith_layer! exactly)
+fn verify_ith_layer(
     layer: &mut Vec<Hash>,
-    queries: &mut [usize],
+    queries: &mut Vec<usize>,
+    curr_cnt: usize,
     proof: &[Hash],
-    mut proof_idx: usize,
+    mut proof_cnt: usize,
 ) -> (usize, usize) {
     let mut next_cnt = 0;
     let mut i = 0;
 
-    while i < queries.len() {
+    while i < curr_cnt {
         let query = queries[i];
         let sibling = query ^ 1;
 
         queries[next_cnt] = query >> 1;
         next_cnt += 1;
 
-        if i == queries.len() - 1 {
-            // Last element
-            let sibling_hash = proof[proof_idx];
-            proof_idx += 1;
-
+        if i == curr_cnt - 1 {
+            proof_cnt += 1;
+            let pp = proof.get(proof_cnt - 1).copied().unwrap_or_default();
             layer[next_cnt - 1] = if query % 2 != 0 {
-                hash_siblings(&sibling_hash, &layer[i])
+                hash_siblings(&pp, &layer[i])
             } else {
-                hash_siblings(&layer[i], &sibling_hash)
+                hash_siblings(&layer[i], &pp)
             };
             break;
         }
 
         if query % 2 != 0 {
-            // Odd query
-            let sibling_hash = proof[proof_idx];
-            proof_idx += 1;
-
-            layer[next_cnt - 1] = hash_siblings(&sibling_hash, &layer[i]);
+            proof_cnt += 1;
+            let pp = proof.get(proof_cnt - 1).copied().unwrap_or_default();
+            layer[next_cnt - 1] = hash_siblings(&pp, &layer[i]);
             i += 1;
         } else {
-            // Even query
             if queries[i + 1] != sibling {
-                let sibling_hash = proof[proof_idx];
-                proof_idx += 1;
-
-                layer[next_cnt - 1] = hash_siblings(&layer[i], &sibling_hash);
+                proof_cnt += 1;
+                let pp = proof.get(proof_cnt - 1).copied().unwrap_or_default();
+                layer[next_cnt - 1] = hash_siblings(&layer[i], &pp);
                 i += 1;
             } else {
-                // Next query is sibling
                 layer[next_cnt - 1] = hash_siblings(&layer[i], &layer[i + 1]);
                 i += 2;
             }
         }
     }
 
-    (next_cnt, proof_idx)
+    (next_cnt, proof_cnt)
 }
