@@ -113,7 +113,16 @@ pub fn fft<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], _parallel: bool) 
 }
 
 fn fft_recursive<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], idx: usize) {
+    static mut DEPTH: usize = 0;
+    unsafe {
+        DEPTH += 1;
+        if DEPTH > 100 {
+            panic!("FFT recursion depth exceeded 100!");
+        }
+    }
+    
     if v.len() == 1 {
+        unsafe { DEPTH -= 1; }
         return;
     }
     
@@ -129,6 +138,8 @@ fn fft_recursive<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], idx: usize)
     
     fft_recursive(u, twiddles, 2 * idx);
     fft_recursive(w, twiddles, 2 * idx + 1);
+    
+    unsafe { DEPTH -= 1; }
 }
 
 /// Inverse FFT butterfly operation
