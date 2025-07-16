@@ -2,6 +2,8 @@
 use bytemuck::Pod;
 use crate::{CompleteMerkleTree, MerkleRoot, Hash, hash_leaf, hash_siblings};
 
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BatchedMerkleProof {
     pub siblings: Vec<Hash>,
 }
