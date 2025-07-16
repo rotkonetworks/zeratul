@@ -448,6 +448,7 @@ where
 #[inline(always)]
 fn evaluate_quadratic<F: BinaryFieldElement>(coeffs: (F, F, F), x: F) -> F {
     let (a0, a1, a2) = coeffs;
+    // a0 + (a1 - a0 - a2) * x + a2 * x^2
     let linear = a1.add(&a0).add(&a2);
     a0.add(&linear.mul(&x)).add(&a2.mul(&x).mul(&x))
 }
@@ -577,11 +578,15 @@ where
             }
 
             let coeffs = proof.sumcheck_transcript.transcript[transcript_idx];
-            let claimed_sum = evaluate_quadratic(coeffs, U::zero())
-                .add(&evaluate_quadratic(coeffs, U::one()));
+            let s0 = evaluate_quadratic(coeffs, U::zero());
+            let s1 = evaluate_quadratic(coeffs, U::one());
+            let claimed_sum = s0.add(&s1);
 
-            println!("  Round {}: coeffs={:?}, claimed_sum={:?}, current_sum={:?}", 
-                     j, coeffs, claimed_sum, current_sum);
+            println!("  Round {}: coeffs={:?}", j, coeffs);
+            println!("    s0 (at 0) = {:?}", s0);
+            println!("    s1 (at 1) = {:?}", s1);
+            println!("    claimed_sum (s0+s1) = {:?}", claimed_sum);
+            println!("    current_sum = {:?}", current_sum);
             
             if claimed_sum != current_sum {
                 println!("  FAILED: Sumcheck mismatch!");
@@ -592,6 +597,7 @@ where
             rs.push(ri);
             current_sum = evaluate_quadratic(coeffs, ri);
             fs.absorb_elem(current_sum);
+            println!("    Next current_sum = {:?}", current_sum);
 
             transcript_idx += 1;
         }
