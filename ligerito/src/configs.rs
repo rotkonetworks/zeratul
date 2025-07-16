@@ -5,6 +5,96 @@ use binary_fields::BinaryFieldElement;
 use reed_solomon::reed_solomon;
 use std::marker::PhantomData;
 
+/// Create minimal configuration for 2^12 polynomial (for testing/demos)
+pub fn hardcoded_config_12<T, U>(
+    _t: PhantomData<T>,
+    _u: PhantomData<U>,
+) -> ProverConfig<T, U>
+where
+    T: BinaryFieldElement,
+    U: BinaryFieldElement,
+{
+    let recursive_steps = 1;
+    let inv_rate = 4;
+
+    let initial_dims = (1 << 8, 1 << 4);  // (256, 16)
+    let dims = vec![(1 << 6, 1 << 2)];    // (64, 4)
+
+    let initial_k = 4;
+    let ks = vec![2];
+
+    let initial_reed_solomon = reed_solomon::<T>(initial_dims.0, initial_dims.0 * inv_rate);
+    let reed_solomon_codes = vec![
+        reed_solomon::<U>(dims[0].0, dims[0].0 * inv_rate),
+    ];
+
+    ProverConfig {
+        recursive_steps,
+        initial_dims,
+        dims,
+        initial_k,
+        ks,
+        initial_reed_solomon,
+        reed_solomon_codes,
+    }
+}
+
+pub fn hardcoded_config_12_verifier() -> VerifierConfig {
+    VerifierConfig {
+        recursive_steps: 1,
+        initial_dim: 8,
+        log_dims: vec![6],
+        initial_k: 4,
+        ks: vec![2],
+    }
+}
+
+/// Create configuration for 2^16 polynomial (still fast)
+pub fn hardcoded_config_16<T, U>(
+    _t: PhantomData<T>,
+    _u: PhantomData<U>,
+) -> ProverConfig<T, U>
+where
+    T: BinaryFieldElement,
+    U: BinaryFieldElement,
+{
+    let recursive_steps = 1;
+    let inv_rate = 4;
+
+    let initial_dims = (1 << 12, 1 << 4);  // (4096, 16)
+    let dims = vec![(1 << 8, 1 << 4)];     // (256, 16)
+
+    let initial_k = 4;
+    let ks = vec![4];
+
+    let initial_reed_solomon = reed_solomon::<T>(initial_dims.0, initial_dims.0 * inv_rate);
+    let reed_solomon_codes = vec![
+        reed_solomon::<U>(dims[0].0, dims[0].0 * inv_rate),
+    ];
+
+    ProverConfig {
+        recursive_steps,
+        initial_dims,
+        dims,
+        initial_k,
+        ks,
+        initial_reed_solomon,
+        reed_solomon_codes,
+    }
+}
+
+pub fn hardcoded_config_16_verifier() -> VerifierConfig {
+    VerifierConfig {
+        recursive_steps: 1,
+        initial_dim: 12,
+        log_dims: vec![8],
+        initial_k: 4,
+        ks: vec![4],
+    }
+}
+
+// Keep existing configurations below...
+
 /// Create configuration for 2^20 polynomial
 pub fn hardcoded_config_20<T, U>(
     _t: PhantomData<T>,

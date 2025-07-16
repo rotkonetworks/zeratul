@@ -97,15 +97,43 @@ pub fn ligero_commit<F: BinaryFieldElement + Send + Sync>(
     n: usize,
     rs: &ReedSolomon<F>,
 ) -> RecursiveLigeroWitness<F> {
+    println!("ligero_commit: Converting polynomial to matrix form...");
     let mut poly_mat = poly2mat(poly, m, n, 4);
+    
+    println!("ligero_commit: Matrix dimensions: {} rows x {} cols", poly_mat.len(), poly_mat[0].len());
+    
+    println!("ligero_commit: Encoding columns (m={}, n={})...", m, n);
+    let start = std::time::Instant::now();
     encode_cols(&mut poly_mat, rs, true);
+    println!("ligero_commit: Column encoding took {:?}", start.elapsed());
 
     // Hash each row to create leaves for merkle tree
+    println!("ligero_commit: Hashing {} rows for Merkle tree...", poly_mat.len());
     let hashed_rows: Vec<Hash> = poly_mat.iter()
         .map(|row| hash_row(row))
         .collect();
     
+    // Debug: print first few hashes
+    println!("First few row hashes:");
+    for (i, hash) in hashed_rows.iter().take(3).enumerate() {
+        println!("  Row {}: {:?}", i, &hash[..8]);
+    }
+    
+    println!("ligero_commit: Building Merkle tree...");
+    println!("  Number of hashed rows (leaves): {}", hashed_rows.len());
+    println!("  Is power of 2: {}", hashed_rows.len().is_power_of_two());
+    
     let tree = build_merkle_tree(&hashed_rows);
+    let tree_depth = tree.get_depth();
+    let root = tree.get_root();
+    
+    println!("ligero_commit: Tree built!");
+    println!("  Tree depth: {}", tree_depth);
+    println!("  Expected leaves for depth {}: {}", tree_depth, 1 << tree_depth);
+    println!("  Root exists: {}", root.root.is_some());
+    if let Some(r) = &root.root {
+        println!("  Root hash: {:?}", &r[..8]);
+    }
 
     RecursiveLigeroWitness { mat: poly_mat, tree }
 }
@@ -120,19 +148,26 @@ pub fn verify_ligero<T, U>(
     T: BinaryFieldElement + Send + Sync,
     U: BinaryFieldElement + Send + Sync + From<T>,
 {
+    println!("=== DEBUG verify_ligero ===");
     println!("verify_ligero: {} queries, {} rows, yr len: {}", 
              queries.len(), opened_rows.len(), yr.len());
+    println!("Challenges: {} values", challenges.len());
     
     let gr = evaluate_lagrange_basis(challenges);
+    println!("Lagrange basis gr len: {}", gr.len());
+    
     let n = yr.len().trailing_zeros() as usize;
     let sks_vks: Vec<T> = eval_sk_at_vks(1 << n);
+    println!("sks_vks len: {}, n: {}", sks_vks.len(), n);
 
     // Check first query serially for debugging
     if !queries.is_empty() {
         let query = queries[0];
         let row = &opened_rows[0];
         
-        println!("First query: {}", query);
+        println!("\nFirst query: {} (1-based)", query);
+        println!("Row length: {}", row.len());
+        println!("First few row values: {:?}", &row[..4.min(row.len())]);
         
         // Compute dot product
         let dot = row.iter()
@@ -145,13 +180,15 @@ pub fn verify_ligero<T, U>(
         println!("Dot product: {:?}", dot);
 
         let qf = T::from_bits((query - 1) as u64);
-        println!("qf: {:?}", qf);
+        println!("qf (query-1 as field elem): {:?}", qf);
 
         let mut local_sks_x = vec![T::zero(); sks_vks.len()];
         let mut local_basis = vec![U::zero(); 1 << n];
 
         let scale = U::one();
         evaluate_scaled_basis_inplace(&mut local_sks_x, &mut local_basis, &sks_vks, qf, scale);
+        
+        println!("First few basis values: {:?}", &local_basis[..4.min(local_basis.len())]);
 
         let e = yr.iter()
             .zip(local_basis.iter())
@@ -160,8 +197,13 @@ pub fn verify_ligero<T, U>(
                 acc.add(&y_u.mul(&b))
             });
 
-        println!("Expected: {:?}", e);
-        println!("Match: {}", e == dot);
+        println!("Expected value e: {:?}", e);
+        println!("Match: {} (dot == e)", e == dot);
+        
+        if e != dot {
+            println!("MISMATCH! Verification will fail.");
+            // Don't panic here, let the assertion below handle it
+        }
     }
 
     // Parallel verification

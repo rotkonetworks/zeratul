@@ -34,6 +34,10 @@ criterion = { workspace = true }
 name = "prove_verify"
 path = "../examples/prove_verify.rs"
 
+[[example]]
+name = "fast_prove_verify"
+path = "../examples/fast_prove_verify.rs"
+
 # [[bench]]
 # name = "ligerito_bench"
 # harness = false
