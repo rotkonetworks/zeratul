@@ -1,9 +1,7 @@
 //! Fast example of proving and verifying with Ligerito
 //! This uses a smaller polynomial size for quick demonstration
-use std::marker::PhantomData;
-
 use binary_fields::{BinaryElem32, BinaryElem128};
-use ligerito::{prover, verifier, ProverConfig, VerifierConfig};
+use ligerito::{prover, ProverConfig, VerifierConfig};
 use reed_solomon::reed_solomon;
 use rand::Rng;
 use std::time::Instant;
@@ -77,8 +75,9 @@ fn main() {
     // Time the verification
     println!("\nVerifying proof...");
     let start = Instant::now();
-    let verification_result = verifier(&verifier_config, &proof)
-        .expect("Verification failed");
+    // let verification_result = verifier(&verifier_config, &proof)
+    let verification_result = ligerito::verifier::verify_debug(&verifier_config, &proof)
+    .expect("Verification failed");
     let verify_time = start.elapsed();
 
     println!("✓ Verification completed in: {:?}", verify_time);

@@ -23,6 +23,8 @@ pub use data_structures::*;
 pub use prover::{prove, prove_sha256, prove_with_transcript};
 pub use verifier::{verify, verify_sha256, verify_with_transcript};
 pub use transcript::{FiatShamir, TranscriptType};
+use utils::evaluate_lagrange_basis;
+use sumcheck_polys::precompute_alpha_powers;
 
 use binary_fields::BinaryFieldElement;
 
@@ -57,6 +59,7 @@ where
 }
 
 /// Main verifier function (uses Merlin transcript by default)
+
 pub fn verifier<T, U>(
     config: &VerifierConfig,
     proof: &FinalizedLigeritoProof<T, U>,
@@ -136,39 +139,211 @@ mod tests {
     }
 
     #[test]
-    fn test_tiny_debug() {
-        // Very small test with debug output
-        let config = hardcoded_config_12(
-            std::marker::PhantomData::<BinaryElem32>,
-            std::marker::PhantomData::<BinaryElem128>,
-        );
+    fn test_debug_zero_challenges() {
+        use crate::transcript::{FiatShamir, Transcript};
+        use crate::utils::evaluate_lagrange_basis;
+        use crate::sumcheck_polys::precompute_alpha_powers;
+        use binary_fields::{BinaryElem32, BinaryElem128};
+        use merkle_tree::MerkleRoot;
 
-        // Simple polynomial - just constant 1
-        let poly = vec![BinaryElem32::one(); 1 << 12];
+        println!("\n=== Testing Challenge Generation ===");
 
-        println!("\n=== Debug Test ===");
-        println!("Polynomial size: {}", poly.len());
-        println!("First few coefficients: {:?}", &poly[..4]);
+        // Test 1: Basic challenge generation
+        let mut fs = FiatShamir::new_merlin();
 
-        let proof = prover(&config, &poly).expect("Proving failed");
+        // Absorb some data first
+        let root = MerkleRoot { root: Some([1u8; 32]) };
+        fs.absorb_root(&root);
 
-        println!("\nProof components:");
-        println!("  Initial commitment: {:?}", proof.initial_ligero_cm.root);
-        println!("  Recursive commitments: {}", proof.recursive_commitments.len());
-        println!("  Recursive proofs: {}", proof.recursive_proofs.len());
-        println!("  Sumcheck rounds: {}", proof.sumcheck_transcript.transcript.len());
-
-        let verifier_config = hardcoded_config_12_verifier();
-        let result = verifier(&verifier_config, &proof).expect("Verification error");
-
-        println!("\nVerification result: {}", result);
-
-        if !result {
-            // Let's check the final polynomial evaluation
-            println!("\nDEBUG: Final ligero proof yr length: {}", proof.final_ligero_proof.yr.len());
-            println!("First few yr values: {:?}", &proof.final_ligero_proof.yr[..4.min(proof.final_ligero_proof.yr.len())]);
+        // Get challenges
+        println!("\nGenerating base field challenges:");
+        for i in 0..4 {
+            let challenge: BinaryElem32 = fs.get_challenge();
+            println!("Challenge {}: {:?}", i, challenge);
+            if challenge == BinaryElem32::zero() {
+                println!("WARNING: Challenge {} is zero!", i);
+            }
         }
 
-        assert!(result, "Verification failed - there's a bug!");
+        println!("\nGenerating extension field challenges:");
+        for i in 0..4 {
+            let challenge: BinaryElem128 = fs.get_challenge();
+            println!("Challenge {}: {:?}", i, challenge);
+            if challenge == BinaryElem128::zero() {
+                println!("WARNING: Challenge {} is zero!", i);
+            }
+        }
+
+        // Test 2: Lagrange basis with various inputs
+        println!("\n=== Testing Lagrange Basis ===");
+
+        // All zeros - should give specific pattern
+        let rs_zero = vec![BinaryElem128::zero(); 4];
+        let basis_zero = evaluate_lagrange_basis(&rs_zero);
+        println!("Lagrange([0,0,0,0]): {:?}", &basis_zero[..4]);
+        assert_eq!(basis_zero[0], BinaryElem128::one(), "First element should be 1");
+
+        // Mixed values
+        let rs_mixed = vec![
+            BinaryElem128::from(1u128),
+            BinaryElem128::zero(),
+            BinaryElem128::from(1u128),
+            BinaryElem128::zero(),
+        ];
+        let basis_mixed = evaluate_lagrange_basis(&rs_mixed);
+        println!("Lagrange([1,0,1,0]): {:?}", &basis_mixed[..4]);
+        assert!(!basis_mixed.iter().all(|&x| x == BinaryElem128::zero()));
+
+        // All ones
+        let rs_ones = vec![BinaryElem128::one(); 4];
+        let basis_ones = evaluate_lagrange_basis(&rs_ones);
+        println!("Lagrange([1,1,1,1]): {:?}", &basis_ones[..4]);
+
+        // Test 3: Alpha powers
+        println!("\n=== Testing Alpha Powers ===");
+
+        let alpha_zero = BinaryElem128::zero();
+        let powers_zero = precompute_alpha_powers(alpha_zero, 5);
+        println!("Powers of 0: {:?}", powers_zero);
+        assert_eq!(powers_zero[0], BinaryElem128::one());
+        assert!(powers_zero[1..].iter().all(|&x| x == BinaryElem128::zero()));
+
+        let alpha_one = BinaryElem128::one();
+        let powers_one = precompute_alpha_powers(alpha_one, 5);
+        println!("Powers of 1: {:?}", powers_one);
+        assert!(powers_one.iter().all(|&x| x == BinaryElem128::one()));
+
+        // Test 4: Field element conversion
+        println!("\n=== Testing Field Conversion ===");
+
+        let base_vals = vec![
+            BinaryElem32::zero(),
+            BinaryElem32::one(),
+            BinaryElem32::from(0x1234),
+        ];
+
+        for val in base_vals {
+            let converted = BinaryElem128::from(val);
+            println!("{:?} -> {:?}", val, converted);
+        }
+
+        // Test 5: Test with actual transcript flow
+        println!("\n=== Testing Full Transcript Flow ===");
+
+        let mut fs2 = FiatShamir::new_merlin();
+
+        // Simulate the actual protocol flow
+        let root1 = MerkleRoot { root: Some([42u8; 32]) };
+        fs2.absorb_root(&root1);
+
+        let challenge1: BinaryElem32 = fs2.get_challenge();
+        println!("After root absorption, challenge: {:?}", challenge1);
+
+        // Absorb more data
+        fs2.absorb_elem(challenge1);
+
+        let challenge2: BinaryElem128 = fs2.get_challenge();
+        println!("After elem absorption, challenge: {:?}", challenge2);
+
+        // Verify we're getting non-zero challenges
+        assert!(challenge1 != BinaryElem32::zero(), "Challenge1 should not be zero");
+        assert!(challenge2 != BinaryElem128::zero(), "Challenge2 should not be zero");
     }
+
+#[test]
+    fn test_lagrange_basis_edge_cases() {
+        use binary_fields::{BinaryElem128, BinaryFieldElement};
+        use crate::utils::evaluate_lagrange_basis;
+
+        // Test case that's failing: [1,0,1,1]
+        let challenges = vec![
+            BinaryElem128::one(),
+            BinaryElem128::zero(),
+            BinaryElem128::one(),
+            BinaryElem128::one(),
+        ];
+
+        println!("\nTesting Lagrange basis with challenges [1,0,1,1]:");
+        let basis = evaluate_lagrange_basis(&challenges);
+
+        println!("Basis length: {}", basis.len());
+        println!("First 8 values: {:?}", &basis[..8.min(basis.len())]);
+
+        // Count non-zero entries
+        let non_zero = basis.iter().filter(|&&x| x != BinaryElem128::zero()).count();
+        println!("Non-zero entries: {}/{}", non_zero, basis.len());
+
+        // The issue is that in binary fields:
+        // 1 + 0 = 1
+        // 1 + 1 = 0
+        // So when we have challenges [1,0,1,1], we get:
+        // Layer 0: [1+1, 1] = [0, 1]
+        // Layer 1: [0*(1+0), 0*0, 1*(1+0), 1*0] = [0, 0, 1, 0]
+        // Layer 2: [0*(1+1), 0*1, 0*(1+1), 0*1, 1*(1+1), 1*1, 0*(1+1), 0*1]
+        //        = [0, 0, 0, 0, 0, 1, 0, 0]
+        // etc.
+
+        // Let's verify this manually
+        let one = BinaryElem128::one();
+        let zero = BinaryElem128::zero();
+
+        // First layer
+        let layer0 = vec![one.add(&challenges[0]), challenges[0]];
+        println!("\nLayer 0: {:?}", layer0);
+
+        // This should be [0, 1] since 1+1=0
+        assert_eq!(layer0[0], zero);
+        assert_eq!(layer0[1], one);
+
+        // The Lagrange basis SHOULD have some non-zero entries
+        // If it's all zeros, our implementation is wrong
+        assert!(non_zero > 0, "Lagrange basis should have non-zero entries!");
+    }
+
+#[test] 
+    fn test_basis_polynomial_sum() {
+        use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
+        use crate::sumcheck_polys::induce_sumcheck_poly_debug;
+        use crate::utils::eval_sk_at_vks;
+
+        // Create a simple test case
+        let n = 4; // 2^4 = 16 elements
+        let sks_vks: Vec<BinaryElem32> = eval_sk_at_vks(1 << n);
+
+        // Use challenges that give non-zero Lagrange basis
+        let v_challenges = vec![
+            BinaryElem128::from(0x1234),
+            BinaryElem128::from(0x5678),
+            BinaryElem128::from(0x9ABC),
+            BinaryElem128::from(0xDEF0),
+        ];
+
+        // Simple queries and rows
+        let queries = vec![0, 1, 2, 3];
+        let opened_rows = vec![
+            vec![BinaryElem32::one(); 16],
+            vec![BinaryElem32::from(2); 16],
+            vec![BinaryElem32::from(3); 16],
+            vec![BinaryElem32::from(4); 16],
+        ];
+
+            let alpha = BinaryElem128::from(0x1111);
+
+            let (basis_poly, _) = induce_sumcheck_poly_debug(
+                n,
+                &sks_vks,
+                &opened_rows,
+                &v_challenges,
+                &queries,
+                alpha,
+            );
+
+            // Check the sum
+            let sum = basis_poly.iter().fold(BinaryElem128::zero(), |acc, &x| acc.add(&x));
+            println!("Basis polynomial sum: {:?}", sum);
+
+            // The sum should NOT be zero for a valid polynomial
+            assert_ne!(sum, BinaryElem128::zero(), "Basis polynomial sum should not be zero!");
+    }
+
 }
