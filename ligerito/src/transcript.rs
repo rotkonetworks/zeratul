@@ -4,7 +4,7 @@
 use binary_fields::BinaryFieldElement;
 use merkle_tree::MerkleRoot;
 use sha2::{Sha256, Digest};
-use rand::{Rng,  SeedableRng};
+use rand::{Rng, SeedableRng};
 use rand::rngs::StdRng;
 use std::collections::HashSet;
 
@@ -81,7 +81,7 @@ impl Transcript for MerlinTranscript {
         let bits_needed = match field_bytes {
             4 => 32,   // BinaryElem32
             16 => 128, // BinaryElem128
-            _ => field_bytes * 8,  // <- Fixed: underscore instead of *
+            _ => field_bytes * 8,
         };
 
         // Create a more diverse bit pattern
@@ -252,20 +252,74 @@ impl Transcript for Sha256Transcript {
 
     fn get_challenge<F: BinaryFieldElement>(&mut self) -> F {
         let mut rng = self.squeeze_rng();
-        let mut result = F::zero();
-        let num_bits = std::mem::size_of::<F>() * 8;
-
-        for i in 0..num_bits {
-            if rng.gen_bool(0.5) {
-                let mut bit = F::one();
-                for _ in 0..i {
-                    bit = bit.add(&bit);
+        
+        // Generate random bytes and convert to field element
+        match std::mem::size_of::<F>() {
+            4 => {
+                // BinaryElem32
+                let value: u32 = rng.gen();
+                F::from_bits(value as u64)
+            }
+            16 => {
+                // BinaryElem128
+                // Generate 128 bits of randomness
+                let low: u64 = rng.gen();
+                let high: u64 = rng.gen();
+                
+                // For BinaryElem128, we need to properly construct the field element
+                // The from_bits might only use the lower 64 bits, so we need a different approach
+                let mut result = F::zero();
+                
+                // Set bits 0-63
+                for i in 0..64 {
+                    if (low >> i) & 1 == 1 {
+                        let bit_value = F::from_bits(1u64 << i);
+                        result = result.add(&bit_value);
+                    }
                 }
-                result = result.add(&bit);
+                
+                // Set bits 64-127
+                for i in 0..64 {
+                    if (high >> i) & 1 == 1 {
+                        // For bits beyond 64, we need to construct 2^(64+i)
+                        // This is done by multiplying 2^64 by 2^i
+                        let mut bit_value = F::from_bits(1u64 << 63);
+                        bit_value = bit_value.add(&bit_value); // 2^64
+                        for _ in 0..i {
+                            bit_value = bit_value.add(&bit_value); // 2^(64+i)
+                        }
+                        result = result.add(&bit_value);
+                    }
+                }
+                
+                result
+            }
+            _ => {
+                // Generic fallback for other sizes
+                let mut result = F::zero();
+                let num_bits = std::mem::size_of::<F>() * 8;
+                
+                for i in 0..num_bits {
+                    if rng.gen_bool(0.5) {
+                        // Create 2^i properly
+                        if i < 64 {
+                            let bit_value = F::from_bits(1u64 << i);
+                            result = result.add(&bit_value);
+                        } else {
+                            // For bits beyond 64, construct by repeated doubling
+                            let mut bit_value = F::from_bits(1u64 << 63);
+                            bit_value = bit_value.add(&bit_value); // 2^64
+                            for _ in 64..i {
+                                bit_value = bit_value.add(&bit_value);
+                            }
+                            result = result.add(&bit_value);
+                        }
+                    }
+                }
+                
+                result
             }
         }
-
-        result
     }
 
     fn get_query(&mut self, max: usize) -> usize {
