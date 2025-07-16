@@ -86,18 +86,25 @@ impl Transcript for MerlinTranscript {
 
         // Create a more diverse bit pattern
         let mut bit_count = 0;
-        for (byte_idx, &byte) in bytes.iter().enumerate() {
+        for (_byte_idx, &byte) in bytes.iter().enumerate() {
             for bit_idx in 0..8 {
                 if bit_count >= bits_needed {
                     break;
                 }
 
                 if (byte >> bit_idx) & 1 == 1 {
-                    // Create x^bit_count
-                    let mut power = F::one();
-                    for _ in 0..bit_count {  // <- Fixed: underscore instead of *
-                        power = power.add(&power); // This is x * 2 in binary fields
-                    }
+                    // Create x^bit_count where x is the primitive element
+                    let mut power = if bit_count == 0 {
+                        F::one()
+                    } else {
+                        // Use a primitive element (not 1) for the base
+                        let mut base = F::from_bits(2); // x in GF(2^n)
+                        let mut result = F::one();
+                        for _ in 0..bit_count {
+                            result = result.mul(&base);
+                        }
+                        result
+                    };
                     result = result.add(&power);
                 }
                 bit_count += 1;
@@ -124,17 +131,25 @@ impl Transcript for MerlinTranscript {
             // Recompute with mixed bytes
             result = F::zero();
             bit_count = 0;
-            for (byte_idx, &byte) in bytes.iter().enumerate() {
+            for (_byte_idx, &byte) in bytes.iter().enumerate() {
                 for bit_idx in 0..8 {
                     if bit_count >= bits_needed {
                         break;
                     }
 
                     if (byte >> bit_idx) & 1 == 1 {
-                        let mut power = F::one();
-                        for _ in 0..bit_count {  // <- Fixed: underscore instead of *
-                            power = power.add(&power);
-                        }
+                        // Create x^bit_count where x is the primitive element
+                        let mut power = if bit_count == 0 {
+                            F::one()
+                        } else {
+                            // Use a primitive element (not 1) for the base
+                            let mut base = F::from_bits(2); // x in GF(2^n)
+                            let mut result = F::one();
+                            for _ in 0..bit_count {
+                                result = result.mul(&base);
+                            }
+                            result
+                        };
                         result = result.add(&power);
                     }
                     bit_count += 1;

@@ -223,7 +223,7 @@ where
 
         // Induce next polynomial
         let sks_vks: Vec<U> = eval_sk_at_vks(1 << config.log_dims[i]);
-        let (basis_poly_next, enforced_sum_next) = induce_sumcheck_poly_debug(
+        let (_basis_poly_next, enforced_sum_next) = induce_sumcheck_poly_debug(
             config.log_dims[i],
             &sks_vks,
             &ligero_proof.opened_rows,

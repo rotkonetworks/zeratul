@@ -23,8 +23,6 @@ pub use data_structures::*;
 pub use prover::{prove, prove_sha256, prove_with_transcript};
 pub use verifier::{verify, verify_sha256, verify_with_transcript};
 pub use transcript::{FiatShamir, TranscriptType};
-use utils::evaluate_lagrange_basis;
-use sumcheck_polys::precompute_alpha_powers;
 
 use binary_fields::BinaryFieldElement;
 
@@ -75,7 +73,6 @@ where
 mod tests {
     use super::*;
     use binary_fields::{BinaryElem32, BinaryElem128};
-    use rand::Rng;
 
     #[test]
     fn test_basic_prove_verify_merlin() {
