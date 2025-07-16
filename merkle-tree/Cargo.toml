@@ -1,19 +1,21 @@
 [package]
 name = "merkle-tree"
 version = "0.1.0"
-authors.workspace = true
-edition.workspace = true
-license.workspace = true
+edition = "2021"
 
 [dependencies]
-sha2 = { workspace = true }
-blake3 = { workspace = true }
-bytemuck = { workspace = true }
-serde = { workspace = true, optional = true }
+sha2 = "0.10"
+bytemuck = "1.14"
+rand = "0.8"
 
-[dev-dependencies]
-rand = { workspace = true }
+[dependencies.serde]
+version = "1.0"
+features = ["derive"]
+optional = true
 
 [features]
 default = []
 serde = ["dep:serde"]
+
+[dev-dependencies]
+rand = "0.8"
