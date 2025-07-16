@@ -476,8 +476,7 @@ fn glue_sums<F: BinaryFieldElement>(sum_f: F, sum_g: F, beta: F) -> F {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use binary_fields::{BinaryElem32, BinaryElem128};
-    use crate::configs;
+    use binary_fields::BinaryElem32;
 
     #[test]
     fn test_fold_polynomial() {
@@ -490,7 +489,7 @@ mod tests {
         ];
         
         let r = BinaryElem32::from(5);
-        let (new_poly, (s0, s1, s2)) = fold_polynomial(&poly, r);
+        let (new_poly, (s0, _s1, s2)) = fold_polynomial(&poly, r);
         
         assert_eq!(new_poly.len(), 2);
         
