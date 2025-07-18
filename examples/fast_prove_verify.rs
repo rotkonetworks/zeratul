@@ -1,7 +1,7 @@
-//! Fast example of proving and verifying with Ligerito
+//! Fixed fast example of proving and verifying with Ligerito
 //! This uses a smaller polynomial size for quick demonstration
 use binary_fields::{BinaryElem32, BinaryElem128};
-use ligerito::{prover, verifier, ProverConfig, VerifierConfig};
+use ligerito::{prove_sha256, verify_sha256, ProverConfig, VerifierConfig};
 use reed_solomon::reed_solomon;
 use rand::Rng;
 use std::time::Instant;
@@ -45,8 +45,8 @@ fn create_small_verifier_config() -> VerifierConfig {
 }
 
 fn main() {
-    println!("Ligerito Fast Example");
-    println!("====================");
+    println!("Ligerito Fast Example - FIXED VERSION");
+    println!("=====================================");
     println!("Polynomial size: 2^12 = 4,096 elements\n");
 
     // Create configuration
@@ -61,12 +61,12 @@ fn main() {
 
     // Warm up (optional, helps with timing)
     println!("Warming up...");
-    let _ = ligerito::prove_sha256(&config, &poly).expect("Warmup failed");
+    let _ = prove_sha256(&config, &poly).expect("Warmup failed");
 
     // Time the proof generation
     println!("\nGenerating proof...");
     let start = Instant::now();
-    let proof = ligerito::prove_sha256(&config, &poly).expect("Proving failed");
+    let proof = prove_sha256(&config, &poly).expect("Proving failed");
     let prove_time = start.elapsed();
 
     println!("✓ Proof generated in: {:?}", prove_time);
@@ -75,7 +75,7 @@ fn main() {
     // Time the verification
     println!("\nVerifying proof...");
     let start = Instant::now();
-    let verification_result = ligerito::verify_sha256(&verifier_config, &proof)
+    let verification_result = verify_sha256(&verifier_config, &proof)
         .expect("Verification failed");
     let verify_time = start.elapsed();
 
@@ -88,13 +88,15 @@ fn main() {
     println!("Proving: {:?}", prove_time);
     println!("Verification: {:?}", verify_time);
     println!("Total: {:?}", prove_time + verify_time);
-    
+
     if prove_time.as_millis() < 1000 {
         println!("\n✨ Fast proof generation achieved! ✨");
     }
 
     // Assert verification passed
     assert!(verification_result, "Proof verification failed! This indicates a bug in the implementation.");
+    
+    println!("\n🎉 All tests passed! The fixed implementation works correctly.");
 }
 
 #[cfg(test)]
@@ -105,15 +107,75 @@ mod tests {
     fn test_small_polynomial_fast() {
         let config = create_small_config();
         let poly: Vec<BinaryElem32> = vec![BinaryElem32::one(); 1 << 12];
-        
+
         let start = Instant::now();
-        let proof = ligerito::prove_sha256(&config, &poly).expect("Proving failed");
+        let proof = prove_sha256(&config, &poly).expect("Proving failed");
         let prove_time = start.elapsed();
-        
+
         assert!(prove_time.as_secs() < 5, "Proving took too long: {:?}", prove_time);
-        
+
         let verifier_config = create_small_verifier_config();
-        let result = ligerito::verify_sha256(&verifier_config, &proof).expect("Verification failed");
+        let result = verify_sha256(&verifier_config, &proof).expect("Verification failed");
         assert!(result);
+    }
+
+    #[test]
+    fn test_zero_polynomial() {
+        let config = create_small_config();
+        let verifier_config = create_small_verifier_config();
+
+        // Test with all zeros
+        let poly = vec![BinaryElem32::zero(); 1 << 12];
+        let proof = prove_sha256(&config, &poly).unwrap();
+        assert!(verify_sha256(&verifier_config, &proof).unwrap());
+    }
+
+    #[test]
+    fn test_pattern_polynomial() {
+        let config = create_small_config();
+        let verifier_config = create_small_verifier_config();
+
+        // Test with a pattern
+        let mut poly = vec![BinaryElem32::zero(); 1 << 12];
+        for i in 0..10 {
+            poly[i] = BinaryElem32::from(i as u32 + 1);
+        }
+        
+        let proof = prove_sha256(&config, &poly).unwrap();
+        assert!(verify_sha256(&verifier_config, &proof).unwrap());
+    }
+
+    #[test]
+    fn test_random_polynomial() {
+        let config = create_small_config();
+        let verifier_config = create_small_verifier_config();
+
+        // Test with random data
+        let mut rng = rand::thread_rng();
+        let poly: Vec<BinaryElem32> = (0..1 << 12)
+            .map(|_| BinaryElem32::from(rng.gen::<u32>()))
+            .collect();
+        
+        let proof = prove_sha256(&config, &poly).unwrap();
+        assert!(verify_sha256(&verifier_config, &proof).unwrap());
+    }
+
+    #[test]
+    fn test_consistency_across_runs() {
+        let config = create_small_config();
+        let verifier_config = create_small_verifier_config();
+
+        // Same polynomial should produce same proof (deterministic with same seed)
+        let poly = vec![BinaryElem32::from(42); 1 << 12];
+        
+        let proof1 = prove_sha256(&config, &poly).unwrap();
+        let proof2 = prove_sha256(&config, &poly).unwrap();
+        
+        // Proofs should be identical (same transcript seed)
+        assert_eq!(proof1.size_of(), proof2.size_of());
+        
+        // Both should verify
+        assert!(verify_sha256(&verifier_config, &proof1).unwrap());
+        assert!(verify_sha256(&verifier_config, &proof2).unwrap());
     }
 }

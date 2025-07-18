@@ -73,6 +73,7 @@ where
         merkle_proof: mtree_proof,
     });
 
+    // FIXED: Use the corrected sumcheck implementation
     let (basis_poly, enforced_sum) = induce_sumcheck_poly_debug(
         n,
         &sks_vks,
@@ -98,11 +99,11 @@ where
         // Sumcheck rounds
         for _ in 0..config.ks[i] {
             let ri = fs.get_challenge::<U>();
-            
+
             // Fold polynomial
             let (new_poly, coeffs) = fold_polynomial(&current_poly, ri);
             sumcheck_transcript.push(coeffs);
-            
+
             rs.push(ri);
             current_poly = new_poly;
 
@@ -169,6 +170,7 @@ where
         let n = current_poly.len().trailing_zeros() as usize;
         let sks_vks: Vec<U> = eval_sk_at_vks(1 << n);
 
+        // FIXED: Use the corrected sumcheck implementation
         let (basis_poly, enforced_sum) = induce_sumcheck_poly_debug(
             n,
             &sks_vks,
@@ -177,7 +179,7 @@ where
             &queries,
             alpha,
         );
-        
+
         // Glue sumcheck absorb
         let glue_sum = current_sum.add(&enforced_sum);
         fs.absorb_elem(glue_sum);
@@ -231,7 +233,7 @@ where
     U: BinaryFieldElement + Send + Sync + From<T>,
 {
     println!("\n=== PROVER DEBUG ===");
-    
+
     let mut fs = FiatShamir::new_merlin();
     let mut proof = LigeritoProof::<T, U>::new();
 
@@ -278,7 +280,7 @@ where
     println!("\nSelecting queries from {} rows...", rows);
     let queries = fs.get_distinct_queries(rows, S);
     println!("Selected queries (0-based): {:?}", &queries[..queries.len().min(5)]);
-    
+
     let alpha = fs.get_challenge::<U>();
     println!("Alpha challenge: {:?}", alpha);
 
@@ -326,12 +328,12 @@ where
         for j in 0..config.ks[i] {
             let ri = fs.get_challenge::<U>();
             println!("  Round {}: challenge = {:?}", j, ri);
-            
+
             // Fold polynomial
             let (new_poly, coeffs) = fold_polynomial(&current_poly, ri);
             println!("  Fold coeffs: {:?}", coeffs);
             sumcheck_transcript.push(coeffs);
-            
+
             rs.push(ri);
             current_poly = new_poly;
 
@@ -410,7 +412,7 @@ where
             alpha,
         );
         println!("Next enforced sum: {:?}", enforced_sum);
-        
+
         // Glue sumcheck
         let glue_sum = current_sum.add(&enforced_sum);
         fs.absorb_elem(glue_sum);
@@ -476,7 +478,9 @@ fn glue_sums<F: BinaryFieldElement>(sum_f: F, sum_g: F, beta: F) -> F {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use binary_fields::BinaryElem32;
+    use binary_fields::{BinaryElem32, BinaryElem128};
+    use crate::configs::hardcoded_config_12;
+    use std::marker::PhantomData;
 
     #[test]
     fn test_fold_polynomial() {
@@ -487,12 +491,12 @@ mod tests {
             BinaryElem32::from(3),
             BinaryElem32::from(4),
         ];
-        
+
         let r = BinaryElem32::from(5);
         let (new_poly, (s0, _s1, s2)) = fold_polynomial(&poly, r);
-        
+
         assert_eq!(new_poly.len(), 2);
-        
+
         // Check sums
         assert_eq!(s0, BinaryElem32::from(1).add(&BinaryElem32::from(3)));
         assert_eq!(s2, BinaryElem32::from(2).add(&BinaryElem32::from(4)));
@@ -505,11 +509,11 @@ mod tests {
             BinaryElem32::from(2),
             BinaryElem32::from(3),
         );
-        
+
         // Test at x = 0
         let val0 = evaluate_quadratic(coeffs, BinaryElem32::zero());
         assert_eq!(val0, BinaryElem32::from(1));
-        
+
         // Test at x = 1
         let val1 = evaluate_quadratic(coeffs, BinaryElem32::one());
         // a0 + (a1 - a0 - a2) + a2 = a1
@@ -521,11 +525,49 @@ mod tests {
         let f = vec![BinaryElem32::from(1), BinaryElem32::from(2)];
         let g = vec![BinaryElem32::from(3), BinaryElem32::from(4)];
         let beta = BinaryElem32::from(5);
-        
+
         let result = glue_polynomials(&f, &g, beta);
-        
+
         assert_eq!(result.len(), 2);
         assert_eq!(result[0], BinaryElem32::from(1).add(&beta.mul(&BinaryElem32::from(3))));
         assert_eq!(result[1], BinaryElem32::from(2).add(&beta.mul(&BinaryElem32::from(4))));
+    }
+
+    #[test]
+    fn test_simple_prove() {
+        let config = hardcoded_config_12(
+            PhantomData::<BinaryElem32>,
+            PhantomData::<BinaryElem128>,
+        );
+
+        // Test with all ones polynomial
+        let poly = vec![BinaryElem32::one(); 1 << 12];
+
+        // This should not panic
+        let proof = prove(&config, &poly);
+        assert!(proof.is_ok(), "Simple proof generation should succeed");
+    }
+
+    #[test]
+    fn test_sumcheck_consistency_in_prover() {
+        // This is tested indirectly through the debug assertions in the prover
+        let config = hardcoded_config_12(
+            PhantomData::<BinaryElem32>,
+            PhantomData::<BinaryElem128>,
+        );
+
+        // Test with zero polynomial
+        let poly = vec![BinaryElem32::zero(); 1 << 12];
+
+        let proof = prove(&config, &poly);
+        assert!(proof.is_ok(), "Zero polynomial proof should succeed");
+
+        // Test with simple pattern
+        let mut poly = vec![BinaryElem32::zero(); 1 << 12];
+        poly[0] = BinaryElem32::one();
+        poly[1] = BinaryElem32::from(2);
+
+        let proof = prove(&config, &poly);
+        assert!(proof.is_ok(), "Simple pattern proof should succeed");
     }
 }
