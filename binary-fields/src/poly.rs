@@ -1,3 +1,4 @@
+// src/poly.rs
 use crate::BinaryPolynomial;
 
 // Macro to implement binary polynomials for different sizes
@@ -62,16 +63,16 @@ macro_rules! impl_binary_poly {
             }
 
             fn mul(&self, other: &Self) -> Self {
-                // Software carryless multiplication
-                // Note: This will truncate if the result doesn't fit
+                // constant-time carryless multiplication
                 let mut result = 0 as $value_type;
                 let a = self.0;
                 let b = other.0;
+                let bits = std::mem::size_of::<$value_type>() * 8;
 
-                for i in 0..std::mem::size_of::<$value_type>() * 8 {
-                    if (b >> i) & 1 == 1 {
-                        result ^= a.wrapping_shl(i as u32);
-                    }
+                for i in 0..bits {
+                    // constant-time conditional xor
+                    let mask = (0 as $value_type).wrapping_sub((b >> i) & 1);
+                    result ^= a.wrapping_shl(i as u32) & mask;
                 }
 
                 Self(result)
@@ -138,6 +139,12 @@ impl BinaryPoly64 {
     pub fn leading_zeros(&self) -> u32 {
         self.0.leading_zeros()
     }
+
+    pub fn split(&self) -> (BinaryPoly32, BinaryPoly32) {
+        let lo = BinaryPoly32::new(self.0 as u32);
+        let hi = BinaryPoly32::new((self.0 >> 32) as u32);
+        (hi, lo)
+    }
 }
 
 impl BinaryPolynomial for BinaryPoly64 {
@@ -164,27 +171,8 @@ impl BinaryPolynomial for BinaryPoly64 {
     }
 
     fn mul(&self, other: &Self) -> Self {
-        #[cfg(target_arch = "x86_64")]
-        {
-            use crate::simd::carryless_mul;
-            carryless_mul(*self, *other).truncate_to_64()
-        }
-
-        #[cfg(not(target_arch = "x86_64"))]
-        {
-            // Software fallback
-            let mut result = 0u64;
-            let a = self.0;
-            let b = other.0;
-
-            for i in 0..64 {
-                if (b >> i) & 1 == 1 {
-                    result ^= a << i;
-                }
-            }
-
-            Self(result)
-        }
+        use crate::simd::carryless_mul_64;
+        carryless_mul_64(*self, *other).truncate_to_64()
     }
 
     fn div_rem(&self, divisor: &Self) -> (Self, Self) {
@@ -208,6 +196,12 @@ impl BinaryPolynomial for BinaryPoly64 {
         }
 
         (quotient, remainder)
+    }
+}
+
+impl From<u64> for BinaryPoly64 {
+    fn from(val: u64) -> Self {
+        Self(val)
     }
 }
 
@@ -238,6 +232,12 @@ impl BinaryPoly128 {
     pub fn leading_zeros(&self) -> u32 {
         self.0.leading_zeros()
     }
+
+    // full 128x128 -> 256 bit multiplication
+    pub fn mul_full(&self, other: &Self) -> BinaryPoly256 {
+        use crate::simd::carryless_mul_128_full;
+        carryless_mul_128_full(*self, *other)
+    }
 }
 
 impl BinaryPolynomial for BinaryPoly128 {
@@ -264,20 +264,8 @@ impl BinaryPolynomial for BinaryPoly128 {
     }
 
     fn mul(&self, other: &Self) -> Self {
-        // Use Karatsuba for 128-bit multiplication
-        let (a_hi, a_lo) = self.split();
-        let (b_hi, b_lo) = other.split();
-
-        let z0 = a_lo.mul(&b_lo);
-        let z2 = a_hi.mul(&b_hi);
-        let z1 = a_lo.add(&a_hi).mul(&b_lo.add(&b_hi)).add(&z0).add(&z2);
-
-        let mut result = z0.value() as u128;
-        result ^= (z1.value() as u128) << 64;
-        // Note: z2 would overflow if shifted by 128, but in carryless multiplication
-        // the result of 64x64 is at most 127 bits, so we don't need the full shift
-
-        Self(result)
+        use crate::simd::carryless_mul_128;
+        carryless_mul_128(*self, *other)
     }
 
     fn div_rem(&self, divisor: &Self) -> (Self, Self) {
@@ -304,8 +292,15 @@ impl BinaryPolynomial for BinaryPoly128 {
     }
 }
 
+impl From<u128> for BinaryPoly128 {
+    fn from(val: u128) -> Self {
+        Self(val)
+    }
+}
+
 // BinaryPoly256 for intermediate calculations
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct BinaryPoly256 {
     hi: u128,
     lo: u128,
@@ -318,5 +313,142 @@ impl BinaryPoly256 {
 
     pub fn split(&self) -> (BinaryPoly128, BinaryPoly128) {
         (BinaryPoly128::new(self.hi), BinaryPoly128::new(self.lo))
+    }
+
+    /// reduce modulo a 128-bit polynomial (for field operations)
+    pub fn reduce_mod(&self, modulus: &BinaryPoly128) -> BinaryPoly128 {
+        // for irreducible polynomials of form x^128 + lower terms,
+        // we can use efficient reduction
+
+        // special case for GF(2^128) with x^128 + x^7 + x^2 + x + 1
+        if modulus.value() == (1u128 << 127) | 0x87 {
+            // efficient reduction for gcm polynomial
+            let mut result = self.lo;
+            let mut high = self.hi;
+
+            // reduce 128 bits at a time
+            while high != 0 {
+                // x^128 = x^7 + x^2 + x + 1
+                let feedback = high.wrapping_shl(7)
+                    ^ high.wrapping_shl(2)
+                    ^ high.wrapping_shl(1)
+                    ^ high;
+
+                result ^= feedback;
+                high >>= 121; // process remaining bits
+            }
+
+            return BinaryPoly128::new(result);
+        }
+
+        // general case: polynomial long division
+        if self.hi == 0 {
+            // already reduced
+            return BinaryPoly128::new(self.lo);
+        }
+
+        // work with a copy
+        let mut remainder_hi = self.hi;
+        let mut remainder_lo = self.lo;
+
+        // get modulus without the leading bit
+        let mod_bits = 128 - modulus.leading_zeros();
+        let mod_val = modulus.value();
+        let mod_mask = mod_val ^ (1u128 << (mod_bits - 1));
+
+        // reduce high 128 bits
+        while remainder_hi != 0 {
+            let shift = remainder_hi.leading_zeros();
+
+            if shift < 128 {
+                // align the leading bit
+                let bit_pos = 127 - shift;
+
+                // xor with modulus shifted appropriately
+                remainder_hi ^= 1u128 << bit_pos;
+
+                // xor lower bits of modulus into result
+                if bit_pos >= (mod_bits - 1) {
+                    remainder_hi ^= mod_mask << (bit_pos - (mod_bits - 1));
+                } else {
+                    let right_shift = (mod_bits - 1) - bit_pos;
+                    remainder_hi ^= mod_mask >> right_shift;
+                    remainder_lo ^= mod_mask << (128 - right_shift);
+                }
+            } else {
+                break;
+            }
+        }
+
+        // now reduce remainder_lo if needed
+        let mut remainder = BinaryPoly128::new(remainder_lo);
+
+        if remainder.leading_zeros() < modulus.leading_zeros() {
+            let (_, r) = remainder.div_rem(modulus);
+            remainder = r;
+        }
+
+        remainder
+    }
+
+    /// get the high 128 bits
+    pub fn high(&self) -> BinaryPoly128 {
+        BinaryPoly128::new(self.hi)
+    }
+
+    /// get the low 128 bits
+    pub fn low(&self) -> BinaryPoly128 {
+        BinaryPoly128::new(self.lo)
+    }
+
+    pub fn leading_zeros(&self) -> u32 {
+        if self.hi == 0 {
+            128 + self.lo.leading_zeros()
+        } else {
+            self.hi.leading_zeros()
+        }
+    }
+
+    pub fn add(&self, other: &Self) -> Self {
+        Self {
+            hi: self.hi ^ other.hi,
+            lo: self.lo ^ other.lo,
+        }
+    }
+
+    pub fn shl(&self, n: u32) -> Self {
+        if n == 0 {
+            *self
+        } else if n >= 256 {
+            Self { hi: 0, lo: 0 }
+        } else if n >= 128 {
+            Self {
+                hi: self.lo << (n - 128),
+                lo: 0,
+            }
+        } else {
+            Self {
+                hi: (self.hi << n) | (self.lo >> (128 - n)),
+                lo: self.lo << n,
+            }
+        }
+    }
+
+    pub fn shr(&self, n: u32) -> Self {
+        if n == 0 {
+            *self
+        } else if n >= 256 {
+            Self { hi: 0, lo: 0 }
+        } else if n >= 128 {
+            Self {
+                hi: 0,
+                lo: self.hi >> (n - 128),
+            }
+        } else {
+            Self {
+                hi: self.hi >> n,
+                lo: (self.lo >> n) | (self.hi << (128 - n)),
+            }
+        }
     }
 }
