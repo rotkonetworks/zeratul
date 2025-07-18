@@ -84,6 +84,9 @@ where
             println!("Running enforced_sum: {:?}", enforced_sum);
         }
 
+        // FIX: Use contribution as the scale (alpha_pow * dot)
+        let scale = contribution;
+
         // Create field element from query index (0-based)
         let qf = T::from_bits(query as u64);
         if i < 3 {
@@ -94,7 +97,7 @@ where
         let mut local_basis = vec![U::zero(); 1 << n];
 
         // FIXED: Use proper multilinear extension of delta function
-        evaluate_scaled_basis_inplace(&mut local_sks_x, &mut local_basis, sks_vks, qf, alpha_pow);
+        evaluate_scaled_basis_inplace(&mut local_sks_x, &mut local_basis, sks_vks, qf, scale);
 
         if i < 3 {
             println!("First few basis values after evaluation: {:?}",
@@ -102,7 +105,7 @@ where
             
             // Debug: check if basis is properly constructed
             let basis_sum = local_basis.iter().fold(U::zero(), |acc, &x| acc.add(&x));
-            println!("Local basis sum: {:?} (should equal alpha_pow: {:?})", basis_sum, alpha_pow);
+            println!("Local basis sum: {:?} (should equal contribution: {:?})", basis_sum, contribution);
         }
 
         // Add to basis polynomial
@@ -172,13 +175,16 @@ where
         let contribution = dot.mul(&alpha_pow);
         enforced_sum = enforced_sum.add(&contribution);
 
+        // FIX: Use contribution as the scale
+        let scale = contribution;
+
         // Create field element from query index (0-based)
         let qf = T::from_bits(query as u64);
 
         let mut local_sks_x = vec![T::zero(); sks_vks.len()];
         let mut local_basis = vec![U::zero(); 1 << n];
 
-        evaluate_scaled_basis_inplace(&mut local_sks_x, &mut local_basis, sks_vks, qf, alpha_pow);
+        evaluate_scaled_basis_inplace(&mut local_sks_x, &mut local_basis, sks_vks, qf, scale);
 
         // Add to basis polynomial
         for (j, &val) in local_basis.iter().enumerate() {
@@ -249,13 +255,17 @@ where
                     });
 
                 let alpha_pow = alpha_pows[i];
-                local_sum = local_sum.add(&dot.mul(&alpha_pow));
+                let contribution = dot.mul(&alpha_pow);
+                local_sum = local_sum.add(&contribution);
+
+                // FIX: Use contribution as the scale
+                let scale = contribution;
 
                 // Create field element from query index (0-based)
                 let qf = T::from_bits(query as u64);
 
                 let mut temp_basis = vec![U::zero(); 1 << n];
-                evaluate_scaled_basis_inplace(&mut local_sks_x, &mut temp_basis, sks_vks, qf, alpha_pow);
+                evaluate_scaled_basis_inplace(&mut local_sks_x, &mut temp_basis, sks_vks, qf, scale);
 
                 // Add to local basis
                 for j in 0..(1 << n) {
