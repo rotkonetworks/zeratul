@@ -1,4 +1,3 @@
-// src/poly.rs
 use crate::BinaryPolynomial;
 
 // Macro to implement binary polynomials for different sizes
@@ -29,6 +28,7 @@ macro_rules! impl_binary_poly {
                 self.0.leading_zeros()
             }
 
+            #[allow(dead_code)]
             pub fn split(&self) -> (Self, Self) {
                 let half_bits = std::mem::size_of::<$value_type>() * 4;
                 let mask = ((1u64 << half_bits) - 1) as $value_type;
@@ -67,13 +67,13 @@ macro_rules! impl_binary_poly {
                 let mut result = 0 as $value_type;
                 let a = self.0;
                 let b = other.0;
-                
+
                 for i in 0..std::mem::size_of::<$value_type>() * 8 {
                     if (b >> i) & 1 == 1 {
                         result ^= a.wrapping_shl(i as u32);
                     }
                 }
-                
+
                 Self(result)
             }
 
@@ -110,7 +110,6 @@ macro_rules! impl_binary_poly {
 }
 
 // Define polynomial types
-impl_binary_poly!(BinaryPoly8, u8, BinaryPoly16);
 impl_binary_poly!(BinaryPoly16, u16, BinaryPoly32);
 impl_binary_poly!(BinaryPoly32, u32, BinaryPoly64);
 
@@ -170,20 +169,20 @@ impl BinaryPolynomial for BinaryPoly64 {
             use crate::simd::carryless_mul;
             carryless_mul(*self, *other).truncate_to_64()
         }
-        
+
         #[cfg(not(target_arch = "x86_64"))]
         {
             // Software fallback
             let mut result = 0u64;
             let a = self.0;
             let b = other.0;
-            
+
             for i in 0..64 {
                 if (b >> i) & 1 == 1 {
                     result ^= a << i;
                 }
             }
-            
+
             Self(result)
         }
     }
@@ -268,16 +267,16 @@ impl BinaryPolynomial for BinaryPoly128 {
         // Use Karatsuba for 128-bit multiplication
         let (a_hi, a_lo) = self.split();
         let (b_hi, b_lo) = other.split();
-        
+
         let z0 = a_lo.mul(&b_lo);
         let z2 = a_hi.mul(&b_hi);
         let z1 = a_lo.add(&a_hi).mul(&b_lo.add(&b_hi)).add(&z0).add(&z2);
-        
+
         let mut result = z0.value() as u128;
         result ^= (z1.value() as u128) << 64;
         // Note: z2 would overflow if shifted by 128, but in carryless multiplication
         // the result of 64x64 is at most 127 bits, so we don't need the full shift
-        
+
         Self(result)
     }
 
