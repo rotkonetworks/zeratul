@@ -4,7 +4,7 @@ use crate::{
     RecursiveLigeroProof, FinalLigeroProof, SumcheckTranscript,
     transcript::{FiatShamir, Transcript},
     ligero::ligero_commit,
-    sumcheck_polys::induce_sumcheck_poly_debug,
+    sumcheck_polys::{induce_sumcheck_poly, induce_sumcheck_poly_debug},
     utils::{eval_sk_at_vks, partial_eval_multilinear},
     data_structures::finalize,
 };
@@ -30,12 +30,14 @@ where
         root: wtns_0.tree.get_root(),
     };
     proof.initial_ligero_cm = Some(cm_0.clone());
+    println!("Prover: Absorbing initial commitment root: {:?}", cm_0.root.root);
     fs.absorb_root(&cm_0.root);
 
     // Get initial challenges - get them as T type (base field)
     let partial_evals_0: Vec<T> = (0..config.initial_k)
         .map(|_| fs.get_challenge())
         .collect();
+    println!("Prover: Got initial challenges: {:?}", partial_evals_0);
 
     // Partial evaluation of multilinear polynomial
     let mut f_evals = poly.to_vec();
@@ -51,11 +53,15 @@ where
         root: wtns_1.tree.get_root(),
     };
     proof.recursive_commitments.push(cm_1.clone());
+    println!("Prover: Absorbing recursive commitment root (initial): {:?}", cm_1.root.root);
     fs.absorb_root(&cm_1.root);
 
     // Query selection
     let rows = wtns_0.mat.len();
+    println!("Getting {} distinct queries from {} rows...", S, rows);
+    println!("Prover: About to get queries after absorbing recursive commitment");
     let queries = fs.get_distinct_queries(rows, S);  // Returns 0-based indices
+    println!("Got queries: {:?}", &queries[..queries.len().min(5)]);
     let alpha = fs.get_challenge::<U>();
 
     // Prepare for sumcheck
@@ -74,7 +80,8 @@ where
     });
 
     // FIXED: Use the corrected sumcheck implementation
-    let (basis_poly, enforced_sum) = induce_sumcheck_poly_debug(
+    println!("Starting induce_sumcheck_poly...");
+    let (basis_poly, enforced_sum) = induce_sumcheck_poly(
         n,
         &sks_vks,
         &opened_rows,
@@ -82,10 +89,12 @@ where
         &queries,
         alpha,
     );
+    println!("induce_sumcheck_poly done.");
 
     let mut sumcheck_transcript = vec![];
     let mut current_poly = basis_poly;
     let mut current_sum = enforced_sum; // Use enforced_sum directly
+    println!("Starting sumcheck rounds...");
 
     // First sumcheck round absorb
     fs.absorb_elem(current_sum);
@@ -94,18 +103,29 @@ where
     let mut wtns_prev = wtns_1;
 
     for i in 0..config.recursive_steps {
+        println!("Recursive step {} of {}", i + 1, config.recursive_steps);
         let mut rs = Vec::new();
 
         // Sumcheck rounds
-        for _ in 0..config.ks[i] {
-            let ri = fs.get_challenge::<U>();
+        for j in 0..config.ks[i] {
+            println!("  Sumcheck round {} of {}", j + 1, config.ks[i]);
 
-            // Fold polynomial
-            let (new_poly, coeffs) = fold_polynomial(&current_poly, ri);
+            // Compute coefficients first (before getting challenge)
+            let coeffs = compute_sumcheck_coefficients(&current_poly);
+            println!("    Computed coeffs: {:?}", coeffs);
+            let s0 = evaluate_quadratic(coeffs, U::zero());
+            let s1 = evaluate_quadratic(coeffs, U::one());
+            let claimed = s0.add(&s1);
+            println!("    s0={:?}, s1={:?}, claimed_sum={:?}", s0, s1, claimed);
+            println!("    current_sum={:?}", current_sum);
             sumcheck_transcript.push(coeffs);
 
+            // Get challenge after providing coefficients
+            let ri = fs.get_challenge::<U>();
             rs.push(ri);
-            current_poly = new_poly;
+
+            // Fold polynomial with the challenge
+            current_poly = fold_polynomial_with_challenge(&current_poly, ri);
 
             // Update sum
             current_sum = evaluate_quadratic(coeffs, ri);
@@ -114,10 +134,14 @@ where
 
         // Final round
         if i == config.recursive_steps - 1 {
+            println!("Final round - current_sum after sumcheck: {:?}", current_sum);
+            println!("Final round - absorbing polynomial of length {}", current_poly.len());
             fs.absorb_elems(&current_poly);
 
             let rows = wtns_prev.mat.len();
+            println!("Getting {} queries from {} rows for final round", S, rows);
             let queries = fs.get_distinct_queries(rows, S);  // 0-based
+            println!("Got final queries");
 
             // Use 0-based queries directly for array access
             let opened_rows: Vec<Vec<U>> = queries.iter()
@@ -125,6 +149,10 @@ where
                 .collect();
 
             let mtree_proof = wtns_prev.tree.prove(&queries);  // 0-based
+
+            println!("Final round: current_poly length={}, first few={:?}",
+                     current_poly.len(),
+                     &current_poly[..4.min(current_poly.len())]);
 
             proof.final_ligero_proof = Some(FinalLigeroProof {
                 yr: current_poly.clone(),
@@ -171,7 +199,7 @@ where
         let sks_vks: Vec<U> = eval_sk_at_vks(1 << n);
 
         // FIXED: Use the corrected sumcheck implementation
-        let (basis_poly, enforced_sum) = induce_sumcheck_poly_debug(
+        let (basis_poly, enforced_sum) = induce_sumcheck_poly(
             n,
             &sks_vks,
             &opened_rows,
@@ -326,16 +354,18 @@ where
 
         // Sumcheck rounds
         for j in 0..config.ks[i] {
-            let ri = fs.get_challenge::<U>();
-            println!("  Round {}: challenge = {:?}", j, ri);
-
-            // Fold polynomial
-            let (new_poly, coeffs) = fold_polynomial(&current_poly, ri);
-            println!("  Fold coeffs: {:?}", coeffs);
+            // Compute coefficients first (before getting challenge)
+            let coeffs = compute_sumcheck_coefficients(&current_poly);
+            println!("  Round {}: coeffs = {:?}", j, coeffs);
             sumcheck_transcript.push(coeffs);
 
+            // Get challenge after providing coefficients
+            let ri = fs.get_challenge::<U>();
+            println!("  Challenge: {:?}", ri);
             rs.push(ri);
-            current_poly = new_poly;
+
+            // Fold polynomial with the challenge
+            current_poly = fold_polynomial_with_challenge(&current_poly, ri);
 
             // Update sum
             current_sum = evaluate_quadratic(coeffs, ri);
@@ -433,9 +463,8 @@ where
 
 // Helper functions
 
-fn fold_polynomial<F: BinaryFieldElement>(poly: &[F], r: F) -> (Vec<F>, (F, F, F)) {
+fn compute_sumcheck_coefficients<F: BinaryFieldElement>(poly: &[F]) -> (F, F, F) {
     let n = poly.len() / 2;
-    let mut new_poly = vec![F::zero(); n];
 
     let mut s0 = F::zero();
     let mut s1 = F::zero();
@@ -448,18 +477,45 @@ fn fold_polynomial<F: BinaryFieldElement>(poly: &[F], r: F) -> (Vec<F>, (F, F, F
         s0 = s0.add(&p0);
         s1 = s1.add(&p0.add(&p1));
         s2 = s2.add(&p1);
+    }
 
+    (s0, s1, s2)
+}
+
+fn fold_polynomial_with_challenge<F: BinaryFieldElement>(poly: &[F], r: F) -> Vec<F> {
+    let n = poly.len() / 2;
+    let mut new_poly = vec![F::zero(); n];
+
+    for i in 0..n {
+        let p0 = poly[2 * i];
+        let p1 = poly[2 * i + 1];
         new_poly[i] = p0.add(&r.mul(&p1.add(&p0)));
     }
 
-    (new_poly, (s0, s1, s2))
+    new_poly
+}
+
+fn fold_polynomial<F: BinaryFieldElement>(poly: &[F], r: F) -> (Vec<F>, (F, F, F)) {
+    let coeffs = compute_sumcheck_coefficients(poly);
+    let new_poly = fold_polynomial_with_challenge(poly, r);
+    (new_poly, coeffs)
 }
 
 fn evaluate_quadratic<F: BinaryFieldElement>(coeffs: (F, F, F), x: F) -> F {
-    let (a0, a1, a2) = coeffs;
-    // a0 + (a1 - a0 - a2) * x + a2 * x^2
-    let linear = a1.add(&a0).add(&a2);
-    a0.add(&linear.mul(&x)).add(&a2.mul(&x).mul(&x))
+    let (s0, s1, s2) = coeffs;
+    // For binary field sumcheck, we need a univariate polynomial where:
+    // f(0) = s0 (sum when xi=0)
+    // f(1) = s2 (sum when xi=1)
+    // and s1 = s0 + s2 (total sum)
+    //
+    // The degree-1 polynomial through (0,s0) and (1,s2) is:
+    // f(x) = s0*(1-x) + s2*x = s0 + (s2-s0)*x
+    // In binary fields where -s0 = s0:
+    // f(x) = s0 + (s2+s0)*x = s0 + s1*x (since s1 = s0+s2)
+    //
+    // But wait, that gives f(0) = s0 and f(1) = s0+s1 = s0+s0+s2 = s2 (since s0+s0=0 in binary)
+    // Let's verify: f(1) = s0 + s1*1 = s0 + (s0+s2) = s2. Good!
+    s0.add(&s1.mul(&x))
 }
 
 fn glue_polynomials<F: BinaryFieldElement>(f: &[F], g: &[F], beta: F) -> Vec<F> {

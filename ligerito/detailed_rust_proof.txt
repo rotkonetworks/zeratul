@@ -1,0 +1,20 @@
+# Detailed Rust-generated proof data for Julia verification
+# Polynomial: size=4096, first 10 elements = [BinaryElem32(BinaryPoly32(0)), BinaryElem32(BinaryPoly32(1)), BinaryElem32(BinaryPoly32(2)), BinaryElem32(BinaryPoly32(3)), BinaryElem32(BinaryPoly32(4)), BinaryElem32(BinaryPoly32(5)), BinaryElem32(BinaryPoly32(6)), BinaryElem32(BinaryPoly32(7)), BinaryElem32(BinaryPoly32(8)), BinaryElem32(BinaryPoly32(9))]
+# Config: initial_dims=(256, 16), k=4, recursive_steps=1
+# Transcript seed: 1234 (SHA256 mode)
+#
+# === PROOF STRUCTURE ===
+# Initial commitment root: Some([172, 38, 75, 66, 80, 100, 59, 181, 102, 127, 57, 120, 233, 245, 31, 93, 45, 232, 212, 71, 105, 160, 195, 77, 114, 33, 152, 117, 25, 100, 111, 101])
+# Recursive commitments: 1
+# Final yr length: 64
+# Sumcheck rounds: 2
+#
+# === FINAL YR VALUES (first 10) ===
+# [BinaryElem128(BinaryPoly128(61735827901135774182986907216971133455)), BinaryElem128(BinaryPoly128(302914484952793783354052168011858309327)), BinaryElem128(BinaryPoly128(208264898857241078353060933137547145100)), BinaryElem128(BinaryPoly128(162793167523517965603436417733875640477)), BinaryElem128(BinaryPoly128(2953452483698939371504693537323422011)), BinaryElem128(BinaryPoly128(73939633116789806150978656694284213559)), BinaryElem128(BinaryPoly128(36177131670262062038056265839477457860)), BinaryElem128(BinaryPoly128(38244291926020369478228198566941158284)), BinaryElem128(BinaryPoly128(157414251180775123131587988296733990516)), BinaryElem128(BinaryPoly128(331706135538273900973683151102667136288))]
+#
+# === SUMCHECK TRANSCRIPT (coefficients) ===
+# Round 1: "(BinaryElem128(BinaryPoly128(216725581548417984202149387526964093153)), BinaryElem128(BinaryPoly128(50187105967903677172279163479030860623)), BinaryElem128(BinaryPoly128(179167899851121014822410095048423910318)))"
+# Round 2: "(BinaryElem128(BinaryPoly128(284704128177921386642609865827465096495)), BinaryElem128(BinaryPoly128(80549817803498930524502844278389596310)), BinaryElem128(BinaryPoly128(311918510391148010247445064356499492281)))"
+#
+# This data can be used to manually construct a proof in Julia
+# and compare with our Rust implementation for debugging

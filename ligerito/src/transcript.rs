@@ -26,6 +26,7 @@ pub trait Transcript: Send + Sync {
     fn get_query(&mut self, max: usize) -> usize;
 
     /// Get multiple distinct queries (0-based)
+    /// Returns min(count, max) queries to avoid infinite loops
     fn get_distinct_queries(&mut self, max: usize, count: usize) -> Vec<usize>;
 }
 
@@ -171,10 +172,12 @@ impl Transcript for MerlinTranscript {
     }
 
     fn get_distinct_queries(&mut self, max: usize, count: usize) -> Vec<usize> {
-        let mut queries = Vec::with_capacity(count);
+        // Can't get more distinct queries than max available
+        let actual_count = count.min(max);
+        let mut queries = Vec::with_capacity(actual_count);
         let mut seen = HashSet::new();
 
-        while queries.len() < count {
+        while queries.len() < actual_count {
             let q = self.get_query(max);
             if seen.insert(q) {
                 queries.push(q);
@@ -279,16 +282,18 @@ impl Transcript for Sha256Transcript {
                 }
                 
                 // Set bits 64-127
+                // Pre-compute 2^64 once
+                let mut power_of_2_64 = F::from_bits(1u64 << 63);
+                power_of_2_64 = power_of_2_64.add(&power_of_2_64); // 2^64
+
+                // Build up powers incrementally
+                let mut current_power = power_of_2_64;
                 for i in 0..64 {
                     if (high >> i) & 1 == 1 {
-                        // For bits beyond 64, we need to construct 2^(64+i)
-                        // This is done by multiplying 2^64 by 2^i
-                        let mut bit_value = F::from_bits(1u64 << 63);
-                        bit_value = bit_value.add(&bit_value); // 2^64
-                        for _ in 0..i {
-                            bit_value = bit_value.add(&bit_value); // 2^(64+i)
-                        }
-                        result = result.add(&bit_value);
+                        result = result.add(&current_power);
+                    }
+                    if i < 63 {
+                        current_power = current_power.add(&current_power); // Double for next bit
                     }
                 }
                 
@@ -298,21 +303,29 @@ impl Transcript for Sha256Transcript {
                 // Generic fallback for other sizes
                 let mut result = F::zero();
                 let num_bits = std::mem::size_of::<F>() * 8;
-                
-                for i in 0..num_bits {
+
+                // Handle first 64 bits
+                for i in 0..num_bits.min(64) {
                     if rng.gen_bool(0.5) {
-                        // Create 2^i properly
-                        if i < 64 {
-                            let bit_value = F::from_bits(1u64 << i);
-                            result = result.add(&bit_value);
-                        } else {
-                            // For bits beyond 64, construct by repeated doubling
-                            let mut bit_value = F::from_bits(1u64 << 63);
-                            bit_value = bit_value.add(&bit_value); // 2^64
-                            for _ in 64..i {
-                                bit_value = bit_value.add(&bit_value);
-                            }
-                            result = result.add(&bit_value);
+                        let bit_value = F::from_bits(1u64 << i);
+                        result = result.add(&bit_value);
+                    }
+                }
+
+                // Handle bits beyond 64 if needed
+                if num_bits > 64 {
+                    // Pre-compute 2^64
+                    let mut power_of_2_64 = F::from_bits(1u64 << 63);
+                    power_of_2_64 = power_of_2_64.add(&power_of_2_64);
+
+                    // Build up powers incrementally
+                    let mut current_power = power_of_2_64;
+                    for i in 64..num_bits {
+                        if rng.gen_bool(0.5) {
+                            result = result.add(&current_power);
+                        }
+                        if i < num_bits - 1 {
+                            current_power = current_power.add(&current_power);
                         }
                     }
                 }
@@ -332,10 +345,12 @@ impl Transcript for Sha256Transcript {
     }
 
     fn get_distinct_queries(&mut self, max: usize, count: usize) -> Vec<usize> {
-        let mut queries = Vec::with_capacity(count);
+        // Can't get more distinct queries than max available
+        let actual_count = count.min(max);
+        let mut queries = Vec::with_capacity(actual_count);
         let mut seen = HashSet::new();
 
-        while queries.len() < count {
+        while queries.len() < actual_count {
             let q = self.get_query(max);
             if seen.insert(q) {
                 queries.push(q);
@@ -377,9 +392,12 @@ impl FiatShamir {
         Self::new(TranscriptType::Merlin)
     }
 
-    /// Create SHA256 transcript
+    /// Create SHA256 transcript (Julia-compatible with 1-based indexing)
     pub fn new_sha256(seed: i32) -> Self {
-        Self::new(TranscriptType::Sha256(seed))
+        // Always use Julia-compatible mode for SHA256 to match the Julia implementation
+        let mut transcript = Sha256Transcript::new(seed);
+        transcript.julia_compatible = true;
+        FiatShamir::Sha256(transcript)
     }
 }
 

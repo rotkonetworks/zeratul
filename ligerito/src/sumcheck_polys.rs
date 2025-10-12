@@ -27,40 +27,31 @@ where
     T: BinaryFieldElement,
     U: BinaryFieldElement + From<T>,
 {
-    println!("\n=== DEBUG induce_sumcheck_poly ===");
-    println!("n: {}, sks_vks.len: {}, opened_rows.len: {}, v_challenges.len: {}",
-             n, sks_vks.len(), opened_rows.len(), v_challenges.len());
-    println!("First few queries: {:?}", &sorted_queries[..sorted_queries.len().min(5)]);
+    // Debug output disabled for performance
 
     // Check if alpha is zero - this is problematic!
-    if alpha == U::zero() {
-        println!("WARNING: Alpha is zero! This will cause issues!");
-    }
+    // if alpha == U::zero() {
+    //     println!("WARNING: Alpha is zero! This will cause issues!");
+    // }
 
     let gr = evaluate_lagrange_basis(v_challenges);
-    println!("Lagrange basis gr.len: {}", gr.len());
-    println!("First few gr values: {:?}", &gr[..gr.len().min(4)]);
+    // println!("Lagrange basis gr.len: {}", gr.len());
+    // println!("First few gr values: {:?}", &gr[..gr.len().min(4)]);
 
     // Check if Lagrange basis is all zeros
-    if gr.iter().all(|&x| x == U::zero()) {
-        println!("WARNING: Lagrange basis is all zeros!");
-    }
+    // if gr.iter().all(|&x| x == U::zero()) {
+    //     println!("WARNING: Lagrange basis is all zeros!");
+    // }
 
     let mut basis_poly = vec![U::zero(); 1 << n];
     let mut enforced_sum = U::zero();
 
     let alpha_pows = precompute_alpha_powers(alpha, opened_rows.len());
-    println!("Alpha: {:?}", alpha);
-    println!("First few alpha powers: {:?}", &alpha_pows[..alpha_pows.len().min(4)]);
+    // println!("Alpha: {:?}", alpha);
+    // println!("First few alpha powers: {:?}", &alpha_pows[..alpha_pows.len().min(4)]);
 
     for (i, (row, &query)) in opened_rows.iter().zip(sorted_queries.iter()).enumerate() {
-        if i < 3 {  // Debug first few iterations
-            println!("\nProcessing query {} (index {})", query, i);
-            println!("Row length: {}", row.len());
-            if row.len() > 0 {
-                println!("First few row values: {:?}", &row[..row.len().min(4)]);
-            }
-        }
+        // Debug output disabled
 
         // Compute dot product
         let dot = row.iter()
@@ -70,28 +61,22 @@ where
                 acc.add(&r_u.mul(&g))
             });
 
-        if i < 3 {
-            println!("Dot product: {:?}", dot);
-        }
+        // Debug output disabled
 
         let alpha_pow = alpha_pows[i];
         let contribution = dot.mul(&alpha_pow);
         enforced_sum = enforced_sum.add(&contribution);
 
-        if i < 3 {
-            println!("Alpha power: {:?}", alpha_pow);
-            println!("Contribution to sum: {:?}", contribution);
-            println!("Running enforced_sum: {:?}", enforced_sum);
-        }
+        // Debug output disabled
 
         // FIX: Use contribution as the scale (alpha_pow * dot)
         let scale = contribution;
 
         // Create field element from query index (0-based)
-        let qf = T::from_bits(query as u64);
-        if i < 3 {
-            println!("Query {} as field element: {:?}", query, qf);
-        }
+        // For queries larger than the basis size, take modulo
+        let query_mod = query % (1 << n);
+        let qf = T::from_bits(query_mod as u64);
+        // Debug output disabled
 
         let mut local_sks_x = vec![T::zero(); sks_vks.len()];
         let mut local_basis = vec![U::zero(); 1 << n];
@@ -99,14 +84,7 @@ where
         // FIXED: Use proper multilinear extension of delta function
         evaluate_scaled_basis_inplace(&mut local_sks_x, &mut local_basis, sks_vks, qf, scale);
 
-        if i < 3 {
-            println!("First few basis values after evaluation: {:?}",
-                     &local_basis[..local_basis.len().min(4)]);
-            
-            // Debug: check if basis is properly constructed
-            let basis_sum = local_basis.iter().fold(U::zero(), |acc, &x| acc.add(&x));
-            println!("Local basis sum: {:?} (should equal contribution: {:?})", basis_sum, contribution);
-        }
+        // Debug output disabled
 
         // Add to basis polynomial
         for (j, &val) in local_basis.iter().enumerate() {
@@ -114,36 +92,23 @@ where
         }
     }
 
-    println!("\nFinal enforced_sum: {:?}", enforced_sum);
-    println!("First few basis_poly values: {:?}", &basis_poly[..basis_poly.len().min(4)]);
+    // Final debug output disabled
 
-    // Check if basis polynomial is all zeros
-    if basis_poly.iter().all(|&x| x == U::zero()) {
-        println!("WARNING: Basis polynomial is all zeros!");
-    }
+    // Check disabled
 
-    // Compute and print the sum of basis polynomial
+    // Compute the sum of basis polynomial for verification
     let basis_sum = basis_poly.iter().fold(U::zero(), |acc, &x| acc.add(&x));
-    println!("Sum of basis polynomial: {:?}", basis_sum);
 
     // CRITICAL FIX: Check consistency
     if basis_sum != enforced_sum {
-        println!("ERROR: Sum inconsistency detected!");
-        println!("  Enforced sum: {:?}", enforced_sum);
-        println!("  Basis sum: {:?}", basis_sum);
-        
         // This should not happen with the fixed implementation
         panic!("Sumcheck consistency check failed - this indicates a bug in the implementation");
-    } else {
-        println!("✓ Sum consistency check passed");
     }
-
-    println!("=== END DEBUG ===\n");
 
     (basis_poly, enforced_sum)
 }
 
-/// Production version without debug output
+/// Production version without debug output - optimized for performance
 pub fn induce_sumcheck_poly<T, U>(
     n: usize,
     sks_vks: &[T],
@@ -175,21 +140,11 @@ where
         let contribution = dot.mul(&alpha_pow);
         enforced_sum = enforced_sum.add(&contribution);
 
-        // FIX: Use contribution as the scale
-        let scale = contribution;
+        // For queries larger than the basis size, take modulo
+        let query_mod = query % (1 << n);
 
-        // Create field element from query index (0-based)
-        let qf = T::from_bits(query as u64);
-
-        let mut local_sks_x = vec![T::zero(); sks_vks.len()];
-        let mut local_basis = vec![U::zero(); 1 << n];
-
-        evaluate_scaled_basis_inplace(&mut local_sks_x, &mut local_basis, sks_vks, qf, scale);
-
-        // Add to basis polynomial
-        for (j, &val) in local_basis.iter().enumerate() {
-            basis_poly[j] = basis_poly[j].add(&val);
-        }
+        // Direct indexing - the query_mod IS the index we want
+        basis_poly[query_mod] = basis_poly[query_mod].add(&contribution);
     }
 
     // Consistency check (can be disabled in production for performance)
