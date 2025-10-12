@@ -1,0 +1,8 @@
+# Rust-generated proof data for Julia verification
+# Polynomial: first 10 elements = [BinaryElem32(BinaryPoly32(0)), BinaryElem32(BinaryPoly32(1)), BinaryElem32(BinaryPoly32(2)), BinaryElem32(BinaryPoly32(3)), BinaryElem32(BinaryPoly32(4)), BinaryElem32(BinaryPoly32(5)), BinaryElem32(BinaryPoly32(6)), BinaryElem32(BinaryPoly32(7)), BinaryElem32(BinaryPoly32(8)), BinaryElem32(BinaryPoly32(9))]
+# Config: dim=256, k=4, recursive_steps=1
+# Transcript seed: 1234
+# Initial commitment root: "Some([172, 38, 75, 66, 80, 100, 59, 181, 102, 127, 57, 120, 233, 245, 31, 93, 45, 232, 212, 71, 105, 160, 195, 77, 114, 33, 152, 117, 25, 100, 111, 101])"
+# Recursive commitments: 1
+# Final yr length: 64
+# Sumcheck rounds: 2

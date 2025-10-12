@@ -184,7 +184,10 @@ mod tests {
             std::marker::PhantomData::<BinaryElem128>,
         );
 
-        let poly: Vec<BinaryElem32> = vec![BinaryElem32::from(123); 1 << 12];
+        // Use a non-constant polynomial to avoid degenerate case
+        let poly: Vec<BinaryElem32> = (0..(1 << 12))
+            .map(|i| BinaryElem32::from(i as u32))
+            .collect();
 
         let proof = prover(&config, &poly).unwrap();
         let verifier_config = hardcoded_config_12_verifier();
