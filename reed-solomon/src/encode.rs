@@ -22,9 +22,9 @@ pub fn encode_in_place<F: BinaryFieldElement>(rs: &ReedSolomon<F>, data: &mut [F
     
     // Apply IFFT to message coefficients
     fft::ifft(&mut data[..message_len], &short_twiddles);
-    
-    // Apply FFT to full vector
-    fft::fft(data, &rs.twiddles, false);
+
+    // Apply parallel FFT to full vector
+    fft::fft(data, &rs.twiddles, true);
 }
 
 /// Non-systematic encoding for Ligero
@@ -39,7 +39,7 @@ pub fn encode_non_systematic<F: BinaryFieldElement>(
     for i in 0..message_len {
         data[i] = data[i].mul(&rs.pis[i]);
     }
-    
-    // Apply FFT to get evaluations
-    fft::fft(data, &rs.twiddles, false);
+
+    // Apply parallel FFT to get evaluations
+    fft::fft(data, &rs.twiddles, true);
 }
