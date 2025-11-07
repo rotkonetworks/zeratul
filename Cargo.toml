@@ -1,10 +1,11 @@
 [workspace]
 members = [
     "binary-fields",
-    "reed-solomon", 
+    "reed-solomon",
     "merkle-tree",
     "ligerito"
 ]
+exclude = ["benchmarks/ashutosh-ligerito"]
 resolver = "2"
 
 [workspace.package]

@@ -5,6 +5,7 @@ all benchmarks use identical parameters:
 - field: BinaryElem32 for coefficients, BinaryElem128 for commitments
 - seed: 1234 (deterministic)
 - measurement: single run with @elapsed (julia) or Instant::now (rust)
+- julia benchmarks: include warmup run to exclude JIT compilation time
 
 ## test specifications
 

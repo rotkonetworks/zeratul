@@ -4,7 +4,7 @@ use crate::{
     RecursiveLigeroProof, FinalLigeroProof, SumcheckTranscript,
     transcript::{FiatShamir, Transcript},
     ligero::ligero_commit,
-    sumcheck_polys::{induce_sumcheck_poly, induce_sumcheck_poly_debug},
+    sumcheck_polys::{induce_sumcheck_poly, induce_sumcheck_poly_parallel, induce_sumcheck_poly_debug},
     utils::{eval_sk_at_vks, partial_eval_multilinear},
     data_structures::finalize,
 };
@@ -30,14 +30,12 @@ where
         root: wtns_0.tree.get_root(),
     };
     proof.initial_ligero_cm = Some(cm_0.clone());
-    println!("Prover: Absorbing initial commitment root: {:?}", cm_0.root.root);
     fs.absorb_root(&cm_0.root);
 
     // Get initial challenges - get them as T type (base field)
     let partial_evals_0: Vec<T> = (0..config.initial_k)
         .map(|_| fs.get_challenge())
         .collect();
-    println!("Prover: Got initial challenges: {:?}", partial_evals_0);
 
     // Partial evaluation of multilinear polynomial
     let mut f_evals = poly.to_vec();
@@ -53,15 +51,11 @@ where
         root: wtns_1.tree.get_root(),
     };
     proof.recursive_commitments.push(cm_1.clone());
-    println!("Prover: Absorbing recursive commitment root (initial): {:?}", cm_1.root.root);
     fs.absorb_root(&cm_1.root);
 
     // Query selection
     let rows = wtns_0.mat.len();
-    println!("Getting {} distinct queries from {} rows...", S, rows);
-    println!("Prover: About to get queries after absorbing recursive commitment");
     let queries = fs.get_distinct_queries(rows, S);  // Returns 0-based indices
-    println!("Got queries: {:?}", &queries[..queries.len().min(5)]);
     let alpha = fs.get_challenge::<U>();
 
     // Prepare for sumcheck
@@ -79,8 +73,7 @@ where
         merkle_proof: mtree_proof,
     });
 
-    // FIXED: Use the corrected sumcheck implementation
-    println!("Starting induce_sumcheck_poly...");
+    // Use sequential version for comparison
     let (basis_poly, enforced_sum) = induce_sumcheck_poly(
         n,
         &sks_vks,
@@ -89,12 +82,10 @@ where
         &queries,
         alpha,
     );
-    println!("induce_sumcheck_poly done.");
 
     let mut sumcheck_transcript = vec![];
     let mut current_poly = basis_poly;
     let mut current_sum = enforced_sum; // Use enforced_sum directly
-    println!("Starting sumcheck rounds...");
 
     // First sumcheck round absorb
     fs.absorb_elem(current_sum);
@@ -103,21 +94,12 @@ where
     let mut wtns_prev = wtns_1;
 
     for i in 0..config.recursive_steps {
-        println!("Recursive step {} of {}", i + 1, config.recursive_steps);
         let mut rs = Vec::new();
 
         // Sumcheck rounds
         for j in 0..config.ks[i] {
-            println!("  Sumcheck round {} of {}", j + 1, config.ks[i]);
-
             // Compute coefficients first (before getting challenge)
             let coeffs = compute_sumcheck_coefficients(&current_poly);
-            println!("    Computed coeffs: {:?}", coeffs);
-            let s0 = evaluate_quadratic(coeffs, U::zero());
-            let s1 = evaluate_quadratic(coeffs, U::one());
-            let claimed = s0.add(&s1);
-            println!("    s0={:?}, s1={:?}, claimed_sum={:?}", s0, s1, claimed);
-            println!("    current_sum={:?}", current_sum);
             sumcheck_transcript.push(coeffs);
 
             // Get challenge after providing coefficients
@@ -134,14 +116,10 @@ where
 
         // Final round
         if i == config.recursive_steps - 1 {
-            println!("Final round - current_sum after sumcheck: {:?}", current_sum);
-            println!("Final round - absorbing polynomial of length {}", current_poly.len());
             fs.absorb_elems(&current_poly);
 
             let rows = wtns_prev.mat.len();
-            println!("Getting {} queries from {} rows for final round", S, rows);
             let queries = fs.get_distinct_queries(rows, S);  // 0-based
-            println!("Got final queries");
 
             // Use 0-based queries directly for array access
             let opened_rows: Vec<Vec<U>> = queries.iter()
@@ -149,10 +127,6 @@ where
                 .collect();
 
             let mtree_proof = wtns_prev.tree.prove(&queries);  // 0-based
-
-            println!("Final round: current_poly length={}, first few={:?}",
-                     current_poly.len(),
-                     &current_poly[..4.min(current_poly.len())]);
 
             proof.final_ligero_proof = Some(FinalLigeroProof {
                 yr: current_poly.clone(),
@@ -198,7 +172,7 @@ where
         let n = current_poly.len().trailing_zeros() as usize;
         let sks_vks: Vec<U> = eval_sk_at_vks(1 << n);
 
-        // FIXED: Use the corrected sumcheck implementation
+        // Use sequential version
         let (basis_poly, enforced_sum) = induce_sumcheck_poly(
             n,
             &sks_vks,

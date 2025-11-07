@@ -185,7 +185,8 @@ where
                 let contribution = dot.mul(&alpha_pows[i]);
                 local_sum = local_sum.add(&contribution);
 
-                let qf = T::from_bits(query as u64);
+                let query_mod = query % (1 << n);
+                let qf = T::from_bits(query_mod as u64);
 
                 // clear and reuse temp_basis
                 temp_basis.fill(U::zero());

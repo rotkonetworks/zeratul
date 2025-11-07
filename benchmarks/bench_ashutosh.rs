@@ -7,7 +7,7 @@ fn main() {
 
     // standard parameters: 2^20 polynomial with seed 1234
     let poly: Vec<BinaryElem32> = (0..(1 << 20))
-        .map(|i| BinaryElem32::new((i % 0xFFFFFFFF) as u32))
+        .map(|i| BinaryElem32::new((i as u32) % 0xFFFFFFFF))
         .collect();
 
     let prover_config: ProverConfig<BinaryElem32> = hardcoded_config_20::<BinaryElem32>();
