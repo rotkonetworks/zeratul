@@ -1,25 +1,46 @@
 # zeratul
 
-fast rust implementation of the [ligerito polynomial commitment scheme](https://angeris.github.io/papers/ligerito.pdf)
+rust implementation of [ligerito](https://angeris.github.io/papers/ligerito.pdf) polynomial commitment scheme over binary extension fields.
+
+## structure
+
+- `binary-fields/` - gf(2^n) arithmetic with constant-time operations
+- `reed-solomon/` - parallel fft-based encoding over binary fields
+- `merkle-tree/` - sha256 commitment trees
+- `ligerito/` - sumcheck-based polynomial commitments
 
 ## performance
 
-**cpu**: AMD Ryzen 9 7945HX (16 cores / 32 threads)
+measured on amd ryzen 9 7945hx (32 threads):
 
-benchmarked on 2^20 (1,048,576) elements:
+### standardized benchmarks
 
-| implementation | transcript | prove | verify | total | proof size |
-|---------------|-----------|-------|--------|-------|------------|
-| **ours (rust)** | **sha256** | **190ms** | **122ms** | **312ms** | **145 KB** |
-| **ours (rust)** | **merlin** | **198ms** | **123ms** | **322ms** | **145 KB** |
-| julia | sha256 | 3,262ms | 383ms | 3,645ms | 147 KB |
-| ashutosh (rust) | sha256 | 3,600ms | 279ms | 3,880ms | 105 KB |
+all implementations tested with identical parameters (sha256 transcript):
 
-**11-19x faster** than other implementations. both transcripts deliver similar
-performance.
+#### 2^20 (1,048,576 elements)
 
-**note on proof sizes**: our proofs are 145 KB vs ashutosh's 105 KB. the 38%
-difference comes from simpler merkle proof batching (no deduplication).
+| implementation | proving | verification | speedup |
+|----------------|---------|--------------|---------|
+| **zeratul** | **184ms** | **131ms** | baseline |
+| ligerito.jl | 3,272ms | 384ms | 17.8x slower |
+| ashutosh-ligerito | 3,467ms | 269ms | 18.8x slower |
+
+#### larger sizes (zeratul only)
+
+| size | elements | proving | verification |
+|------|----------|---------|--------------|
+| 2^24 | 16.8M | 4.3s | 2.4s |
+| 2^28 | 268.4M | 109s | 26.6s |
+| 2^30 | 1.07B | 318s | 41.7s |
+
+### reproducing
+
+```bash
+git submodule update --init --recursive
+./benchmarks/run_standardized_benchmarks.sh
+```
+
+see `benchmarks/RESULTS.md` for detailed methodology and analysis.
 
 ## usage
 
@@ -100,13 +121,45 @@ let valid = verify_sha256(&verifier_config, &proof)?;
 - cpu with simd support (x86_64 pclmulqdq or arm pmull)
 - multi-core cpu recommended
 
+## notes on llm-assisted development
+
+this code vibes hard and was built with llm assistance. what actually worked:
+
+1. **study the best** - pointed at isis lovecruft's style for commit
+   messages, looked at how top cryptographers write code instead of generic
+"best practices"
+
+2. **meditate on failure** - when things broke or benchmarks sucked, asked llm
+   to reflect on what went wrong and find the headspace to try differently. very
+similar to sport coaching - you don't just say "do better", you work through the
+mental blockers
+
+3. **iterate through pain** - let test failures and compiler errors be the
+   teacher. when reduction algorithm for gf(2^128) failed, reverted and learned
+instead of forcing it
+
+4. **the julia 1-indexing hell** - major hardship was translating julia
+   reference implementation (1-indexed) to rust (0-indexed). off-by-one errors
+in polynomial evaluation and fft indexing caused subtle math bugs that took
+meditation to debug
+
+5. **minimal vibe-based prompts** - "yes lets keep improving prover and verifier
+   times" or "pedal to the metal, we want to be on L1 cache"
+
+6. **benchmark against reality** - added reference implementations as
+   submodules, ran same tests on same hardware, no speculation, claude code
+   improvements were the final nail in the coffin
+
+the key: treat it like coaching - point at role models, create space to reflect
+on failures, iterate based on real feedback not theory.
+
 ## license
 
-mit
+MIT
 
 ## references
 
 - [ligerito paper](https://angeris.github.io/papers/ligerito.pdf) by novakovic & angeris
-- [julia implementation](https://github.com/bcc-research/Ligerito.jl)
-- [julia implementation2](https://github.com/bcc-research/ligerito-impl)
-- [rust implementation](https://github.com/ashutosh1206/ligerito-rust)
+- [ligerito.jl](https://github.com/bcc-research/Ligerito.jl) - julia reference implementation
+- [ligerito-impl](https://github.com/bcc-research/ligerito-impl) - optimized julia components
+- [ashutosh1206/ligerito-rust](https://github.com/ashutosh1206/ligerito-rust) - rust reference port
