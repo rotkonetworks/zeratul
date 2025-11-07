@@ -52,6 +52,22 @@ path = "examples/compression_prototype.rs"
 name = "detailed_proof_breakdown"
 path = "examples/detailed_proof_breakdown.rs"
 
+[[example]]
+name = "bench_standardized"
+path = "../examples/bench_standardized.rs"
+
+[[example]]
+name = "bench_standardized_24"
+path = "../examples/bench_standardized_24.rs"
+
+[[example]]
+name = "bench_standardized_28"
+path = "../examples/bench_standardized_28.rs"
+
+[[example]]
+name = "bench_standardized_30"
+path = "../examples/bench_standardized_30.rs"
+
 [[bench]]
 name = "ligerito_bench"
 harness = false

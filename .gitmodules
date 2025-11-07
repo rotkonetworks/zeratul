@@ -1,0 +1,9 @@
+[submodule "benchmarks/Ligerito.jl"]
+	path = benchmarks/Ligerito.jl
+	url = https://github.com/bcc-research/Ligerito.jl
+[submodule "benchmarks/ashutosh-ligerito"]
+	path = benchmarks/ashutosh-ligerito
+	url = https://github.com/ashutosh1206/ligerito-rust
+[submodule "benchmarks/ligerito-impl"]
+	path = benchmarks/ligerito-impl
+	url = https://github.com/bcc-research/ligerito-impl
