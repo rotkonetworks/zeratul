@@ -29,6 +29,8 @@ bytemuck = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
+bincode = "1.3"
+zstd = "0.13"
 
 [[example]]
 name = "prove_verify"
@@ -41,6 +43,14 @@ path = "../examples/fast_prove_verify.rs"
 [[example]]
 name = "tiny_debug"
 path = "../examples/tiny_debug.rs"
+
+[[example]]
+name = "compression_prototype"
+path = "examples/compression_prototype.rs"
+
+[[example]]
+name = "detailed_proof_breakdown"
+path = "examples/detailed_proof_breakdown.rs"
 
 # [[bench]]
 # name = "ligerito_bench"

@@ -1,6 +1,5 @@
 use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 use ligerito::{prove_sha256, verify_sha256, ProverConfig, VerifierConfig};
-use ligerito::verifier::verify_debug;
 use reed_solomon::reed_solomon;
 
 fn create_tiny_config() -> ProverConfig<BinaryElem32, BinaryElem128> {
@@ -55,9 +54,9 @@ fn main() {
     println!("Proof generated successfully");
 
     println!("\nVerifying proof...");
-    
-    // Use the debug verifier
-    match verify_debug(&verifier_config, &proof) {
+
+    // Use SHA256 verifier to match the prover
+    match verify_sha256(&verifier_config, &proof) {
         Ok(true) => println!("✓ Verification PASSED"),
         Ok(false) => println!("✗ Verification FAILED"),
         Err(e) => println!("✗ Verification ERROR: {:?}", e),
