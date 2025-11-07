@@ -2,6 +2,47 @@ use binary_fields::BinaryFieldElement;
 use crate::utils::{evaluate_lagrange_basis, evaluate_scaled_basis_inplace};
 use rayon::prelude::*;
 
+/// Tensorized dot product - exploits Kronecker structure of Lagrange basis
+/// For L(r₀, r₁, ..., rₖ₋₁) = L(r₀) ⊗ L(r₁) ⊗ ... ⊗ L(rₖ₋₁)
+/// Computes <row, L(challenges)> in O(k × 2^(k-1)) instead of O(2^k)
+///
+/// IMPORTANT: Iterates from LAST to FIRST challenge because Lagrange basis
+/// construction maps r0 to LSB, but tensor contraction needs MSB-first
+fn tensorized_dot_product<T, U>(row: &[T], challenges: &[U]) -> U
+where
+    T: BinaryFieldElement,
+    U: BinaryFieldElement + From<T>,
+{
+    let k = challenges.len();
+    if k == 0 {
+        return if row.len() == 1 {
+            U::from(row[0])
+        } else {
+            U::zero()
+        };
+    }
+
+    assert_eq!(row.len(), 1 << k, "Row length must be 2^k");
+
+    // Convert row to extension field
+    let mut current: Vec<U> = row.iter().map(|&x| U::from(x)).collect();
+
+    // Fold dimension by dimension from LAST to FIRST
+    for &r in challenges.iter().rev() {
+        let half = current.len() / 2;
+        let one_minus_r = U::one().add(&r); // Binary field: 1-r = 1+r
+
+        for i in 0..half {
+            // Contract using Lagrange basis structure: (1-r)*left + r*right
+            current[i] = current[2*i].mul(&one_minus_r)
+                        .add(&current[2*i+1].mul(&r));
+        }
+        current.truncate(half);
+    }
+
+    current[0]
+}
+
 /// Precompute alpha powers for efficiency
 pub fn precompute_alpha_powers<F: BinaryFieldElement>(alpha: F, n: usize) -> Vec<F> {
     let mut alpha_pows = vec![F::zero(); n];
@@ -34,32 +75,15 @@ where
     //     println!("WARNING: Alpha is zero! This will cause issues!");
     // }
 
-    let gr = evaluate_lagrange_basis(v_challenges);
-    // println!("Lagrange basis gr.len: {}", gr.len());
-    // println!("First few gr values: {:?}", &gr[..gr.len().min(4)]);
-
-    // Check if Lagrange basis is all zeros
-    // if gr.iter().all(|&x| x == U::zero()) {
-    //     println!("WARNING: Lagrange basis is all zeros!");
-    // }
-
+    // OPTIMIZATION: Use tensorized dot product instead of computing full Lagrange basis
     let mut basis_poly = vec![U::zero(); 1 << n];
     let mut enforced_sum = U::zero();
 
     let alpha_pows = precompute_alpha_powers(alpha, opened_rows.len());
-    // println!("Alpha: {:?}", alpha);
-    // println!("First few alpha powers: {:?}", &alpha_pows[..alpha_pows.len().min(4)]);
 
     for (i, (row, &query)) in opened_rows.iter().zip(sorted_queries.iter()).enumerate() {
-        // Debug output disabled
-
-        // Compute dot product
-        let dot = row.iter()
-            .zip(gr.iter())
-            .fold(U::zero(), |acc, (&r, &g)| {
-                let r_u = U::from(r);
-                acc.add(&r_u.mul(&g))
-            });
+        // OPTIMIZATION: Tensorized dot product O(k × 2^(k-1)) instead of O(2^k)
+        let dot = tensorized_dot_product(row, v_challenges);
 
         // Debug output disabled
 
