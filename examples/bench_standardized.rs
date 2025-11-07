@@ -23,6 +23,10 @@ fn main() {
     let proof = prove_sha256(&config, &poly).expect("proving failed");
     let prove_time = prove_start.elapsed();
 
+    // measure proof size
+    let proof_bytes = bincode::serialize(&proof).expect("serialization failed");
+    let proof_size_kb = proof_bytes.len() as f64 / 1024.0;
+
     // benchmark verification
     let verify_start = Instant::now();
     let result = verify_sha256(&verifier_config, &proof).expect("verification failed");
@@ -30,5 +34,6 @@ fn main() {
 
     println!("proving: {:.2}ms", prove_time.as_secs_f64() * 1000.0);
     println!("verification: {:.2}ms", verify_time.as_secs_f64() * 1000.0);
+    println!("proof size: {:.1} KB", proof_size_kb);
     println!("verified: {}", result);
 }
