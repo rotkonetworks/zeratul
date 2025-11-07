@@ -4,10 +4,11 @@
 
 mod elem;
 mod poly;
-mod simd;
+pub mod simd;
 
 pub use elem::{BinaryElem16, BinaryElem32, BinaryElem64, BinaryElem128};
 pub use poly::{BinaryPoly16, BinaryPoly32, BinaryPoly64, BinaryPoly128, BinaryPoly256};
+pub use simd::{batch_mul_gf128, batch_add_gf128};
 
 // Re-export traits
 pub trait BinaryFieldElement: Send + Sync +

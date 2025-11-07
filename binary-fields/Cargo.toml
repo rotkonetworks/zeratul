@@ -11,6 +11,12 @@ wide = { workspace = true }
 bytemuck = { workspace = true }
 serde = { workspace = true, optional = true }
 
+# portable simd for prover (requires nightly)
+[dependencies.portable-simd]
+package = "core_simd"
+git = "https://github.com/rust-lang/portable-simd"
+optional = true
+
 [dev-dependencies]
 criterion = { workspace = true }
 proptest = { workspace = true }
@@ -18,6 +24,10 @@ proptest = { workspace = true }
 [features]
 default = []
 serde = ["dep:serde"]
+# portable simd for cross-platform prover acceleration (nightly only)
+simd = ["portable-simd"]
+# x86-specific hardware acceleration (pclmulqdq, avx512)
+hardware-accel = []
 
 # [[bench]]
 # name = "field_ops"
