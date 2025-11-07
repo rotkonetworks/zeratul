@@ -52,6 +52,6 @@ path = "examples/compression_prototype.rs"
 name = "detailed_proof_breakdown"
 path = "examples/detailed_proof_breakdown.rs"
 
-# [[bench]]
-# name = "ligerito_bench"
-# harness = false
+[[bench]]
+name = "ligerito_bench"
+harness = false
