@@ -11,7 +11,7 @@ rust implementation of [ligerito](https://angeris.github.io/papers/ligerito.pdf)
 
 ## performance
 
-measured on amd ryzen 9 7945hx (32 threads):
+measured on amd ryzen 9 7945hx (32 threads) 96gb ddr5:
 
 ### standardized benchmarks
 
