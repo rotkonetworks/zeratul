@@ -1,4 +1,4 @@
-# ligerito
+# zeratul
 
 fast rust implementation of the [ligerito polynomial commitment scheme](https://angeris.github.io/papers/ligerito.pdf)
 
@@ -15,9 +15,11 @@ benchmarked on 2^20 (1,048,576) elements:
 | julia | sha256 | 3,262ms | 383ms | 3,645ms | 147 KB |
 | ashutosh (rust) | sha256 | 3,600ms | 279ms | 3,880ms | 105 KB |
 
-**11-19x faster** than other implementations. both transcripts deliver similar performance.
+**11-19x faster** than other implementations. both transcripts deliver similar
+performance.
 
-**note on proof sizes**: our proofs are 145 KB vs ashutosh's 105 KB. the 38% difference comes from simpler merkle proof batching (no deduplication). this is an acceptable tradeoff for 12x performance gain. see [PROOF_SIZE_INVESTIGATION.md](PROOF_SIZE_INVESTIGATION.md) for details.
+**note on proof sizes**: our proofs are 145 KB vs ashutosh's 105 KB. the 38%
+difference comes from simpler merkle proof batching (no deduplication).
 
 ## usage
 
@@ -105,4 +107,6 @@ mit
 ## references
 
 - [ligerito paper](https://angeris.github.io/papers/ligerito.pdf) by novakovic & angeris
-- [julia implementation](https://github.com/bcc-research/ligerito-impl)
+- [julia implementation](https://github.com/bcc-research/Ligerito.jl)
+- [julia implementation2](https://github.com/bcc-research/ligerito-impl)
+- [rust implementation](https://github.com/ashutosh1206/ligerito-rust)
