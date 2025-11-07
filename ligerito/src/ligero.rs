@@ -97,17 +97,14 @@ pub fn ligero_commit<F: BinaryFieldElement + Send + Sync>(
     n: usize,
     rs: &ReedSolomon<F>,
 ) -> RecursiveLigeroWitness<F> {
-    println!("ligero_commit: Converting poly to matrix...");
     let mut poly_mat = poly2mat(poly, m, n, 4);
-    println!("ligero_commit: Matrix size: {} x {}", poly_mat.len(), poly_mat[0].len());
-    println!("ligero_commit: Starting encode_cols...");
     encode_cols(&mut poly_mat, rs, true);
-    println!("ligero_commit: encode_cols done.");
 
-    let hashed_rows: Vec<Hash> = poly_mat.iter()
+    // Parallelize row hashing
+    let hashed_rows: Vec<Hash> = poly_mat.par_iter()
         .map(|row| hash_row(row))
         .collect();
-    
+
     let tree = build_merkle_tree(&hashed_rows);
 
     RecursiveLigeroWitness { mat: poly_mat, tree }
