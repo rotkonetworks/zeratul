@@ -21,9 +21,11 @@ all implementations tested with identical parameters (sha256 transcript):
 
 | implementation | proving | verification | speedup |
 |----------------|---------|--------------|---------|
-| **zeratul** | **184ms** | **131ms** | baseline |
-| ligerito.jl | 3,272ms | 384ms | 17.8x slower |
-| ashutosh-ligerito | 3,467ms | 269ms | 18.8x slower |
+| **ligerito.jl** | **60ms** | **40ms** | baseline |
+| zeratul | 184ms | 117ms | 3.1x slower |
+| ashutosh-ligerito | 3,417ms | 258ms | 57x slower |
+
+note: julia benchmarks exclude jit compilation time via warmup runs
 
 #### larger sizes (zeratul only)
 

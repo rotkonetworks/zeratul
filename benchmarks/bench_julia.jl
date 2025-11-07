@@ -12,7 +12,12 @@ poly = [BinaryElem32(UInt32(i % 0xFFFFFFFF)) for i in 0:(2^k-1)]
 config = Ligerito.hardcoded_config_20(BinaryElem32, BinaryElem128)
 verifier_cfg = Ligerito.hardcoded_config_20_verifier()
 
-# benchmark proving (no warmup - config mismatch with smaller poly)
+# warmup run to trigger JIT compilation
+println("warming up...")
+warmup_proof = prover(config, poly)
+verifier(verifier_cfg, warmup_proof)
+
+# benchmark proving (after warmup, excludes compilation time)
 prove_time = @elapsed begin
     proof = prover(config, poly)
 end
