@@ -222,3 +222,154 @@ fn mul_64x64_to_128(a: u64, b: u64) -> u128 {
 
     result
 }
+
+// batch field operations
+
+use crate::{BinaryElem128, BinaryFieldElement};
+
+/// batch multiply gf(2^128) elements with three-tier dispatch:
+/// hardware-accel → pclmulqdq, simd → portable_simd, else → scalar
+pub fn batch_mul_gf128(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [BinaryElem128]) {
+    assert_eq!(a.len(), b.len());
+    assert_eq!(a.len(), out.len());
+
+    #[cfg(all(feature = "hardware-accel", target_arch = "x86_64"))]
+    {
+        if is_x86_feature_detected!("pclmulqdq") {
+            return batch_mul_gf128_hw(a, b, out);
+        }
+    }
+
+    #[cfg(feature = "simd")]
+    {
+        return batch_mul_gf128_portable(a, b, out);
+    }
+
+    // scalar fallback
+    for i in 0..a.len() {
+        out[i] = a[i].mul(&b[i]);
+    }
+}
+
+/// batch add gf(2^128) elements (xor in gf(2^n))
+pub fn batch_add_gf128(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [BinaryElem128]) {
+    assert_eq!(a.len(), b.len());
+    assert_eq!(a.len(), out.len());
+
+    #[cfg(feature = "simd")]
+    {
+        return batch_add_gf128_portable(a, b, out);
+    }
+
+    // scalar fallback
+    for i in 0..a.len() {
+        out[i] = a[i].add(&b[i]);
+    }
+}
+
+// pclmulqdq-based batch multiply for x86_64
+#[cfg(all(feature = "hardware-accel", target_arch = "x86_64"))]
+fn batch_mul_gf128_hw(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [BinaryElem128]) {
+    use core::arch::x86_64::*;
+
+    unsafe {
+        for i in 0..a.len() {
+            let a_poly = BinaryPoly128::from_u128(a[i].to_u128());
+            let b_poly = BinaryPoly128::from_u128(b[i].to_u128());
+            let product = carryless_mul_128_full(a_poly, b_poly);
+            let reduced = reduce_mod_irred_128(product);
+            out[i] = BinaryElem128::from_u128(reduced.value());
+        }
+    }
+}
+
+// reduce 256-bit product mod gf(2^128) irreducible
+// todo: implement proper reduction for BinaryElem128's irreducible poly
+#[cfg(all(feature = "hardware-accel", target_arch = "x86_64"))]
+fn reduce_mod_irred_128(product: BinaryPoly256) -> BinaryPoly128 {
+    BinaryPoly128::from_u128(product.low())
+}
+
+// portable_simd batch ops (cross-platform, nightly)
+#[cfg(feature = "simd")]
+fn batch_mul_gf128_portable(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [BinaryElem128]) {
+    // todo: vectorize with portable_simd
+    for i in 0..a.len() {
+        out[i] = a[i].mul(&b[i]);
+    }
+}
+
+#[cfg(feature = "simd")]
+fn batch_add_gf128_portable(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [BinaryElem128]) {
+    // todo: vectorize xor with portable_simd
+    for i in 0..a.len() {
+        out[i] = a[i].add(&b[i]);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_batch_add() {
+        let a = vec![
+            BinaryElem128::from(1),
+            BinaryElem128::from(2),
+            BinaryElem128::from(3),
+        ];
+        let b = vec![
+            BinaryElem128::from(4),
+            BinaryElem128::from(5),
+            BinaryElem128::from(6),
+        ];
+        let mut out = vec![BinaryElem128::zero(); 3];
+
+        batch_add_gf128(&a, &b, &mut out);
+
+        for i in 0..3 {
+            assert_eq!(out[i], a[i].add(&b[i]));
+        }
+    }
+
+    #[test]
+    fn test_batch_mul() {
+        let a = vec![
+            BinaryElem128::from(7),
+            BinaryElem128::from(11),
+            BinaryElem128::from(13),
+        ];
+        let b = vec![
+            BinaryElem128::from(3),
+            BinaryElem128::from(5),
+            BinaryElem128::from(7),
+        ];
+        let mut out = vec![BinaryElem128::zero(); 3];
+
+        batch_mul_gf128(&a, &b, &mut out);
+
+        for i in 0..3 {
+            assert_eq!(out[i], a[i].mul(&b[i]));
+        }
+    }
+
+    #[test]
+    fn test_batch_mul_large() {
+        // test with larger field elements
+        let a = vec![
+            BinaryElem128::from(0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF0),
+            BinaryElem128::from(u128::MAX),
+        ];
+        let b = vec![
+            BinaryElem128::from(0x123456789ABCDEF0123456789ABCDEF0),
+            BinaryElem128::from(0x8000000000000000_0000000000000000),
+        ];
+        let mut out = vec![BinaryElem128::zero(); 2];
+
+        batch_mul_gf128(&a, &b, &mut out);
+
+        for i in 0..2 {
+            assert_eq!(out[i], a[i].mul(&b[i]));
+        }
+    }
+}
