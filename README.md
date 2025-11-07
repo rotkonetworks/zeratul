@@ -27,11 +27,12 @@ all implementations tested with identical parameters (sha256 transcript):
 
 #### larger sizes (zeratul only)
 
-| size | elements | proving | verification |
-|------|----------|---------|--------------|
-| 2^24 | 16.8M | 4.3s | 2.4s |
-| 2^28 | 268.4M | 109s | 26.6s |
-| 2^30 | 1.07B | 318s | 41.7s |
+| size | elements | proving | verification | proof size |
+|------|----------|---------|--------------|------------|
+| 2^20 | 1.05M | 184ms | 131ms | 147 KB |
+| 2^24 | 16.8M | 4.3s | 2.4s | 241 KB |
+| 2^28 | 268.4M | 109s | 26.6s | 364 KB |
+| 2^30 | 1.07B | 318s | 41.7s | 423 KB |
 
 ### reproducing
 
@@ -130,7 +131,7 @@ let valid = verify_sha256(&verifier_config, &proof)?;
 
 this code vibes hard and was built with llm assistance. what actually worked:
 
-1. **study the best** - pointed at isis lovecruft's style for commit
+1. **channel the best** - pointed at isis lovecruft's style for commit
    messages, looked at how top cryptographers write code instead of generic
 "best practices"
 
