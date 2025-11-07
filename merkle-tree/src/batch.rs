@@ -1,6 +1,7 @@
 // src/batch.rs
 use bytemuck::Pod;
 use crate::{CompleteMerkleTree, MerkleRoot, Hash, hash_leaf, hash_siblings};
+use rayon::prelude::*;
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -41,7 +42,7 @@ pub fn prove_batch(tree: &CompleteMerkleTree, queries: &[usize]) -> BatchedMerkl
 }
 
 /// Verify a batched proof (0-based indices)
-pub fn verify_batch<T: Pod>(
+pub fn verify_batch<T: Pod + Send + Sync>(
     root: &MerkleRoot,
     proof: &BatchedMerkleProof,
     depth: usize,
@@ -61,8 +62,8 @@ pub fn verify_batch<T: Pod>(
         return false;
     }
 
-    // Hash leaves
-    let mut layer: Vec<Hash> = leaves.iter()
+    // Hash leaves in parallel
+    let mut layer: Vec<Hash> = leaves.par_iter()
         .map(hash_leaf)
         .collect();
 

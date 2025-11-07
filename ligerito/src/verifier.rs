@@ -24,6 +24,16 @@ where
     T: BinaryFieldElement + Send + Sync,
     U: BinaryFieldElement + Send + Sync + From<T>,
 {
+    // OPTIMIZATION: Precompute basis evaluations once
+    // Cache initial basis (type T)
+    let cached_initial_sks: Vec<T> = eval_sk_at_vks(1 << config.initial_dim);
+
+    // Cache recursive basis evaluations (type U) for all rounds
+    let cached_recursive_sks: Vec<Vec<U>> = config.log_dims
+        .iter()
+        .map(|&dim| eval_sk_at_vks(1 << dim))
+        .collect();
+
     // Initialize transcript with proper domain separation
     let mut fs = FiatShamir::new_merlin();
 
@@ -69,8 +79,8 @@ where
 
     let alpha = fs.get_challenge::<U>();
 
-    // CRITICAL FIX: Use the same fixed sumcheck function as prover
-    let sks_vks: Vec<T> = eval_sk_at_vks(1 << config.initial_dim);
+    // Use cached basis instead of recomputing
+    let sks_vks = &cached_initial_sks;
     let (basis_poly, enforced_sum) = induce_sumcheck_poly_debug(
         config.initial_dim,
         &sks_vks,
@@ -220,11 +230,11 @@ where
             return Ok(false);
         }
 
-        // CRITICAL FIX: Use the same fixed sumcheck function as prover
-        let sks_vks: Vec<U> = eval_sk_at_vks(1 << config.log_dims[i]);
+        // Use cached basis instead of recomputing
+        let sks_vks = &cached_recursive_sks[i];
         let (basis_poly_next, enforced_sum_next) = induce_sumcheck_poly_debug(
             config.log_dims[i],
-            &sks_vks,
+            sks_vks,
             &ligero_proof.opened_rows,
             &rs,
             &queries,
@@ -263,6 +273,13 @@ where
     T: BinaryFieldElement + Send + Sync,
     U: BinaryFieldElement + Send + Sync + From<T>,
 {
+    // OPTIMIZATION: Precompute basis evaluations once
+    let cached_initial_sks: Vec<T> = eval_sk_at_vks(1 << config.initial_dim);
+    let cached_recursive_sks: Vec<Vec<U>> = config.log_dims
+        .iter()
+        .map(|&dim| eval_sk_at_vks(1 << dim))
+        .collect();
+
     // Absorb initial commitment
     fs.absorb_root(&proof.initial_ligero_cm.root);
 
@@ -301,7 +318,8 @@ where
 
     let alpha = fs.get_challenge::<U>();
 
-    let sks_vks: Vec<T> = eval_sk_at_vks(1 << config.initial_dim);
+    // Use cached basis
+    let sks_vks = &cached_initial_sks;
     let (_, enforced_sum) = induce_sumcheck_poly_debug(
         config.initial_dim,
         &sks_vks,
@@ -415,10 +433,10 @@ where
             return Ok(false);
         }
 
-        let sks_vks: Vec<U> = eval_sk_at_vks(1 << config.log_dims[i]);
+        let sks_vks = &cached_recursive_sks[i];
         let (_, enforced_sum_next) = induce_sumcheck_poly_debug(
             config.log_dims[i],
-            &sks_vks,
+            sks_vks,
             &ligero_proof.opened_rows,
             &rs,
             &queries,
@@ -485,6 +503,13 @@ where
     U: BinaryFieldElement + Send + Sync + From<T>,
 {
     println!("\n=== VERIFICATION DEBUG ===");
+
+    // OPTIMIZATION: Precompute basis evaluations once
+    let cached_initial_sks: Vec<T> = eval_sk_at_vks(1 << config.initial_dim);
+    let cached_recursive_sks: Vec<Vec<U>> = config.log_dims
+        .iter()
+        .map(|&dim| eval_sk_at_vks(1 << dim))
+        .collect();
 
     // Initialize transcript with Merlin (default)
     let mut fs = FiatShamir::new_merlin();
@@ -568,12 +593,12 @@ where
     println!("Got alpha challenge: {:?}", alpha);
 
     // CRITICAL FIX: Use the same fixed sumcheck function as prover
-    let sks_vks: Vec<T> = eval_sk_at_vks(1 << config.initial_dim);
+    let sks_vks = &cached_initial_sks;
     println!("Computed {} sks_vks", sks_vks.len());
 
     let (basis_poly, enforced_sum) = induce_sumcheck_poly_debug(
         config.initial_dim,
-        &sks_vks,
+        sks_vks,
         &proof.initial_ligero_proof.opened_rows,
         &partial_evals_0,
         &queries,
@@ -747,10 +772,10 @@ where
         }
 
         // CRITICAL FIX: Use the same fixed sumcheck function as prover
-        let sks_vks: Vec<U> = eval_sk_at_vks(1 << config.log_dims[i]);
+        let sks_vks = &cached_recursive_sks[i];
         let (basis_poly_next, enforced_sum_next) = induce_sumcheck_poly_debug(
             config.log_dims[i],
-            &sks_vks,
+            sks_vks,
             &ligero_proof.opened_rows,
             &rs,
             &queries,
@@ -799,6 +824,13 @@ where
 {
     use crate::sumcheck_verifier::SumcheckVerifierInstance;
 
+    // OPTIMIZATION: Precompute basis evaluations once
+    let cached_initial_sks: Vec<T> = eval_sk_at_vks(1 << config.initial_dim);
+    let cached_recursive_sks: Vec<Vec<U>> = config.log_dims
+        .iter()
+        .map(|&dim| eval_sk_at_vks(1 << dim))
+        .collect();
+
     // absorb initial commitment
     fs.absorb_root(&proof.initial_ligero_cm.root);
 
@@ -841,10 +873,10 @@ where
     let alpha = fs.get_challenge::<U>();
 
     // induce initial sumcheck polynomial
-    let sks_vks: Vec<T> = eval_sk_at_vks(1 << config.initial_dim);
+    let sks_vks = &cached_initial_sks;
     let (basis_poly, enforced_sum) = induce_sumcheck_poly_debug(
         config.initial_dim,
-        &sks_vks,
+        sks_vks,
         &proof.initial_ligero_proof.opened_rows,
         &partial_evals_0,
         &queries,
@@ -961,10 +993,10 @@ where
         }
 
         // induce next sumcheck polynomial
-        let sks_vks: Vec<U> = eval_sk_at_vks(1 << config.log_dims[i]);
+        let sks_vks = &cached_recursive_sks[i];
         let (basis_poly_next, enforced_sum_next) = induce_sumcheck_poly_debug(
             config.log_dims[i],
-            &sks_vks,
+            sks_vks,
             &ligero_proof.opened_rows,
             &rs,
             &queries,

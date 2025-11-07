@@ -7,6 +7,7 @@ edition = "2021"
 sha2 = "0.10"
 bytemuck = "1.14"
 rand = "0.8"
+rayon = "1.10"
 
 [dependencies.serde]
 version = "1.0"

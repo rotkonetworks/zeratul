@@ -95,7 +95,7 @@ impl CompleteMerkleTree {
 }
 
 /// Verify a batched Merkle proof (0-based indices)
-pub fn verify<T: Pod>(
+pub fn verify<T: Pod + Send + Sync>(
     root: &MerkleRoot,
     proof: &BatchedMerkleProof,
     depth: usize,

@@ -489,6 +489,7 @@ version = "0.1.0"
 dependencies = [
  "bytemuck",
  "rand",
+ "rayon",
  "serde",
  "sha2",
 ]
