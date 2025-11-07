@@ -68,6 +68,10 @@ where
     let mut enforced_sum = U::zero();
     let alpha_pows = precompute_alpha_powers(alpha, opened_rows.len());
 
+    // reuse allocations across iterations
+    let mut local_sks_x = vec![T::zero(); sks_vks.len()];
+    let mut local_basis = vec![U::zero(); 1 << n];
+
     for (i, (row, &query)) in opened_rows.iter().zip(sorted_queries.iter()).enumerate() {
         let dot = tensorized_dot_product(row, v_challenges);
         let contribution = dot.mul(&alpha_pows[i]);
@@ -76,8 +80,9 @@ where
         let query_mod = query % (1 << n);
         let qf = T::from_bits(query_mod as u64);
 
-        let mut local_sks_x = vec![T::zero(); sks_vks.len()];
-        let mut local_basis = vec![U::zero(); 1 << n];
+        // clear and reuse buffers
+        local_sks_x.fill(T::zero());
+        local_basis.fill(U::zero());
         evaluate_scaled_basis_inplace(&mut local_sks_x, &mut local_basis, sks_vks, qf, contribution);
 
         for (j, &val) in local_basis.iter().enumerate() {
@@ -164,6 +169,7 @@ where
             let mut local_basis = vec![U::zero(); 1 << n];
             let mut local_sum = U::zero();
             let mut local_sks_x = vec![T::zero(); sks_vks.len()];
+            let mut temp_basis = vec![U::zero(); 1 << n]; // reuse across loop
 
             let start_idx = t * chunk_size;
             let end_idx = ((t + 1) * chunk_size).min(n_rows);
@@ -180,7 +186,10 @@ where
                 local_sum = local_sum.add(&contribution);
 
                 let qf = T::from_bits(query as u64);
-                let mut temp_basis = vec![U::zero(); 1 << n];
+
+                // clear and reuse temp_basis
+                temp_basis.fill(U::zero());
+                local_sks_x.fill(T::zero());
                 evaluate_scaled_basis_inplace(&mut local_sks_x, &mut temp_basis, sks_vks, qf, contribution);
 
                 for j in 0..(1 << n) {
