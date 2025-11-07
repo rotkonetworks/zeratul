@@ -132,7 +132,7 @@ this code vibes hard and was built with llm assistance. what actually worked:
 2. **meditate on failure** - when things broke or benchmarks sucked, asked llm
    to reflect on what went wrong and find the headspace to try differently. very
 similar to sport coaching - you don't just say "do better", you work through the
-mental blockers
+mental blockers.
 
 3. **iterate through pain** - let test failures and compiler errors be the
    teacher. when reduction algorithm for gf(2^128) failed, reverted and learned
@@ -140,8 +140,7 @@ instead of forcing it
 
 4. **the julia 1-indexing hell** - major hardship was translating julia
    reference implementation (1-indexed) to rust (0-indexed). off-by-one errors
-in polynomial evaluation and fft indexing caused subtle math bugs that took
-meditation to debug
+in polynomial evaluation and fft indexing caused subtle math bugs
 
 5. **minimal vibe-based prompts** - "yes lets keep improving prover and verifier
    times" or "pedal to the metal, we want to be on L1 cache"
@@ -151,11 +150,14 @@ meditation to debug
    improvements were the final nail in the coffin
 
 the key: treat it like coaching - point at role models, create space to reflect
-on failures, iterate based on real feedback not theory.
+on failures, require explanations, iterate based on real feedback not theory.
 
 ## license
 
 MIT
+
+## support
+penumbra13pqjwqyqqd3u7jw86a7ncekc6xg07d7gfk36ywlym2twypqh7xusmjnamz5ketvk2hxklpm8gdn4sdp3m333fvsq0nwly4lhzzzekjf9r9e98mpt0tdn8e6pzg65nx9uv2x4f4
 
 ## references
 
