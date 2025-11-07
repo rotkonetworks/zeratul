@@ -7,6 +7,7 @@ pub use batch::{BatchedMerkleProof, prove_batch, verify_batch};
 
 use sha2::{Sha256, Digest};
 use bytemuck::Pod;
+use rayon::prelude::*;
 
 pub type Hash = [u8; 32];
 
@@ -60,10 +61,18 @@ pub fn build_merkle_tree<T: Pod>(leaves: &[T]) -> CompleteMerkleTree {
     let mut layers = vec![current_layer.clone()];
 
     while current_layer.len() > 1 {
-        let next_layer: Vec<Hash> = current_layer
-            .chunks_exact(2)
-            .map(|chunk| hash_siblings(&chunk[0], &chunk[1]))
-            .collect();
+        // Parallelize sibling hashing when layer is large enough (prover optimization)
+        let next_layer: Vec<Hash> = if current_layer.len() >= 128 {
+            current_layer
+                .par_chunks_exact(2)
+                .map(|chunk| hash_siblings(&chunk[0], &chunk[1]))
+                .collect()
+        } else {
+            current_layer
+                .chunks_exact(2)
+                .map(|chunk| hash_siblings(&chunk[0], &chunk[1]))
+                .collect()
+        };
 
         layers.push(next_layer.clone());
         current_layer = next_layer;

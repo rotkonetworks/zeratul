@@ -2,12 +2,9 @@ use binary_fields::BinaryFieldElement;
 use crate::utils::{evaluate_lagrange_basis, evaluate_scaled_basis_inplace};
 use rayon::prelude::*;
 
-/// Tensorized dot product - exploits Kronecker structure of Lagrange basis
-/// For L(r₀, r₁, ..., rₖ₋₁) = L(r₀) ⊗ L(r₁) ⊗ ... ⊗ L(rₖ₋₁)
-/// Computes <row, L(challenges)> in O(k × 2^(k-1)) instead of O(2^k)
-///
-/// IMPORTANT: Iterates from LAST to FIRST challenge because Lagrange basis
-/// construction maps r0 to LSB, but tensor contraction needs MSB-first
+/// tensorized dot product exploiting kronecker structure
+/// reduces o(2^k) to o(k × 2^(k-1)) by folding dimensions
+/// iterates challenges in reverse since lagrange basis maps r0 to lsb
 fn tensorized_dot_product<T, U>(row: &[T], challenges: &[U]) -> U
 where
     T: BinaryFieldElement,
@@ -24,16 +21,15 @@ where
 
     assert_eq!(row.len(), 1 << k, "Row length must be 2^k");
 
-    // Convert row to extension field
     let mut current: Vec<U> = row.iter().map(|&x| U::from(x)).collect();
 
-    // Fold dimension by dimension from LAST to FIRST
+    // fold from last to first challenge
     for &r in challenges.iter().rev() {
         let half = current.len() / 2;
-        let one_minus_r = U::one().add(&r); // Binary field: 1-r = 1+r
+        let one_minus_r = U::one().add(&r); // in gf(2^n): 1-r = 1+r
 
         for i in 0..half {
-            // Contract using Lagrange basis structure: (1-r)*left + r*right
+            // lagrange contraction: (1-r)*left + r*right
             current[i] = current[2*i].mul(&one_minus_r)
                         .add(&current[2*i+1].mul(&r));
         }
@@ -43,7 +39,7 @@ where
     current[0]
 }
 
-/// Precompute alpha powers for efficiency
+/// precompute powers of alpha to avoid repeated multiplications
 pub fn precompute_alpha_powers<F: BinaryFieldElement>(alpha: F, n: usize) -> Vec<F> {
     let mut alpha_pows = vec![F::zero(); n];
     if n > 0 {
@@ -55,7 +51,7 @@ pub fn precompute_alpha_powers<F: BinaryFieldElement>(alpha: F, n: usize) -> Vec
     alpha_pows
 }
 
-/// FIXED: Induce sumcheck polynomial with proper sum consistency
+/// debug version with consistency checks enabled
 pub fn induce_sumcheck_poly_debug<T, U>(
     n: usize,
     sks_vks: &[T],
@@ -68,71 +64,36 @@ where
     T: BinaryFieldElement,
     U: BinaryFieldElement + From<T>,
 {
-    // Debug output disabled for performance
-
-    // Check if alpha is zero - this is problematic!
-    // if alpha == U::zero() {
-    //     println!("WARNING: Alpha is zero! This will cause issues!");
-    // }
-
-    // OPTIMIZATION: Use tensorized dot product instead of computing full Lagrange basis
     let mut basis_poly = vec![U::zero(); 1 << n];
     let mut enforced_sum = U::zero();
-
     let alpha_pows = precompute_alpha_powers(alpha, opened_rows.len());
 
     for (i, (row, &query)) in opened_rows.iter().zip(sorted_queries.iter()).enumerate() {
-        // OPTIMIZATION: Tensorized dot product O(k × 2^(k-1)) instead of O(2^k)
         let dot = tensorized_dot_product(row, v_challenges);
-
-        // Debug output disabled
-
-        let alpha_pow = alpha_pows[i];
-        let contribution = dot.mul(&alpha_pow);
+        let contribution = dot.mul(&alpha_pows[i]);
         enforced_sum = enforced_sum.add(&contribution);
 
-        // Debug output disabled
-
-        // FIX: Use contribution as the scale (alpha_pow * dot)
-        let scale = contribution;
-
-        // Create field element from query index (0-based)
-        // For queries larger than the basis size, take modulo
         let query_mod = query % (1 << n);
         let qf = T::from_bits(query_mod as u64);
-        // Debug output disabled
 
         let mut local_sks_x = vec![T::zero(); sks_vks.len()];
         let mut local_basis = vec![U::zero(); 1 << n];
+        evaluate_scaled_basis_inplace(&mut local_sks_x, &mut local_basis, sks_vks, qf, contribution);
 
-        // FIXED: Use proper multilinear extension of delta function
-        evaluate_scaled_basis_inplace(&mut local_sks_x, &mut local_basis, sks_vks, qf, scale);
-
-        // Debug output disabled
-
-        // Add to basis polynomial
         for (j, &val) in local_basis.iter().enumerate() {
             basis_poly[j] = basis_poly[j].add(&val);
         }
     }
 
-    // Final debug output disabled
-
-    // Check disabled
-
-    // Compute the sum of basis polynomial for verification
     let basis_sum = basis_poly.iter().fold(U::zero(), |acc, &x| acc.add(&x));
-
-    // CRITICAL FIX: Check consistency
     if basis_sum != enforced_sum {
-        // This should not happen with the fixed implementation
-        panic!("Sumcheck consistency check failed - this indicates a bug in the implementation");
+        panic!("sumcheck consistency check failed");
     }
 
     (basis_poly, enforced_sum)
 }
 
-/// Production version without debug output - optimized for performance
+/// production version using direct indexing optimization
 pub fn induce_sumcheck_poly<T, U>(
     n: usize,
     sks_vks: &[T],
@@ -152,36 +113,27 @@ where
     let mut enforced_sum = U::zero();
 
     for (i, (row, &query)) in opened_rows.iter().zip(sorted_queries.iter()).enumerate() {
-        // Compute dot product
         let dot = row.iter()
             .zip(gr.iter())
-            .fold(U::zero(), |acc, (&r, &g)| {
-                let r_u = U::from(r);
-                acc.add(&r_u.mul(&g))
-            });
+            .fold(U::zero(), |acc, (&r, &g)| acc.add(&U::from(r).mul(&g)));
 
-        let alpha_pow = alpha_pows[i];
-        let contribution = dot.mul(&alpha_pow);
+        let contribution = dot.mul(&alpha_pows[i]);
         enforced_sum = enforced_sum.add(&contribution);
 
-        // For queries larger than the basis size, take modulo
         let query_mod = query % (1 << n);
-
-        // Direct indexing - the query_mod IS the index we want
         basis_poly[query_mod] = basis_poly[query_mod].add(&contribution);
     }
 
-    // Consistency check (can be disabled in production for performance)
     debug_assert_eq!(
         basis_poly.iter().fold(U::zero(), |acc, &x| acc.add(&x)),
         enforced_sum,
-        "Sumcheck consistency check failed"
+        "sumcheck consistency failed"
     );
 
     (basis_poly, enforced_sum)
 }
 
-/// Induce sumcheck polynomial in parallel
+/// parallel version for prover (not for wasm/polkavm verifier)
 pub fn induce_sumcheck_poly_parallel<T, U>(
     n: usize,
     sks_vks: &[T],
@@ -196,21 +148,16 @@ where
 {
     let gr = evaluate_lagrange_basis(v_challenges);
 
-    // Check if we have the expected dimensions
     if !opened_rows.is_empty() {
-        assert_eq!(opened_rows[0].len(), gr.len(),
-                   "Row length {} doesn't match Lagrange basis length {}",
-                   opened_rows[0].len(), gr.len());
+        assert_eq!(opened_rows[0].len(), gr.len());
     }
     assert_eq!(opened_rows.len(), sorted_queries.len());
 
     let n_threads = rayon::current_num_threads();
     let n_rows = opened_rows.len();
     let chunk_size = (n_rows + n_threads - 1) / n_threads;
-
     let alpha_pows = precompute_alpha_powers(alpha, n_rows);
 
-    // Parallel computation
     let results: Vec<(Vec<U>, U)> = (0..n_threads)
         .into_par_iter()
         .map(|t| {
@@ -225,28 +172,17 @@ where
                 let row = &opened_rows[i];
                 let query = sorted_queries[i];
 
-                // Compute dot product
                 let dot = row.iter()
                     .zip(gr.iter())
-                    .fold(U::zero(), |acc, (&r, &g)| {
-                        let r_u = U::from(r);
-                        acc.add(&r_u.mul(&g))
-                    });
+                    .fold(U::zero(), |acc, (&r, &g)| acc.add(&U::from(r).mul(&g)));
 
-                let alpha_pow = alpha_pows[i];
-                let contribution = dot.mul(&alpha_pow);
+                let contribution = dot.mul(&alpha_pows[i]);
                 local_sum = local_sum.add(&contribution);
 
-                // FIX: Use contribution as the scale
-                let scale = contribution;
-
-                // Create field element from query index (0-based)
                 let qf = T::from_bits(query as u64);
-
                 let mut temp_basis = vec![U::zero(); 1 << n];
-                evaluate_scaled_basis_inplace(&mut local_sks_x, &mut temp_basis, sks_vks, qf, scale);
+                evaluate_scaled_basis_inplace(&mut local_sks_x, &mut temp_basis, sks_vks, qf, contribution);
 
-                // Add to local basis
                 for j in 0..(1 << n) {
                     local_basis[j] = local_basis[j].add(&temp_basis[j]);
                 }
@@ -256,7 +192,6 @@ where
         })
         .collect();
 
-    // Combine results
     let mut basis_poly = vec![U::zero(); 1 << n];
     let mut enforced_sum = U::zero();
 
@@ -267,11 +202,10 @@ where
         enforced_sum = enforced_sum.add(&partial_sum);
     }
 
-    // Consistency check
     debug_assert_eq!(
         basis_poly.iter().fold(U::zero(), |acc, &x| acc.add(&x)),
         enforced_sum,
-        "Parallel sumcheck consistency check failed"
+        "parallel sumcheck consistency failed"
     );
 
     (basis_poly, enforced_sum)
