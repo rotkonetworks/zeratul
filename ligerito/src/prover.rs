@@ -560,19 +560,21 @@ mod tests {
 
     #[test]
     fn test_evaluate_quadratic() {
+        // for binary field sumcheck, we use linear polynomials: f(x) = s0 + s1*x
+        // where s1 = s0 + s2, so f(0) = s0 and f(1) = s0 + s1 = s2
         let coeffs = (
-            BinaryElem32::from(1),
-            BinaryElem32::from(2),
-            BinaryElem32::from(3),
+            BinaryElem32::from(1),  // s0
+            BinaryElem32::from(3),  // s1 = s0 + s2
+            BinaryElem32::from(2),  // s2
         );
 
-        // Test at x = 0
+        // test at x = 0: f(0) = s0
         let val0 = evaluate_quadratic(coeffs, BinaryElem32::zero());
         assert_eq!(val0, BinaryElem32::from(1));
 
-        // Test at x = 1
+        // test at x = 1: f(1) = s0 + s1*1 = s0 + s1
         let val1 = evaluate_quadratic(coeffs, BinaryElem32::one());
-        // a0 + (a1 - a0 - a2) + a2 = a1
+        // in binary field: 1 XOR 3 = 2
         assert_eq!(val1, BinaryElem32::from(2));
     }
 

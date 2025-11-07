@@ -305,18 +305,20 @@ mod tests {
 
     #[test]
     fn test_sumcheck_parallel_consistency() {
-        let n = 2; // 2^2 = 4 elements  
+        let n = 2; // 2^2 = 4 elements
         let sks_vks: Vec<BinaryElem32> = eval_sk_at_vks(1 << n);
 
+        // 1 challenge -> Lagrange basis length = 2^1 = 2
         let v_challenges = vec![
             BinaryElem128::from(0xABCD),
         ];
 
         let queries = vec![0, 1, 3];
+        // each row must have length 2 to match Lagrange basis
         let opened_rows = vec![
-            vec![BinaryElem32::from(7)],
-            vec![BinaryElem32::from(11)],
-            vec![BinaryElem32::from(13)],
+            vec![BinaryElem32::from(7), BinaryElem32::from(9)],
+            vec![BinaryElem32::from(11), BinaryElem32::from(13)],
+            vec![BinaryElem32::from(15), BinaryElem32::from(17)],
         ];
 
         let alpha = BinaryElem128::from(0x1337);

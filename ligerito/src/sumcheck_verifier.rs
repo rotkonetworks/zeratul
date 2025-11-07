@@ -1,0 +1,413 @@
+use binary_fields::BinaryFieldElement;
+use crate::utils::partial_eval_multilinear;
+
+/// linear polynomial structure for binary field sumcheck
+/// represents f(x) = c + b*x
+#[derive(Debug, Clone)]
+pub struct LinearPoly<F: BinaryFieldElement> {
+    b: F, // coefficient of x
+    c: F, // constant term
+}
+
+impl<F: BinaryFieldElement> LinearPoly<F> {
+    pub fn new(b: F, c: F) -> Self {
+        Self { b, c }
+    }
+
+    /// evaluate linear polynomial at point r: c + b*r
+    pub fn eval(&self, r: F) -> F {
+        self.c.add(&self.b.mul(&r))
+    }
+}
+
+/// quadratic polynomial structure (kept for completeness but not used in binary sumcheck)
+#[derive(Debug, Clone)]
+pub struct QuadraticPoly<F: BinaryFieldElement> {
+    a: F,
+    b: F,
+    c: F,
+}
+
+impl<F: BinaryFieldElement> QuadraticPoly<F> {
+    pub fn new(a: F, b: F, c: F) -> Self {
+        Self { a, b, c }
+    }
+
+    /// evaluate quadratic at point r: a*r^2 + b*r + c
+    pub fn eval_quadratic(&self, r: F) -> F {
+        self.a.mul(&r).mul(&r).add(&self.b.mul(&r)).add(&self.c)
+    }
+}
+
+/// create linear polynomial from two evaluations
+/// for binary field sumcheck: g(x) = s0 + (s0 + s2)*x
+/// where s0 = g(0) and s2 = g(1)
+pub fn linear_from_evals<F: BinaryFieldElement>(s0: F, s2: F) -> LinearPoly<F> {
+    // g(x) = s0 + (s0 + s2)*x
+    // this gives g(0) = s0 and g(1) = s0 + (s0+s2) = s2 (in binary field)
+    LinearPoly::new(s0.add(&s2), s0)
+}
+
+/// create quadratic polynomial from three evaluations
+/// given: f(0) = at0, f(1) = at1, f(x) = atx (default x=3)
+/// compute unique degree-2 polynomial through these points
+pub fn quadratic_from_evals<F: BinaryFieldElement>(at0: F, at1: F, atx: F) -> QuadraticPoly<F> {
+    // default x = 3
+    let x = F::from_bits(3);
+
+    // standard lagrange interpolation for quadratic
+    // numerator = atx + at0 + x*(at1 + at0)
+    let numerator = atx.add(&at0).add(&x.mul(&at1.add(&at0)));
+
+    // denominator = x^2 + x
+    let denominator = x.mul(&x).add(&x);
+
+    // a = numerator / denominator
+    let a = numerator.mul(&denominator.inv());
+
+    // b = at1 + at0 + a
+    let b = at1.add(&at0).add(&a);
+
+    QuadraticPoly {
+        a,
+        b,
+        c: at0,
+    }
+}
+
+/// fold two linear polynomials with separation challenge
+/// result = p1 + alpha * p2
+pub fn fold_linear<F: BinaryFieldElement>(
+    p1: LinearPoly<F>,
+    p2: LinearPoly<F>,
+    alpha: F,
+) -> LinearPoly<F> {
+    LinearPoly::new(
+        p1.b.add(&alpha.mul(&p2.b)),
+        p1.c.add(&alpha.mul(&p2.c)),
+    )
+}
+
+/// fold two quadratic polynomials with separation challenge
+/// result = p1 + alpha * p2
+pub fn fold_quadratic<F: BinaryFieldElement>(
+    p1: QuadraticPoly<F>,
+    p2: QuadraticPoly<F>,
+    alpha: F,
+) -> QuadraticPoly<F> {
+    QuadraticPoly::new(
+        p1.a.add(&alpha.mul(&p2.a)),
+        p1.b.add(&alpha.mul(&p2.b)),
+        p1.c.add(&alpha.mul(&p2.c)),
+    )
+}
+
+/// stateful sumcheck verifier instance
+/// maintains basis polynomials, challenges, and running state throughout verification
+pub struct SumcheckVerifierInstance<F: BinaryFieldElement> {
+    /// basis polynomials being tracked
+    basis_polys: Vec<Vec<F>>,
+    /// separation challenges for gluing
+    separation_challenges: Vec<F>,
+    /// current sum claim (public so verifier can absorb it)
+    pub sum: F,
+    /// full sumcheck transcript
+    transcript: Vec<(F, F, F)>,
+    /// random challenges received so far
+    ris: Vec<F>,
+    /// current position in transcript
+    tr_reader: usize,
+    /// current running polynomial (linear for binary field sumcheck)
+    running_poly: Option<LinearPoly<F>>,
+    /// polynomial to be glued next
+    to_glue: Option<LinearPoly<F>>,
+}
+
+impl<F: BinaryFieldElement> SumcheckVerifierInstance<F> {
+    /// create new verifier instance with first basis polynomial and initial sum
+    /// the first fold() call will read the first transcript entry
+    pub fn new(
+        b1: Vec<F>,
+        h1: F,
+        transcript: Vec<(F, F, F)>,
+    ) -> Self {
+        Self {
+            basis_polys: vec![b1],
+            separation_challenges: vec![F::one()],
+            sum: h1,
+            transcript,
+            ris: vec![],
+            tr_reader: 0,
+            running_poly: None,
+            to_glue: None,
+        }
+    }
+
+    /// read next transcript entry
+    fn read_tr(&mut self) -> (F, F, F) {
+        if self.tr_reader >= self.transcript.len() {
+            panic!("transcript reader out of bounds");
+        }
+        let (g0, g1, g2) = self.transcript[self.tr_reader];
+        self.tr_reader += 1;
+        (g0, g1, g2)
+    }
+
+    /// fold the sumcheck with random challenge r
+    pub fn fold(&mut self, r: F) -> (F, F, F) {
+        // read transcript entry for this round
+        let (s0, s_total, s2) = self.read_tr();
+
+        // verify the coefficients match current sum claim
+        if s_total != self.sum {
+            eprintln!("sumcheck fold verification failed");
+            eprintln!("  expected sum: {:?}", self.sum);
+            eprintln!("  got s_total: {:?}", s_total);
+            eprintln!("  s0: {:?}, s2: {:?}", s0, s2);
+            eprintln!("  s0 + s2 = {:?}", s0.add(&s2));
+            panic!("sumcheck fold verification failed");
+        }
+
+        // construct linear polynomial from the coefficients
+        let poly = linear_from_evals(s0, s2);
+
+        // evaluate at the challenge point to get new sum
+        self.sum = poly.eval(r);
+
+        // update running polynomial for next round
+        self.running_poly = Some(poly);
+
+        // store the challenge
+        self.ris.push(r);
+
+        (s0, s_total, s2)
+    }
+
+    /// introduce new basis polynomial to be glued
+    pub fn introduce_new(&mut self, bi: Vec<F>, h: F) -> (F, F, F) {
+        let (s0, s_total, s2) = self.read_tr();
+
+        // verify the new polynomial's claim
+        if s_total != h {
+            panic!("introduce_new claim verification failed");
+        }
+
+        self.basis_polys.push(bi);
+
+        // construct linear polynomial from evaluations
+        self.to_glue = Some(linear_from_evals(s0, s2));
+
+        (s0, s_total, s2)
+    }
+
+    /// glue the pending polynomial with separation challenge alpha
+    pub fn glue(&mut self, alpha: F) {
+        if self.running_poly.is_none() {
+            panic!("no running polynomial to glue");
+        }
+        if self.to_glue.is_none() {
+            panic!("no polynomial to glue");
+        }
+
+        self.separation_challenges.push(alpha);
+
+        let running = self.running_poly.take().unwrap();
+        let to_glue = self.to_glue.take().unwrap();
+
+        self.running_poly = Some(fold_linear(running, to_glue, alpha));
+    }
+
+    /// evaluate basis polynomials at the current point (after all folds)
+    /// this is used for the final check
+    fn evaluate_basis_polys(&mut self, r: F) -> F {
+        self.ris.push(r);
+
+        // evaluate first basis polynomial at all ris
+        let mut b0_copy = self.basis_polys[0].clone();
+        partial_eval_multilinear(&mut b0_copy, &self.ris);
+
+        if b0_copy.len() != 1 {
+            panic!("basis polynomial should evaluate to single value");
+        }
+        let mut b_eval = b0_copy[0];
+
+        // evaluate other basis polynomials
+        for i in 1..self.basis_polys.len() {
+            let n = self.basis_polys[i].len().ilog2() as usize;
+            let num_rs = self.ris.len();
+
+            // take the last n evaluation points for this basis polynomial
+            let eval_pts = if num_rs >= n {
+                &self.ris[num_rs - n..]
+            } else {
+                &self.ris[..]
+            };
+
+            let mut bi_copy = self.basis_polys[i].clone();
+            partial_eval_multilinear(&mut bi_copy, eval_pts);
+
+            if bi_copy.len() != 1 {
+                panic!("basis polynomial {} should evaluate to single value", i);
+            }
+            let bi_eval = bi_copy[0];
+
+            // add scaled contribution
+            b_eval = b_eval.add(&self.separation_challenges[i].mul(&bi_eval));
+        }
+
+        b_eval
+    }
+
+    /// final verification check: f(r) * basis(r) == sum
+    pub fn verify(&mut self, r: F, f_eval: F) -> bool {
+        if self.running_poly.is_none() {
+            return false;
+        }
+
+        let running_poly = self.running_poly.as_ref().unwrap().clone();
+        self.sum = running_poly.eval(r);
+
+        let basis_evals = self.evaluate_basis_polys(r);
+
+        f_eval.mul(&basis_evals) == self.sum
+    }
+
+    /// evaluate basis polynomials partially (keeping k variables unevaluated)
+    /// returns a vector of length 2^k
+    fn evaluate_basis_polys_partially(&mut self, r: F, k: usize) -> Vec<F> {
+        self.ris.push(r);
+
+        // evaluate first basis polynomial
+        let mut b0_copy = self.basis_polys[0].clone();
+        partial_eval_multilinear(&mut b0_copy, &self.ris);
+        let mut acc = b0_copy;
+
+        // evaluate and accumulate other basis polynomials
+        for i in 1..self.basis_polys.len() {
+            let n = self.basis_polys[i].len().ilog2() as usize;
+            let num_rs = self.ris.len();
+
+            // take the last (n - k) evaluation points for this basis polynomial
+            // this leaves k variables unevaluated
+            let eval_len = if n >= k { n - k } else { 0 };
+            let eval_len = eval_len.min(num_rs);
+
+            let eval_pts = if eval_len > 0 {
+                &self.ris[num_rs - eval_len..]
+            } else {
+                &[]
+            };
+
+            let mut bi_copy = self.basis_polys[i].clone();
+            if !eval_pts.is_empty() {
+                partial_eval_multilinear(&mut bi_copy, eval_pts);
+            }
+
+            let alpha = self.separation_challenges[i];
+
+            // accumulate: acc[j] += alpha * bi_eval[j]
+            if acc.len() != bi_copy.len() {
+                panic!(
+                    "basis polynomial length mismatch: {} vs {}",
+                    acc.len(),
+                    bi_copy.len()
+                );
+            }
+
+            for j in 0..acc.len() {
+                acc[j] = acc[j].add(&alpha.mul(&bi_copy[j]));
+            }
+        }
+
+        acc
+    }
+
+    /// final partial verification check: sum(f_partial_eval[i] * basis_evals[i]) == sum
+    /// note: in current protocol, verify_ligero provides sufficient verification
+    /// this function is kept for completeness but may not be necessary
+    pub fn verify_partial(&mut self, r: F, f_partial_eval: &[F]) -> bool {
+        let k = f_partial_eval.len().ilog2() as usize;
+
+        if self.running_poly.is_none() {
+            return false;
+        }
+
+        // evaluate running polynomial at r
+        self.sum = self.running_poly.as_ref().unwrap().eval(r);
+
+        // evaluate basis polynomials partially
+        let basis_evals = self.evaluate_basis_polys_partially(r, k);
+
+        // check lengths match
+        if f_partial_eval.len() != basis_evals.len() {
+            return false;
+        }
+
+        // compute dot product: sum(f[i] * basis[i])
+        let dot_product = f_partial_eval
+            .iter()
+            .zip(basis_evals.iter())
+            .fold(F::zero(), |acc, (&f_i, &b_i)| {
+                acc.add(&f_i.mul(&b_i))
+            });
+
+        dot_product == self.sum
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use binary_fields::BinaryElem128;
+
+    #[test]
+    fn test_quadratic_eval() {
+        // test f(x) = x^2 + 2x + 3 in binary field
+        let poly = QuadraticPoly::new(
+            BinaryElem128::one(),
+            BinaryElem128::from(2),
+            BinaryElem128::from(3),
+        );
+
+        let val_at_0 = poly.eval_quadratic(BinaryElem128::zero());
+        assert_eq!(val_at_0, BinaryElem128::from(3));
+    }
+
+    #[test]
+    fn test_quadratic_from_evals() {
+        // create quadratic from three points
+        let at0 = BinaryElem128::from(1);
+        let at1 = BinaryElem128::from(2);
+        let at3 = BinaryElem128::from(4);
+
+        let poly = quadratic_from_evals(at0, at1, at3);
+
+        // verify it passes through the points
+        assert_eq!(poly.eval_quadratic(BinaryElem128::zero()), at0);
+        assert_eq!(poly.eval_quadratic(BinaryElem128::one()), at1);
+        assert_eq!(poly.eval_quadratic(BinaryElem128::from(3)), at3);
+    }
+
+    #[test]
+    fn test_fold_quadratic() {
+        let p1 = QuadraticPoly::new(
+            BinaryElem128::one(),
+            BinaryElem128::from(2),
+            BinaryElem128::from(3),
+        );
+        let p2 = QuadraticPoly::new(
+            BinaryElem128::from(4),
+            BinaryElem128::from(5),
+            BinaryElem128::from(6),
+        );
+        let alpha = BinaryElem128::from(7);
+
+        let folded = fold_quadratic(p1.clone(), p2.clone(), alpha);
+
+        // check that folded(x) = p1(x) + alpha * p2(x)
+        let x = BinaryElem128::from(11);
+        let expected = p1.eval_quadratic(x).add(&alpha.mul(&p2.eval_quadratic(x)));
+        let actual = folded.eval_quadratic(x);
+        assert_eq!(actual, expected);
+    }
+}
