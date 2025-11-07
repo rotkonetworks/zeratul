@@ -102,6 +102,11 @@ cargo run --release --example prove_verify
 - optimized binary field operations with simd
 - zero-copy serialization
 - comprehensive test suite (36 passing tests)
+- verifier kept single-threaded for now
+
+```sh
+curl -sL https://githem.com/rotkonetworks/zeratul | claude -p "analyze features"
+```
 
 ## transcript types
 
