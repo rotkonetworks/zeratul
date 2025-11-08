@@ -3,7 +3,7 @@ use crate::{
     VerifierConfig, FinalizedLigeritoProof,
     transcript::{FiatShamir, Transcript},
     ligero::{verify_ligero, hash_row},
-    sumcheck_polys::induce_sumcheck_poly,
+    sumcheck_polys::induce_sumcheck_poly_parallel,
     utils::{eval_sk_at_vks, partial_eval_multilinear, evaluate_lagrange_basis},
 };
 use merkle_tree::{self, Hash};
@@ -81,7 +81,7 @@ where
 
     // Use cached basis instead of recomputing
     let sks_vks = &cached_initial_sks;
-    let (basis_poly, enforced_sum) = induce_sumcheck_poly(
+    let (basis_poly, enforced_sum) = induce_sumcheck_poly_parallel(
         config.initial_dim,
         &sks_vks,
         &proof.initial_ligero_proof.opened_rows,
@@ -90,7 +90,7 @@ where
         alpha,
     );
 
-    // CRITICAL FIX: Use the enforced_sum from sumcheck computation
+    // Use the enforced_sum from sumcheck computation
     let mut current_sum = enforced_sum;
 
     // Initial sumcheck absorb
@@ -223,7 +223,7 @@ where
 
         // Use cached basis instead of recomputing
         let sks_vks = &cached_recursive_sks[i];
-        let (basis_poly_next, enforced_sum_next) = induce_sumcheck_poly(
+        let (basis_poly_next, enforced_sum_next) = induce_sumcheck_poly_parallel(
             config.log_dims[i],
             sks_vks,
             &ligero_proof.opened_rows,
@@ -302,7 +302,7 @@ where
 
     // Use cached basis
     let sks_vks = &cached_initial_sks;
-    let (_, enforced_sum) = induce_sumcheck_poly(
+    let (_, enforced_sum) = induce_sumcheck_poly_parallel(
         config.initial_dim,
         &sks_vks,
         &proof.initial_ligero_proof.opened_rows,
@@ -416,7 +416,7 @@ where
         }
 
         let sks_vks = &cached_recursive_sks[i];
-        let (_, enforced_sum_next) = induce_sumcheck_poly(
+        let (_, enforced_sum_next) = induce_sumcheck_poly_parallel(
             config.log_dims[i],
             sks_vks,
             &ligero_proof.opened_rows,
@@ -574,11 +574,11 @@ where
     let alpha = fs.get_challenge::<U>();
     println!("Got alpha challenge: {:?}", alpha);
 
-    // CRITICAL FIX: Use the same fixed sumcheck function as prover
+    // Use the same fixed sumcheck function as prover
     let sks_vks = &cached_initial_sks;
     println!("Computed {} sks_vks", sks_vks.len());
 
-    let (basis_poly, enforced_sum) = induce_sumcheck_poly(
+    let (basis_poly, enforced_sum) = induce_sumcheck_poly_parallel(
         config.initial_dim,
         sks_vks,
         &proof.initial_ligero_proof.opened_rows,
@@ -587,7 +587,7 @@ where
         alpha,
     );
 
-    // CRITICAL FIX: Check consistency
+    // Check consistency
     let basis_sum = basis_poly.iter().fold(U::zero(), |acc, &x| acc.add(&x));
     if basis_sum != enforced_sum {
         println!("VERIFICATION FAILED: Initial basis polynomial sum mismatch");
@@ -598,7 +598,7 @@ where
         println!("✓ Initial sumcheck consistency check passed");
     }
 
-    // CRITICAL FIX: Use the enforced_sum from sumcheck computation
+    // Use the enforced_sum from sumcheck computation
     let mut current_sum = enforced_sum;
     println!("Using current_sum (enforced_sum): {:?}", current_sum);
 
@@ -753,9 +753,9 @@ where
             return Ok(false);
         }
 
-        // CRITICAL FIX: Use the same fixed sumcheck function as prover
+        // Use the same fixed sumcheck function as prover
         let sks_vks = &cached_recursive_sks[i];
-        let (basis_poly_next, enforced_sum_next) = induce_sumcheck_poly(
+        let (basis_poly_next, enforced_sum_next) = induce_sumcheck_poly_parallel(
             config.log_dims[i],
             sks_vks,
             &ligero_proof.opened_rows,
@@ -764,7 +764,7 @@ where
             alpha,
         );
 
-        // CRITICAL FIX: Check consistency for recursive round too
+        // Check consistency for recursive round too
         let basis_sum_next = basis_poly_next.iter().fold(U::zero(), |acc, &x| acc.add(&x));
         if basis_sum_next != enforced_sum_next {
             println!("VERIFICATION FAILED: Recursive basis polynomial sum mismatch at round {}", i);
@@ -856,7 +856,7 @@ where
 
     // induce initial sumcheck polynomial
     let sks_vks = &cached_initial_sks;
-    let (basis_poly, enforced_sum) = induce_sumcheck_poly(
+    let (basis_poly, enforced_sum) = induce_sumcheck_poly_parallel(
         config.initial_dim,
         sks_vks,
         &proof.initial_ligero_proof.opened_rows,
@@ -976,7 +976,7 @@ where
 
         // induce next sumcheck polynomial
         let sks_vks = &cached_recursive_sks[i];
-        let (basis_poly_next, enforced_sum_next) = induce_sumcheck_poly(
+        let (basis_poly_next, enforced_sum_next) = induce_sumcheck_poly_parallel(
             config.log_dims[i],
             sks_vks,
             &ligero_proof.opened_rows,

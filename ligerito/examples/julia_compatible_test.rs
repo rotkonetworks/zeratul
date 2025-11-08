@@ -1,7 +1,7 @@
 use ligerito::{
     prove_sha256, verify_sha256, hardcoded_config_12, hardcoded_config_12_verifier,
     transcript::{FiatShamir, Transcript},
-    sumcheck_polys::induce_sumcheck_poly_debug,
+    sumcheck_polys::induce_sumcheck_poly,
     utils::eval_sk_at_vks,
 };
 use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
@@ -119,7 +119,7 @@ fn manual_verification_steps(
         .collect();
 
     // This is where the mathematical relationship matters most
-    let (basis_poly, enforced_sum) = induce_sumcheck_poly_debug(
+    let (basis_poly, enforced_sum) = induce_sumcheck_poly(
         verifier_config.initial_dim,
         &sks_vks,
         &proof.initial_ligero_proof.opened_rows,

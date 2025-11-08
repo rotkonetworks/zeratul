@@ -55,11 +55,11 @@ fn main() {
     let alpha = fs.get_challenge::<BinaryElem128>();
 
     // Get the enforced sum for initial step
-    use ligerito::sumcheck_polys::induce_sumcheck_poly_debug;
+    use ligerito::sumcheck_polys::induce_sumcheck_poly;
     use ligerito::utils::eval_sk_at_vks;
 
     let sks_vks: Vec<BinaryElem32> = eval_sk_at_vks(1 << verifier_config.initial_dim);
-    let (_, enforced_sum) = induce_sumcheck_poly_debug(
+    let (_, enforced_sum) = induce_sumcheck_poly(
         verifier_config.initial_dim,
         &sks_vks,
         &proof.initial_ligero_proof.opened_rows,

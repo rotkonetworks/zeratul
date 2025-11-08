@@ -1,9 +1,11 @@
 // reed-solomon/src/lib.rs
 mod fft;
+mod fft_gf32;
 mod encode;
 
-pub use encode::{encode, encode_in_place, encode_non_systematic};
+pub use encode::{encode, encode_in_place, encode_in_place_with_parallel, encode_non_systematic};
 pub use fft::{compute_twiddles, fft, ifft};
+pub use fft_gf32::{fft_gf32, ifft_gf32};
 
 use binary_fields::BinaryFieldElement;
 

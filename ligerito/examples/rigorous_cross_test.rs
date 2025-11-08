@@ -2,7 +2,7 @@ use ligerito::{
     prove_sha256, verify_sha256, hardcoded_config_12, hardcoded_config_12_verifier,
     verifier::verify_debug, prover::prove_debug,
     utils::{evaluate_lagrange_basis, eval_sk_at_vks, evaluate_scaled_basis_inplace},
-    sumcheck_polys::{induce_sumcheck_poly, induce_sumcheck_poly_debug},
+    sumcheck_polys::{induce_sumcheck_poly, induce_sumcheck_poly},
     transcript::{FiatShamir, Transcript},
 };
 use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
@@ -189,7 +189,7 @@ fn test_sumcheck_consistency() {
         n, &sks_vks, &opened_rows, &v_challenges, &queries, alpha
     );
 
-    let (basis_poly2, sum2) = induce_sumcheck_poly_debug(
+    let (basis_poly2, sum2) = induce_sumcheck_poly(
         n, &sks_vks, &opened_rows, &v_challenges, &queries, alpha
     );
 

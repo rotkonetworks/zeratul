@@ -183,7 +183,7 @@ pub fn is_power_of_two(n: usize) -> bool {
 }
 
 /// Encode non-systematic Reed-Solomon
-pub fn encode_non_systematic<F: BinaryFieldElement>(
+pub fn encode_non_systematic<F: BinaryFieldElement + 'static>(
     rs: &reed_solomon::ReedSolomon<F>,
     data: &mut [F],
 ) {

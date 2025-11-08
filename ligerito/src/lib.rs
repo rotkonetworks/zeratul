@@ -54,8 +54,8 @@ pub fn prover<T, U>(
     poly: &[T],
 ) -> Result<FinalizedLigeritoProof<T, U>>
 where
-    T: BinaryFieldElement + Send + Sync,
-    U: BinaryFieldElement + Send + Sync + From<T>,
+    T: BinaryFieldElement + Send + Sync + 'static,
+    U: BinaryFieldElement + Send + Sync + From<T> + 'static,
 {
     prover::prove(config, poly)
 }

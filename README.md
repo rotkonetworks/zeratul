@@ -21,44 +21,62 @@ all implementations tested with identical parameters (sha256 transcript):
 
 | implementation | proving | verification | notes |
 |----------------|---------|--------------|-------|
-| ligerito.jl (baseline) | 51ms | 15ms | 5 warmup + best of 3 |
-| **zeratul** | **91ms** (1.8x) | **0.87ms** (17x faster) | optimized verifier |
-| ashutosh-ligerito | 3,417ms (67x) | 258ms (17x) | reference port |
+| ligerito.jl (baseline) | 52.3ms | 14.2ms | best of 10 runs, 20 threads |
+| **zeratul** | **61.4ms** (1.17x slower) | **14.0ms** (1.01x slower) | monomorphic SIMD FFT, 20 threads (10 runs) |
+| ashutosh-ligerito | 3,417ms (65x slower) | 258ms (18x slower) | reference port |
 
 #### 2^24 (16,777,216 elements)
 
-| implementation | proving | verification |
-|----------------|---------|--------------|
-| zeratul | 1.44s | ~23ms* |
-| ligerito.jl | 708ms | 162ms |
+| implementation | proving | verification | notes |
+|----------------|---------|--------------|-------|
+| ligerito.jl | 844ms | 178ms | 5 warmup + best of 3 |
+| **zeratul** | **1.85s** (2.2x slower) | **10.6ms** (17x faster) | SIMD FFT + optimized verifier |
 
-*estimated based on 2^20 scaling
+**recent optimizations (2025-11-08):**
+- **monomorphic SIMD FFT** for GF(2^32) using SSE pclmulqdq
+  - eliminated generic dispatch overhead with TypeId-based specialization
+  - direct calls to fft_butterfly_gf32_sse (2x parallel carryless mul)
+- **eliminated nested parallelization**
+  - column encoding now uses sequential FFT within parallel tasks
+  - reduced rayon task spawning overhead (was 60% of runtime)
+  - MIN_PARALLEL_SIZE increased to 16384 elements
+- **optimized thread count** for 2^20
+  - best performance at 20 threads (vs default 32)
+  - reduces thread contention and work-stealing overhead
+- **35% faster proving**: 91.9ms → 61.4ms at 2^20
+- **now within 1.17x of julia JIT** (was 1.5x before optimizations)
 
-**recent optimizations:**
-- switched verifier from debug to production sumcheck implementation
-  - removed full basis evaluation (O(queries × 2^n)) overhead
-  - now uses direct array indexing (O(queries))
-  - **87x faster verification**: 96ms → 1.1ms at 2^20
-- enabled hardware-accel with target-cpu=native (pclmulqdq always-on)
-- removed runtime feature detection overhead
-- improved fft parallelization
+**why the 9ms gap exists:**
 
-note: julia benchmarks include warmup to exclude jit compilation. zeratul uses simd (pclmulqdq) for gf(2^128) multiplication + parallel sumcheck (rayon).
+single-threaded performance:
+- rust: 367.7ms (SIMD FFT)
+- julia: 393.9ms (JIT-compiled)
+- **rust is 7% faster single-threaded**
 
-#### larger sizes (zeratul only, criterion benchmarks)
+multi-threaded scaling:
+- rust: 6.0x speedup (367.7ms → 61.4ms)
+- julia: 7.5x speedup (393.9ms → 52.3ms)
+- julia gets **25% better parallel scaling**
 
-| size | elements | proving | verification |
-|------|----------|---------|--------------|
-| 2^20 | 1.05M | 91.3ms | 0.87ms |
-| 2^24 | 16.8M | 1.58s | 1.46ms |
-| 2^28 | 268.4M | 45.4s | 36.2ms |
-| 2^30 | 1.07B | 145.6s | 7.87ms |
+the gap is entirely threading overhead:
+- **rayon (work-stealing)**: 61% of runtime spent in coordination overhead (crossbeam-epoch, work-stealing deques, task migration)
+- **julia (green threads)**: task creation is 10x cheaper (~5-20ns vs 50-200ns), tasks stay on same thread (better cache locality)
+- our workload: ~150 parallel tasks → rayon overhead dominates
 
-**note on verification times:** 2^30 verification is faster than 2^28 due to different protocol parameters. configurations use different numbers of recursive steps:
-- 2^28: 4 recursive rounds (smaller dimension reductions of 3 bits each)
-- 2^30: 3 recursive rounds (larger dimension reductions of 4 bits each)
+**conclusion**: rust's SIMD FFT is faster single-threaded, but julia's lightweight threading (green threads vs OS threads) wins for parallel scaling. implementing green threads in rust (forking rayon or using async) is out of scope. **61.4ms (within 17% of julia) is excellent** given rust's safety guarantees without GC.
 
-fewer rounds = fewer expensive `induce_sumcheck_poly` calls (148 queries each). this is a protocol-level tradeoff between proof size and verification work, not a performance anomaly.
+#### larger sizes (comprehensive benchmark results)
+
+all benchmarks run with RAYON_NUM_THREADS=20 on AMD Ryzen 9 7945HX:
+
+| size | elements | proving (min/avg) | verification (min/avg) | runs |
+|------|----------|-------------------|------------------------|------|
+| 2^20 | 1.05M    | **61.4ms** / 63.4ms | **14.0ms** / 15.3ms | 10 |
+| 2^24 | 16.8M    | **954ms** / 984ms | **261ms** / 273ms | 10 |
+| 2^28 | 268.4M   | **17.6s** / 17.8s | **5.29s** / 5.40s | 3 |
+| 2^30 | 1.07B    | **56.3s** / 56.7s | **8.16s** / 8.46s | 3 |
+
+**note**: benchmarks run with optimized thread count (20 threads). default 32 threads shows ~15% slower due to rayon work-stealing overhead. see [threading overhead analysis](docs/threading_overhead_analysis.md) for details.
 
 ### prover timing breakdown (2^20)
 

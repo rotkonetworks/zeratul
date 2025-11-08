@@ -29,7 +29,7 @@ pub fn poly2mat<F: BinaryFieldElement>(
     mat
 }
 
-pub fn encode_cols<F: BinaryFieldElement + Send + Sync>(
+pub fn encode_cols<F: BinaryFieldElement + Send + Sync + 'static>(
     poly_mat: &mut Vec<Vec<F>>,
     rs: &ReedSolomon<F>,
     parallel: bool,
@@ -37,20 +37,19 @@ pub fn encode_cols<F: BinaryFieldElement + Send + Sync>(
     let n = poly_mat[0].len();
 
     if parallel {
+        // Parallelize at column level only - each column FFT runs sequentially
+        // to avoid nested parallelization overhead
         let mut cols: Vec<Vec<F>> = (0..n)
             .into_par_iter()
             .map(|j| {
-                poly_mat.iter()
-                    .map(|row| row[j])
-                    .collect()
+                let mut col: Vec<F> = poly_mat.iter().map(|row| row[j]).collect();
+                // Use sequential FFT within each parallel task to avoid nested parallelism
+                reed_solomon::encode_in_place_with_parallel(rs, &mut col, false);
+                col
             })
             .collect();
 
-        cols.par_iter_mut()
-            .for_each(|col| {
-                reed_solomon::encode_in_place(rs, col);
-            });
-
+        // Transpose back
         for (i, row) in poly_mat.iter_mut().enumerate() {
             for (j, col) in cols.iter().enumerate() {
                 row[j] = col[i];
@@ -91,7 +90,7 @@ pub fn hash_row<F: BinaryFieldElement>(row: &[F]) -> Hash {
     hasher.finalize().into()
 }
 
-pub fn ligero_commit<F: BinaryFieldElement + Send + Sync>(
+pub fn ligero_commit<F: BinaryFieldElement + Send + Sync + 'static>(
     poly: &[F],
     m: usize,
     n: usize,
