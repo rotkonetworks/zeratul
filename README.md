@@ -54,6 +54,12 @@ note: julia benchmarks include warmup to exclude jit compilation. zeratul uses s
 | 2^28 | 268.4M | 45.4s | 36.2ms |
 | 2^30 | 1.07B | 145.6s | 7.87ms |
 
+**note on verification times:** 2^30 verification is faster than 2^28 due to different protocol parameters. configurations use different numbers of recursive steps:
+- 2^28: 4 recursive rounds (smaller dimension reductions of 3 bits each)
+- 2^30: 3 recursive rounds (larger dimension reductions of 4 bits each)
+
+fewer rounds = fewer expensive `induce_sumcheck_poly` calls (148 queries each). this is a protocol-level tradeoff between proof size and verification work, not a performance anomaly.
+
 ### reproducing
 
 ```bash
