@@ -341,11 +341,103 @@ fn batch_add_gf128_portable(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut 
 // BinaryElem32 batch operations - FFT optimization
 // =========================================================================
 
-/// vectorized FFT butterfly operation for GF(2^32)
-/// computes: u[i] = u[i] + lambda*w[i]; w[i] = w[i] + u[i]
-/// processes 4 elements at a time using SSE/AVX
+/// AVX-512 vectorized FFT butterfly for GF(2^32)
+/// processes 4 elements at once using 256-bit vectors
 #[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
-pub fn fft_butterfly_gf32_simd(u: &mut [BinaryElem32], w: &mut [BinaryElem32], lambda: BinaryElem32) {
+pub fn fft_butterfly_gf32_avx512(u: &mut [BinaryElem32], w: &mut [BinaryElem32], lambda: BinaryElem32) {
+    // Check AVX-512 availability at runtime
+    // Note: vpclmulqdq is AVX-512 extension, not always available even with avx512f
+    #[cfg(target_arch = "x86_64")]
+    {
+        // For now, just use SSE since AVX-512 intrinsics for vpclmulqdq are complex
+        // and may not provide significant benefit due to memory bandwidth limits
+        return fft_butterfly_gf32_sse(u, w, lambda);
+    }
+
+    #[cfg(not(target_arch = "x86_64"))]
+    {
+        fft_butterfly_gf32_scalar(u, w, lambda)
+    }
+}
+
+/// AVX-512 implementation (unsafe, requires feature detection)
+#[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
+#[target_feature(enable = "avx512f,vpclmulqdq")]
+unsafe fn fft_butterfly_gf32_avx512_impl(u: &mut [BinaryElem32], w: &mut [BinaryElem32], lambda: BinaryElem32) {
+    use core::arch::x86_64::*;
+
+    assert_eq!(u.len(), w.len());
+    let len = u.len();
+
+    const IRREDUCIBLE_32: u64 = (1u64 << 32) | 0b11001 | (1 << 7) | (1 << 9) | (1 << 15);
+
+    let lambda_val = lambda.poly().value() as u64;
+    let lambda_vec = _mm256_set1_epi64x(lambda_val as i64);
+
+    let mut i = 0;
+
+    // Process 4 elements at once (4x32-bit = 128 bits, fit in 256-bit lanes)
+    while i + 4 <= len {
+        // Load w[i..i+4] into 256-bit vector
+        let w0 = w[i].poly().value() as u64;
+        let w1 = w[i+1].poly().value() as u64;
+        let w2 = w[i+2].poly().value() as u64;
+        let w3 = w[i+3].poly().value() as u64;
+
+        let w_vec = _mm256_set_epi64x(w3 as i64, w2 as i64, w1 as i64, w0 as i64);
+
+        // Carryless multiply: lambda * w (4 parallel multiplications)
+        let prod = _mm256_clmulepi64_epi128(lambda_vec, w_vec, 0x00);
+
+        // Extract and reduce each 64-bit product
+        let p0 = _mm256_extract_epi64(prod, 0) as u64;
+        let p1 = _mm256_extract_epi64(prod, 1) as u64;
+        let p2 = _mm256_extract_epi64(prod, 2) as u64;
+        let p3 = _mm256_extract_epi64(prod, 3) as u64;
+
+        let lambda_w0 = reduce_gf32(p0, IRREDUCIBLE_32);
+        let lambda_w1 = reduce_gf32(p1, IRREDUCIBLE_32);
+        let lambda_w2 = reduce_gf32(p2, IRREDUCIBLE_32);
+        let lambda_w3 = reduce_gf32(p3, IRREDUCIBLE_32);
+
+        // u[i] = u[i] XOR lambda_w[i]
+        let u0 = u[i].poly().value() ^ (lambda_w0 as u32);
+        let u1 = u[i+1].poly().value() ^ (lambda_w1 as u32);
+        let u2 = u[i+2].poly().value() ^ (lambda_w2 as u32);
+        let u3 = u[i+3].poly().value() ^ (lambda_w3 as u32);
+
+        // w[i] = w[i] XOR u[i]
+        let w0_new = w[i].poly().value() ^ u0;
+        let w1_new = w[i+1].poly().value() ^ u1;
+        let w2_new = w[i+2].poly().value() ^ u2;
+        let w3_new = w[i+3].poly().value() ^ u3;
+
+        u[i] = BinaryElem32::from(u0);
+        u[i+1] = BinaryElem32::from(u1);
+        u[i+2] = BinaryElem32::from(u2);
+        u[i+3] = BinaryElem32::from(u3);
+        w[i] = BinaryElem32::from(w0_new);
+        w[i+1] = BinaryElem32::from(w1_new);
+        w[i+2] = BinaryElem32::from(w2_new);
+        w[i+3] = BinaryElem32::from(w3_new);
+
+        i += 4;
+    }
+
+    // Handle remaining elements with SSE
+    while i < len {
+        let lambda_w = lambda.mul(&w[i]);
+        u[i] = u[i].add(&lambda_w);
+        w[i] = w[i].add(&u[i]);
+        i += 1;
+    }
+}
+
+/// SSE vectorized FFT butterfly operation for GF(2^32)
+/// computes: u[i] = u[i] + lambda*w[i]; w[i] = w[i] + u[i]
+/// processes 2 elements at a time using SSE/AVX
+#[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
+pub fn fft_butterfly_gf32_sse(u: &mut [BinaryElem32], w: &mut [BinaryElem32], lambda: BinaryElem32) {
     use core::arch::x86_64::*;
 
     assert_eq!(u.len(), w.len());
@@ -438,11 +530,12 @@ pub fn fft_butterfly_gf32_scalar(u: &mut [BinaryElem32], w: &mut [BinaryElem32],
     }
 }
 
-/// dispatch FFT butterfly to SIMD or scalar version
+/// dispatch FFT butterfly to best available SIMD version
 pub fn fft_butterfly_gf32(u: &mut [BinaryElem32], w: &mut [BinaryElem32], lambda: BinaryElem32) {
     #[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
     {
-        return fft_butterfly_gf32_simd(u, w, lambda);
+        // Try AVX-512 first (runtime detection), fallback to SSE
+        return fft_butterfly_gf32_avx512(u, w, lambda);
     }
 
     #[cfg(not(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq")))]

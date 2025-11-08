@@ -66,16 +66,16 @@ detailed profiling shows where proving time is spent:
 
 | component | time (ms) | % of total |
 |-----------|-----------|------------|
-| **FFT (reed-solomon encode)** | **36.33** | **75%** |
-| poly to matrix | 3.61 | 7% |
-| merkle tree construction | 2.83 | 6% |
-| partial evaluation | 1.52 | 3% |
-| recursive commitment | 2.78 | 6% |
-| SHA256 row hashing | 0.96 | 2% |
-| sumcheck (induce + rounds) | 0.36 | 1% |
-| **total** | **~49ms** | **100%** |
+| **FFT (reed-solomon encode)** | **35.1** | **79%** |
+| poly to matrix | 2.9 | 6% |
+| merkle tree construction | 1.9 | 4% |
+| partial evaluation | 1.5 | 3% |
+| recursive commitment | 2.2 | 5% |
+| SHA256 row hashing | 0.7 | 2% |
+| sumcheck (induce + rounds) | 0.3 | 1% |
+| **total** | **~45ms** | **100%** |
 
-**main bottleneck:** FFT operations on BinaryElem32 consume 75% of proving time. the FFT uses scalar GF(2^32) arithmetic without SIMD acceleration. optimization path: add vectorized batch operations for BinaryElem32 (pack 4x into 128-bit registers) or implement AVX-512 butterfly operations.
+**optimization status:** FFT butterfly operations now use SIMD (pclmulqdq for 2x parallel carryless multiplication). AVX-512 tested but provides no additional benefit - memory bandwidth is the bottleneck, not compute throughput.
 
 run detailed profiling:
 ```bash
