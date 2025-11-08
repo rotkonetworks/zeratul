@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-binary-fields = { path = "../binary-fields", features = ["serde"] }
+binary-fields = { path = "../binary-fields", features = ["serde", "hardware-accel"] }
 reed-solomon = { path = "../reed-solomon" }
 merkle-tree = { path = "../merkle-tree", features = ["serde"] }
 

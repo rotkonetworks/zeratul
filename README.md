@@ -21,11 +21,26 @@ all implementations tested with identical parameters (sha256 transcript):
 
 | implementation | proving | verification | speedup |
 |----------------|---------|--------------|---------|
-| **ligerito.jl** | **60ms** | **40ms** | baseline |
-| zeratul | 184ms | 117ms | 3.1x slower |
+| **ligerito.jl** | **60ms** | **42ms** | baseline |
+| zeratul | 175ms | 96ms | 2.9x slower (was 3.1x) |
 | ashutosh-ligerito | 3,417ms | 258ms | 57x slower |
 
-note: julia benchmarks exclude jit compilation time via warmup runs
+#### 2^24 (16,777,216 elements)
+
+| implementation | proving | verification | speedup |
+|----------------|---------|--------------|---------|
+| **ligerito.jl** | **708ms** | **162ms** | baseline |
+| zeratul | 3,465ms | 1,199ms | **4.9x slower** (was 5.0x) |
+
+⚠️ **performance degrades at scale**: gap increases from 2.9x at 2^20 to 4.9x at 2^24, suggesting bottlenecks in fft/reed-solomon or memory allocation patterns that don't scale well.
+
+**recent optimizations (committed separately):**
+- enabled hardware-accel feature with target-cpu=native (pclmulqdq always-on)
+- removed runtime feature detection overhead in hot paths
+- improved fft parallelization with better work distribution
+- 7% faster proving at 2^20, 1.5% at 2^24 (38% faster verification at 2^20)
+
+note: julia benchmarks exclude jit compilation time via warmup runs. zeratul uses simd (pclmulqdq) for gf(2^128) multiplication + parallel sumcheck (rayon).
 
 #### larger sizes (zeratul only)
 
