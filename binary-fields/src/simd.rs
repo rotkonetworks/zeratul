@@ -1,5 +1,6 @@
 // src/simd.rs
 use crate::poly::{BinaryPoly64, BinaryPoly128, BinaryPoly256};
+use crate::elem::BinaryElem32;
 
 // 64x64 -> 128 bit carryless multiplication
 pub fn carryless_mul_64(a: BinaryPoly64, b: BinaryPoly64) -> BinaryPoly128 {
@@ -334,6 +335,120 @@ fn batch_add_gf128_portable(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut 
                 out_chunk[i] = a_chunk[i].add(&b_chunk[i]);
             }
         });
+}
+
+// =========================================================================
+// BinaryElem32 batch operations - FFT optimization
+// =========================================================================
+
+/// vectorized FFT butterfly operation for GF(2^32)
+/// computes: u[i] = u[i] + lambda*w[i]; w[i] = w[i] + u[i]
+/// processes 4 elements at a time using SSE/AVX
+#[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
+pub fn fft_butterfly_gf32_simd(u: &mut [BinaryElem32], w: &mut [BinaryElem32], lambda: BinaryElem32) {
+    use core::arch::x86_64::*;
+
+    assert_eq!(u.len(), w.len());
+    let len = u.len();
+
+    // irreducible polynomial for GF(2^32):
+    // x^32 + x^7 + x^9 + x^15 + x^3 + 1
+    const IRREDUCIBLE_32: u64 = (1u64 << 32) | 0b11001 | (1 << 7) | (1 << 9) | (1 << 15);
+
+    unsafe {
+        let lambda_val = lambda.poly().value() as u64;
+        let lambda_vec = _mm_set1_epi64x(lambda_val as i64);
+
+        let mut i = 0;
+
+        // process 2 elements at once (2x32-bit = 64 bits, fits in one lane)
+        while i + 2 <= len {
+            // load w[i] and w[i+1] into 64-bit lanes
+            let w0 = w[i].poly().value() as u64;
+            let w1 = w[i+1].poly().value() as u64;
+            let w_vec = _mm_set_epi64x(w1 as i64, w0 as i64);
+
+            // carryless multiply: lambda * w[i]
+            let prod_lo = _mm_clmulepi64_si128(lambda_vec, w_vec, 0x00); // lambda * w0
+            let prod_hi = _mm_clmulepi64_si128(lambda_vec, w_vec, 0x11); // lambda * w1
+
+            // reduce modulo irreducible
+            let p0 = _mm_extract_epi64(prod_lo, 0) as u64;
+            let p1 = _mm_extract_epi64(prod_hi, 0) as u64;
+
+            let lambda_w0 = reduce_gf32(p0, IRREDUCIBLE_32);
+            let lambda_w1 = reduce_gf32(p1, IRREDUCIBLE_32);
+
+            // u[i] = u[i] XOR lambda_w[i]
+            let u0 = u[i].poly().value() ^ (lambda_w0 as u32);
+            let u1 = u[i+1].poly().value() ^ (lambda_w1 as u32);
+
+            // w[i] = w[i] XOR u[i] (using updated u)
+            let w0_new = w[i].poly().value() ^ u0;
+            let w1_new = w[i+1].poly().value() ^ u1;
+
+            u[i] = BinaryElem32::from(u0);
+            u[i+1] = BinaryElem32::from(u1);
+            w[i] = BinaryElem32::from(w0_new);
+            w[i+1] = BinaryElem32::from(w1_new);
+
+            i += 2;
+        }
+
+        // handle remaining element
+        if i < len {
+            let lambda_w = lambda.mul(&w[i]);
+            u[i] = u[i].add(&lambda_w);
+            w[i] = w[i].add(&u[i]);
+        }
+    }
+}
+
+/// reduce 64-bit product modulo GF(2^32) irreducible
+/// optimized branchless reduction for GF(2^32)
+#[inline(always)]
+fn reduce_gf32(p: u64, irr: u64) -> u64 {
+    // for 32x32 -> 64 multiplication, we need to reduce bits [63:32]
+    // unrolled reduction: process high 32 bits in chunks
+
+    let hi = (p >> 32) as u64;
+    let lo = (p & 0xFFFFFFFF) as u64;
+
+    // compute tmp by shifting high bits down
+    // for irreducible 0b1_0000_1000_1001_1000_1001 (x^32 + x^15 + x^9 + x^7 + x^3 + 1)
+    // bits set at positions: 0,3,7,9,15 -> shifts needed: 32,29,25,23,17
+    let tmp = hi
+        ^ (hi >> 29)  // bit 15: shift by (32-3)
+        ^ (hi >> 25)  // bit 9: shift by (32-7)
+        ^ (hi >> 23)  // bit 7: shift by (32-9)
+        ^ (hi >> 17); // bit 3: shift by (32-15)
+
+    // XOR with low bits and shifted tmp
+    lo ^ tmp ^ (tmp << 3) ^ (tmp << 7) ^ (tmp << 9) ^ (tmp << 15)
+}
+
+/// scalar fallback for FFT butterfly
+pub fn fft_butterfly_gf32_scalar(u: &mut [BinaryElem32], w: &mut [BinaryElem32], lambda: BinaryElem32) {
+    assert_eq!(u.len(), w.len());
+
+    for i in 0..u.len() {
+        let lambda_w = lambda.mul(&w[i]);
+        u[i] = u[i].add(&lambda_w);
+        w[i] = w[i].add(&u[i]);
+    }
+}
+
+/// dispatch FFT butterfly to SIMD or scalar version
+pub fn fft_butterfly_gf32(u: &mut [BinaryElem32], w: &mut [BinaryElem32], lambda: BinaryElem32) {
+    #[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
+    {
+        return fft_butterfly_gf32_simd(u, w, lambda);
+    }
+
+    #[cfg(not(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq")))]
+    {
+        fft_butterfly_gf32_scalar(u, w, lambda)
+    }
 }
 
 #[cfg(test)]
