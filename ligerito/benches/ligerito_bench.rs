@@ -49,9 +49,7 @@ fn bench_proving(c: &mut Criterion) {
         });
     });
 
-    // 2^28 - 1 GiB polynomial (optional - comment out if too large)
-    // Uncomment if your machine has sufficient memory
-    /*
+    // 2^28 - 1 GiB polynomial
     group.bench_function(BenchmarkId::from_parameter("2^28"), |b| {
         let config = hardcoded_config_28(
             PhantomData::<BinaryElem32>,
@@ -64,11 +62,8 @@ fn bench_proving(c: &mut Criterion) {
             black_box(proof)
         });
     });
-    */
 
-    // 2^30 - 4 GiB polynomial (optional - comment out if too large)
-    // Uncomment if your machine has sufficient memory
-    /*
+    // 2^30 - 4 GiB polynomial
     group.bench_function(BenchmarkId::from_parameter("2^30"), |b| {
         let config = hardcoded_config_30(
             PhantomData::<BinaryElem32>,
@@ -81,7 +76,6 @@ fn bench_proving(c: &mut Criterion) {
             black_box(proof)
         });
     });
-    */
 
     group.finish();
 }
@@ -126,8 +120,7 @@ fn bench_verification(c: &mut Criterion) {
         });
     }
 
-    // 2^28 - optional
-    /*
+    // 2^28
     {
         let config = hardcoded_config_28(
             PhantomData::<BinaryElem32>,
@@ -144,10 +137,8 @@ fn bench_verification(c: &mut Criterion) {
             });
         });
     }
-    */
 
-    // 2^30 - optional
-    /*
+    // 2^30
     {
         let config = hardcoded_config_30(
             PhantomData::<BinaryElem32>,
@@ -164,7 +155,6 @@ fn bench_verification(c: &mut Criterion) {
             });
         });
     }
-    */
 
     group.finish();
 }
@@ -174,7 +164,7 @@ fn bench_proof_size(c: &mut Criterion) {
     group.sample_size(10);
 
     // Measure proof sizes for different polynomial sizes
-    for &log_size in &[20, 24] {
+    for &log_size in &[20, 24, 28, 30] {
         let size = 1 << log_size;
         let poly = generate_random_poly(size);
 
@@ -189,6 +179,22 @@ fn bench_proof_size(c: &mut Criterion) {
             }
             24 => {
                 let cfg = hardcoded_config_24(
+                    PhantomData::<BinaryElem32>,
+                    PhantomData::<BinaryElem128>,
+                );
+                let p = prove_sha256(&cfg, &poly).unwrap();
+                (cfg, p)
+            }
+            28 => {
+                let cfg = hardcoded_config_28(
+                    PhantomData::<BinaryElem32>,
+                    PhantomData::<BinaryElem128>,
+                );
+                let p = prove_sha256(&cfg, &poly).unwrap();
+                (cfg, p)
+            }
+            30 => {
+                let cfg = hardcoded_config_30(
                     PhantomData::<BinaryElem32>,
                     PhantomData::<BinaryElem128>,
                 );
