@@ -3,27 +3,28 @@ use crate::poly::{BinaryPoly64, BinaryPoly128, BinaryPoly256};
 
 // 64x64 -> 128 bit carryless multiplication
 pub fn carryless_mul_64(a: BinaryPoly64, b: BinaryPoly64) -> BinaryPoly128 {
-    #[cfg(all(target_arch = "x86_64", any(target_feature = "pclmulqdq", target_feature = "sse2")))]
+    #[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
     {
         use core::arch::x86_64::*;
-        
+
         unsafe {
-            if is_x86_feature_detected!("pclmulqdq") {
-                let a_vec = _mm_set_epi64x(0, a.value() as i64);
-                let b_vec = _mm_set_epi64x(0, b.value() as i64);
+            let a_vec = _mm_set_epi64x(0, a.value() as i64);
+            let b_vec = _mm_set_epi64x(0, b.value() as i64);
 
-                let result = _mm_clmulepi64_si128(a_vec, b_vec, 0x00);
+            let result = _mm_clmulepi64_si128(a_vec, b_vec, 0x00);
 
-                let lo = _mm_extract_epi64(result, 0) as u64;
-                let hi = _mm_extract_epi64(result, 1) as u64;
+            let lo = _mm_extract_epi64(result, 0) as u64;
+            let hi = _mm_extract_epi64(result, 1) as u64;
 
-                return BinaryPoly128::new(((hi as u128) << 64) | (lo as u128));
-            }
+            return BinaryPoly128::new(((hi as u128) << 64) | (lo as u128));
         }
     }
 
-    // software fallback
-    carryless_mul_64_soft(a, b)
+    #[cfg(not(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq")))]
+    {
+        // software fallback
+        carryless_mul_64_soft(a, b)
+    }
 }
 
 // software implementation for 64x64
@@ -42,55 +43,56 @@ fn carryless_mul_64_soft(a: BinaryPoly64, b: BinaryPoly64) -> BinaryPoly128 {
 
 // 128x128 -> 128 bit carryless multiplication (truncated)
 pub fn carryless_mul_128(a: BinaryPoly128, b: BinaryPoly128) -> BinaryPoly128 {
-    #[cfg(all(target_arch = "x86_64", any(target_feature = "pclmulqdq", target_feature = "sse2")))]
+    #[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
     {
         use core::arch::x86_64::*;
-        
+
         unsafe {
-            if is_x86_feature_detected!("pclmulqdq") {
-                // split inputs into 64-bit halves
-                let a_lo = a.value() as u64;
-                let a_hi = (a.value() >> 64) as u64;
-                let b_lo = b.value() as u64;
-                let b_hi = (b.value() >> 64) as u64;
+            // split inputs into 64-bit halves
+            let a_lo = a.value() as u64;
+            let a_hi = (a.value() >> 64) as u64;
+            let b_lo = b.value() as u64;
+            let b_hi = (b.value() >> 64) as u64;
 
-                // perform 3 64x64->128 bit multiplications (skip hi*hi for truncated result)
-                let lo_lo = _mm_clmulepi64_si128(
-                    _mm_set_epi64x(0, a_lo as i64),
-                    _mm_set_epi64x(0, b_lo as i64),
-                    0x00
-                );
+            // perform 3 64x64->128 bit multiplications (skip hi*hi for truncated result)
+            let lo_lo = _mm_clmulepi64_si128(
+                _mm_set_epi64x(0, a_lo as i64),
+                _mm_set_epi64x(0, b_lo as i64),
+                0x00
+            );
 
-                let lo_hi = _mm_clmulepi64_si128(
-                    _mm_set_epi64x(0, a_lo as i64),
-                    _mm_set_epi64x(0, b_hi as i64),
-                    0x00
-                );
+            let lo_hi = _mm_clmulepi64_si128(
+                _mm_set_epi64x(0, a_lo as i64),
+                _mm_set_epi64x(0, b_hi as i64),
+                0x00
+            );
 
-                let hi_lo = _mm_clmulepi64_si128(
-                    _mm_set_epi64x(0, a_hi as i64),
-                    _mm_set_epi64x(0, b_lo as i64),
-                    0x00
-                );
+            let hi_lo = _mm_clmulepi64_si128(
+                _mm_set_epi64x(0, a_hi as i64),
+                _mm_set_epi64x(0, b_lo as i64),
+                0x00
+            );
 
-                // extract 128-bit results - fix the overflow by casting to u128 first
-                let r0 = (_mm_extract_epi64(lo_lo, 0) as u64) as u128 
-                       | ((_mm_extract_epi64(lo_lo, 1) as u64) as u128) << 64;
-                let r1 = (_mm_extract_epi64(lo_hi, 0) as u64) as u128 
-                       | ((_mm_extract_epi64(lo_hi, 1) as u64) as u128) << 64;
-                let r2 = (_mm_extract_epi64(hi_lo, 0) as u64) as u128 
-                       | ((_mm_extract_epi64(hi_lo, 1) as u64) as u128) << 64;
+            // extract 128-bit results - fix the overflow by casting to u128 first
+            let r0 = (_mm_extract_epi64(lo_lo, 0) as u64) as u128
+                   | ((_mm_extract_epi64(lo_lo, 1) as u64) as u128) << 64;
+            let r1 = (_mm_extract_epi64(lo_hi, 0) as u64) as u128
+                   | ((_mm_extract_epi64(lo_hi, 1) as u64) as u128) << 64;
+            let r2 = (_mm_extract_epi64(hi_lo, 0) as u64) as u128
+                   | ((_mm_extract_epi64(hi_lo, 1) as u64) as u128) << 64;
 
-                // combine: result = r0 + (r1 << 64) + (r2 << 64)
-                let result = r0 ^ (r1 << 64) ^ (r2 << 64);
+            // combine: result = r0 + (r1 << 64) + (r2 << 64)
+            let result = r0 ^ (r1 << 64) ^ (r2 << 64);
 
-                return BinaryPoly128::new(result);
-            }
+            return BinaryPoly128::new(result);
         }
     }
 
-    // software fallback
-    carryless_mul_128_soft(a, b)
+    #[cfg(not(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq")))]
+    {
+        // software fallback
+        carryless_mul_128_soft(a, b)
+    }
 }
 
 // software implementation for 128x128 truncated
@@ -111,76 +113,77 @@ fn carryless_mul_128_soft(a: BinaryPoly128, b: BinaryPoly128) -> BinaryPoly128 {
 
 // 128x128 -> 256 bit full multiplication
 pub fn carryless_mul_128_full(a: BinaryPoly128, b: BinaryPoly128) -> BinaryPoly256 {
-    #[cfg(all(target_arch = "x86_64", any(target_feature = "pclmulqdq", target_feature = "sse2")))]
+    #[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
     {
         use core::arch::x86_64::*;
-        
+
         unsafe {
-            if is_x86_feature_detected!("pclmulqdq") {
-                let a_lo = a.value() as u64;
-                let a_hi = (a.value() >> 64) as u64;
-                let b_lo = b.value() as u64;
-                let b_hi = (b.value() >> 64) as u64;
+            let a_lo = a.value() as u64;
+            let a_hi = (a.value() >> 64) as u64;
+            let b_lo = b.value() as u64;
+            let b_hi = (b.value() >> 64) as u64;
 
-                // 4 multiplications
-                let lo_lo = _mm_clmulepi64_si128(
-                    _mm_set_epi64x(0, a_lo as i64),
-                    _mm_set_epi64x(0, b_lo as i64),
-                    0x00
-                );
+            // 4 multiplications
+            let lo_lo = _mm_clmulepi64_si128(
+                _mm_set_epi64x(0, a_lo as i64),
+                _mm_set_epi64x(0, b_lo as i64),
+                0x00
+            );
 
-                let lo_hi = _mm_clmulepi64_si128(
-                    _mm_set_epi64x(0, a_lo as i64),
-                    _mm_set_epi64x(0, b_hi as i64),
-                    0x00
-                );
+            let lo_hi = _mm_clmulepi64_si128(
+                _mm_set_epi64x(0, a_lo as i64),
+                _mm_set_epi64x(0, b_hi as i64),
+                0x00
+            );
 
-                let hi_lo = _mm_clmulepi64_si128(
-                    _mm_set_epi64x(0, a_hi as i64),
-                    _mm_set_epi64x(0, b_lo as i64),
-                    0x00
-                );
+            let hi_lo = _mm_clmulepi64_si128(
+                _mm_set_epi64x(0, a_hi as i64),
+                _mm_set_epi64x(0, b_lo as i64),
+                0x00
+            );
 
-                let hi_hi = _mm_clmulepi64_si128(
-                    _mm_set_epi64x(0, a_hi as i64),
-                    _mm_set_epi64x(0, b_hi as i64),
-                    0x00
-                );
+            let hi_hi = _mm_clmulepi64_si128(
+                _mm_set_epi64x(0, a_hi as i64),
+                _mm_set_epi64x(0, b_hi as i64),
+                0x00
+            );
 
-                // extract and combine
-                let r0_lo = _mm_extract_epi64(lo_lo, 0) as u64;
-                let r0_hi = _mm_extract_epi64(lo_lo, 1) as u64;
-                let r1_lo = _mm_extract_epi64(lo_hi, 0) as u64;
-                let r1_hi = _mm_extract_epi64(lo_hi, 1) as u64;
-                let r2_lo = _mm_extract_epi64(hi_lo, 0) as u64;
-                let r2_hi = _mm_extract_epi64(hi_lo, 1) as u64;
-                let r3_lo = _mm_extract_epi64(hi_hi, 0) as u64;
-                let r3_hi = _mm_extract_epi64(hi_hi, 1) as u64;
+            // extract and combine
+            let r0_lo = _mm_extract_epi64(lo_lo, 0) as u64;
+            let r0_hi = _mm_extract_epi64(lo_lo, 1) as u64;
+            let r1_lo = _mm_extract_epi64(lo_hi, 0) as u64;
+            let r1_hi = _mm_extract_epi64(lo_hi, 1) as u64;
+            let r2_lo = _mm_extract_epi64(hi_lo, 0) as u64;
+            let r2_hi = _mm_extract_epi64(hi_lo, 1) as u64;
+            let r3_lo = _mm_extract_epi64(hi_hi, 0) as u64;
+            let r3_hi = _mm_extract_epi64(hi_hi, 1) as u64;
 
-                // build 256-bit result
-                let mut lo = r0_lo as u128 | ((r0_hi as u128) << 64);
-                let mut hi = 0u128;
+            // build 256-bit result
+            let mut lo = r0_lo as u128 | ((r0_hi as u128) << 64);
+            let mut hi = 0u128;
 
-                // add r1 << 64
-                lo ^= (r1_lo as u128) << 64;
-                hi ^= (r1_lo as u128) >> 64;
-                hi ^= r1_hi as u128;
+            // add r1 << 64
+            lo ^= (r1_lo as u128) << 64;
+            hi ^= (r1_lo as u128) >> 64;
+            hi ^= r1_hi as u128;
 
-                // add r2 << 64
-                lo ^= (r2_lo as u128) << 64;
-                hi ^= (r2_lo as u128) >> 64;
-                hi ^= r2_hi as u128;
+            // add r2 << 64
+            lo ^= (r2_lo as u128) << 64;
+            hi ^= (r2_lo as u128) >> 64;
+            hi ^= r2_hi as u128;
 
-                // add r3 << 128
-                hi ^= r3_lo as u128 | ((r3_hi as u128) << 64);
+            // add r3 << 128
+            hi ^= r3_lo as u128 | ((r3_hi as u128) << 64);
 
-                return BinaryPoly256::from_parts(hi, lo);
-            }
+            return BinaryPoly256::from_parts(hi, lo);
         }
     }
 
-    // software fallback
-    carryless_mul_128_full_soft(a, b)
+    #[cfg(not(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq")))]
+    {
+        // software fallback
+        carryless_mul_128_full_soft(a, b)
+    }
 }
 
 // software implementation for 128x128 full
@@ -233,21 +236,25 @@ pub fn batch_mul_gf128(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [Bina
     assert_eq!(a.len(), b.len());
     assert_eq!(a.len(), out.len());
 
-    #[cfg(all(feature = "hardware-accel", target_arch = "x86_64"))]
+    #[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
     {
-        if is_x86_feature_detected!("pclmulqdq") {
-            return batch_mul_gf128_hw(a, b, out);
-        }
+        return batch_mul_gf128_hw(a, b, out);
     }
 
-    #[cfg(feature = "simd")]
+    #[cfg(all(feature = "simd", not(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))))]
     {
         return batch_mul_gf128_portable(a, b, out);
     }
 
-    // scalar fallback
-    for i in 0..a.len() {
-        out[i] = a[i].mul(&b[i]);
+    #[cfg(not(any(
+        all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"),
+        feature = "simd"
+    )))]
+    {
+        // scalar fallback
+        for i in 0..a.len() {
+            out[i] = a[i].mul(&b[i]);
+        }
     }
 }
 
@@ -268,32 +275,41 @@ pub fn batch_add_gf128(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [Bina
 }
 
 // pclmulqdq-based batch multiply for x86_64
-#[cfg(all(feature = "hardware-accel", target_arch = "x86_64"))]
+#[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
 fn batch_mul_gf128_hw(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [BinaryElem128]) {
-    use core::arch::x86_64::*;
-
-    unsafe {
-        for i in 0..a.len() {
-            let a_poly = BinaryPoly128::from_u128(a[i].to_u128());
-            let b_poly = BinaryPoly128::from_u128(b[i].to_u128());
-            let product = carryless_mul_128_full(a_poly, b_poly);
-            let reduced = reduce_mod_irred_128(product);
-            out[i] = BinaryElem128::from_u128(reduced.value());
-        }
+    for i in 0..a.len() {
+        let a_poly = a[i].poly();
+        let b_poly = b[i].poly();
+        let product = carryless_mul_128_full(a_poly, b_poly);
+        let reduced = reduce_gf128(product);
+        out[i] = BinaryElem128::from_value(reduced.value());
     }
 }
 
-// reduce 256-bit product mod gf(2^128) irreducible
-// todo: implement proper reduction for BinaryElem128's irreducible poly
-#[cfg(all(feature = "hardware-accel", target_arch = "x86_64"))]
-fn reduce_mod_irred_128(product: BinaryPoly256) -> BinaryPoly128 {
-    BinaryPoly128::from_u128(product.low())
+/// Reduce 256-bit product modulo GF(2^128) irreducible polynomial
+/// Irreducible: x^128 + x^7 + x^2 + x + 1 (0x87 = 0b10000111)
+/// Matches Julia's @generated mod_irreducible implementation
+pub fn reduce_gf128(product: BinaryPoly256) -> BinaryPoly128 {
+    let (hi, lo) = product.split();
+    let high = hi.value();
+    let low = lo.value();
+
+    // Julia's compute_tmp for irreducible 0b10000111 (bits 0,1,2,7):
+    // tmp = hi ^ (hi >> 127) ^ (hi >> 126) ^ (hi >> 121)
+    let tmp = high ^ (high >> 127) ^ (high >> 126) ^ (high >> 121);
+
+    // Julia's compute_res:
+    // res = lo ^ tmp ^ (tmp << 1) ^ (tmp << 2) ^ (tmp << 7)
+    let res = low ^ tmp ^ (tmp << 1) ^ (tmp << 2) ^ (tmp << 7);
+
+    BinaryPoly128::new(res)
 }
 
 // portable_simd batch ops (cross-platform, nightly)
 #[cfg(feature = "simd")]
 fn batch_mul_gf128_portable(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [BinaryElem128]) {
-    // todo: vectorize with portable_simd
+    // Use vectorized XOR for addition, but multiplication still needs field arithmetic
+    // For now, use scalar multiplication which already uses SIMD pclmulqdq internally
     for i in 0..a.len() {
         out[i] = a[i].mul(&b[i]);
     }
@@ -301,10 +317,20 @@ fn batch_mul_gf128_portable(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut 
 
 #[cfg(feature = "simd")]
 fn batch_add_gf128_portable(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [BinaryElem128]) {
-    // todo: vectorize xor with portable_simd
-    for i in 0..a.len() {
-        out[i] = a[i].add(&b[i]);
-    }
+    // XOR is embarrassingly parallel - process in chunks
+    // Binary field addition is just XOR
+    use rayon::prelude::*;
+
+    const CHUNK_SIZE: usize = 1024;
+
+    a.par_chunks(CHUNK_SIZE)
+        .zip(b.par_chunks(CHUNK_SIZE))
+        .zip(out.par_chunks_mut(CHUNK_SIZE))
+        .for_each(|((a_chunk, b_chunk), out_chunk)| {
+            for i in 0..a_chunk.len() {
+                out_chunk[i] = a_chunk[i].add(&b_chunk[i]);
+            }
+        });
 }
 
 #[cfg(test)]

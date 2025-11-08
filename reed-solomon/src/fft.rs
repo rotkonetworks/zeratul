@@ -88,16 +88,20 @@ fn fft_twiddles<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], idx: usize) 
 
 /// Parallel in-place recursive FFT step with twiddles, idx starts at 1
 fn fft_twiddles_parallel<F: BinaryFieldElement + Send + Sync>(v: &mut [F], twiddles: &[F], idx: usize, thread_depth: usize) {
-    if v.len() == 1 {
+    const MIN_PARALLEL_SIZE: usize = 256; // Only parallelize if chunks are large enough
+
+    let len = v.len();
+    if len == 1 {
         return;
     }
 
     fft_mul(v, twiddles[idx - 1]);
 
-    let mid = v.len() / 2;
+    let mid = len / 2;
     let (u, w) = v.split_at_mut(mid);
 
-    if thread_depth > 0 {
+    // Parallelize if we have depth remaining AND the chunks are large enough
+    if thread_depth > 0 && len >= MIN_PARALLEL_SIZE {
         rayon::join(
             || fft_twiddles_parallel(u, twiddles, 2 * idx, thread_depth - 1),
             || fft_twiddles_parallel(w, twiddles, 2 * idx + 1, thread_depth - 1),
@@ -115,7 +119,10 @@ pub fn fft<F: BinaryFieldElement + Send + Sync>(v: &mut [F], twiddles: &[F], par
     }
 
     if parallel {
-        let thread_depth = rayon::current_num_threads().ilog2() as usize;
+        // Be more aggressive with parallelization depth
+        // Use 2x the number of threads to saturate cores better
+        let thread_count = rayon::current_num_threads();
+        let thread_depth = (thread_count * 2).ilog2() as usize;
         fft_twiddles_parallel(v, twiddles, 1, thread_depth);
     } else {
         fft_twiddles(v, twiddles, 1);
