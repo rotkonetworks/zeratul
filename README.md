@@ -11,48 +11,67 @@ rust implementation of [ligerito](https://angeris.github.io/papers/ligerito.pdf)
 
 ## performance
 
-benchmarked on amd ryzen 9 7945hx (8 cores, performance governor, turbo disabled):
+benchmarked on amd ryzen 9 7945hx (8 physical cores, smt disabled, turbo disabled, performance governor):
 
 ### julia vs zeratul comparison
 
-all benchmarks use identical parameters (sha256 transcript, 8 cores):
-
 | size | elements | julia proving | julia verify | zeratul proving | zeratul verify | proving ratio | verify ratio |
 |------|----------|---------------|--------------|-----------------|----------------|---------------|--------------|
-| 2^20 | 1.05M    | 175.49ms | 28.72ms | **138.64ms** | 44.99ms | **0.79x** ✓ | 1.57x |
-| 2^24 | 16.8M    | 2044.29ms | 221.33ms | 2357.10ms | 943.66ms | 1.15x | 4.26x |
-| 2^28 | 268.4M   | TBD | TBD | **44.54s** | 16.04s | TBD | TBD |
-| 2^30 | 1.07B    | TBD | TBD | **130.12s** | 26.09s | TBD | TBD |
+| 2^20 | 1.05M    | 90.65ms | 16.55ms | **68.31ms** | 22.48ms | **0.75x** ✓ | 1.35x |
+| 2^24 | 16.8M    | 1173.71ms | 127.24ms | **1238.83ms** | 470.45ms | **1.05x** | 3.69x |
+| 2^28 | 268.4M   | 18.08s | 2.07s | 25.09s | 8.50s | 1.38x | 4.10x |
+| 2^30 | 1.07B    | 71.11s | 4.14s | 77.34s | 14.46s | 1.08x | 3.49x |
 
-**note**: benchmarks run with cpu governor tuning (performance mode, turbo boost disabled, pinned to cores 1-8). run `./benchmarks/compare_julia_rust.sh` to reproduce.
+**results:**
+- 2^20: rust 25% faster (68.31ms vs 90.65ms)
+- 2^24: roughly equal (1238.83ms vs 1173.71ms, 5% slower)
+- 2^28/2^30: julia faster (8-38% slower)
 
-### optimizations
+single-threaded baseline (2^20):
+- rust simd fft: 334.79ms
+- julia jit: 401.0ms
+- rust 20% faster single-threaded
 
-**monomorphic simd fft (35% faster):**
+multi-threaded scaling with 8 physical cores (smt disabled):
+- rust: 334.79ms → 68.31ms (4.9x speedup)
+- julia: 401.0ms → 90.65ms (4.42x speedup)
+
+rust's monomorphic simd fft (direct sse pclmulqdq) is faster than julia's jit both single and multi-threaded at 2^20, but julia wins at larger inputs.
+
+**why julia mt scales better at large sizes:**
+
+at 2^20, rust's simd advantage compensates for rayon overhead. at larger sizes (2^24+), julia's task-based parallelism wins:
+
+- **julia**: green threads + task-based scheduler
+  - lightweight task creation (stack copying)
+  - m:n threading (many tasks on few os threads)
+  - lower context switching overhead
+  - better for fine-grained parallel recursion
+
+- **rayon**: work-stealing threadpool with os threads
+  - heavier task spawning overhead
+  - 1:1 os thread mapping
+  - coordination overhead increases with problem size
+  - our fft creates many small recursive tasks
+
+as problem size grows, the number of parallel tasks increases exponentially. julia's green threads handle this better than rayon's os thread work-stealing. forking rayon to use a lighter task system is out of scope.
+
+### optimization highlights
+
+**monomorphic simd fft:**
 - specialized gf(2^32) fft using direct sse pclmulqdq calls
 - eliminated generic dispatch overhead via typeid-based specialization
 - 2x parallel carryless multiplication in butterfly operations
-- before: 91.9ms → after: 61.4ms (2^20, 20 threads)
 
-**threading improvements:**
+**threading:**
 - eliminated nested parallelization (sequential fft within parallel column encoding)
-- reduced rayon task spawning overhead (min_parallel_size: 16384 elements)
-- tuned thread count for minimal work-stealing coordination
+- tuned for 8 physical cores without smt
+- min_parallel_size: 16384 elements to reduce task spawning overhead
 
-**single-threaded comparison:**
-- rust: 367.7ms (simd fft)
-- julia: 393.9ms (jit-compiled)
-- **rust is 7% faster single-threaded**
-
-**why julia scales better:**
-
-profiling revealed 61% of rust multi-threaded runtime is rayon coordination overhead (crossbeam-epoch, work-stealing deques, task migration). julia's green threads are 10x cheaper to create (~5-20ns vs 50-200ns) and stay on the same thread (better cache locality).
-
-the remaining gap is architectural:
-- rayon: os threads + work-stealing (heavy)
-- julia: m:n green threads (lightweight, cooperative scheduling)
-
-implementing green threads in rust would require forking rayon or switching to async (out of scope). current performance is excellent given rust's safety guarantees without gc.
+**critical: smt (hyperthreading) must be disabled**
+- with smt on: 2^20 proving = 138.64ms (terrible - cache/resource contention)
+- with smt off: 2^20 proving = 68.31ms (proper scaling!)
+- **smt doubles latency due to execution unit/cache sharing**
 
 ## usage
 
@@ -85,24 +104,31 @@ assert!(verified);
 
 ### setup (one-time)
 
-configure passwordless sudo for cpu governor tuning:
+configure passwordless sudo for cpu tuning:
 ```bash
 ./benchmarks/setup_sudo.sh
 ```
 
-this allows the benchmark scripts to set performance governor and disable turbo boost for consistent measurements.
+this allows benchmarks to disable smt, set performance governor, and disable turbo boost.
 
 ### run benchmarks
 
-run tuned benchmarks (8 cores, performance governor, turbo disabled):
+**important:** benchmarks require smt disabled for accurate results:
+
 ```bash
-./benchmarks/run_tuned_benchmarks.sh
+# complete benchmark suite (all sizes)
+./benchmarks/run_proper_tuned.sh
+
+# compare with julia
+./benchmarks/compare_proper_tuned.sh
 ```
 
-compare with julia:
-```bash
-./benchmarks/compare_julia_rust.sh
-```
+benchmarks automatically:
+- disable smt (hyperthreading)
+- disable turbo boost (consistent clocks)
+- set performance governor
+- pin to physical cores 0-7
+- restore original state on exit
 
 ## testing
 

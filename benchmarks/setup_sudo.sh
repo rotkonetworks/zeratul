@@ -7,6 +7,7 @@ echo ""
 echo "this will add a sudoers rule to allow your user ($USER) to modify:"
 echo "  - /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor"
 echo "  - /sys/devices/system/cpu/cpufreq/boost"
+echo "  - /sys/devices/system/cpu/smt/control"
 echo ""
 echo "without requiring a password for each benchmark run."
 echo ""
@@ -24,6 +25,7 @@ cat <<EOF | sudo tee "$SUDOERS_FILE" > /dev/null
 # allow $USER to modify cpu governor for benchmarking
 $USER ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/devices/system/cpu/cpu*/cpufreq/scaling_governor
 $USER ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/devices/system/cpu/cpufreq/boost
+$USER ALL=(ALL) NOPASSWD: /usr/bin/tee /sys/devices/system/cpu/smt/control
 EOF
 
 sudo chmod 0440 "$SUDOERS_FILE"
