@@ -21,9 +21,9 @@ all implementations tested with identical parameters (sha256 transcript):
 
 | implementation | proving | verification | notes |
 |----------------|---------|--------------|-------|
-| **zeratul** | **90ms** | **1.1ms** | optimized verifier |
-| ligerito.jl | 58ms | 58ms | with warmup |
-| ashutosh-ligerito | 3,417ms | 258ms | reference port |
+| ligerito.jl (baseline) | 51ms | 15ms | 5 warmup + best of 3 |
+| **zeratul** | **90ms** (1.7x) | **1.1ms** (13x faster) | optimized verifier |
+| ashutosh-ligerito | 3,417ms (67x) | 258ms (17x) | reference port |
 
 #### 2^24 (16,777,216 elements)
 
