@@ -70,6 +70,14 @@ name = "bench_standardized_30"
 path = "../examples/bench_standardized_30.rs"
 
 [[example]]
+name = "bench_28_30"
+path = "../examples/bench_28_30.rs"
+
+[[example]]
+name = "bench_20"
+path = "../examples/bench_20.rs"
+
+[[example]]
 name = "polkadot_monitor"
 path = "../examples/polkadot_monitor.rs"
 

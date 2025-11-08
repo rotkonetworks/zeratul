@@ -4,7 +4,7 @@ use crate::{
     RecursiveLigeroProof, FinalLigeroProof, SumcheckTranscript,
     transcript::{FiatShamir, Transcript},
     ligero::ligero_commit,
-    sumcheck_polys::{induce_sumcheck_poly, induce_sumcheck_poly_parallel, induce_sumcheck_poly_debug},
+    sumcheck_polys::{induce_sumcheck_poly, induce_sumcheck_poly_parallel},
     utils::{eval_sk_at_vks, partial_eval_multilinear},
     data_structures::finalize,
 };
@@ -19,8 +19,8 @@ pub fn prove_with_transcript<T, U>(
     mut fs: impl Transcript,
 ) -> crate::Result<FinalizedLigeritoProof<T, U>>
 where
-    T: BinaryFieldElement + Send + Sync,
-    U: BinaryFieldElement + Send + Sync + From<T>,
+    T: BinaryFieldElement + Send + Sync + 'static,
+    U: BinaryFieldElement + Send + Sync + From<T> + 'static,
 {
     let mut proof = LigeritoProof::<T, U>::new();
 
@@ -203,8 +203,8 @@ pub fn prove<T, U>(
     poly: &[T],
 ) -> crate::Result<FinalizedLigeritoProof<T, U>>
 where
-    T: BinaryFieldElement + Send + Sync,
-    U: BinaryFieldElement + Send + Sync + From<T>,
+    T: BinaryFieldElement + Send + Sync + 'static,
+    U: BinaryFieldElement + Send + Sync + From<T> + 'static,
 {
     // Use Merlin by default for better performance
     let fs = FiatShamir::new_merlin();
@@ -217,8 +217,8 @@ pub fn prove_sha256<T, U>(
     poly: &[T],
 ) -> crate::Result<FinalizedLigeritoProof<T, U>>
 where
-    T: BinaryFieldElement + Send + Sync,
-    U: BinaryFieldElement + Send + Sync + From<T>,
+    T: BinaryFieldElement + Send + Sync + 'static,
+    U: BinaryFieldElement + Send + Sync + From<T> + 'static,
 {
     // Use SHA256 with seed 1234 to match Julia
     let fs = FiatShamir::new_sha256(1234);
@@ -231,8 +231,8 @@ pub fn prove_debug<T, U>(
     poly: &[T],
 ) -> crate::Result<FinalizedLigeritoProof<T, U>>
 where
-    T: BinaryFieldElement + Send + Sync,
-    U: BinaryFieldElement + Send + Sync + From<T>,
+    T: BinaryFieldElement + Send + Sync + 'static,
+    U: BinaryFieldElement + Send + Sync + From<T> + 'static,
 {
     println!("\n=== PROVER DEBUG ===");
 
@@ -302,7 +302,7 @@ where
     });
 
     println!("\nInducing sumcheck polynomial...");
-    let (basis_poly, enforced_sum) = induce_sumcheck_poly_debug(
+    let (basis_poly, enforced_sum) = induce_sumcheck_poly(
         n,
         &sks_vks,
         &opened_rows,
@@ -407,7 +407,7 @@ where
         let sks_vks: Vec<U> = eval_sk_at_vks(1 << n);
 
         println!("\nInducing next sumcheck polynomial...");
-        let (basis_poly, enforced_sum) = induce_sumcheck_poly_debug(
+        let (basis_poly, enforced_sum) = induce_sumcheck_poly(
             n,
             &sks_vks,
             &opened_rows,

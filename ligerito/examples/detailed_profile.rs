@@ -4,7 +4,7 @@ use ligerito::{
     VerifierConfig, FinalizedLigeritoProof,
     transcript::{FiatShamir, Transcript},
     ligero::hash_row,
-    sumcheck_polys::induce_sumcheck_poly_debug,
+    sumcheck_polys::induce_sumcheck_poly,
     utils::eval_sk_at_vks,
 };
 use std::time::Instant;
@@ -70,7 +70,7 @@ where
     let t0 = Instant::now();
     let alpha = fs.get_challenge::<U>();
     let sks_vks = &cached_initial_sks;
-    let (basis_poly, enforced_sum) = induce_sumcheck_poly_debug(
+    let (basis_poly, enforced_sum) = induce_sumcheck_poly(
         config.initial_dim,
         &sks_vks,
         &proof.initial_ligero_proof.opened_rows,
@@ -146,7 +146,7 @@ where
 
         let alpha_r = fs.get_challenge::<U>();
         let sks_vks_r = &cached_recursive_sks[i];
-        let (_, enforced_sum_next) = induce_sumcheck_poly_debug(
+        let (_, enforced_sum_next) = induce_sumcheck_poly(
             config.log_dims[i],
             &sks_vks_r,
             &ligero_proof.opened_rows,

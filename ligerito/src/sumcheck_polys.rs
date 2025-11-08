@@ -51,8 +51,9 @@ pub fn precompute_alpha_powers<F: BinaryFieldElement>(alpha: F, n: usize) -> Vec
     alpha_pows
 }
 
-/// debug version with consistency checks enabled
-pub fn induce_sumcheck_poly_debug<T, U>(
+/// full ligerito sumcheck polynomial induction per paper section 6.2
+/// computes batched basis polynomial w̃ℓ for verifier consistency check
+pub fn induce_sumcheck_poly<T, U>(
     n: usize,
     sks_vks: &[T],
     opened_rows: &[Vec<T>],
@@ -80,9 +81,7 @@ where
         let query_mod = query % (1 << n);
         let qf = T::from_bits(query_mod as u64);
 
-        // clear and reuse buffers
-        local_sks_x.fill(T::zero());
-        local_basis.fill(U::zero());
+        // compute scaled basis (clears buffers internally)
         evaluate_scaled_basis_inplace(&mut local_sks_x, &mut local_basis, sks_vks, qf, contribution);
 
         for (j, &val) in local_basis.iter().enumerate() {
@@ -90,59 +89,20 @@ where
         }
     }
 
-    let basis_sum = basis_poly.iter().fold(U::zero(), |acc, &x| acc.add(&x));
-    if basis_sum != enforced_sum {
-        panic!("sumcheck consistency check failed");
-    }
-
-    (basis_poly, enforced_sum)
-}
-
-/// production version using direct indexing optimization
-pub fn induce_sumcheck_poly<T, U>(
-    n: usize,
-    sks_vks: &[T],
-    opened_rows: &[Vec<T>],
-    v_challenges: &[U],
-    sorted_queries: &[usize],
-    alpha: U,
-) -> (Vec<U>, U)
-where
-    T: BinaryFieldElement,
-    U: BinaryFieldElement + From<T>,
-{
-    let gr = evaluate_lagrange_basis(v_challenges);
-    let alpha_pows = precompute_alpha_powers(alpha, opened_rows.len());
-
-    let mut basis_poly = vec![U::zero(); 1 << n];
-    let mut enforced_sum = U::zero();
-
-    for (i, (row, &query)) in opened_rows.iter().zip(sorted_queries.iter()).enumerate() {
-        let dot = row.iter()
-            .zip(gr.iter())
-            .fold(U::zero(), |acc, (&r, &g)| acc.add(&U::from(r).mul(&g)));
-
-        let contribution = dot.mul(&alpha_pows[i]);
-        enforced_sum = enforced_sum.add(&contribution);
-
-        let query_mod = query % (1 << n);
-        basis_poly[query_mod] = basis_poly[query_mod].add(&contribution);
-    }
-
     debug_assert_eq!(
         basis_poly.iter().fold(U::zero(), |acc, &x| acc.add(&x)),
         enforced_sum,
-        "sumcheck consistency failed"
+        "sumcheck consistency check failed"
     );
 
     (basis_poly, enforced_sum)
 }
 
-/// parallel version for prover - parallelize dot products, not basis accumulation
-/// only worth it for many queries (500+) - otherwise use sequential
+/// parallel version using thread-local accumulators (julia-style chunked parallelism)
+/// divides work into contiguous chunks, one per thread, to avoid locking overhead
 pub fn induce_sumcheck_poly_parallel<T, U>(
     n: usize,
-    _sks_vks: &[T],
+    sks_vks: &[T],
     opened_rows: &[Vec<T>],
     v_challenges: &[U],
     sorted_queries: &[usize],
@@ -152,43 +112,75 @@ where
     T: BinaryFieldElement + Send + Sync,
     U: BinaryFieldElement + Send + Sync + From<T>,
 {
-    // precompute lagrange basis once
-    let gr = evaluate_lagrange_basis(v_challenges);
+    use rayon::prelude::*;
+    use std::sync::Arc;
 
-    if !opened_rows.is_empty() {
-        assert_eq!(opened_rows[0].len(), gr.len());
-    }
     assert_eq!(opened_rows.len(), sorted_queries.len());
 
-    // precompute alpha powers once
     let alpha_pows = precompute_alpha_powers(alpha, opened_rows.len());
+    let basis_size = 1 << n;
+    let n_rows = opened_rows.len();
+    let n_threads = rayon::current_num_threads();
 
-    // parallelize ONLY the dot product computation, not basis accumulation
-    // this avoids allocating huge per-thread basis_poly copies
-    let contributions: Vec<(U, usize)> = opened_rows
-        .par_iter()
-        .zip(sorted_queries.par_iter())
-        .zip(alpha_pows.par_iter())
-        .map(|((row, &query), &alpha_pow)| {
-            // compute dot product in parallel
-            let dot = row.iter()
-                .zip(gr.iter())
-                .fold(U::zero(), |acc, (&r, &g)| acc.add(&U::from(r).mul(&g)));
+    // wrap shared data in Arc for safe sharing across threads
+    let sks_vks = Arc::new(sks_vks);
 
-            let contribution = dot.mul(&alpha_pow);
-            let query_mod = query % (1 << n);
+    // compute chunk size
+    let chunk_size = (n_rows + n_threads - 1) / n_threads;
 
-            (contribution, query_mod)
+    // process chunks in parallel, each thread produces its own basis and sum
+    let results: Vec<(Vec<U>, U)> = (0..n_threads)
+        .into_par_iter()
+        .map(|thread_id| {
+            let start_idx = thread_id * chunk_size;
+            let end_idx = (start_idx + chunk_size).min(n_rows);
+
+            if start_idx >= n_rows {
+                return (vec![U::zero(); basis_size], U::zero());
+            }
+
+            let mut thread_basis = vec![U::zero(); basis_size];
+            let mut thread_sum = U::zero();
+
+            // reusable buffers for this thread
+            let mut local_sks_x = vec![T::zero(); sks_vks.len()];
+            let mut local_basis = vec![U::zero(); basis_size];
+
+            for i in start_idx..end_idx {
+                let row = &opened_rows[i];
+                let query = sorted_queries[i];
+                let alpha_pow = alpha_pows[i];
+
+                // compute dot product
+                let dot = tensorized_dot_product(row, v_challenges);
+                let contribution = dot.mul(&alpha_pow);
+                thread_sum = thread_sum.add(&contribution);
+
+                let query_mod = query % (1 << n);
+                let qf = T::from_bits(query_mod as u64);
+
+                // compute scaled basis (clears buffers internally)
+                evaluate_scaled_basis_inplace(&mut local_sks_x, &mut local_basis, &sks_vks, qf, contribution);
+
+                // accumulate into thread-local basis
+                for (j, &val) in local_basis.iter().enumerate() {
+                    thread_basis[j] = thread_basis[j].add(&val);
+                }
+            }
+
+            (thread_basis, thread_sum)
         })
         .collect();
 
-    // sequential accumulation into basis_poly (single allocation)
-    let mut basis_poly = vec![U::zero(); 1 << n];
+    // combine results from all threads
+    let mut basis_poly = vec![U::zero(); basis_size];
     let mut enforced_sum = U::zero();
 
-    for (contribution, query_mod) in contributions {
-        basis_poly[query_mod] = basis_poly[query_mod].add(&contribution);
-        enforced_sum = enforced_sum.add(&contribution);
+    for (thread_basis, thread_sum) in results {
+        for (j, val) in thread_basis.into_iter().enumerate() {
+            basis_poly[j] = basis_poly[j].add(&val);
+        }
+        enforced_sum = enforced_sum.add(&thread_sum);
     }
 
     debug_assert_eq!(
@@ -355,7 +347,8 @@ mod tests {
 
         let v_challenges = vec![BinaryElem128::from(5)];
         let queries = vec![2]; // Single query at index 2
-        let opened_rows = vec![vec![BinaryElem32::from(7)]]; // Single row with single element
+        // Row must have length 2^k where k = number of challenges
+        let opened_rows = vec![vec![BinaryElem32::from(7), BinaryElem32::from(11)]];
         let alpha = BinaryElem128::from(3);
 
         let (basis_poly, enforced_sum) = induce_sumcheck_poly(
@@ -366,8 +359,7 @@ mod tests {
         let basis_sum = basis_poly.iter().fold(BinaryElem128::zero(), |acc, &x| acc.add(&x));
         assert_eq!(basis_sum, enforced_sum);
 
-        // Since we have only one query, the basis should be mostly zero except at the query point
-        let non_zero_count = basis_poly.iter().filter(|&&x| x != BinaryElem128::zero()).count();
-        assert!(non_zero_count <= 1, "Should have at most one non-zero entry for single query");
+        // Basis polynomial sum should equal enforced sum
+        assert!(basis_sum == enforced_sum, "Basis sum should match enforced sum");
     }
 }

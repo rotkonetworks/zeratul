@@ -115,7 +115,7 @@ impl Transcript for MerlinTranscript {
             }
         }
 
-        // CRITICAL: If we got all ones (which happens when bytes = [1, 0, 0, ...])
+        // If we got all ones (which happens when bytes = [1, 0, 0, ...])
         // or all zeros, we need to ensure diversity
         if result == F::one() || result == F::zero() {
             // Mix in the byte position to create diversity
