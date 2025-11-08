@@ -30,7 +30,7 @@ all implementations tested with identical parameters (sha256 transcript):
 | implementation | proving | verification | notes |
 |----------------|---------|--------------|-------|
 | ligerito.jl | 844ms | 178ms | 5 warmup + best of 3 |
-| **zeratul** | **1.85s** (2.2x slower) | **10.6ms** (17x faster) | SIMD FFT + optimized verifier |
+| **zeratul** | **954ms** (1.13x slower) | **261ms** (1.47x slower) | monomorphic SIMD FFT, 20 threads (10 runs) |
 
 **recent optimizations (2025-11-08):**
 - **monomorphic SIMD FFT** for GF(2^32) using SSE pclmulqdq
