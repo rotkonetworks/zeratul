@@ -1,17 +1,95 @@
 #!/bin/bash
 set -e
 
-cd /home/alice/rotko/zeratul
+# proper cpu-tuned benchmarking: disable SMT, turbo, use physical cores only
 
-echo "=== comprehensive zeratul benchmark suite ==="
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR/.."
+
+echo "=== zeratul proper tuned benchmarks ==="
 echo "hardware: $(cat /proc/cpuinfo | grep 'model name' | head -1 | cut -d: -f2 | xargs)"
+echo "cores: 8 physical cores (0-7), SMT disabled, turbo disabled"
 echo "date: $(date +%Y-%m-%d)"
 echo ""
 
-# Set optimal thread count
-export RAYON_NUM_THREADS=20
+# check sudo
+if ! sudo -n true 2>/dev/null; then
+    echo "error: need passwordless sudo"
+    echo "run: ./benchmarks/setup_sudo.sh"
+    exit 1
+fi
 
-# Function to extract min time from multiple runs
+# save original state
+ORIGINAL_GOVERNOR=$(cat /sys/devices/system/cpu/cpu0/cpufreq/scaling_governor)
+ORIGINAL_BOOST=$(cat /sys/devices/system/cpu/cpufreq/boost 2>/dev/null || echo "1")
+ORIGINAL_SMT=$(cat /sys/devices/system/cpu/smt/control)
+
+echo "original state:"
+echo "  governor: $ORIGINAL_GOVERNOR"
+echo "  turbo boost: $ORIGINAL_BOOST"
+echo "  smt: $ORIGINAL_SMT"
+echo ""
+
+cleanup() {
+    echo ""
+    echo "=== restoring original state ==="
+
+    # restore SMT
+    echo "restoring SMT to '$ORIGINAL_SMT'..."
+    echo "$ORIGINAL_SMT" | sudo tee /sys/devices/system/cpu/smt/control >/dev/null || true
+
+    # restore turbo boost
+    if [ -f /sys/devices/system/cpu/cpufreq/boost ]; then
+        echo "restoring turbo boost to '$ORIGINAL_BOOST'..."
+        echo "$ORIGINAL_BOOST" | sudo tee /sys/devices/system/cpu/cpufreq/boost >/dev/null
+    fi
+
+    # restore scaling governor
+    echo "restoring scaling governor to '$ORIGINAL_GOVERNOR'..."
+    for cpu in /sys/devices/system/cpu/cpu{0..15}/cpufreq/scaling_governor; do
+        [ -f "$cpu" ] && echo "$ORIGINAL_GOVERNOR" | sudo tee "$cpu" >/dev/null || true
+    done
+
+    echo "done!"
+}
+
+trap cleanup EXIT INT TERM
+
+echo "=== tuning cpu for benchmarking ==="
+
+# disable SMT (hyperthreading)
+echo "disabling SMT..."
+echo "off" | sudo tee /sys/devices/system/cpu/smt/control >/dev/null
+
+# disable turbo boost
+if [ -f /sys/devices/system/cpu/cpufreq/boost ]; then
+    echo "disabling turbo boost..."
+    echo "0" | sudo tee /sys/devices/system/cpu/cpufreq/boost >/dev/null
+fi
+
+# set performance governor on physical cores 0-15
+echo "setting performance governor on physical cores 0-15..."
+for cpu in /sys/devices/system/cpu/cpu{0..15}/cpufreq/scaling_governor; do
+    [ -f "$cpu" ] && echo "performance" | sudo tee "$cpu" >/dev/null || true
+done
+
+# verify SMT is actually off
+smt_state=$(cat /sys/devices/system/cpu/smt/control)
+if [ "$smt_state" != "off" ] && [ "$smt_state" != "forceoff" ]; then
+    echo "WARNING: SMT is still '$smt_state', not 'off'!"
+fi
+
+sync
+sleep 1
+
+echo ""
+echo "=== building optimized binaries ==="
+cargo build --release --quiet
+echo ""
+
+# use 8 threads on physical cores 0-7 (reserve higher cores for other work)
+export RAYON_NUM_THREADS=8
+
 min_time() {
     sort -n | head -1
 }
@@ -25,7 +103,8 @@ prove_times_20=()
 verify_times_20=()
 for i in {1..10}; do
     echo -n "  run $i/10... "
-    output=$(cargo run --release --example bench_20 2>&1 | tail -3)
+    # pin to physical cores 0-7 (SMT disabled so these are the only active cores)
+    output=$(taskset -c 0-7 cargo run --release --example bench_20 2>&1 | tail -3)
     ptime=$(echo "$output" | grep "^proving:" | awk '{print $2}' | tr -d 'ms')
     vtime=$(echo "$output" | grep "^verification:" | awk '{print $2}' | tr -d 'ms')
     echo "prove: ${ptime}ms, verify: ${vtime}ms"
@@ -49,7 +128,7 @@ prove_times_24=()
 verify_times_24=()
 for i in {1..10}; do
     echo -n "  run $i/10... "
-    output=$(cargo run --release --example bench_standardized_24 2>&1 | tail -5)
+    output=$(taskset -c 0-7 cargo run --release --example bench_standardized_24 2>&1 | tail -5)
     ptime=$(echo "$output" | grep "^proving:" | awk '{print $2}' | tr -d 'ms')
     vtime=$(echo "$output" | grep "^verification:" | awk '{print $2}' | tr -d 'ms')
     echo "prove: ${ptime}ms, verify: ${vtime}ms"
@@ -73,7 +152,7 @@ prove_times_28=()
 verify_times_28=()
 for i in {1..3}; do
     echo -n "  run $i/3... "
-    output=$(cargo run --release --example bench_standardized_28 2>&1 | tail -5)
+    output=$(taskset -c 0-7 cargo run --release --example bench_standardized_28 2>&1 | tail -5)
     ptime=$(echo "$output" | grep "^proving:" | awk '{print $2}' | tr -d 'ms')
     vtime=$(echo "$output" | grep "^verification:" | awk '{print $2}' | tr -d 'ms')
     ptime_s=$(echo "scale=2; $ptime / 1000" | bc)
@@ -98,7 +177,7 @@ prove_times_30=()
 verify_times_30=()
 for i in {1..3}; do
     echo -n "  run $i/3... "
-    output=$(cargo run --release --example bench_standardized_30 2>&1 | tail -5)
+    output=$(taskset -c 0-7 cargo run --release --example bench_standardized_30 2>&1 | tail -5)
     ptime=$(echo "$output" | grep "^proving:" | awk '{print $2}' | tr -d 'ms')
     vtime=$(echo "$output" | grep "^verification:" | awk '{print $2}' | tr -d 'ms')
     ptime_s=$(echo "scale=2; $ptime / 1000" | bc)
@@ -118,7 +197,7 @@ echo "  proving:      min=${min_prove_30}s, avg=${avg_prove_30}s"
 echo "  verification: min=${min_verify_30}ms, avg=${avg_verify_30}ms"
 echo ""
 
-echo "=== summary ==="
+echo "=== summary (8 physical cores, SMT off, turbo off, performance governor) ==="
 echo ""
 echo "| size | elements | proving (min/avg) | verification (min/avg) |"
 echo "|------|----------|-------------------|------------------------|"
