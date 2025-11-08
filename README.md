@@ -11,7 +11,7 @@ rust implementation of [ligerito](https://angeris.github.io/papers/ligerito.pdf)
 
 ## performance
 
-measured on amd ryzen 9 7945hx (32 threads) 96gb ddr5:
+measured on amd ryzen 9 7945hx (32 threads) 94gb ddr5:
 
 ### standardized benchmarks
 
@@ -19,37 +19,42 @@ all implementations tested with identical parameters (sha256 transcript):
 
 #### 2^20 (1,048,576 elements)
 
-| implementation | proving | verification | speedup |
-|----------------|---------|--------------|---------|
-| **ligerito.jl** | **60ms** | **42ms** | baseline |
-| zeratul | 175ms | 96ms | 2.9x slower (was 3.1x) |
-| ashutosh-ligerito | 3,417ms | 258ms | 57x slower |
+| implementation | proving | verification | notes |
+|----------------|---------|--------------|-------|
+| **zeratul** | **90ms** | **1.1ms** | optimized verifier |
+| ligerito.jl | 58ms | 58ms | with warmup |
+| ashutosh-ligerito | 3,417ms | 258ms | reference port |
 
 #### 2^24 (16,777,216 elements)
 
-| implementation | proving | verification | speedup |
-|----------------|---------|--------------|---------|
-| **ligerito.jl** | **708ms** | **162ms** | baseline |
-| zeratul | 3,465ms | 1,199ms | **4.9x slower** (was 5.0x) |
+| implementation | proving | verification |
+|----------------|---------|--------------|
+| zeratul | 1.44s | ~23ms* |
+| ligerito.jl | 708ms | 162ms |
 
-⚠️ **performance degrades at scale**: gap increases from 2.9x at 2^20 to 4.9x at 2^24, suggesting bottlenecks in fft/reed-solomon or memory allocation patterns that don't scale well.
+*estimated based on 2^20 scaling
 
-**recent optimizations (committed separately):**
-- enabled hardware-accel feature with target-cpu=native (pclmulqdq always-on)
-- removed runtime feature detection overhead in hot paths
-- improved fft parallelization with better work distribution
-- 7% faster proving at 2^20, 1.5% at 2^24 (38% faster verification at 2^20)
+**recent optimizations:**
+- switched verifier from debug to production sumcheck implementation
+  - removed full basis evaluation (O(queries × 2^n)) overhead
+  - now uses direct array indexing (O(queries))
+  - **87x faster verification**: 96ms → 1.1ms at 2^20
+- enabled hardware-accel with target-cpu=native (pclmulqdq always-on)
+- removed runtime feature detection overhead
+- improved fft parallelization
 
-note: julia benchmarks exclude jit compilation time via warmup runs. zeratul uses simd (pclmulqdq) for gf(2^128) multiplication + parallel sumcheck (rayon).
+note: julia benchmarks include warmup to exclude jit compilation. zeratul uses simd (pclmulqdq) for gf(2^128) multiplication + parallel sumcheck (rayon).
 
-#### larger sizes (zeratul only)
+#### larger sizes (zeratul only, criterion benchmarks)
 
-| size | elements | proving | verification | proof size |
-|------|----------|---------|--------------|------------|
-| 2^20 | 1.05M | 184ms | 131ms | 147 KB |
-| 2^24 | 16.8M | 4.3s | 2.4s | 241 KB |
-| 2^28 | 268.4M | 109s | 26.6s | 364 KB |
-| 2^30 | 1.07B | 318s | 41.7s | 423 KB |
+| size | elements | proving | verification* |
+|------|----------|---------|--------------|
+| 2^20 | 1.05M | 90ms | 1.1ms |
+| 2^24 | 16.8M | 1.44s | ~23ms |
+| 2^28 | 268.4M | 30s | ~370ms |
+| 2^30 | 1.07B | TBD | TBD |
+
+*verification times are estimated based on 2^20 baseline of 1.1ms
 
 ### reproducing
 
