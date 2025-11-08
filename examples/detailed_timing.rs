@@ -3,21 +3,23 @@
 
 use ligerito::*;
 use ligerito::transcript::Transcript;
+use ligerito::{ligero, data_structures, transcript, utils, sumcheck_polys};
 use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 use std::marker::PhantomData;
 use std::time::Instant;
+use rayon::prelude::*;
 
 fn main() {
     println!("=== detailed ligerito timing breakdown ===\n");
 
-    let size = 16777216; // 2^24
+    let size = 1048576; // 2^20
     let poly: Vec<BinaryElem32> = (0u32..size as u32)
         .map(|i| BinaryElem32::from(i % 0xFFFFFFFF))
         .collect();
 
-    let config = hardcoded_config_24(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>);
+    let config = hardcoded_config_20(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>);
 
-    println!("polynomial size: 2^24 = {} elements\n", size);
+    println!("polynomial size: 2^20 = {} elements\n", size);
 
     // warmup
     let _ = prove_sha256(&config, &poly);
@@ -53,17 +55,43 @@ struct Timings {
     merkle_open: f64,
     sumcheck_induce: f64,
     sumcheck_rounds: f64,
-    final_proof: f64,
 }
 
 fn time_prove(config: &ProverConfig<BinaryElem32, BinaryElem128>, poly: &[BinaryElem32]) -> Timings {
     let total_start = Instant::now();
 
-    // initial commit
+    // initial commit - break down into components
+    let t0_total = Instant::now();
+
+    // poly2mat
     let t0 = Instant::now();
-    let wtns_0 = ligero::ligero_commit(poly, config.initial_dims.0, config.initial_dims.1, &config.initial_reed_solomon);
-    let initial_commit = t0.elapsed().as_secs_f64() * 1000.0;
-    println!("  initial commit (reed-solomon + merkle): {:.2}ms", initial_commit);
+    let mut poly_mat = ligero::poly2mat(poly, config.initial_dims.0, config.initial_dims.1, 4);
+    let poly2mat_time = t0.elapsed().as_secs_f64() * 1000.0;
+    println!("  poly2mat: {:.2}ms", poly2mat_time);
+
+    // encode_cols (FFT)
+    let t0 = Instant::now();
+    ligero::encode_cols(&mut poly_mat, &config.initial_reed_solomon, true);
+    let encode_time = t0.elapsed().as_secs_f64() * 1000.0;
+    println!("  encode_cols (FFT): {:.2}ms", encode_time);
+
+    // hash rows
+    let t0 = Instant::now();
+    let hashed_rows: Vec<_> = poly_mat.par_iter()
+        .map(|row| ligero::hash_row(row))
+        .collect();
+    let hash_time = t0.elapsed().as_secs_f64() * 1000.0;
+    println!("  hash rows (SHA256): {:.2}ms", hash_time);
+
+    // build merkle tree
+    let t0 = Instant::now();
+    let tree = merkle_tree::build_merkle_tree(&hashed_rows);
+    let merkle_time = t0.elapsed().as_secs_f64() * 1000.0;
+    println!("  build merkle tree: {:.2}ms", merkle_time);
+
+    let wtns_0 = data_structures::RecursiveLigeroWitness { mat: poly_mat, tree };
+    let initial_commit = t0_total.elapsed().as_secs_f64() * 1000.0;
+    println!("  initial commit total: {:.2}ms", initial_commit);
 
     // initial challenges
     let t0 = Instant::now();
@@ -149,12 +177,6 @@ fn time_prove(config: &ProverConfig<BinaryElem32, BinaryElem128>, poly: &[Binary
     let sumcheck_rounds = t0.elapsed().as_secs_f64() * 1000.0;
     println!("  sumcheck rounds (folding): {:.2}ms", sumcheck_rounds);
 
-    // final proof serialization
-    let t0 = Instant::now();
-    let _ = prove_sha256(&config, &poly);
-    let final_proof = t0.elapsed().as_secs_f64() * 1000.0;
-    println!("  final proof assembly: {:.2}ms", final_proof);
-
     let total = total_start.elapsed().as_secs_f64() * 1000.0;
     println!("  total: {:.2}ms", total);
 
@@ -168,7 +190,6 @@ fn time_prove(config: &ProverConfig<BinaryElem32, BinaryElem128>, poly: &[Binary
         merkle_open,
         sumcheck_induce,
         sumcheck_rounds,
-        final_proof,
     }
 }
 
@@ -182,7 +203,6 @@ fn print_timing(t: &Timings) {
         ("merkle opening", t.merkle_open),
         ("sumcheck induce", t.sumcheck_induce),
         ("sumcheck rounds", t.sumcheck_rounds),
-        ("final proof", t.final_proof),
     ];
 
     println!("{:>25} {:>12} {:>10}", "component", "time (ms)", "% of total");

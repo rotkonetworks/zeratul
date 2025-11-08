@@ -60,6 +60,28 @@ note: julia benchmarks include warmup to exclude jit compilation. zeratul uses s
 
 fewer rounds = fewer expensive `induce_sumcheck_poly` calls (148 queries each). this is a protocol-level tradeoff between proof size and verification work, not a performance anomaly.
 
+### prover timing breakdown (2^20)
+
+detailed profiling shows where proving time is spent:
+
+| component | time (ms) | % of total |
+|-----------|-----------|------------|
+| **FFT (reed-solomon encode)** | **36.33** | **75%** |
+| poly to matrix | 3.61 | 7% |
+| merkle tree construction | 2.83 | 6% |
+| partial evaluation | 1.52 | 3% |
+| recursive commitment | 2.78 | 6% |
+| SHA256 row hashing | 0.96 | 2% |
+| sumcheck (induce + rounds) | 0.36 | 1% |
+| **total** | **~49ms** | **100%** |
+
+**main bottleneck:** FFT operations on BinaryElem32 consume 75% of proving time. the FFT uses scalar GF(2^32) arithmetic without SIMD acceleration. optimization path: add vectorized batch operations for BinaryElem32 (pack 4x into 128-bit registers) or implement AVX-512 butterfly operations.
+
+run detailed profiling:
+```bash
+cargo run --release --example detailed_timing
+```
+
 ### reproducing
 
 ```bash
