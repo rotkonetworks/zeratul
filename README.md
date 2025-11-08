@@ -19,10 +19,10 @@ all benchmarks use identical parameters (sha256 transcript, 8 cores):
 
 | size | elements | julia proving | julia verify | zeratul proving | zeratul verify | proving ratio | verify ratio |
 |------|----------|---------------|--------------|-----------------|----------------|---------------|--------------|
-| 2^20 | 1.05M    | TBD ms | TBD ms | TBD ms | TBD ms | TBD x | TBD x |
-| 2^24 | 16.8M    | TBD ms | TBD ms | TBD ms | TBD ms | TBD x | TBD x |
-| 2^28 | 268.4M   | TBD s  | TBD ms | TBD s  | TBD ms | TBD x | TBD x |
-| 2^30 | 1.07B    | TBD s  | TBD ms | TBD s  | TBD ms | TBD x | TBD x |
+| 2^20 | 1.05M    | 175.49ms | 28.72ms | **138.64ms** | 44.99ms | **0.79x** ✓ | 1.57x |
+| 2^24 | 16.8M    | 2044.29ms | 221.33ms | 2357.10ms | 943.66ms | 1.15x | 4.26x |
+| 2^28 | 268.4M   | TBD | TBD | **44.54s** | 16.04s | TBD | TBD |
+| 2^30 | 1.07B    | TBD | TBD | **130.12s** | 26.09s | TBD | TBD |
 
 **note**: benchmarks run with cpu governor tuning (performance mode, turbo boost disabled, pinned to cores 1-8). run `./benchmarks/compare_julia_rust.sh` to reproduce.
 
