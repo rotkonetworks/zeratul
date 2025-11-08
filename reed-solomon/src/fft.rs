@@ -65,7 +65,25 @@ pub fn compute_twiddles<F: BinaryFieldElement>(log_n: usize, beta: F) -> Vec<F> 
 fn fft_mul<F: BinaryFieldElement>(v: &mut [F], lambda: F) {
     let (u, w) = v.split_at_mut(v.len() / 2);
 
-    // optimize inner loop - reduce dependencies for better pipelining
+    // use SIMD-optimized version for BinaryElem32 when available
+    #[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
+    {
+        use binary_fields::BinaryElem32;
+        use std::any::TypeId;
+
+        // type check for BinaryElem32 - if match, use SIMD path
+        if TypeId::of::<F>() == TypeId::of::<BinaryElem32>() {
+            // safe: we just checked the type
+            let u_ref = unsafe { std::mem::transmute::<&mut [F], &mut [BinaryElem32]>(u) };
+            let w_ref = unsafe { std::mem::transmute::<&mut [F], &mut [BinaryElem32]>(w) };
+            let lambda_ref = unsafe { std::mem::transmute::<&F, &BinaryElem32>(&lambda) };
+
+            binary_fields::simd::fft_butterfly_gf32(u_ref, w_ref, *lambda_ref);
+            return;
+        }
+    }
+
+    // scalar fallback for other types or when SIMD not available
     for i in 0..u.len() {
         let lambda_w = lambda.mul(&w[i]);
         u[i] = u[i].add(&lambda_w);
