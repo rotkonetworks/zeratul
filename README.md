@@ -52,7 +52,7 @@ note: julia benchmarks include warmup to exclude jit compilation. zeratul uses s
 | 2^20 | 1.05M | 91.3ms | 0.87ms |
 | 2^24 | 16.8M | 1.58s | 1.46ms |
 | 2^28 | 268.4M | 45.4s | 36.2ms |
-| 2^30 | 1.07B | running... | running... |
+| 2^30 | 1.07B | 145.6s | 7.87ms |
 
 ### reproducing
 
