@@ -25,19 +25,21 @@ echo "=== 2. ligerito.jl (julia reference) ==="
 cd "$SCRIPT_DIR/Ligerito.jl"
 julia --threads=auto --project=. -e '
 using Pkg; Pkg.activate("."); Pkg.instantiate()
-using BinaryFields, Ligerito, Random
-Random.seed!(1234)
+using BinaryFields, Ligerito
 config = Ligerito.hardcoded_config_20(BinaryElem32, BinaryElem128)
 poly = [BinaryElem32(i % UInt32(0xFFFFFFFF)) for i in 0:(2^20-1)]
-# warmup run to trigger JIT compilation
-proof = prover(config, poly)
 verifier_cfg = Ligerito.hardcoded_config_20_verifier()
-result = verifier(verifier_cfg, proof)
-# actual timed run
-prove_time = @elapsed proof = prover(config, poly)
-verify_time = @elapsed result = verifier(verifier_cfg, proof)
-println("proving time: $(round(prove_time * 1000, digits=2))ms")
-println("verification time: $(round(verify_time * 1000, digits=2))ms")
+# multiple warmup runs to fully compile all paths
+for _ in 1:5
+    proof = prover(config, poly)
+    result = verifier(verifier_cfg, proof)
+end
+# actual timed run - take best of 3 to account for variability
+p1 = @elapsed proof = prover(config, poly); v1 = @elapsed result = verifier(verifier_cfg, proof)
+p2 = @elapsed proof = prover(config, poly); v2 = @elapsed result = verifier(verifier_cfg, proof)
+p3 = @elapsed proof = prover(config, poly); v3 = @elapsed result = verifier(verifier_cfg, proof)
+println("proving time: $(round(min(p1,p2,p3) * 1000, digits=2))ms")
+println("verification time: $(round(min(v1,v2,v3) * 1000, digits=2))ms")
 ' 2>&1 | grep -E "proving time:|verification time:"
 echo ""
 
