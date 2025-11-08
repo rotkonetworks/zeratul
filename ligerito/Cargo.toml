@@ -89,6 +89,10 @@ path = "../examples/onchain_verifier_pallet_v2.rs"
 name = "profile_proving"
 path = "../examples/profile_proving.rs"
 
+[[example]]
+name = "detailed_timing"
+path = "../examples/detailed_timing.rs"
+
 [[bench]]
 name = "ligerito_bench"
 harness = false

@@ -17,34 +17,27 @@ macro_rules! impl_binary_elem {
             }
 
             fn mod_irreducible_wide(poly: $poly_double) -> Self {
-                // Reduce a double-width polynomial modulo the irreducible
+                // julia-like reduction using leading_zeros (lzcnt)
                 let mut p = poly.value();
                 let irr = $irreducible;
                 let n = $bitsize;
 
-                // Find highest bit set in p
-                let mut high_bit = 0;
-                for i in (n..std::mem::size_of::<$value_double>() * 8).rev() {
-                    if (p >> i) & 1 == 1 {
-                        high_bit = i;
-                        break;
-                    }
-                }
+                // use leading_zeros instead of loop - julia uses this (binarypoly.jl:146)
+                let total_bits = std::mem::size_of::<$value_double>() * 8;
 
-                // Reduce
-                while high_bit >= n {
-                    p ^= irr << (high_bit - n);
-                    // Find new high bit
-                    high_bit = 0;
-                    for i in (n..std::mem::size_of::<$value_double>() * 8).rev() {
-                        if (p >> i) & 1 == 1 {
-                            high_bit = i;
-                            break;
-                        }
+                loop {
+                    if p == 0 {
+                        break;  // avoid underflow when p is zero
                     }
+
+                    let lz = p.leading_zeros() as usize;
+                    let high_bit = total_bits - lz - 1;
+
                     if high_bit < n {
                         break;
                     }
+
+                    p ^= irr << (high_bit - n);
                 }
 
                 Self($poly_type::new(p as $value_type))
@@ -185,34 +178,13 @@ impl BinaryFieldElement for BinaryElem128 {
     }
 
     fn mul(&self, other: &Self) -> Self {
-        // For 128-bit multiplication in GF(2^128), we need to handle reduction
-        // The irreducible polynomial is x^128 + x^7 + x^2 + x + 1
+        // Use SIMD carryless multiplication + reduction for performance
+        use crate::simd::{carryless_mul_128_full, reduce_gf128};
 
-        // First, do the multiplication (which may overflow)
-        let a = self.0.value();
-        let b = other.0.value();
+        let product = carryless_mul_128_full(self.0, other.0);
+        let reduced = reduce_gf128(product);
 
-        // We'll do this multiplication manually to handle the reduction
-        let mut result = 0u128;
-        let mut temp = a;
-
-        for i in 0..128 {
-            if (b >> i) & 1 == 1 {
-                result ^= temp;
-            }
-
-            // Multiply temp by x (shift left by 1)
-            let high_bit = (temp >> 127) & 1;
-            temp <<= 1;
-
-            // If we shifted out a 1, we need to reduce by the polynomial
-            // x^128 = x^7 + x^2 + x + 1
-            if high_bit == 1 {
-                temp ^= 0b10000111; // x^7 + x^2 + x + 1
-            }
-        }
-
-        Self(BinaryPoly128::new(result))
+        Self(reduced)
     }
 
     fn inv(&self) -> Self {

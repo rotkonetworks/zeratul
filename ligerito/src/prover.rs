@@ -73,7 +73,7 @@ where
         merkle_proof: mtree_proof,
     });
 
-    // Use sequential version for comparison
+    // use sequential version - parallel needs more tuning
     let (basis_poly, enforced_sum) = induce_sumcheck_poly(
         n,
         &sks_vks,
@@ -172,8 +172,8 @@ where
         let n = current_poly.len().trailing_zeros() as usize;
         let sks_vks: Vec<U> = eval_sk_at_vks(1 << n);
 
-        // Use sequential version
-        let (basis_poly, enforced_sum) = induce_sumcheck_poly(
+        // Use parallel version for performance
+        let (basis_poly, enforced_sum) = induce_sumcheck_poly_parallel(
             n,
             &sks_vks,
             &opened_rows,

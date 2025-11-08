@@ -286,20 +286,23 @@ fn batch_mul_gf128_hw(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [Binar
     }
 }
 
-/// Reduce 256-bit product modulo GF(2^128) irreducible polynomial
-/// Irreducible: x^128 + x^7 + x^2 + x + 1 (0x87 = 0b10000111)
-/// Matches Julia's @generated mod_irreducible implementation
+/// reduce 256-bit product modulo GF(2^128) irreducible polynomial
+/// irreducible: x^128 + x^7 + x^2 + x + 1 (0x87 = 0b10000111)
+/// matches julia's @generated mod_irreducible (binaryfield.jl:73-114)
+#[inline(always)]
 pub fn reduce_gf128(product: BinaryPoly256) -> BinaryPoly128 {
     let (hi, lo) = product.split();
     let high = hi.value();
     let low = lo.value();
 
-    // Julia's compute_tmp for irreducible 0b10000111 (bits 0,1,2,7):
-    // tmp = hi ^ (hi >> 127) ^ (hi >> 126) ^ (hi >> 121)
+    // julia's compute_tmp for irreducible 0b10000111 (bits 0,1,2,7):
+    // for each set bit i in irreducible: tmp ^= hi >> (128 - i)
+    // bits set: 0, 1, 2, 7 -> shifts: 128, 127, 126, 121
     let tmp = high ^ (high >> 127) ^ (high >> 126) ^ (high >> 121);
 
-    // Julia's compute_res:
-    // res = lo ^ tmp ^ (tmp << 1) ^ (tmp << 2) ^ (tmp << 7)
+    // julia's compute_res:
+    // for each set bit i in irreducible: res ^= tmp << i
+    // bits set: 0, 1, 2, 7 -> shifts: 0, 1, 2, 7
     let res = low ^ tmp ^ (tmp << 1) ^ (tmp << 2) ^ (tmp << 7);
 
     BinaryPoly128::new(res)

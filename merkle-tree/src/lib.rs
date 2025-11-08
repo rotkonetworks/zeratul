@@ -45,7 +45,7 @@ pub fn hash_siblings(left: &Hash, right: &Hash) -> Hash {
     hasher.finalize().into()
 }
 
-pub fn build_merkle_tree<T: Pod>(leaves: &[T]) -> CompleteMerkleTree {
+pub fn build_merkle_tree<T: Pod + Send + Sync>(leaves: &[T]) -> CompleteMerkleTree {
     if leaves.is_empty() {
         return CompleteMerkleTree { layers: vec![] };
     }
@@ -54,15 +54,22 @@ pub fn build_merkle_tree<T: Pod>(leaves: &[T]) -> CompleteMerkleTree {
         panic!("Number of leaves must be a power of 2");
     }
 
-    let mut current_layer: Vec<Hash> = leaves.iter()
-        .map(|leaf| hash_leaf(leaf))
-        .collect();
+    // parallelize initial leaf hashing for large leaf sets
+    let mut current_layer: Vec<Hash> = if leaves.len() >= 64 {
+        leaves.par_iter()
+            .map(|leaf| hash_leaf(leaf))
+            .collect()
+    } else {
+        leaves.iter()
+            .map(|leaf| hash_leaf(leaf))
+            .collect()
+    };
 
     let mut layers = vec![current_layer.clone()];
 
     while current_layer.len() > 1 {
-        // Parallelize sibling hashing when layer is large enough (prover optimization)
-        let next_layer: Vec<Hash> = if current_layer.len() >= 128 {
+        // parallelize sibling hashing for larger layers only to avoid thread overhead
+        let next_layer: Vec<Hash> = if current_layer.len() >= 64 {
             current_layer
                 .par_chunks_exact(2)
                 .map(|chunk| hash_siblings(&chunk[0], &chunk[1]))

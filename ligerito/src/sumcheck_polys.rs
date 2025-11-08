@@ -138,10 +138,11 @@ where
     (basis_poly, enforced_sum)
 }
 
-/// parallel version for prover (not for wasm/polkavm verifier)
+/// parallel version for prover - parallelize dot products, not basis accumulation
+/// only worth it for many queries (500+) - otherwise use sequential
 pub fn induce_sumcheck_poly_parallel<T, U>(
     n: usize,
-    sks_vks: &[T],
+    _sks_vks: &[T],
     opened_rows: &[Vec<T>],
     v_challenges: &[U],
     sorted_queries: &[usize],
@@ -151,6 +152,7 @@ where
     T: BinaryFieldElement + Send + Sync,
     U: BinaryFieldElement + Send + Sync + From<T>,
 {
+    // precompute lagrange basis once
     let gr = evaluate_lagrange_basis(v_challenges);
 
     if !opened_rows.is_empty() {
@@ -158,58 +160,35 @@ where
     }
     assert_eq!(opened_rows.len(), sorted_queries.len());
 
-    let n_threads = rayon::current_num_threads();
-    let n_rows = opened_rows.len();
-    let chunk_size = (n_rows + n_threads - 1) / n_threads;
-    let alpha_pows = precompute_alpha_powers(alpha, n_rows);
+    // precompute alpha powers once
+    let alpha_pows = precompute_alpha_powers(alpha, opened_rows.len());
 
-    let results: Vec<(Vec<U>, U)> = (0..n_threads)
-        .into_par_iter()
-        .map(|t| {
-            let mut local_basis = vec![U::zero(); 1 << n];
-            let mut local_sum = U::zero();
-            let mut local_sks_x = vec![T::zero(); sks_vks.len()];
-            let mut temp_basis = vec![U::zero(); 1 << n]; // reuse across loop
+    // parallelize ONLY the dot product computation, not basis accumulation
+    // this avoids allocating huge per-thread basis_poly copies
+    let contributions: Vec<(U, usize)> = opened_rows
+        .par_iter()
+        .zip(sorted_queries.par_iter())
+        .zip(alpha_pows.par_iter())
+        .map(|((row, &query), &alpha_pow)| {
+            // compute dot product in parallel
+            let dot = row.iter()
+                .zip(gr.iter())
+                .fold(U::zero(), |acc, (&r, &g)| acc.add(&U::from(r).mul(&g)));
 
-            let start_idx = t * chunk_size;
-            let end_idx = ((t + 1) * chunk_size).min(n_rows);
+            let contribution = dot.mul(&alpha_pow);
+            let query_mod = query % (1 << n);
 
-            for i in start_idx..end_idx {
-                let row = &opened_rows[i];
-                let query = sorted_queries[i];
-
-                let dot = row.iter()
-                    .zip(gr.iter())
-                    .fold(U::zero(), |acc, (&r, &g)| acc.add(&U::from(r).mul(&g)));
-
-                let contribution = dot.mul(&alpha_pows[i]);
-                local_sum = local_sum.add(&contribution);
-
-                let query_mod = query % (1 << n);
-                let qf = T::from_bits(query_mod as u64);
-
-                // clear and reuse temp_basis
-                temp_basis.fill(U::zero());
-                local_sks_x.fill(T::zero());
-                evaluate_scaled_basis_inplace(&mut local_sks_x, &mut temp_basis, sks_vks, qf, contribution);
-
-                for j in 0..(1 << n) {
-                    local_basis[j] = local_basis[j].add(&temp_basis[j]);
-                }
-            }
-
-            (local_basis, local_sum)
+            (contribution, query_mod)
         })
         .collect();
 
+    // sequential accumulation into basis_poly (single allocation)
     let mut basis_poly = vec![U::zero(); 1 << n];
     let mut enforced_sum = U::zero();
 
-    for (partial_basis, partial_sum) in results {
-        for (i, &val) in partial_basis.iter().enumerate() {
-            basis_poly[i] = basis_poly[i].add(&val);
-        }
-        enforced_sum = enforced_sum.add(&partial_sum);
+    for (contribution, query_mod) in contributions {
+        basis_poly[query_mod] = basis_poly[query_mod].add(&contribution);
+        enforced_sum = enforced_sum.add(&contribution);
     }
 
     debug_assert_eq!(
@@ -252,7 +231,7 @@ mod tests {
         let queries = vec![0, 2, 5];
         let opened_rows = vec![
             vec![BinaryElem32::from(1); 4],
-            vec![BinaryElem32::from(2); 4], 
+            vec![BinaryElem32::from(2); 4],
             vec![BinaryElem32::from(3); 4],
         ];
 
@@ -269,6 +248,51 @@ mod tests {
         // The basis polynomial should not be all zeros (unless all inputs are zero)
         let all_zero = basis_poly.iter().all(|&x| x == BinaryElem128::zero());
         assert!(!all_zero || alpha == BinaryElem128::zero(), "Basis polynomial should not be all zeros");
+    }
+
+    #[test]
+    fn test_parallel_vs_sequential() {
+        // Test that parallel and sequential versions produce identical results
+        let n = 12; // 2^12 = 4096 elements
+        let sks_vks: Vec<BinaryElem32> = eval_sk_at_vks(1 << n);
+
+        // Create realistic test data
+        let num_queries = 148;
+        let v_challenges = vec![
+            BinaryElem128::from(0x1234567890abcdef),
+            BinaryElem128::from(0xfedcba0987654321),
+        ];
+
+        let queries: Vec<usize> = (0..num_queries).map(|i| (i * 113) % (1 << n)).collect();
+        let opened_rows: Vec<Vec<BinaryElem32>> = (0..num_queries)
+            .map(|i| {
+                (0..4).map(|j| BinaryElem32::from((i * j + 1) as u32)).collect()
+            })
+            .collect();
+
+        let alpha = BinaryElem128::from(0x9ABC);
+
+        // Run sequential version
+        let (seq_basis, seq_sum) = induce_sumcheck_poly(
+            n, &sks_vks, &opened_rows, &v_challenges, &queries, alpha
+        );
+
+        // Run parallel version
+        let (par_basis, par_sum) = induce_sumcheck_poly_parallel(
+            n, &sks_vks, &opened_rows, &v_challenges, &queries, alpha
+        );
+
+        // Compare enforced sums
+        assert_eq!(par_sum, seq_sum, "Parallel and sequential enforced sums differ");
+
+        // Compare basis polynomials element by element
+        for (i, (&par_val, &seq_val)) in par_basis.iter().zip(seq_basis.iter()).enumerate() {
+            if par_val != seq_val {
+                println!("Mismatch at index {}: parallel={:?}, sequential={:?}", i, par_val, seq_val);
+            }
+        }
+
+        assert_eq!(par_basis, seq_basis, "Parallel and sequential basis polynomials differ");
     }
 
     #[test]

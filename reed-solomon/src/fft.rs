@@ -3,7 +3,7 @@
 //! Based on recursive subspace polynomial evaluation over GF(2^m).
 //! Ported from Julia reference in BinaryReedSolomon/src/binaryfft.jl.
 
-use binary_fields::BinaryFieldElement;
+use binary_fields::{BinaryFieldElement, BinaryElem128};
 use rayon::prelude::*;
 
 /// Compute next s value: s_i(x) = s_{i-1}(x)^2 + s_{i-1}(v_{i-1}) * s_{i-1}(x)
@@ -64,9 +64,11 @@ pub fn compute_twiddles<F: BinaryFieldElement>(log_n: usize, beta: F) -> Vec<F> 
 /// FFT butterfly in-place: u' = u + λ*w; w' = w + u' (char 2: + = add)
 fn fft_mul<F: BinaryFieldElement>(v: &mut [F], lambda: F) {
     let (u, w) = v.split_at_mut(v.len() / 2);
+
+    // optimize inner loop - reduce dependencies for better pipelining
     for i in 0..u.len() {
-        let temp = lambda.mul(&w[i]);
-        u[i] = u[i].add(&temp);
+        let lambda_w = lambda.mul(&w[i]);
+        u[i] = u[i].add(&lambda_w);
         w[i] = w[i].add(&u[i]);
     }
 }
@@ -88,7 +90,7 @@ fn fft_twiddles<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], idx: usize) 
 
 /// Parallel in-place recursive FFT step with twiddles, idx starts at 1
 fn fft_twiddles_parallel<F: BinaryFieldElement + Send + Sync>(v: &mut [F], twiddles: &[F], idx: usize, thread_depth: usize) {
-    const MIN_PARALLEL_SIZE: usize = 256; // Only parallelize if chunks are large enough
+    const MIN_PARALLEL_SIZE: usize = 128; // reduce threshold for more parallelism
 
     let len = v.len();
     if len == 1 {
@@ -132,9 +134,11 @@ pub fn fft<F: BinaryFieldElement + Send + Sync>(v: &mut [F], twiddles: &[F], par
 /// IFFT butterfly in-place: hi += lo; lo += λ*hi (char 2)
 fn ifft_mul<F: BinaryFieldElement>(v: &mut [F], lambda: F) {
     let (lo, hi) = v.split_at_mut(v.len() / 2);
+
     for i in 0..lo.len() {
         hi[i] = hi[i].add(&lo[i]);
-        lo[i] = lo[i].add(&lambda.mul(&hi[i]));
+        let lambda_hi = lambda.mul(&hi[i]);
+        lo[i] = lo[i].add(&lambda_hi);
     }
 }
 
