@@ -456,6 +456,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_fft_butterfly_gf32() {
+        // test SIMD vs scalar butterfly give same results
+        let mut u_simd = vec![
+            BinaryElem32::from(1),
+            BinaryElem32::from(2),
+            BinaryElem32::from(3),
+            BinaryElem32::from(4),
+        ];
+        let mut w_simd = vec![
+            BinaryElem32::from(5),
+            BinaryElem32::from(6),
+            BinaryElem32::from(7),
+            BinaryElem32::from(8),
+        ];
+        let lambda = BinaryElem32::from(3);
+
+        let mut u_scalar = u_simd.clone();
+        let mut w_scalar = w_simd.clone();
+
+        fft_butterfly_gf32(&mut u_simd, &mut w_simd, lambda);
+        fft_butterfly_gf32_scalar(&mut u_scalar, &mut w_scalar, lambda);
+
+        for i in 0..u_simd.len() {
+            assert_eq!(u_simd[i], u_scalar[i], "u mismatch at index {}", i);
+            assert_eq!(w_simd[i], w_scalar[i], "w mismatch at index {}", i);
+        }
+    }
+
+    #[test]
     fn test_batch_add() {
         let a = vec![
             BinaryElem128::from(1),
