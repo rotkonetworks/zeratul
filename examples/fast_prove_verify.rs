@@ -1,8 +1,8 @@
 //! Fixed fast example of proving and verifying with Ligerito
 //! This uses a smaller polynomial size for quick demonstration
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use ligerito::{prove_sha256, verify_sha256, ProverConfig, VerifierConfig};
-use reed_solomon::reed_solomon;
+use ligerito_reed_solomon::reed_solomon;
 use rand::Rng;
 use std::time::Instant;
 
@@ -18,9 +18,9 @@ fn create_small_config() -> ProverConfig<BinaryElem32, BinaryElem128> {
     let initial_k = 4;
     let ks = vec![2];
 
-    let initial_reed_solomon = reed_solomon::<BinaryElem32>(initial_dims.0, initial_dims.0 * inv_rate);
+    let initial_reed_solomon = ligerito_reed_solomon::<BinaryElem32>(initial_dims.0, initial_dims.0 * inv_rate);
     let reed_solomon_codes = vec![
-        reed_solomon::<BinaryElem128>(dims[0].0, dims[0].0 * inv_rate),
+        ligerito_reed_solomon::<BinaryElem128>(dims[0].0, dims[0].0 * inv_rate),
     ];
 
     ProverConfig {

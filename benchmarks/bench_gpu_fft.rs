@@ -2,7 +2,7 @@
 //!
 //! Usage: cargo run --release --example bench_gpu_fft --features webgpu
 
-use binary_fields::{BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem128, BinaryFieldElement};
 use std::time::Instant;
 
 #[cfg(feature = "webgpu")]
@@ -15,7 +15,7 @@ fn generate_test_data(size: usize) -> Vec<BinaryElem128> {
 }
 
 fn benchmark_cpu_fft(size: usize) -> f64 {
-    use reed_solomon::{fft, compute_twiddles};
+    use ligerito_reed_solomon::{fft, compute_twiddles};
 
     let mut data = generate_test_data(size);
     let log_size = (size as u32).trailing_zeros() as usize;

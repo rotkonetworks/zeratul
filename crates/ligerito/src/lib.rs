@@ -16,7 +16,7 @@
 //!
 //! ```rust,ignore
 //! use ligerito::{prove, verify, hardcoded_config_20, hardcoded_config_20_verifier};
-//! use binary_fields::{BinaryElem32, BinaryElem128};
+//! use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 //! use std::marker::PhantomData;
 //!
 //! let config = hardcoded_config_20(
@@ -39,6 +39,12 @@ extern crate alloc;
 
 #[cfg(not(feature = "std"))]
 use alloc::{vec::Vec, vec, string::String, boxed::Box};
+
+// Re-export with shorter names for internal use
+extern crate ligerito_binary_fields as binary_fields;
+extern crate ligerito_merkle as merkle_tree;
+#[cfg(feature = "prover")]
+extern crate ligerito_reed_solomon as reed_solomon;
 
 pub mod configs;
 pub mod data_structures;
@@ -172,7 +178,7 @@ where
 #[cfg(all(test, feature = "std", feature = "prover"))]
 mod tests {
     use super::*;
-    use binary_fields::{BinaryElem32, BinaryElem128};
+    use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 
     #[test]
     fn test_basic_prove_verify_merlin() {

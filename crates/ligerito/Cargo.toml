@@ -25,19 +25,19 @@ default = ["std", "prover", "parallel", "hardware-accel", "transcript-merlin"]
 
 # Environment: std or no_std
 std = [
-    "binary-fields/std",
-    "merkle-tree/std",
+    "ligerito-binary-fields/std",
+    "ligerito-merkle/std",
     "serde/std",
     "thiserror",
 ]
 
 # Functionality: include prover or verifier-only
-prover = ["reed-solomon", "rand", "rand_chacha"]
+prover = ["ligerito-reed-solomon", "rand", "rand_chacha"]
 verifier-only = []
 
 # Performance optimizations
 parallel = ["rayon"]
-hardware-accel = ["binary-fields/hardware-accel"]
+hardware-accel = ["ligerito-binary-fields/hardware-accel"]
 
 # Transcript implementations
 transcript-merlin = ["merlin", "std"]
@@ -79,8 +79,8 @@ cli = ["std", "prover", "transcript-merlin", "bincode", "clap", "anyhow", "hex",
 
 [dependencies]
 # Core dependencies (always needed)
-binary-fields = { version = "0.1.0", path = "../binary-fields", default-features = false, features = ["serde"] }
-merkle-tree = { version = "0.1.0", path = "../merkle-tree", default-features = false, features = ["serde"] }
+ligerito-binary-fields = { version = "0.1.0", path = "../ligerito-binary-fields", default-features = false, features = ["serde"] }
+ligerito-merkle = { version = "0.1.0", path = "../ligerito-merkle", default-features = false, features = ["serde"] }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 bytemuck = { workspace = true }
 
@@ -90,7 +90,7 @@ blake3 = { workspace = true, optional = true }
 merlin = { workspace = true, optional = true }
 
 # Prover-only dependencies
-reed-solomon = { version = "0.1.0", path = "../reed-solomon", optional = true }
+ligerito-reed-solomon = { version = "0.1.0", path = "../ligerito-reed-solomon", optional = true }
 rand = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
 

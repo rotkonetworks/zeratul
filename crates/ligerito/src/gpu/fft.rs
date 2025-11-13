@@ -325,7 +325,7 @@ impl GpuFft {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use binary_fields::{BinaryElem128, BinaryFieldElement};
+    use ligerito_binary_fields::{BinaryElem128, BinaryFieldElement};
 
     #[tokio::test]
     async fn test_gpu_fft_basic() {

@@ -1,5 +1,5 @@
 //! Detailed profiling of prover and verifier
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use ligerito::{prove_sha256, verify_sha256, hardcoded_config_20, hardcoded_config_20_verifier};
 use rand::Rng;
 use std::time::Instant;

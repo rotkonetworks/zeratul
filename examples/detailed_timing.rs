@@ -4,7 +4,7 @@
 use ligerito::*;
 use ligerito::transcript::Transcript;
 use ligerito::{ligero, data_structures, transcript, utils, sumcheck_polys};
-use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 use std::marker::PhantomData;
 use std::time::Instant;
 use rayon::prelude::*;
@@ -85,7 +85,7 @@ fn time_prove(config: &ProverConfig<BinaryElem32, BinaryElem128>, poly: &[Binary
 
     // build merkle tree
     let t0 = Instant::now();
-    let tree = merkle_tree::build_merkle_tree(&hashed_rows);
+    let tree = ligerito_merkle::build_merkle_tree(&hashed_rows);
     let merkle_time = t0.elapsed().as_secs_f64() * 1000.0;
     println!("  build merkle tree: {:.2}ms", merkle_time);
 

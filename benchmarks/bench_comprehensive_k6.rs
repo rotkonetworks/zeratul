@@ -3,7 +3,7 @@
 /// Tests proving and verification performance at different scales
 /// Records results with hardware specs for documentation
 
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use ligerito::{prove, verify, configs::{
     hardcoded_config_20, hardcoded_config_20_verifier,
     hardcoded_config_24, hardcoded_config_24_verifier,

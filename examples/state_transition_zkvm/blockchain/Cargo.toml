@@ -27,7 +27,7 @@ path = "examples/light_client_sync.rs"
 # Local dependencies
 state-transition-circuit = { path = "../circuit" }
 ligerito = { path = "../../../crates/ligerito", features = ["prover"] }
-binary-fields = { path = "../../../crates/binary-fields" }
+ligerito-binary-fields = { path = "../../../crates/ligerito-binary-fields" }
 
 # Commonware dependencies - blockchain primitives
 commonware-consensus = { git = "https://github.com/commonwarexyz/monorepo" }

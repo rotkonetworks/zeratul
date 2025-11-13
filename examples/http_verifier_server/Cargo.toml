@@ -12,7 +12,7 @@ path = "src/main.rs"
 
 [dependencies]
 ligerito = { path = "../../crates/ligerito", default-features = false, features = ["std", "verifier-only"] }
-binary-fields = { path = "../../crates/binary-fields", features = ["serde"] }
+ligerito-binary-fields = { path = "../../crates/ligerito-binary-fields", features = ["serde"] }
 
 # HTTP server
 axum = "0.7"

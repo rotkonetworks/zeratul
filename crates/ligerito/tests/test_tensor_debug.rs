@@ -1,4 +1,4 @@
-use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 
 fn tensorized_dot_product_debug<T, U>(row: &[T], challenges: &[U]) -> U
 where

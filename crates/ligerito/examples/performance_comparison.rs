@@ -2,7 +2,7 @@ use ligerito::{
     prove_sha256, prove, verify_sha256, verify,
     hardcoded_config_12, hardcoded_config_12_verifier,
 };
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use std::marker::PhantomData;
 use std::time::Instant;
 
@@ -211,7 +211,7 @@ fn transcript_benchmarks() {
     println!("Pure transcript performance (1000 challenges):");
 
     let iterations = 1000;
-    let dummy_root = merkle_tree::MerkleRoot { root: Some([1u8; 32]) };
+    let dummy_root = ligerito_merkle::MerkleRoot { root: Some([1u8; 32]) };
 
     // Merlin transcript
     let start = Instant::now();

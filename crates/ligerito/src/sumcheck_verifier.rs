@@ -358,7 +358,7 @@ impl<F: BinaryFieldElement> SumcheckVerifierInstance<F> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use binary_fields::BinaryElem128;
+    use ligerito_binary_fields::BinaryElem128;
 
     #[test]
     fn test_quadratic_eval() {

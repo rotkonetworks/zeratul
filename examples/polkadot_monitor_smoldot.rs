@@ -4,7 +4,7 @@
 /// proves: [timestamp, latency_ms, sync_working, peers_discovered, block_height]
 
 use ligerito::*;
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use std::marker::PhantomData;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 

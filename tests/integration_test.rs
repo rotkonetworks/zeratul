@@ -1,6 +1,6 @@
 //! Integration tests for Ligerito.
 
-use binary_fields::{BinaryElem128, BinaryElem32};
+use ligerito_binary_fields::{BinaryElem128, BinaryElem32};
 use ligerito::{prover, verifier, Config};
 use rand::{thread_rng, Rng};
 

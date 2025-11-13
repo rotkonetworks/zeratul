@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 
 // TODO: Import actual Ligerito types when compilation is fixed
 // use ligerito::{prove, verify, ProverConfig, VerifierConfig};
-// use binary_fields::BinaryElem32;
+// use ligerito_binary_fields::BinaryElem32;
 
 /// ZODA header (polynomial commitment)
 ///

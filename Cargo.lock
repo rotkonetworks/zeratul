@@ -684,19 +684,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "230c5f1ca6a325a32553f8640d31ac9b49f2411e901e427570154868b46da4f7"
 
 [[package]]
-name = "binary-fields"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "core_simd",
- "criterion",
- "proptest",
- "rand 0.8.5",
- "serde",
- "wide",
-]
-
-[[package]]
 name = "bincode"
 version = "1.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3557,7 +3544,6 @@ name = "ligerito"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "binary-fields",
  "bincode",
  "blake3",
  "bytemuck",
@@ -3569,13 +3555,14 @@ dependencies = [
  "hashbrown 0.14.5",
  "hex",
  "js-sys",
- "merkle-tree",
+ "ligerito-binary-fields",
+ "ligerito-merkle",
+ "ligerito-reed-solomon",
  "merlin",
  "pollster",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "rayon",
- "reed-solomon",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3587,6 +3574,40 @@ dependencies = [
  "web-sys",
  "wgpu",
  "zstd",
+]
+
+[[package]]
+name = "ligerito-binary-fields"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "core_simd",
+ "criterion",
+ "proptest",
+ "rand 0.8.5",
+ "serde",
+ "wide",
+]
+
+[[package]]
+name = "ligerito-merkle"
+version = "0.1.0"
+dependencies = [
+ "bytemuck",
+ "rand 0.8.5",
+ "rayon",
+ "serde",
+ "sha2 0.10.9",
+]
+
+[[package]]
+name = "ligerito-reed-solomon"
+version = "0.1.0"
+dependencies = [
+ "criterion",
+ "ligerito-binary-fields",
+ "rand 0.8.5",
+ "rayon",
 ]
 
 [[package]]
@@ -3681,17 +3702,6 @@ name = "memchr"
 version = "2.7.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "78ca9ab1a0babb1e7d5695e3530886289c18cf2f87ec19a575a0abdce112e3a3"
-
-[[package]]
-name = "merkle-tree"
-version = "0.1.0"
-dependencies = [
- "bytemuck",
- "rand 0.8.5",
- "rayon",
- "serde",
- "sha2 0.10.9",
-]
 
 [[package]]
 name = "merlin"
@@ -4730,16 +4740,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "reed-solomon"
-version = "0.1.0"
-dependencies = [
- "binary-fields",
- "criterion",
- "rand 0.8.5",
- "rayon",
-]
-
-[[package]]
 name = "reed-solomon-simd"
 version = "3.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5479,7 +5479,6 @@ name = "state-transition-circuit"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "binary-fields",
  "bytes",
  "commonware-codec",
  "commonware-coding",
@@ -5487,6 +5486,7 @@ dependencies = [
  "criterion",
  "hex",
  "ligerito",
+ "ligerito-binary-fields",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
  "serde",
@@ -7041,7 +7041,6 @@ name = "zeratul-blockchain"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "binary-fields",
  "blake3",
  "bytes",
  "clap",
@@ -7062,6 +7061,7 @@ dependencies = [
  "futures",
  "governor 0.7.0",
  "ligerito",
+ "ligerito-binary-fields",
  "nomt",
  "parity-scale-codec",
  "rand 0.8.5",

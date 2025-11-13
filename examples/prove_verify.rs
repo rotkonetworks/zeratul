@@ -1,7 +1,7 @@
 //! Example of proving and verifying with Ligerito
 use std::marker::PhantomData;
 
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use ligerito::{prover, verifier, hardcoded_config_24, hardcoded_config_24_verifier};
 use rand::Rng;
 use std::time::Instant;

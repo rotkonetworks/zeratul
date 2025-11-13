@@ -3,7 +3,7 @@ use ligerito::ligero::verify_ligero;
 use ligerito::transcript::{Sha256Transcript, Transcript};
 use ligerito::data_structures::*;
 // Use local definition of evaluate_quadratic
-use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 use std::marker::PhantomData;
 
 fn evaluate_quadratic<F: BinaryFieldElement>(coeffs: (F, F, F), x: F) -> F {
