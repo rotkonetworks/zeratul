@@ -1,4 +1,10 @@
 target/
+pkg/
+**/.cargo/
+
+# external projects
+alto/
+commonware/
 
 # temporary profiling and analysis files
 perf.data*
