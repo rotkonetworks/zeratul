@@ -13,14 +13,14 @@ echo "Step 1: Building multi-threaded WASM..."
 
 echo
 echo "Step 2: Copying helper files..."
-mkdir -p www/snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src
+mkdir -p ../examples/www/snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src
 cp ~/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/wasm-bindgen-rayon-1.3.0/src/workerHelpers.* \
-   www/snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src/
+   ../examples/www/snippets/wasm-bindgen-rayon-38edf6e439f6d70d/src/
 
 echo
 echo "Step 3: Creating deployment package..."
 mkdir -p deploy
-cp -r www/* deploy/
+cp -r ../examples/www/* deploy/
 
 # Create _headers file for proper CORS (for Netlify/Cloudflare Pages)
 cat > deploy/_headers <<EOF

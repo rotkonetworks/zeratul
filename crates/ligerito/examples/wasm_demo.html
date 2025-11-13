@@ -1,0 +1,238 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Ligerito WASM Demo</title>
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            max-width: 800px;
+            margin: 50px auto;
+            padding: 20px;
+            background-color: #f5f5f5;
+        }
+        h1 {
+            color: #333;
+        }
+        .section {
+            background: white;
+            padding: 20px;
+            margin: 20px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        button {
+            background-color: #4CAF50;
+            color: white;
+            padding: 10px 20px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 16px;
+            margin: 5px;
+        }
+        button:hover {
+            background-color: #45a049;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .output {
+            background-color: #f9f9f9;
+            border: 1px solid #ddd;
+            padding: 15px;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+            white-space: pre-wrap;
+            margin-top: 10px;
+            max-height: 300px;
+            overflow-y: auto;
+        }
+        .success {
+            color: #4CAF50;
+            font-weight: bold;
+        }
+        .error {
+            color: #f44336;
+            font-weight: bold;
+        }
+        select {
+            padding: 8px;
+            border-radius: 4px;
+            border: 1px solid #ddd;
+            font-size: 14px;
+            margin: 5px;
+        }
+    </style>
+</head>
+<body>
+    <h1>🚀 Ligerito WASM Demo</h1>
+
+    <div class="section">
+        <h2>Polynomial Commitment in Your Browser!</h2>
+        <p>
+            This demo shows Ligerito's polynomial commitment scheme running entirely in WebAssembly.
+            Generate and verify zero-knowledge proofs right in your browser!
+        </p>
+    </div>
+
+    <div class="section">
+        <h2>1. Select Polynomial Size</h2>
+        <label>
+            Config Size:
+            <select id="configSize">
+                <option value="12" selected>2^12 (4,096 elements) - Fast demo</option>
+                <option value="20">2^20 (1,048,576 elements) - Production size</option>
+                <option value="24">2^24 (16,777,216 elements) - Large proof</option>
+            </select>
+        </label>
+    </div>
+
+    <div class="section">
+        <h2>2. Generate Random Polynomial</h2>
+        <button id="generateBtn">Generate Random Polynomial</button>
+        <div id="polyOutput" class="output"></div>
+    </div>
+
+    <div class="section">
+        <h2>3. Prove (Generate ZK Proof)</h2>
+        <button id="proveBtn" disabled>Generate Proof</button>
+        <div id="proveOutput" class="output"></div>
+    </div>
+
+    <div class="section">
+        <h2>4. Verify Proof</h2>
+        <button id="verifyBtn" disabled>Verify Proof</button>
+        <div id="verifyOutput" class="output"></div>
+    </div>
+
+    <script type="module">
+        import init, { prove, verify, get_polynomial_size } from '../pkg/web/ligerito.js';
+
+        let polynomial = null;
+        let proof = null;
+        let configSize = 12;
+
+        // Initialize WASM
+        (async () => {
+            try {
+                await init();
+                console.log('Ligerito WASM initialized!');
+            } catch (e) {
+                console.error('Failed to initialize WASM:', e);
+                document.body.innerHTML = '<h1 style="color:red">Failed to load WASM module</h1><pre>' + e + '</pre>';
+            }
+        })();
+
+        // Update config size
+        document.getElementById('configSize').addEventListener('change', (e) => {
+            configSize = parseInt(e.target.value);
+            polynomial = null;
+            proof = null;
+            document.getElementById('proveBtn').disabled = true;
+            document.getElementById('verifyBtn').disabled = true;
+            document.getElementById('polyOutput').textContent = '';
+            document.getElementById('proveOutput').textContent = '';
+            document.getElementById('verifyOutput').textContent = '';
+        });
+
+        // Generate random polynomial
+        document.getElementById('generateBtn').addEventListener('click', () => {
+            const size = get_polynomial_size(configSize);
+            polynomial = new Uint32Array(size);
+
+            // Fill with random values
+            for (let i = 0; i < size; i++) {
+                polynomial[i] = Math.floor(Math.random() * 0xFFFFFFFF);
+            }
+
+            document.getElementById('polyOutput').innerHTML = `
+<span class="success">✓ Generated polynomial</span>
+Size: ${size.toLocaleString()} elements (${(size * 4 / 1024).toFixed(2)} KB)
+First 10 values: ${Array.from(polynomial.slice(0, 10)).join(', ')}...
+            `.trim();
+
+            document.getElementById('proveBtn').disabled = false;
+            proof = null;
+            document.getElementById('verifyBtn').disabled = true;
+            document.getElementById('proveOutput').textContent = '';
+            document.getElementById('verifyOutput').textContent = '';
+        });
+
+        // Generate proof
+        document.getElementById('proveBtn').addEventListener('click', async () => {
+            if (!polynomial) return;
+
+            document.getElementById('proveOutput').textContent = 'Generating proof... (this may take a few seconds)';
+            document.getElementById('proveBtn').disabled = true;
+
+            try {
+                const start = performance.now();
+                proof = prove(polynomial, configSize);
+                const elapsed = performance.now() - start;
+
+                document.getElementById('proveOutput').innerHTML = `
+<span class="success">✓ Proof generated!</span>
+Time: ${elapsed.toFixed(2)}ms
+Proof size: ${proof.length.toLocaleString()} bytes (${(proof.length / 1024).toFixed(2)} KB)
+                `.trim();
+
+                document.getElementById('verifyBtn').disabled = false;
+            } catch (e) {
+                document.getElementById('proveOutput').innerHTML = `
+<span class="error">✗ Proving failed</span>
+Error: ${e}
+                `.trim();
+                console.error('Proving error:', e);
+            } finally {
+                document.getElementById('proveBtn').disabled = false;
+            }
+        });
+
+        // Verify proof
+        document.getElementById('verifyBtn').addEventListener('click', async () => {
+            if (!proof) return;
+
+            document.getElementById('verifyOutput').textContent = 'Verifying proof...';
+            document.getElementById('verifyBtn').disabled = true;
+
+            try {
+                const start = performance.now();
+                const isValid = verify(proof, configSize);
+                const elapsed = performance.now() - start;
+
+                if (isValid) {
+                    document.getElementById('verifyOutput').innerHTML = `
+<span class="success">✓ PROOF IS VALID!</span>
+Time: ${elapsed.toFixed(2)}ms
+
+The proof cryptographically verifies that:
+- The polynomial was correctly encoded
+- The commitment is valid
+- The sumcheck protocol passes
+
+All without revealing the polynomial data! 🎉
+                    `.trim();
+                } else {
+                    document.getElementById('verifyOutput').innerHTML = `
+<span class="error">✗ PROOF IS INVALID</span>
+Time: ${elapsed.toFixed(2)}ms
+
+The proof failed verification.
+                    `.trim();
+                }
+            } catch (e) {
+                document.getElementById('verifyOutput').innerHTML = `
+<span class="error">✗ Verification failed</span>
+Error: ${e}
+                `.trim();
+                console.error('Verification error:', e);
+            } finally {
+                document.getElementById('verifyBtn').disabled = false;
+            }
+        });
+    </script>
+</body>
+</html>

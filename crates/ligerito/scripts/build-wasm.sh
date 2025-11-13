@@ -38,7 +38,7 @@ if [ "$PARALLEL_MODE" = "yes" ]; then
     RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals' \
     wasm-pack build \
         --target web \
-        --out-dir pkg/web \
+        --out-dir ../pkg/web \
         --features $FEATURES \
         --no-default-features \
         -- -Z build-std=panic_abort,std
@@ -46,7 +46,7 @@ else
     # Single-threaded build (normal)
     wasm-pack build \
         --target web \
-        --out-dir pkg/web \
+        --out-dir ../pkg/web \
         --features $FEATURES \
         --no-default-features
 fi
@@ -57,14 +57,14 @@ if [ "$PARALLEL_MODE" = "yes" ]; then
     RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals' \
     wasm-pack build \
         --target bundler \
-        --out-dir pkg/bundler \
+        --out-dir ../pkg/bundler \
         --features $FEATURES \
         --no-default-features \
         -- -Z build-std=panic_abort,std
 else
     wasm-pack build \
         --target bundler \
-        --out-dir pkg/bundler \
+        --out-dir ../pkg/bundler \
         --features $FEATURES \
         --no-default-features
 fi
@@ -75,14 +75,14 @@ if [ "$PARALLEL_MODE" = "yes" ]; then
     RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals' \
     wasm-pack build \
         --target nodejs \
-        --out-dir pkg/nodejs \
+        --out-dir ../pkg/nodejs \
         --features $FEATURES \
         --no-default-features \
         -- -Z build-std=panic_abort,std
 else
     wasm-pack build \
         --target nodejs \
-        --out-dir pkg/nodejs \
+        --out-dir ../pkg/nodejs \
         --features $FEATURES \
         --no-default-features
 fi
@@ -92,22 +92,22 @@ echo "✓ Build complete!"
 
 # Copy web build to www directory
 echo
-echo "Copying web build to www/..."
-cp pkg/web/ligerito_bg.wasm www/
-cp pkg/web/ligerito.js www/
+echo "Copying web build to ../examples/www/..."
+cp ../pkg/web/ligerito_bg.wasm ../examples/www/
+cp ../pkg/web/ligerito.js ../examples/www/
 
 echo
 echo "Output directories:"
-echo "  - pkg/web/      (for <script type=\"module\">)"
-echo "  - pkg/bundler/  (for webpack/vite)"
-echo "  - pkg/nodejs/   (for Node.js)"
-echo "  - www/          (demo website)"
+echo "  - ../pkg/web/      (for <script type=\"module\">)"
+echo "  - ../pkg/bundler/  (for webpack/vite)"
+echo "  - ../pkg/nodejs/   (for Node.js)"
+echo "  - ../examples/www/          (demo website)"
 echo
 echo "WASM file sizes:"
-wc -c pkg/web/ligerito_bg.wasm | awk '{printf "  Web:     %s bytes (%.2f MB)\n", $1, $1/1024/1024}'
-wc -c pkg/bundler/ligerito_bg.wasm | awk '{printf "  Bundler: %s bytes (%.2f MB)\n", $1, $1/1024/1024}'
-wc -c pkg/nodejs/ligerito_bg.wasm | awk '{printf "  Node.js: %s bytes (%.2f MB)\n", $1, $1/1024/1024}'
+wc -c ../pkg/web/ligerito_bg.wasm | awk '{printf "  Web:     %s bytes (%.2f MB)\n", $1, $1/1024/1024}'
+wc -c ../pkg/bundler/ligerito_bg.wasm | awk '{printf "  Bundler: %s bytes (%.2f MB)\n", $1, $1/1024/1024}'
+wc -c ../pkg/nodejs/ligerito_bg.wasm | awk '{printf "  Node.js: %s bytes (%.2f MB)\n", $1, $1/1024/1024}'
 echo
 echo "To run the demo website:"
-echo "  cd www && python3 -m http.server 8080"
+echo "  cd examples/www cd www &&cd www && python3 -m http.server 8080"
 echo "  Then open: http://localhost:8080"
