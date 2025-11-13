@@ -1,0 +1,22 @@
+[package]
+name = "state-transition-guest"
+version = "0.1.0"
+edition = "2021"
+
+# This is the guest program that runs inside PolkaVM zkVM
+# It will be compiled to PolkaVM bytecode
+
+[dependencies]
+# Serialization (no_std compatible)
+serde = { version = "1.0", features = ["derive"], default-features = false }
+bincode = "1.3"
+
+# Crypto (no_std compatible)
+sha2 = { version = "0.10", default-features = false }
+ed25519-dalek = { version = "2.0", default-features = false, features = ["alloc"] }
+
+# TODO: Add PolkaVM guest SDK when available
+# polkavm-guest = { path = "..." }
+
+# TODO: Add NOMT verification (if available in no_std)
+# For now, we'll implement simple witness verification manually

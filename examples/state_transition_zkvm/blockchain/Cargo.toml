@@ -1,0 +1,73 @@
+[package]
+name = "zeratul-blockchain"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "setup"
+path = "src/bin/setup.rs"
+
+[[bin]]
+name = "validator"
+path = "src/bin/validator.rs"
+
+[[example]]
+name = "generate_proof"
+path = "examples/generate_proof.rs"
+
+[[example]]
+name = "submit_transfer"
+path = "examples/submit_transfer.rs"
+
+[[example]]
+name = "light_client_sync"
+path = "examples/light_client_sync.rs"
+
+[dependencies]
+# Local dependencies
+state-transition-circuit = { path = "../circuit" }
+ligerito = { path = "../../../crates/ligerito", features = ["prover"] }
+binary-fields = { path = "../../../crates/binary-fields" }
+
+# Commonware dependencies - blockchain primitives
+commonware-consensus = { git = "https://github.com/commonwarexyz/monorepo" }
+commonware-broadcast = { git = "https://github.com/commonwarexyz/monorepo" }
+commonware-p2p = { git = "https://github.com/commonwarexyz/monorepo" }
+commonware-resolver = { git = "https://github.com/commonwarexyz/monorepo" }
+commonware-runtime = { git = "https://github.com/commonwarexyz/monorepo" }
+commonware-storage = { git = "https://github.com/commonwarexyz/monorepo" }
+commonware-cryptography = { git = "https://github.com/commonwarexyz/monorepo" }
+commonware-codec = { git = "https://github.com/commonwarexyz/monorepo" }
+commonware-coding = { git = "https://github.com/commonwarexyz/monorepo" }
+commonware-utils = { git = "https://github.com/commonwarexyz/monorepo" }
+commonware-macros = { git = "https://github.com/commonwarexyz/monorepo" }
+
+# NOMT for state storage
+nomt = { git = "https://github.com/thrumdev/nomt" }
+
+# Standard dependencies
+anyhow = "1.0"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_yaml = "0.9"
+serde-big-array = "0.5"
+tokio = { version = "1.0", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+futures = "0.3"
+bytes = "1.0"
+governor = "0.7"
+rand = "0.8"
+clap = { version = "4.0", features = ["derive"] }
+sha2 = "0.10"
+wincode = "0.1"
+
+# Penumbra FROST for threshold signatures (decaf377 compatible)
+decaf377-frost = { path = "../../../../penumbra/crates/crypto/decaf377-frost" }
+decaf377-rdsa = "0.11.0"
+decaf377 = { version = "0.10.1", default-features = false }
+
+# Polkadot SDK dependencies for Safrole consensus
+sp-core = { path = "../../../../polkadot-sdk/substrate/primitives/core", default-features = false, features = ["bandersnatch-experimental", "std"] }
+parity-scale-codec = { version = "3.0", default-features = false, features = ["derive"] }
+blake3 = "1.5"
