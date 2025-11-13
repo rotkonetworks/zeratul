@@ -1,0 +1,88 @@
+name: Deploy Ligerito Web Demo
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'crates/ligerito/**'
+      - 'crates/binary-fields/**'
+      - 'crates/reed-solomon/**'
+      - 'crates/merkle-tree/**'
+      - '.github/workflows/deploy-ligerito-web.yaml'
+  workflow_dispatch:
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rust-src
+          target: wasm32-unknown-unknown
+
+      - name: Install wasm-bindgen-cli
+        run: cargo install wasm-bindgen-cli --vers 0.2.92
+
+      - name: Build WASM with SIMD
+        working-directory: crates/ligerito
+        run: |
+          chmod +x build-wasm-parallel.sh
+          ./build-wasm-parallel.sh
+
+      - name: Create deployment package
+        working-directory: crates/ligerito
+        run: |
+          chmod +x deploy.sh
+          ./deploy.sh
+
+      - name: Upload to ligerito.rotko.net
+        run: |
+          echo "${{ secrets.DEPLOY_KEY }}" > ssh_key
+          chmod 600 ssh_key
+
+          # Create deployment directory on server
+          ssh -i ssh_key -o StrictHostKeyChecking=no \
+            -p ${{ secrets.DEPLOY_HOST_PORT }} \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            "mkdir -p ~/ligerito-web"
+
+          # Upload deployment files
+          scp -i ssh_key -o StrictHostKeyChecking=no \
+            -P ${{ secrets.DEPLOY_HOST_PORT }} \
+            -r crates/ligerito/deploy/* \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:~/ligerito-web/
+
+          # Restart web server (adjust based on your setup)
+          ssh -i ssh_key -o StrictHostKeyChecking=no \
+            -p ${{ secrets.DEPLOY_HOST_PORT }} \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << 'EOF'
+            cd ~/ligerito-web
+
+            # Option 1: Using systemd service (if configured)
+            # sudo systemctl restart ligerito-web
+
+            # Option 2: Using PM2 (if installed)
+            # pm2 restart ligerito-web || pm2 start serve-multithreaded.py --name ligerito-web
+
+            # Option 3: Simple python server (update port if needed)
+            pkill -f "serve-multithreaded.py" || true
+            nohup python3 serve-multithreaded.py 8080 > ligerito.log 2>&1 &
+
+            echo "Ligerito web deployed successfully!"
+          EOF
+
+          rm ssh_key
+
+      - name: Deployment Summary
+        run: |
+          echo "### Deployment Complete! 🚀" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **URL**: https://ligerito.rotko.net" >> $GITHUB_STEP_SUMMARY
+          echo "- **WASM Size**: $(du -h crates/ligerito/deploy/ligerito_bg.wasm | cut -f1)" >> $GITHUB_STEP_SUMMARY
+          echo "- **Features**: WASM SIMD128, Multi-threading, WebGPU detection" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY

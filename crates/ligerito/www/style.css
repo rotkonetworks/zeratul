@@ -1,0 +1,162 @@
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  background: #1a0f00;
+  color: #ff8c42;
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  line-height: 1.4;
+  padding: 10px;
+}
+
+.terminal {
+  max-width: 900px;
+  width: 100%;
+  margin: 0 auto;
+  border: 1px solid #F8229B;
+  padding: 8px;
+  background: #0f0a05;
+}
+
+.header {
+  color: #00ffe1;
+  border-bottom: 1px solid #F8229B;
+  padding: 8px 0;
+  margin-bottom: 15px;
+  font-weight: normal;
+  word-wrap: break-word;
+}
+
+.status {
+  padding: 8px;
+  margin-bottom: 15px;
+  border-left: 2px solid #F8229B;
+  background: #0a0600;
+}
+
+.section {
+  margin: 15px 0;
+}
+
+.section-title {
+  color: #ff8c42;
+  font-weight: normal;
+  overflow-x: auto;
+}
+
+.section-content {
+  padding: 10px 5px;
+  background: #0a0600;
+}
+
+.section-footer {
+  color: #ff8c42;
+  overflow-x: auto;
+}
+
+.output {
+  margin-top: 8px;
+  padding: 8px;
+  background: #0a0600;
+  border: 1px solid #d97826;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  font-family: 'Courier New', monospace;
+  min-height: 50px;
+  overflow-x: auto;
+}
+
+.btn {
+  background: #d97826;
+  color: #000000;
+  border: 1px solid #d97826;
+  padding: 8px 12px;
+  font-family: 'Courier New', monospace;
+  font-size: 12px;
+  font-weight: normal;
+  cursor: pointer;
+  text-transform: uppercase;
+  margin: 5px 5px 5px 0;
+  display: inline-block;
+}
+
+.btn:hover:not(:disabled) {
+  background: #ff8c42;
+  border-color: #ff8c42;
+}
+
+.btn:disabled {
+  background: #333333;
+  color: #666666;
+  border-color: #333333;
+  cursor: not-allowed;
+}
+
+select {
+  background: #000000;
+  color: #ff8c42;
+  border: 1px solid #d97826;
+  padding: 6px;
+  font-family: 'Courier New', monospace;
+  font-size: 13px;
+  max-width: 100%;
+}
+
+select:focus {
+  outline: 1px solid #d97826;
+}
+
+label {
+  color: #00ffe1;
+  margin-right: 8px;
+  display: inline-block;
+  margin-bottom: 5px;
+}
+
+.ok {
+  color: #00ff00;
+  font-weight: bold;
+}
+
+.warn {
+  color: #ffcc00;
+  font-weight: bold;
+}
+
+.err {
+  color: #ff3333;
+  font-weight: bold;
+}
+
+.footer {
+  margin-top: 40px;
+  padding: 10px;
+  border-top: 1px solid #e6007a;
+  color: #F8229B;
+  text-align: center;
+  font-size: 12px;
+}
+
+.footer a {
+  color: #00ffe1;
+  text-decoration: none;
+}
+
+.footer a:hover {
+  text-decoration: underline;
+}
+
+/* Blinking cursor effect */
+@keyframes blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+
+.cursor::after {
+  content: '█';
+  animation: blink 1s infinite;
+}
