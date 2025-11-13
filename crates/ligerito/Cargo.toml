@@ -1,0 +1,230 @@
+[package]
+name = "ligerito"
+version = "0.1.0"
+edition = "2021"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Ligerito polynomial commitment scheme over binary extension fields"
+keywords = ["cryptography", "polynomial-commitment", "zero-knowledge", "binary-fields"]
+categories = ["cryptography", "no-std"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+# Default is full-featured std environment with prover + verifier
+[features]
+default = ["std", "prover", "parallel", "hardware-accel", "transcript-merlin"]
+
+# Environment: std or no_std
+std = [
+    "binary-fields/std",
+    "merkle-tree/std",
+    "serde/std",
+    "thiserror",
+]
+
+# Functionality: include prover or verifier-only
+prover = ["reed-solomon", "rand", "rand_chacha"]
+verifier-only = []
+
+# Performance optimizations
+parallel = ["rayon"]
+hardware-accel = ["binary-fields/hardware-accel"]
+
+# Transcript implementations
+transcript-merlin = ["merlin", "std"]
+transcript-sha256 = []  # Always available (default)
+transcript-blake3 = ["blake3"]
+
+# WASM support
+wasm = [
+    "std",                          # Need std for WASM
+    "prover",                       # Include prover in WASM
+    "parallel",                     # Include parallel (rayon will fall back to single-threaded in WASM)
+    "transcript-sha256",            # Use SHA256 (works in WASM)
+    "getrandom/js",                 # Enable WASM-compatible RNG
+    "wasm-bindgen",                 # WASM bindings
+    "wasm-bindgen-futures",         # Async WASM support
+    "console_error_panic_hook",     # Better error messages in browser console
+    "bincode",                      # For serialization
+    "js-sys",                       # JavaScript types
+]
+
+# Multi-threaded WASM (requires SharedArrayBuffer + CORS headers)
+wasm-parallel = [
+    "wasm",
+    "wasm-bindgen-rayon",       # Enable rayon in WASM via Web Workers
+    "js-sys",                   # JavaScript Promise types
+]
+
+# WebGPU acceleration (optional, falls back to WASM if unavailable)
+webgpu = [
+    "wasm",
+    "wgpu",                     # WebGPU API
+    "pollster",                 # Async executor for WASM
+    "web-sys",                  # For console logging in WASM
+    "futures",                  # Async utilities
+]
+
+# CLI binary support
+cli = ["std", "prover", "transcript-merlin", "bincode", "clap", "anyhow", "hex", "serde_json"]
+
+[dependencies]
+# Core dependencies (always needed)
+binary-fields = { path = "../binary-fields", default-features = false, features = ["serde"] }
+merkle-tree = { path = "../merkle-tree", default-features = false, features = ["serde"] }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+bytemuck = { workspace = true }
+
+# Crypto (sha256 always available for no_std)
+sha2 = { workspace = true, default-features = false }
+blake3 = { workspace = true, optional = true }
+merlin = { workspace = true, optional = true }
+
+# Prover-only dependencies
+reed-solomon = { path = "../reed-solomon", optional = true }
+rand = { workspace = true, optional = true }
+rand_chacha = { workspace = true, optional = true }
+
+# Parallel processing (std only)
+rayon = { workspace = true, optional = true }
+
+# Error handling (std only - for no_std we use custom errors)
+thiserror = { workspace = true, optional = true }
+
+# CLI dependencies
+clap = { version = "4.4", features = ["derive"], optional = true }
+anyhow = { version = "1.0", optional = true }
+bincode = { version = "1.3", optional = true }
+hex = { workspace = true, optional = true }
+serde_json = { version = "1.0", optional = true }
+
+# WASM dependencies
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-rayon = { version = "1.2", optional = true }
+wasm-bindgen-futures = { version = "0.4", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+getrandom = { version = "0.2", optional = true }
+js-sys = { version = "0.3.82", optional = true }
+
+# WebGPU dependencies
+wgpu = { version = "0.20", optional = true, features = ["webgpu", "wgsl"] }
+pollster = { version = "0.3", optional = true }
+web-sys = { version = "0.3", optional = true, features = ["console"] }
+futures = { version = "0.3", optional = true }
+
+# For no_std targets, we need alloc
+[dependencies.hashbrown]
+version = "0.14"
+default-features = false
+optional = true
+features = ["serde"]
+
+[dev-dependencies]
+criterion = { workspace = true }
+bincode = { version = "1.3" }
+zstd = "0.13"
+tokio = { version = "1.0", features = ["full"] }
+
+# CLI binary
+[[bin]]
+name = "ligerito"
+path = "src/bin/ligerito.rs"
+required-features = ["cli"]
+
+[[example]]
+name = "prove_verify"
+path = "../../examples/prove_verify.rs"
+
+[[example]]
+name = "fast_prove_verify"
+path = "../../examples/fast_prove_verify.rs"
+
+[[example]]
+name = "tiny_debug"
+path = "../../examples/tiny_debug.rs"
+
+[[example]]
+name = "compression_prototype"
+path = "examples/compression_prototype.rs"
+
+[[example]]
+name = "detailed_proof_breakdown"
+path = "examples/detailed_proof_breakdown.rs"
+
+[[example]]
+name = "bench_standardized"
+path = "../../examples/bench_standardized.rs"
+
+[[example]]
+name = "bench_standardized_24"
+path = "../../examples/bench_standardized_24.rs"
+
+[[example]]
+name = "bench_standardized_28"
+path = "../../examples/bench_standardized_28.rs"
+
+[[example]]
+name = "bench_standardized_30"
+path = "../../examples/bench_standardized_30.rs"
+
+[[example]]
+name = "bench_28_30"
+path = "../../examples/bench_28_30.rs"
+
+[[example]]
+name = "bench_20"
+path = "../../examples/bench_20.rs"
+
+[[example]]
+name = "polkadot_monitor"
+path = "../../examples/polkadot_monitor.rs"
+
+[[example]]
+name = "polkadot_monitor_smoldot"
+path = "../../examples/polkadot_monitor_smoldot.rs"
+
+[[example]]
+name = "onchain_verifier_pallet"
+path = "../../examples/onchain_verifier_pallet.rs"
+
+[[example]]
+name = "onchain_verifier_pallet_v2"
+path = "../../examples/onchain_verifier_pallet_v2.rs"
+
+[[example]]
+name = "profile_proving"
+path = "../../examples/profile_proving.rs"
+
+[[example]]
+name = "detailed_timing"
+path = "../../examples/detailed_timing.rs"
+
+[[example]]
+name = "polkavm_verifier"
+path = "../../examples/polkavm_verifier/main.rs"
+
+[[example]]
+name = "test_polkavm_verifier"
+path = "../../examples/test_polkavm_verifier.rs"
+
+[[example]]
+name = "bench_gpu_fft"
+path = "../../examples/bench_gpu_fft.rs"
+
+[[example]]
+name = "bench_gpu_sumcheck"
+path = "../../examples/bench_gpu_sumcheck.rs"
+
+[[example]]
+name = "debug_gpu_sumcheck"
+path = "../../examples/debug_gpu_sumcheck.rs"
+
+[[example]]
+name = "bench_gpu_v2"
+path = "../../examples/bench_gpu_v2.rs"
+
+[[bench]]
+name = "ligerito_bench"
+harness = false

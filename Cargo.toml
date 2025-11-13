@@ -1,9 +1,12 @@
 [workspace]
 members = [
-    "binary-fields",
-    "reed-solomon",
-    "merkle-tree",
-    "ligerito"
+    "crates/binary-fields",
+    "crates/reed-solomon",
+    "crates/merkle-tree",
+    "crates/ligerito",
+    "examples/state_transition_zkvm/circuit",
+    "examples/state_transition_zkvm/server",
+    "examples/state_transition_zkvm/blockchain"
 ]
 exclude = ["benchmarks/ashutosh-ligerito"]
 resolver = "2"

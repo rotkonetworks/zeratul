@@ -1,13 +1,41 @@
-# zeratul
+# Zeratul
 
-rust implementation of [ligerito](https://angeris.github.io/papers/ligerito.pdf) polynomial commitment scheme over binary extension fields.
+Zero-overhead blockchain using AccidentalComputer pattern with Ligerito for ZK proofs.
 
-## structure
+This repository contains:
+- **Ligerito** - A publishable implementation of the [Ligerito polynomial commitment scheme](https://angeris.github.io/papers/ligerito.pdf)
+- **Zeratul Blockchain** - Example blockchain using AccidentalComputer pattern (ZODA encoding as polynomial commitment)
 
-- `binary-fields/` - gf(2^n) arithmetic with simd operations
-- `reed-solomon/` - parallel fft-based encoding over binary fields
-- `merkle-tree/` - sha256 commitment trees
-- `ligerito/` - sumcheck-based polynomial commitments
+## Documentation
+
+### Main Project (Zeratul Blockchain)
+- **[QUICKSTART.md](QUICKSTART.md)** - Get started quickly
+- **[PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md)** - Complete codebase organization
+- **[ARCHITECTURE.md](ARCHITECTURE.md)** - System architecture and design decisions
+- **[STATUS.md](STATUS.md)** - Current status and roadmap
+
+### Ligerito Library
+- **[crates/ligerito/README.md](crates/ligerito/README.md)** - Ligerito library documentation
+- See `crates/ligerito/` for the standalone polynomial commitment implementation
+
+## Repository Structure
+
+```
+zeratul/
+├── crates/
+│   ├── ligerito/          - Polynomial commitment scheme (publishable crate)
+│   ├── binary-fields/     - GF(2^n) arithmetic with SIMD operations
+│   ├── reed-solomon/      - Parallel FFT-based encoding
+│   └── merkle-tree/       - SHA256 commitment trees
+├── examples/
+│   └── state_transition_zkvm/  - Example blockchain (the "Zeratul" implementation)
+│       ├── circuit/            - State transition circuit with AccidentalComputer
+│       ├── blockchain/         - Consensus + storage + light client
+│       └── server/             - RPC server
+└── benchmarks/            - Performance benchmarking suite
+```
+
+**See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for detailed organization.**
 
 ## performance
 
