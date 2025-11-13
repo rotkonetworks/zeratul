@@ -1,6 +1,6 @@
-use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 use ligerito::{prove_sha256, verify_sha256, ProverConfig, VerifierConfig};
-use reed_solomon::reed_solomon;
+use ligerito_reed_solomon::reed_solomon;
 
 fn create_tiny_config() -> ProverConfig<BinaryElem32, BinaryElem128> {
     // Even smaller: 2^8 = 256 elements
@@ -13,9 +13,9 @@ fn create_tiny_config() -> ProverConfig<BinaryElem32, BinaryElem128> {
     let initial_k = 2;
     let ks = vec![2];
 
-    let initial_reed_solomon = reed_solomon::<BinaryElem32>(initial_dims.0, initial_dims.0 * inv_rate);
+    let initial_reed_solomon = ligerito_reed_solomon::<BinaryElem32>(initial_dims.0, initial_dims.0 * inv_rate);
     let reed_solomon_codes = vec![
-        reed_solomon::<BinaryElem128>(dims[0].0, dims[0].0 * inv_rate),
+        ligerito_reed_solomon::<BinaryElem128>(dims[0].0, dims[0].0 * inv_rate),
     ];
 
     ProverConfig {

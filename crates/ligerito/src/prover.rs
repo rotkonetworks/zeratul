@@ -519,7 +519,7 @@ fn glue_sums<F: BinaryFieldElement>(sum_f: F, sum_g: F, beta: F) -> F {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use binary_fields::{BinaryElem32, BinaryElem128};
+    use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
     use crate::configs::hardcoded_config_12;
     use std::marker::PhantomData;
 

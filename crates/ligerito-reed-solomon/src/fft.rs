@@ -3,7 +3,7 @@
 //! Based on recursive subspace polynomial evaluation over GF(2^m).
 //! Ported from Julia reference in BinaryReedSolomon/src/binaryfft.jl.
 
-use binary_fields::{BinaryFieldElement, BinaryElem128};
+use ligerito_binary_fields::{BinaryFieldElement, BinaryElem128};
 use rayon::prelude::*;
 
 /// Compute next s value: s_i(x) = s_{i-1}(x)^2 + s_{i-1}(v_{i-1}) * s_{i-1}(x)
@@ -68,7 +68,7 @@ fn fft_mul<F: BinaryFieldElement>(v: &mut [F], lambda: F) {
     // use SIMD-optimized version for BinaryElem32 when available
     #[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
     {
-        use binary_fields::BinaryElem32;
+        use ligerito_binary_fields::BinaryElem32;
         use std::any::TypeId;
 
         // type check for BinaryElem32 - if match, use SIMD path
@@ -78,7 +78,7 @@ fn fft_mul<F: BinaryFieldElement>(v: &mut [F], lambda: F) {
             let w_ref = unsafe { std::mem::transmute::<&mut [F], &mut [BinaryElem32]>(w) };
             let lambda_ref = unsafe { std::mem::transmute::<&F, &BinaryElem32>(&lambda) };
 
-            binary_fields::simd::fft_butterfly_gf32(u_ref, w_ref, *lambda_ref);
+            ligerito_binary_fields::simd::fft_butterfly_gf32(u_ref, w_ref, *lambda_ref);
             return;
         }
     }

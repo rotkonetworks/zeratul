@@ -1,7 +1,7 @@
 /// detailed proof size breakdown to understand why ours is larger
 
 use ligerito::{prove, hardcoded_config_20, hardcoded_config_20_verifier};
-use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 use std::marker::PhantomData;
 
 fn main() {

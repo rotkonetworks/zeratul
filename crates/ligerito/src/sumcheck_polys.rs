@@ -195,7 +195,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use binary_fields::{BinaryElem32, BinaryElem128};
+    use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
     use crate::utils::eval_sk_at_vks;
 
     #[test]

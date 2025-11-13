@@ -2,7 +2,7 @@
 //!
 //! Usage: cargo run --release --example test_gf128_mul
 
-use binary_fields::{BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem128, BinaryFieldElement};
 
 fn main() {
     println!("Testing GF(2^128) Multiplication");

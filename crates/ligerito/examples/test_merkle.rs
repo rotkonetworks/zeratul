@@ -1,6 +1,6 @@
-use merkle_tree::{build_merkle_tree, Hash};
+use ligerito_merkle::{build_merkle_tree, Hash};
 use ligerito::ligero::hash_row;
-use binary_fields::BinaryElem32;
+use ligerito_binary_fields::BinaryElem32;
 
 fn main() {
     println!("=== TESTING MERKLE TREE ===");
@@ -38,7 +38,7 @@ fn main() {
 
     // Verify
     let depth = 2; // 4 leaves = 2^2
-    let result = merkle_tree::verify(
+    let result = ligerito_merkle::verify(
         &tree.get_root(),
         &proof,
         depth,

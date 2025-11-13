@@ -282,7 +282,7 @@ pub fn extract_succinct_proof(
     let polynomial = bytes_to_polynomial(&recovered_data, config_size)?;
 
     // Step 6: Generate Ligerito proof
-    use binary_fields::{BinaryElem32, BinaryElem128};
+    use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
     use std::marker::PhantomData;
 
     let ligerito_config = match config_size {
@@ -322,8 +322,8 @@ pub fn extract_succinct_proof(
 /// 1. Interprets bytes as u32 values (BinaryElem32)
 /// 2. Pads to the required polynomial size (power of 2)
 /// 3. Returns Vec<BinaryElem32> ready for Ligerito prover
-fn bytes_to_polynomial(data: &[u8], config_size: u32) -> Result<Vec<binary_fields::BinaryElem32>> {
-    use binary_fields::BinaryElem32;
+fn bytes_to_polynomial(data: &[u8], config_size: u32) -> Result<Vec<ligerito_binary_fields::BinaryElem32>> {
+    use ligerito_binary_fields::BinaryElem32;
 
     let required_size = 1usize << config_size; // 2^config_size
 

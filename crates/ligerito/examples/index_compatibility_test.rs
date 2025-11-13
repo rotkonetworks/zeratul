@@ -2,7 +2,7 @@ use ligerito::{
     prove_sha256, verify_sha256, hardcoded_config_12, hardcoded_config_12_verifier,
     transcript::{FiatShamir, Transcript},
 };
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use std::marker::PhantomData;
 
 fn main() {
@@ -24,7 +24,7 @@ fn main() {
 
     // Simulate the same sequence as prover
     // Initial commitment would be absorbed here (not recreated for simplicity)
-    let dummy_root = merkle_tree::MerkleRoot { root: Some([1u8; 32]) };
+    let dummy_root = ligerito_merkle::MerkleRoot { root: Some([1u8; 32]) };
     fs_rust.absorb_root(&dummy_root);
 
     // Get initial challenges like prover does
@@ -85,7 +85,7 @@ fn main() {
 }
 
 fn test_merkle_tree_indexing() {
-    use merkle_tree::{build_merkle_tree, verify};
+    use ligerito_merkle::{build_merkle_tree, verify};
 
     println!("Testing Merkle tree indexing directly...");
 

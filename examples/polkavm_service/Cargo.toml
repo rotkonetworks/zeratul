@@ -28,7 +28,7 @@ thiserror = "1.0"
 
 # For generating test proofs (optional, for testing)
 ligerito = { path = "../../crates/ligerito", optional = true, features = ["prover"] }
-binary-fields = { path = "../../crates/binary-fields", optional = true }
+ligerito-binary-fields = { path = "../../crates/ligerito-binary-fields", optional = true }
 
 [features]
 default = []

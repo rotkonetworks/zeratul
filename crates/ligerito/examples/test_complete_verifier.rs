@@ -2,7 +2,7 @@
 /// this is the 100% protocol-compliant implementation
 
 use ligerito::{prove, verify_complete, hardcoded_config_12, hardcoded_config_12_verifier};
-use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 use std::marker::PhantomData;
 
 fn main() {

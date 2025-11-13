@@ -7,7 +7,7 @@
 /// 3. Both implementations pass their own verification
 
 use ligerito::{prove_sha256, verify_sha256, hardcoded_config_12, hardcoded_config_12_verifier};
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use std::marker::PhantomData;
 
 fn main() {

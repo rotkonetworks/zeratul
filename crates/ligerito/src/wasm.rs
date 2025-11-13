@@ -363,7 +363,7 @@ pub async fn check_webgpu_available() -> bool {
 //
 
 fn run_cpu_sumcheck_internal(n: usize, k: usize, q: usize) -> Result<(), String> {
-    use binary_fields::BinaryElem128;
+    use ligerito_binary_fields::BinaryElem128;
     use crate::sumcheck_polys::induce_sumcheck_poly;
 
     let row_size = 1 << k;
@@ -410,7 +410,7 @@ fn run_cpu_sumcheck_internal(n: usize, k: usize, q: usize) -> Result<(), String>
 
 #[cfg(feature = "webgpu")]
 async fn run_gpu_sumcheck_internal(n: usize, k: usize, q: usize) -> Result<(), String> {
-    use binary_fields::BinaryElem128;
+    use ligerito_binary_fields::BinaryElem128;
     use crate::gpu::{GpuDevice, sumcheck::GpuSumcheck};
 
     let row_size = 1 << k;

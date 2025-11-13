@@ -2,7 +2,7 @@
 //!
 //! Usage: cargo run --release --example debug_gpu_sumcheck --features webgpu
 
-use binary_fields::{BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem128, BinaryFieldElement};
 
 #[cfg(feature = "webgpu")]
 use ligerito::gpu::{GpuDevice, sumcheck::GpuSumcheck};

@@ -1,5 +1,5 @@
 use ligerito::{prove_sha256, hardcoded_config_12, ligero::verify_ligero};
-use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 use std::marker::PhantomData;
 
 fn main() {

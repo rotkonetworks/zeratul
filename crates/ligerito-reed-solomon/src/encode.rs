@@ -1,6 +1,6 @@
 // reed-solomon/src/encode.rs
 use crate::{ReedSolomon, fft, short_from_long_twiddles};
-use binary_fields::BinaryFieldElement;
+use ligerito_binary_fields::BinaryFieldElement;
 
 /// Encode a message using Reed-Solomon
 pub fn encode<F: BinaryFieldElement + 'static>(rs: &ReedSolomon<F>, message: &[F]) -> Vec<F> {
@@ -22,7 +22,7 @@ pub fn encode_in_place_with_parallel<F: BinaryFieldElement + 'static>(
     data: &mut [F],
     parallel: bool,
 ) {
-    use binary_fields::BinaryElem32;
+    use ligerito_binary_fields::BinaryElem32;
     use std::any::TypeId;
 
     // Fast path for BinaryElem32 using SIMD
@@ -50,7 +50,7 @@ pub fn encode_non_systematic<F: BinaryFieldElement + 'static>(
     rs: &ReedSolomon<F>,
     data: &mut [F]
 ) {
-    use binary_fields::BinaryElem32;
+    use ligerito_binary_fields::BinaryElem32;
     use std::any::TypeId;
 
     assert_eq!(data.len(), rs.block_length());

@@ -3,7 +3,7 @@
 //! This module implements proof generation for state transitions using Ligerito PCS.
 
 use anyhow::Result;
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use ligerito::{hardcoded_config_20, prover, FinalizedLigeritoProof};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};

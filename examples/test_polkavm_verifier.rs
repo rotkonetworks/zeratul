@@ -11,7 +11,7 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 use std::marker::PhantomData;
 
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use ligerito::{prover, verifier, hardcoded_config_12, hardcoded_config_12_verifier};
 use rand::Rng;
 

@@ -2,7 +2,7 @@
 //!
 //! Usage: cargo run --release --example trace_query7
 
-use binary_fields::{BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem128, BinaryFieldElement};
 
 fn main() {
     println!("Tracing Query 7 Tensorized Dot Product");

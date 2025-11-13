@@ -10,7 +10,7 @@
 //!
 //! Usage: cargo run --release --example bench_gpu_v2 --features webgpu
 
-use binary_fields::{BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem128, BinaryFieldElement};
 use std::time::Instant;
 
 #[cfg(feature = "webgpu")]

@@ -1,4 +1,4 @@
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use criterion::{black_box, criterion_group, criterion_main, Criterion, BenchmarkId};
 use ligerito::{
     prove_sha256, verify_sha256,

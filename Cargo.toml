@@ -1,8 +1,8 @@
 [workspace]
 members = [
-    "crates/binary-fields",
-    "crates/reed-solomon",
-    "crates/merkle-tree",
+    "crates/ligerito-binary-fields",
+    "crates/ligerito-reed-solomon",
+    "crates/ligerito-merkle",
     "crates/ligerito",
     "examples/state_transition_zkvm/circuit",
     "examples/state_transition_zkvm/server",

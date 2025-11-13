@@ -1,7 +1,7 @@
 /// test verify_complete with verify_partial check
 /// this verifies the complete ligerito protocol with stateful sumcheck
 
-use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 use ligerito::{prove_sha256, verify_complete_sha256, hardcoded_config_12, hardcoded_config_12_verifier};
 use std::marker::PhantomData;
 

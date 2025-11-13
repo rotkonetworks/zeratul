@@ -1,0 +1,21 @@
+[package]
+name = "ligerito-reed-solomon"
+version = "0.1.0"
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Reed-Solomon erasure coding for Ligerito over binary fields"
+keywords = ["cryptography", "reed-solomon", "erasure-coding", "error-correction"]
+categories = ["cryptography", "no-std"]
+
+[features]
+hardware-accel = ["ligerito-binary-fields/hardware-accel"]
+
+[dependencies]
+ligerito-binary-fields = { version = "0.1.0", path = "../ligerito-binary-fields" }
+rayon = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+rand = { workspace = true }

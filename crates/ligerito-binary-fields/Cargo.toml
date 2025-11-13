@@ -1,9 +1,13 @@
 [package]
-name = "binary-fields"
+name = "ligerito-binary-fields"
 version = "0.1.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
+description = "Binary extension field arithmetic for Ligerito"
+keywords = ["cryptography", "binary-fields", "finite-fields", "gf2"]
+categories = ["cryptography", "no-std"]
+repository.workspace = true
 
 [dependencies]
 rand = { workspace = true }

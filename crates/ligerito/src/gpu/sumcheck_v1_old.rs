@@ -690,7 +690,7 @@ impl GpuSumcheck {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use binary_fields::{BinaryElem128, BinaryFieldElement};
+    use ligerito_binary_fields::{BinaryElem128, BinaryFieldElement};
     use crate::sumcheck_polys::induce_sumcheck_poly as cpu_induce_sumcheck_poly;
 
     fn generate_test_data(

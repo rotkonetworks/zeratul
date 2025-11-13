@@ -1,6 +1,6 @@
 // detailed proof size breakdown to understand why ashutosh's proofs are smaller
 use ligerito::{prove_sha256, hardcoded_config_20};
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use std::marker::PhantomData;
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {

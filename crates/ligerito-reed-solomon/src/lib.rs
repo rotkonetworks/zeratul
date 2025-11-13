@@ -7,7 +7,7 @@ pub use encode::{encode, encode_in_place, encode_in_place_with_parallel, encode_
 pub use fft::{compute_twiddles, fft, ifft};
 pub use fft_gf32::{fft_gf32, ifft_gf32};
 
-use binary_fields::BinaryFieldElement;
+use ligerito_binary_fields::BinaryFieldElement;
 
 /// Reed-Solomon encoding configuration
 pub struct ReedSolomon<F: BinaryFieldElement> {
@@ -145,7 +145,7 @@ pub fn short_from_long_twiddles<F: BinaryFieldElement>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use binary_fields::{BinaryElem16, BinaryElem32, BinaryElem128};
+    use ligerito_binary_fields::{BinaryElem16, BinaryElem32, BinaryElem128};
 
     #[test]
     fn test_eval_sk_at_vks() {
@@ -180,7 +180,7 @@ mod tests {
 
     #[test]
     fn test_reed_solomon_creation() {
-        let rs = reed_solomon::<BinaryElem16>(256, 1024);
+        let rs = ligerito_reed_solomon::<BinaryElem16>(256, 1024);
         assert_eq!(rs.message_length(), 256);
         assert_eq!(rs.block_length(), 1024);
         assert_eq!(rs.twiddles.len(), 1023); // 2^10 - 1
@@ -237,7 +237,7 @@ mod tests {
 
     #[test]
     fn test_systematic_encoding() {
-        let rs = reed_solomon::<BinaryElem16>(4, 16);
+        let rs = ligerito_reed_solomon::<BinaryElem16>(4, 16);
 
         let message = vec![
             BinaryElem16::from(1),
@@ -269,7 +269,7 @@ mod tests {
 
     #[test]
     fn test_non_systematic_encoding() {
-        let rs = reed_solomon::<BinaryElem16>(4, 16);
+        let rs = ligerito_reed_solomon::<BinaryElem16>(4, 16);
 
         let mut data = vec![BinaryElem16::zero(); 16];
         data[0] = BinaryElem16::from(1);
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn test_short_from_long_twiddles() {
-        let rs = reed_solomon::<BinaryElem16>(16, 64);
+        let rs = ligerito_reed_solomon::<BinaryElem16>(16, 64);
 
         // Extract short twiddles for message length 16 from block length 64
         let short_twiddles = short_from_long_twiddles(&rs.twiddles, 6, 4);
@@ -317,7 +317,7 @@ mod tests {
         let sizes = [(4, 16), (8, 32), (16, 64), (32, 128)];
 
         for (msg_len, block_len) in sizes {
-            let rs = reed_solomon::<BinaryElem16>(msg_len, block_len);
+            let rs = ligerito_reed_solomon::<BinaryElem16>(msg_len, block_len);
             assert_eq!(rs.message_length(), msg_len);
             assert_eq!(rs.block_length(), block_len);
 
@@ -339,29 +339,29 @@ mod tests {
     #[should_panic]
     fn test_invalid_message_length() {
         // Should panic because 5 is not a power of 2
-        reed_solomon::<BinaryElem16>(5, 16);
+        ligerito_reed_solomon::<BinaryElem16>(5, 16);
     }
 
     #[test]
     #[should_panic]
     fn test_invalid_block_length() {
         // Should panic because 20 is not a power of 2
-        reed_solomon::<BinaryElem16>(4, 20);
+        ligerito_reed_solomon::<BinaryElem16>(4, 20);
     }
 
     #[test]
     #[should_panic]
     fn test_message_larger_than_block() {
         // Should panic because message length > block length
-        reed_solomon::<BinaryElem16>(16, 8);
+        ligerito_reed_solomon::<BinaryElem16>(16, 8);
     }
 
     #[test]
     fn test_different_field_sizes() {
         // Test with different field element sizes
-        let rs16 = reed_solomon::<BinaryElem16>(8, 32);
-        let rs32 = reed_solomon::<BinaryElem32>(8, 32);
-        let rs128 = reed_solomon::<BinaryElem128>(8, 32);
+        let rs16 = ligerito_reed_solomon::<BinaryElem16>(8, 32);
+        let rs32 = ligerito_reed_solomon::<BinaryElem32>(8, 32);
+        let rs128 = ligerito_reed_solomon::<BinaryElem128>(8, 32);
 
         assert_eq!(rs16.message_length(), 8);
         assert_eq!(rs32.message_length(), 8);
@@ -437,7 +437,7 @@ mod tests {
     #[test]
     fn test_encoding_decoding_correctness() {
         // Test that we can recover the message from systematic encoding
-        let rs = reed_solomon::<BinaryElem16>(4, 16);
+        let rs = ligerito_reed_solomon::<BinaryElem16>(4, 16);
         
         let message = vec![
             BinaryElem16::from(0x1234),
@@ -578,7 +578,7 @@ mod tests {
 
     #[test]
     fn debug_twiddle_computation() {
-        use binary_fields::BinaryElem128;
+        use ligerito_binary_fields::BinaryElem128;
         
         // Helper function
         fn next_s<F: BinaryFieldElement>(s_prev: F, s_prev_at_root: F) -> F {

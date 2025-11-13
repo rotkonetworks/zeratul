@@ -1,4 +1,4 @@
-use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 
 // Copy of tensorized dot product for testing
 fn tensorized_dot_product<T, U>(row: &[T], challenges: &[U]) -> U

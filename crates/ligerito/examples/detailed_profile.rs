@@ -1,4 +1,4 @@
-use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 use ligerito::{
     prove, configs,
     VerifierConfig, FinalizedLigeritoProof,
@@ -50,12 +50,12 @@ where
     fs.absorb_root(&proof.recursive_commitments[0].root);
     let depth = config.initial_dim + 2;
     let queries = fs.get_distinct_queries(1 << depth, 148);
-    let hashed_leaves: Vec<merkle_tree::Hash> = proof.initial_ligero_proof.opened_rows
+    let hashed_leaves: Vec<ligerito_merkle::Hash> = proof.initial_ligero_proof.opened_rows
         .iter()
         .map(|row| hash_row(row))
         .collect();
 
-    if !merkle_tree::verify(
+    if !ligerito_merkle::verify(
         &proof.initial_ligero_cm.root,
         &proof.initial_ligero_proof.merkle_proof,
         depth,
@@ -115,7 +115,7 @@ where
         let depth_r = config.log_dims[i] + 2;
         let queries_r = fs.get_distinct_queries(1 << depth_r, 148);
 
-        let hashed_r: Vec<merkle_tree::Hash> = ligero_proof.opened_rows
+        let hashed_r: Vec<ligerito_merkle::Hash> = ligero_proof.opened_rows
             .iter()
             .map(|row| hash_row(row))
             .collect();
@@ -126,7 +126,7 @@ where
             &proof.final_ligero_proof.merkle_proof.siblings[0]
         };
 
-        if !merkle_tree::verify(
+        if !ligerito_merkle::verify(
             &proof.recursive_commitments[i].root,
             &ligero_proof.merkle_proof,
             depth_r,
@@ -164,7 +164,7 @@ where
     let final_depth = config.log_dims[config.recursive_steps - 1] + 2;
     let final_queries = fs.get_distinct_queries(1 << final_depth, 148);
 
-    let final_hashed: Vec<merkle_tree::Hash> = proof.final_ligero_proof.opened_rows
+    let final_hashed: Vec<ligerito_merkle::Hash> = proof.final_ligero_proof.opened_rows
         .iter()
         .map(|row| hash_row(row))
         .collect();

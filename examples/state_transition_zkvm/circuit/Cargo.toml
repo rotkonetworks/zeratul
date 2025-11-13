@@ -6,7 +6,7 @@ edition = "2021"
 [dependencies]
 # Local dependencies
 ligerito = { path = "../../../crates/ligerito" }
-binary-fields = { path = "../../../crates/binary-fields" }
+ligerito-binary-fields = { path = "../../../crates/ligerito-binary-fields" }
 
 # Commonware dependencies for ZODA encoding
 commonware-coding = { git = "https://github.com/commonwarexyz/monorepo" }

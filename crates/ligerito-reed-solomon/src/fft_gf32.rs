@@ -1,5 +1,5 @@
 // Specialized SIMD FFT for BinaryElem32
-use binary_fields::{BinaryFieldElement, BinaryElem32};
+use ligerito_binary_fields::{BinaryFieldElement, BinaryElem32};
 
 /// FFT butterfly using SIMD for GF(2^32)
 #[inline(always)]
@@ -9,12 +9,12 @@ fn fft_mul_simd(v: &mut [BinaryElem32], lambda: BinaryElem32) {
     #[cfg(target_arch = "x86_64")]
     {
         // Call SSE version directly - it's always available on x86_64 with pclmulqdq
-        binary_fields::simd::fft_butterfly_gf32_sse(u, w, lambda);
+        ligerito_binary_fields::simd::fft_butterfly_gf32_sse(u, w, lambda);
     }
 
     #[cfg(not(target_arch = "x86_64"))]
     {
-        binary_fields::simd::fft_butterfly_gf32_scalar(u, w, lambda);
+        ligerito_binary_fields::simd::fft_butterfly_gf32_scalar(u, w, lambda);
     }
 }
 

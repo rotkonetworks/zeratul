@@ -23,7 +23,7 @@ use axum::{
     routing::{get, post},
     Router,
 };
-use binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 use ligerito::{
     hardcoded_config_12_verifier, hardcoded_config_16_verifier,
     hardcoded_config_20_verifier, hardcoded_config_24_verifier,

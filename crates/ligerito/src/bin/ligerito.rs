@@ -26,9 +26,10 @@ use ligerito::{
     hardcoded_config_30, hardcoded_config_30_verifier,
     VerifierConfig, FinalizedLigeritoProof,
 };
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
+use std::fs::File;
 
 #[derive(Parser)]
 #[command(name = "ligerito")]
@@ -88,6 +89,21 @@ enum Commands {
         #[arg(long, default_value = "json")]
         output_format: String,
     },
+
+    /// Generate random polynomial data for testing
+    Generate {
+        /// Log2 of polynomial size
+        #[arg(short, long)]
+        size: usize,
+
+        /// Pattern: random (default), zeros, ones, sequential
+        #[arg(short, long, default_value = "random")]
+        pattern: String,
+
+        /// Output file (stdout if not specified)
+        #[arg(short, long)]
+        output: Option<String>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -102,6 +118,9 @@ fn main() -> Result<()> {
         }
         Commands::Config { size, generate, output_format } => {
             config_command(size, generate, &output_format)?;
+        }
+        Commands::Generate { size, pattern, output } => {
+            generate_command(size, &pattern, output)?;
         }
     }
 
@@ -332,4 +351,41 @@ fn print_config_info(config: &VerifierConfig) {
         poly_size_bytes,
         poly_size_bytes as f64 / 1_048_576.0
     );
+}
+
+fn generate_command(size: usize, pattern: &str, output: Option<String>) -> Result<()> {
+    let len = 1 << size;
+    eprintln!("Generating 2^{} = {} elements with pattern '{}'", size, len, pattern);
+
+    let poly: Vec<BinaryElem32> = match pattern {
+        "random" => {
+            use rand::Rng;
+            let mut rng = rand::thread_rng();
+            (0..len).map(|_| BinaryElem32::from(rng.gen::<u32>())).collect()
+        }
+        "zeros" => vec![BinaryElem32::from(0); len],
+        "ones" => vec![BinaryElem32::from(1); len],
+        "sequential" => (0..len).map(|i| BinaryElem32::from(i as u32)).collect(),
+        _ => anyhow::bail!("Unknown pattern '{}'. Use: random, zeros, ones, sequential", pattern),
+    };
+
+    // Convert to bytes using bytemuck
+    let bytes = bytemuck::cast_slice(&poly).to_vec();
+
+    // Write output
+    match output {
+        Some(path) => {
+            let mut file = File::create(&path)
+                .context(format!("Failed to create output file: {}", path))?;
+            file.write_all(&bytes)
+                .context("Failed to write polynomial data")?;
+            eprintln!("Wrote {} bytes to {}", bytes.len(), path);
+        }
+        None => {
+            io::stdout().write_all(&bytes)
+                .context("Failed to write polynomial data to stdout")?;
+        }
+    }
+
+    Ok(())
 }

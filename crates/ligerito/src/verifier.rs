@@ -111,7 +111,7 @@ where
         .map(|row| hash_row(row))
         .collect();
 
-    if !merkle_tree::verify(
+    if !ligerito_merkle::verify(
         &proof.initial_ligero_cm.root,
         &proof.initial_ligero_proof.merkle_proof,
         depth,
@@ -189,7 +189,7 @@ where
                 .map(|row| hash_row(row))
                 .collect();
 
-            if !merkle_tree::verify(
+            if !ligerito_merkle::verify(
                 root,
                 &proof.final_ligero_proof.merkle_proof,
                 depth,
@@ -248,7 +248,7 @@ where
             .map(|row| hash_row(row))
             .collect();
 
-        if !merkle_tree::verify(
+        if !ligerito_merkle::verify(
             root,
             &ligero_proof.merkle_proof,
             depth,
@@ -332,7 +332,7 @@ where
         .map(|row| hash_row(row))
         .collect();
 
-    if !merkle_tree::verify(
+    if !ligerito_merkle::verify(
         &proof.initial_ligero_cm.root,
         &proof.initial_ligero_proof.merkle_proof,
         depth,
@@ -404,7 +404,7 @@ where
                 .map(|row| hash_row(row))
                 .collect();
 
-            if !merkle_tree::verify(
+            if !ligerito_merkle::verify(
                 root,
                 &proof.final_ligero_proof.merkle_proof,
                 depth,
@@ -443,7 +443,7 @@ where
             .map(|row| hash_row(row))
             .collect();
 
-        if !merkle_tree::verify(
+        if !ligerito_merkle::verify(
             root,
             &ligero_proof.merkle_proof,
             depth,
@@ -598,7 +598,7 @@ where
     println!("First 3 row hashes: {:?}", &hashed_leaves[..3.min(hashed_leaves.len())]);
     println!("Tree root: {:?}", proof.initial_ligero_cm.root);
 
-    let merkle_result = merkle_tree::verify(
+    let merkle_result = ligerito_merkle::verify(
         &proof.initial_ligero_cm.root,
         &proof.initial_ligero_proof.merkle_proof,
         depth,
@@ -719,7 +719,7 @@ where
                 .map(|row| hash_row(row))
                 .collect();
 
-            let final_merkle_result = merkle_tree::verify(
+            let final_merkle_result = ligerito_merkle::verify(
                 root,
                 &proof.final_ligero_proof.merkle_proof,
                 depth,
@@ -778,7 +778,7 @@ where
             .map(|row| hash_row(row))
             .collect();
 
-        let rec_merkle_result = merkle_tree::verify(
+        let rec_merkle_result = ligerito_merkle::verify(
             root,
             &ligero_proof.merkle_proof,
             depth,
@@ -890,7 +890,7 @@ where
         .map(|row| hash_row(row))
         .collect();
 
-    if !merkle_tree::verify(
+    if !ligerito_merkle::verify(
         &proof.initial_ligero_cm.root,
         &proof.initial_ligero_proof.merkle_proof,
         depth,
@@ -960,7 +960,7 @@ where
                 .map(|row| hash_row(row))
                 .collect();
 
-            if !merkle_tree::verify(
+            if !ligerito_merkle::verify(
                 root,
                 &proof.final_ligero_proof.merkle_proof,
                 depth,
@@ -1006,7 +1006,7 @@ where
             .map(|row| hash_row(row))
             .collect();
 
-        if !merkle_tree::verify(
+        if !ligerito_merkle::verify(
             root,
             &ligero_proof.merkle_proof,
             depth,
@@ -1097,7 +1097,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use binary_fields::{BinaryElem32, BinaryElem128};
+    use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
     use crate::configs::{hardcoded_config_12, hardcoded_config_12_verifier};
     use crate::prover::prove;
     use std::marker::PhantomData;

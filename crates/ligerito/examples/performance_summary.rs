@@ -1,5 +1,5 @@
 use ligerito::{prove_sha256, verify_sha256, prove, verify, hardcoded_config_12, hardcoded_config_12_verifier};
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use std::marker::PhantomData;
 use std::time::Instant;
 
@@ -140,7 +140,7 @@ fn demonstrate_transcript_compatibility() {
 
     println!("Testing with identical seeds and absorption...");
 
-    let dummy_root = merkle_tree::MerkleRoot { root: Some([0x42u8; 32]) };
+    let dummy_root = ligerito_merkle::MerkleRoot { root: Some([0x42u8; 32]) };
 
     // Two SHA256 transcripts with same seed
     let mut sha256_a = FiatShamir::new_sha256(1234);

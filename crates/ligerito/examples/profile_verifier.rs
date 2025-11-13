@@ -1,4 +1,4 @@
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use ligerito::{prove, verify, configs};
 use std::time::Instant;
 

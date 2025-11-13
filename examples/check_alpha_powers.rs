@@ -2,7 +2,7 @@
 //!
 //! Usage: cargo run --release --example check_alpha_powers
 
-use binary_fields::{BinaryElem128, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem128, BinaryFieldElement};
 
 fn main() {
     let alpha = BinaryElem128::from_value(42);

@@ -17,7 +17,7 @@
 //! Output (exit code): 0 = valid, 1 = invalid, 2 = error
 
 use ligerito::{verify, FinalizedLigeritoProof};
-use binary_fields::{BinaryElem32, BinaryElem128};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use std::io::{self, Read};
 
 fn main() {
