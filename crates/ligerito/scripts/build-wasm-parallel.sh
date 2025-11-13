@@ -34,7 +34,7 @@ echo "✓ WASM binary built successfully"
 # Step 2: Run wasm-bindgen
 echo
 echo "Step 2: Generating JavaScript bindings..."
-mkdir -p pkg/parallel-web
+mkdir -p ../pkg/parallel-web
 
 # Note: cargo build from workspace root puts artifacts in ../../target
 WASM_FILE="../../target/wasm32-unknown-unknown/release/ligerito.wasm"
@@ -45,7 +45,7 @@ fi
 
 wasm-bindgen \
     "$WASM_FILE" \
-    --out-dir pkg/parallel-web \
+    --out-dir ../pkg/parallel-web \
     --target web
 
 echo
@@ -56,8 +56,8 @@ if command -v wasm-opt &> /dev/null; then
     echo
     echo "Step 3: Optimizing WASM with wasm-opt..."
     wasm-opt -Oz \
-        pkg/parallel-web/ligerito_bg.wasm \
-        -o pkg/parallel-web/ligerito_bg.wasm
+        ../pkg/parallel-web/ligerito_bg.wasm \
+        -o ../pkg/parallel-web/ligerito_bg.wasm
     echo "✓ WASM optimized"
 else
     echo
@@ -67,9 +67,9 @@ fi
 
 # Step 4: Copy to www directory
 echo
-echo "Step 4: Copying to www/..."
-cp pkg/parallel-web/ligerito_bg.wasm www/
-cp pkg/parallel-web/ligerito.js www/
+echo "Step 4: Copying to ../examples/www/..."
+cp ../pkg/parallel-web/ligerito_bg.wasm ../examples/www/
+cp ../pkg/parallel-web/ligerito.js ../examples/www/
 
 echo
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -77,13 +77,13 @@ echo "✓ Multi-threaded WASM build complete!"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo
 echo "Output:"
-echo "  - pkg/parallel-web/ligerito_bg.wasm"
-echo "  - pkg/parallel-web/ligerito.js"
-echo "  - www/ (copied)"
+echo "  - ../pkg/parallel-web/ligerito_bg.wasm"
+echo "  - ../pkg/parallel-web/ligerito.js"
+echo "  - ../examples/www/ (copied)"
 echo
-wc -c pkg/parallel-web/ligerito_bg.wasm | awk '{printf "WASM size: %s bytes (%.2f MB)\n", $1, $1/1024/1024}'
+wc -c ../pkg/parallel-web/ligerito_bg.wasm | awk '{printf "WASM size: %s bytes (%.2f MB)\n", $1, $1/1024/1024}'
 echo
 echo "To test:"
-echo "  cd www && python3 serve-multithreaded.py 8080"
+echo "  cd examples/www cd www &&cd www && python3 serve-multithreaded.py 8080"
 echo "  Then open: http://localhost:8080"
 echo

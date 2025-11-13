@@ -8,6 +8,13 @@ repository.workspace = true
 description = "Ligerito polynomial commitment scheme over binary extension fields"
 keywords = ["cryptography", "polynomial-commitment", "zero-knowledge", "binary-fields"]
 categories = ["cryptography", "no-std"]
+exclude = [
+    "browser-shell.nix",
+    "deploy/",
+    "pkg/",
+    "BENCHMARK_RESULTS.md",
+    ".gitignore",
+]
 
 [lib]
 crate-type = ["cdylib", "rlib"]
@@ -72,8 +79,8 @@ cli = ["std", "prover", "transcript-merlin", "bincode", "clap", "anyhow", "hex",
 
 [dependencies]
 # Core dependencies (always needed)
-binary-fields = { path = "../binary-fields", default-features = false, features = ["serde"] }
-merkle-tree = { path = "../merkle-tree", default-features = false, features = ["serde"] }
+binary-fields = { version = "0.1.0", path = "../binary-fields", default-features = false, features = ["serde"] }
+merkle-tree = { version = "0.1.0", path = "../merkle-tree", default-features = false, features = ["serde"] }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 bytemuck = { workspace = true }
 
@@ -83,7 +90,7 @@ blake3 = { workspace = true, optional = true }
 merlin = { workspace = true, optional = true }
 
 # Prover-only dependencies
-reed-solomon = { path = "../reed-solomon", optional = true }
+reed-solomon = { version = "0.1.0", path = "../reed-solomon", optional = true }
 rand = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
 

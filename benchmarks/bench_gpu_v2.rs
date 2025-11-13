@@ -133,16 +133,11 @@ async fn main() {
     println!("  n=20: V1=2.4 GB ❌  V2=32 MB ✓");
     println!("  n=24: V1=38 GB  ❌  V2=512 MB ✓\n");
 
-    // Test configurations focused on large scales (n≥20 where ligerito is useful)
+    // Test configurations focused on production scales only
     let test_configs = vec![
-        (8, 148, 7),   // Small: n=8 - Sanity check
-        (10, 148, 7),  // Medium: n=10 - Sanity check
-        (12, 148, 7),  // Large: n=12 - Sanity check
-        (14, 148, 7),  // XL: n=14 - Sanity check
-        (16, 148, 7),  // XXL: n=16 - First scale where v1 fails
-        (18, 148, 7),  // Huge: n=18 - Warm up to target
         (20, 148, 7),  // 2^20: n=20 - TARGET SCALE! (ligerito becomes useful here)
         (24, 148, 7),  // 2^24: n=24 - ULTIMATE TARGET! (recursion wins big)
+        (28, 148, 7),  // 2^28: n=28 - MASSIVE SCALE (1 GB input)
     ];
 
     println!("{:<20} {:<15} {:<15} {:<12} {:<15} {:<15}", "Config", "CPU (ms)", "GPU V2 (ms)", "Speedup", "Match", "Status");

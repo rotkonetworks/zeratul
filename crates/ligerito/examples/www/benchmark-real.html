@@ -121,6 +121,14 @@
     </select>
   </label>
   <br><br>
+  <label>Acceleration mode:
+    <select id="acceleration-mode">
+      <option value="auto" selected>Auto (GPU if available)</option>
+      <option value="wasm-only">WASM CPU only</option>
+      <option value="webgpu-required" id="webgpu-option">WebGPU required</option>
+    </select>
+  </label>
+  <br><br>
   <label style="display: flex; align-items: center; gap: 10px;">
     <input type="checkbox" id="run-both" checked>
     Run both CPU and GPU (for comparison)
@@ -255,6 +263,7 @@ async function initGPU() {
 document.getElementById('run-bench').addEventListener('click', async () => {
   const scale = document.getElementById('bench-scale').value;
   const runBoth = document.getElementById('run-both').checked;
+  const accelMode = document.getElementById('acceleration-mode').value;
   const config = CONFIGS[scale];
 
   const resultsDiv = document.getElementById('bench-results');
@@ -269,9 +278,27 @@ document.getElementById('run-bench').addEventListener('click', async () => {
     timestamp: new Date().toISOString()
   };
 
+  // Determine which benchmarks to run based on acceleration mode
+  let runCPU = runBoth;
+  let runGPU = true;
+
+  if (accelMode === 'wasm-only') {
+    runCPU = true;
+    runGPU = false;
+  } else if (accelMode === 'webgpu-required') {
+    runCPU = false;
+    runGPU = true;
+    if (!gpuAvailable) {
+      resultsDiv.innerHTML = '<div style="color: #f00;">❌ WebGPU required but not available</div>';
+      runButton.disabled = false;
+      return;
+    }
+  }
+  // 'auto' mode uses default runBoth/gpuAvailable logic
+
   try {
     // CPU Benchmark
-    if (runBoth) {
+    if (runCPU) {
       resultsDiv.innerHTML = '<div class="progress-bar"><div class="progress-fill" style="width: 30%">Running CPU...</div></div>';
 
       const benchConfig = new BenchConfig(config.n, config.k, config.q);
@@ -285,7 +312,7 @@ document.getElementById('run-bench').addEventListener('click', async () => {
     }
 
     // GPU Benchmark
-    if (gpuAvailable && typeof bench_gpu_sumcheck === 'function') {
+    if (runGPU && gpuAvailable && typeof bench_gpu_sumcheck === 'function') {
       resultsDiv.innerHTML = '<div class="progress-bar"><div class="progress-fill" style="width: 70%">Running GPU...</div></div>';
 
       const benchConfig = new BenchConfig(config.n, config.k, config.q);
@@ -296,7 +323,7 @@ document.getElementById('run-bench').addEventListener('click', async () => {
       } else {
         throw new Error(`GPU benchmark failed: ${gpuResult.error || 'Unknown error'}`);
       }
-    } else {
+    } else if (runGPU) {
       results.gpuTime = null;
       results.gpuError = 'GPU not available';
     }
