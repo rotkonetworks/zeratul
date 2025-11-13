@@ -5,7 +5,6 @@ perf.data*
 *.asm.txt
 rust_asm.txt
 julia_asm.txt
-docs/
 benchmarks/*_only.sh
 benchmarks/final_comparison.sh
 benchmarks/test_threads.sh
