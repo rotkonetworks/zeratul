@@ -151,6 +151,96 @@ pub fn hardcoded_config_20_verifier() -> VerifierConfig {
     }
 }
 
+/// Create configuration for 2^20 polynomial with k=8 (GPU-optimized: 256-element dot products)
+#[cfg(feature = "prover")]
+pub fn hardcoded_config_20_k8<T, U>(
+    _t: PhantomData<T>,
+    _u: PhantomData<U>,
+) -> ProverConfig<T, U>
+where
+    T: BinaryFieldElement,
+    U: BinaryFieldElement,
+{
+    let recursive_steps = 1;
+    let inv_rate = 4;
+
+    let initial_dims = (1 << 12, 1 << 8);  // (2^12, 2^8) = 4096 × 256
+    let dims = vec![(1 << 8, 1 << 6)];     // (2^8, 2^6) = 256 × 64
+
+    let initial_k = 8;
+    let ks = vec![6];
+
+    let initial_reed_solomon = reed_solomon::<T>(initial_dims.0, initial_dims.0 * inv_rate);
+    let reed_solomon_codes = vec![
+        reed_solomon::<U>(dims[0].0, dims[0].0 * inv_rate),
+    ];
+
+    ProverConfig {
+        recursive_steps,
+        initial_dims,
+        dims,
+        initial_k,
+        ks,
+        initial_reed_solomon,
+        reed_solomon_codes,
+    }
+}
+
+pub fn hardcoded_config_20_k8_verifier() -> VerifierConfig {
+    VerifierConfig {
+        recursive_steps: 1,
+        initial_dim: 12,
+        log_dims: vec![8],
+        initial_k: 8,
+        ks: vec![6],
+    }
+}
+
+/// Create configuration for 2^20 polynomial with k=10 (GPU-optimized: 1024-element dot products)
+#[cfg(feature = "prover")]
+pub fn hardcoded_config_20_k10<T, U>(
+    _t: PhantomData<T>,
+    _u: PhantomData<U>,
+) -> ProverConfig<T, U>
+where
+    T: BinaryFieldElement,
+    U: BinaryFieldElement,
+{
+    let recursive_steps = 1;
+    let inv_rate = 4;
+
+    let initial_dims = (1 << 10, 1 << 10);  // (2^10, 2^10) = 1024 × 1024 (square!)
+    let dims = vec![(1 << 8, 1 << 8)];      // (2^8, 2^8) = 256 × 256 (square!)
+
+    let initial_k = 10;
+    let ks = vec![8];
+
+    let initial_reed_solomon = reed_solomon::<T>(initial_dims.0, initial_dims.0 * inv_rate);
+    let reed_solomon_codes = vec![
+        reed_solomon::<U>(dims[0].0, dims[0].0 * inv_rate),
+    ];
+
+    ProverConfig {
+        recursive_steps,
+        initial_dims,
+        dims,
+        initial_k,
+        ks,
+        initial_reed_solomon,
+        reed_solomon_codes,
+    }
+}
+
+pub fn hardcoded_config_20_k10_verifier() -> VerifierConfig {
+    VerifierConfig {
+        recursive_steps: 1,
+        initial_dim: 10,
+        log_dims: vec![8],
+        initial_k: 10,
+        ks: vec![8],
+    }
+}
+
 /// Create configuration for 2^24 polynomial
 #[cfg(feature = "prover")]
 pub fn hardcoded_config_24<T, U>(
