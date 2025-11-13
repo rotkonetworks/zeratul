@@ -1,0 +1,162 @@
+---
+# Verifier Service - Stateless, Horizontally Scalable
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: verifier-service
+  namespace: state-transition
+  labels:
+    app: verifier
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 1
+  selector:
+    matchLabels:
+      app: verifier
+  template:
+    metadata:
+      labels:
+        app: verifier
+    spec:
+      containers:
+      - name: verifier
+        image: state-transition-verifier:latest
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: NOMT_GRPC_ENDPOINT
+          value: "nomt-storage:9090"
+        - name: LOG_LEVEL
+          value: "info"
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "500m"
+          limits:
+            memory: "2Gi"
+            cpu: "2000m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 30
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 10
+
+---
+# Service for Verifier
+apiVersion: v1
+kind: Service
+metadata:
+  name: verifier-service
+  namespace: state-transition
+spec:
+  type: LoadBalancer
+  selector:
+    app: verifier
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 8080
+    name: http
+
+---
+# NOMT Storage - StatefulSet with Persistent Volume
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nomt-storage
+  namespace: state-transition
+spec:
+  serviceName: nomt-storage
+  replicas: 1  # Single instance for consistency
+  selector:
+    matchLabels:
+      app: nomt
+  template:
+    metadata:
+      labels:
+        app: nomt
+    spec:
+      containers:
+      - name: nomt
+        image: state-transition-nomt:latest
+        ports:
+        - containerPort: 9090
+          name: grpc
+        env:
+        - name: NOMT_DATA_DIR
+          value: "/data/nomt"
+        volumeMounts:
+        - name: nomt-data
+          mountPath: /data
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "500m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+  volumeClaimTemplates:
+  - metadata:
+      name: nomt-data
+    spec:
+      accessModes: [ "ReadWriteOnce" ]
+      resources:
+        requests:
+          storage: 100Gi
+
+---
+# Internal Service for NOMT (not exposed externally)
+apiVersion: v1
+kind: Service
+metadata:
+  name: nomt-storage
+  namespace: state-transition
+spec:
+  clusterIP: None  # Headless service
+  selector:
+    app: nomt
+  ports:
+  - protocol: TCP
+    port: 9090
+    targetPort: 9090
+    name: grpc
+
+---
+# HorizontalPodAutoscaler for Verifier
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: verifier-hpa
+  namespace: state-transition
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: verifier-service
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      target:
+        type: Utilization
+        averageUtilization: 70
+  - type: Resource
+    resource:
+      name: memory
+      target:
+        type: Utilization
+        averageUtilization: 80

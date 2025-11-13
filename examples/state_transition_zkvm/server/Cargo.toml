@@ -1,0 +1,37 @@
+[package]
+name = "state-transition-server"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# Local dependencies
+state-transition-circuit = { path = "../circuit" }
+
+# NOMT for state storage
+nomt = { git = "https://github.com/thrumdev/nomt" }
+
+# HTTP server
+axum = "0.7"
+tokio = { version = "1.0", features = ["full"] }
+tower = "0.4"
+tower-http = { version = "0.5", features = ["cors", "trace"] }
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "1.0"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Crypto
+sha2 = "0.10"
+
+# Misc
+hex = "0.4"
+rand.workspace = true
+rand_chacha.workspace = true
