@@ -14,7 +14,7 @@ use binary_fields::{BinaryElem128, BinaryFieldElement};
 use std::time::Instant;
 
 #[cfg(feature = "webgpu")]
-use ligerito::gpu::{GpuDevice, sumcheck_v2::GpuSumcheckV2};
+use ligerito::gpu::{GpuDevice, sumcheck::GpuSumcheck};
 
 use ligerito::sumcheck_polys::induce_sumcheck_poly as cpu_induce_sumcheck_poly;
 
@@ -83,7 +83,7 @@ fn benchmark_cpu_sumcheck(
 
 #[cfg(feature = "webgpu")]
 async fn benchmark_gpu_v2_sumcheck(
-    gpu_sumcheck: &mut GpuSumcheckV2,
+    gpu_sumcheck: &mut GpuSumcheck,
     n: usize,
     sks_vks: &[BinaryElem128],
     opened_rows: &[Vec<BinaryElem128>],
@@ -156,7 +156,7 @@ async fn main() {
                 println!("GPU initialized successfully");
                 println!("  Device: {}", device.capabilities.adapter_name);
                 println!("  Backend: {}\n", device.capabilities.backend);
-                Some(GpuSumcheckV2::new(device))
+                Some(GpuSumcheck::new(device))
             }
             Err(e) => {
                 println!("GPU not available: {}", e);
