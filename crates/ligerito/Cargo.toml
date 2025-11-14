@@ -76,8 +76,8 @@ webgpu = [
     "futures",                  # Async utilities
 ]
 
-# CLI binary support
-cli = ["std", "prover", "transcript-merlin", "bincode", "clap", "anyhow", "hex", "serde_json"]
+# CLI binary support - includes all transcript backends for flexibility
+cli = ["std", "prover", "transcript-sha256", "transcript-merlin", "transcript-blake3", "bincode", "clap", "anyhow", "hex", "serde_json"]
 
 [dependencies]
 # Core dependencies (always needed)

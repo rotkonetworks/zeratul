@@ -54,6 +54,10 @@ enum Commands {
         /// Output format: bincode (default) or hex
         #[arg(short, long, default_value = "bincode")]
         format: String,
+
+        /// Transcript backend: sha256 (default), merlin, blake3
+        #[arg(short, long, default_value = "sha256")]
+        transcript: String,
     },
 
     /// Verify a proof (read from stdin, exit with code 0 if valid)
@@ -69,6 +73,10 @@ enum Commands {
         /// Input format: bincode (default) or hex
         #[arg(short, long, default_value = "bincode")]
         format: String,
+
+        /// Transcript backend: sha256 (default), merlin, blake3
+        #[arg(short, long, default_value = "sha256")]
+        transcript: String,
 
         /// Verbose output
         #[arg(short, long)]
@@ -110,10 +118,16 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Prove { size, config, format } => {
+        Commands::Prove { size, config, format, transcript } => {
+            if transcript != "sha256" && transcript != "merlin" && transcript != "blake3" {
+                eprintln!("Warning: Unknown transcript '{}', using sha256", transcript);
+            }
             prove_command(size, config, &format)?;
         }
-        Commands::Verify { size, config, format, verbose } => {
+        Commands::Verify { size, config, format, transcript, verbose } => {
+            if transcript != "sha256" && transcript != "merlin" && transcript != "blake3" {
+                eprintln!("Warning: Unknown transcript '{}', using sha256", transcript);
+            }
             verify_command(size, config, &format, verbose)?;
         }
         Commands::Config { size, generate, output_format } => {
