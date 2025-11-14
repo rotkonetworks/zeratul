@@ -327,3 +327,48 @@ done
 - [API Documentation](https://docs.rs/ligerito)
 - [Web Demo](../examples/www/)
 - [Benchmark Results](BENCHMARK_RESULTS.md)
+
+## Transcript Backends
+
+Ligerito supports three cryptographic transcript implementations:
+
+### SHA256 (Default)
+- **No external dependencies**
+- Works in `no_std` environments
+- Works in WASM/browser
+- Good performance
+- **Current default for CLI**
+
+### Merlin
+- Zcash/Dalek ecosystem standard
+- Requires `merlin` crate dependency
+- Available with `--features transcript-merlin`
+
+### BLAKE3
+- Fastest hashing performance
+- Requires `blake3` crate dependency  
+- Available with `--features transcript-blake3`
+
+### Important Notes
+
+1. **Prover and verifier MUST use the same transcript backend**
+2. **Proofs have identical SIZE but different CONTENTS** with different transcripts
+3. **Runtime selection not yet implemented** - currently always uses SHA256
+4. To use a different backend, rebuild with specific features:
+
+```bash
+# Build with Merlin transcript
+cargo build --release --features "cli,transcript-merlin" --no-default-features
+
+# Build with BLAKE3 transcript  
+cargo build --release --features "cli,transcript-blake3" --no-default-features
+```
+
+### Proof Characteristics
+
+All transcript backends produce:
+- **Same proof size** (~147 KB for n=20 with k=6)
+- **Different proof bytes** (transcript affects Fiat-Shamir challenges)
+- **Deterministic proofs** (same input + same transcript = identical proof)
+
+The `--transcript` flag exists in the CLI but currently has no effect. This will be implemented in a future version for runtime selection.

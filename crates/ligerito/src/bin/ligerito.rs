@@ -55,7 +55,10 @@ enum Commands {
         #[arg(short, long, default_value = "bincode")]
         format: String,
 
-        /// Transcript backend: sha256 (default), merlin, blake3
+        /// Transcript backend: sha256, merlin, or blake3
+        /// WARNING: Currently defaults to SHA256 regardless of this flag
+        /// Prover and verifier MUST use the same backend!
+        /// TODO: Implement runtime transcript selection
         #[arg(short, long, default_value = "sha256")]
         transcript: String,
     },
@@ -74,7 +77,10 @@ enum Commands {
         #[arg(short, long, default_value = "bincode")]
         format: String,
 
-        /// Transcript backend: sha256 (default), merlin, blake3
+        /// Transcript backend: sha256, merlin, or blake3
+        /// WARNING: Currently defaults to SHA256 regardless of this flag
+        /// MUST match the transcript used for proving!
+        /// TODO: Implement runtime transcript selection
         #[arg(short, long, default_value = "sha256")]
         transcript: String,
 
