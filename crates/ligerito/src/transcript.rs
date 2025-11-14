@@ -131,11 +131,11 @@ impl Transcript for MerlinTranscript {
 
                 if (byte >> bit_idx) & 1 == 1 {
                     // Create x^bit_count where x is the primitive element
-                    let mut power = if bit_count == 0 {
+                    let power = if bit_count == 0 {
                         F::one()
                     } else {
                         // Use a primitive element (not 1) for the base
-                        let mut base = F::from_bits(2); // x in GF(2^n)
+                        let base = F::from_bits(2); // x in GF(2^n)
                         let mut result = F::one();
                         for _ in 0..bit_count {
                             result = result.mul(&base);
@@ -176,11 +176,11 @@ impl Transcript for MerlinTranscript {
 
                     if (byte >> bit_idx) & 1 == 1 {
                         // Create x^bit_count where x is the primitive element
-                        let mut power = if bit_count == 0 {
+                        let power = if bit_count == 0 {
                             F::one()
                         } else {
                             // Use a primitive element (not 1) for the base
-                            let mut base = F::from_bits(2); // x in GF(2^n)
+                            let base = F::from_bits(2); // x in GF(2^n)
                             let mut result = F::one();
                             for _ in 0..bit_count {
                                 result = result.mul(&base);
@@ -263,6 +263,7 @@ impl Sha256Transcript {
     }
 
     /// Get random bytes without using the rand crate (for verifier-only builds)
+    #[allow(dead_code)]
     fn squeeze_bytes(&mut self, count: usize) -> Vec<u8> {
         self.hasher.update(&self.counter.to_le_bytes());
         self.counter += 1;

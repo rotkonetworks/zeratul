@@ -3,7 +3,7 @@
 //! Based on recursive subspace polynomial evaluation over GF(2^m).
 //! Ported from Julia reference in BinaryReedSolomon/src/binaryfft.jl.
 
-use ligerito_binary_fields::{BinaryFieldElement, BinaryElem128};
+use ligerito_binary_fields::BinaryFieldElement;
 use rayon::prelude::*;
 
 /// Compute next s value: s_i(x) = s_{i-1}(x)^2 + s_{i-1}(v_{i-1}) * s_{i-1}(x)

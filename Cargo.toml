@@ -24,13 +24,13 @@ repository = "https://github.com/your-org/ligerito-rust"
 
 [workspace.dependencies]
 # Core dependencies
-sha2 = "0.10"
+sha2 = { version = "0.10", default-features = false }
 rayon = "1.8"
 rand = "0.8"
 rand_chacha = "0.3"
 hex = "0.4"
 thiserror = "1.0"
-serde = { version = "1.0", features = ["derive"] }
+serde = { version = "1.0", default-features = false, features = ["derive"] }
 
 # Crypto primitives
 merlin = "3.0"

@@ -1,5 +1,5 @@
 use binary_fields::BinaryFieldElement;
-use crate::utils::{evaluate_lagrange_basis, evaluate_scaled_basis_inplace};
+use crate::utils::evaluate_scaled_basis_inplace;
 
 /// tensorized dot product exploiting kronecker structure
 /// reduces o(2^k) to o(k × 2^(k-1)) by folding dimensions

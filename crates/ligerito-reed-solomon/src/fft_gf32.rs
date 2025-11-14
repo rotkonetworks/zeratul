@@ -1,5 +1,5 @@
 // Specialized SIMD FFT for BinaryElem32
-use ligerito_binary_fields::{BinaryFieldElement, BinaryElem32};
+use ligerito_binary_fields::BinaryElem32;
 
 /// FFT butterfly using SIMD for GF(2^32)
 #[inline(always)]
