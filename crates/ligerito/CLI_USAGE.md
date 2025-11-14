@@ -330,45 +330,44 @@ done
 
 ## Transcript Backends
 
-Ligerito supports three cryptographic transcript implementations:
+Ligerito supports two cryptographic transcript implementations:
 
 ### SHA256 (Default)
 - **No external dependencies**
 - Works in `no_std` environments
 - Works in WASM/browser
-- Good performance
+- Simple counter-based transcript wrapper
 - **Current default for CLI**
 
 ### Merlin
+- Industry standard STROBE-based protocol
 - Zcash/Dalek ecosystem standard
+- Proper domain separation
 - Requires `merlin` crate dependency
-- Available with `--features transcript-merlin`
+- Better security guarantees
 
-### BLAKE3
-- Fastest hashing performance
-- Requires `blake3` crate dependency  
-- Available with `--features transcript-blake3`
+### Usage
+
+The CLI supports runtime selection via the `--transcript` flag:
+
+```bash
+# Use SHA256 (default)
+ligerito prove --size 20 --transcript sha256 < poly.bin > proof.bin
+
+# Use Merlin
+ligerito prove --size 20 --transcript merlin < poly.bin > proof.bin
+```
 
 ### Important Notes
 
 1. **Prover and verifier MUST use the same transcript backend**
-2. **Proofs have identical SIZE but different CONTENTS** with different transcripts
-3. **Runtime selection not yet implemented** - currently always uses SHA256
-4. To use a different backend, rebuild with specific features:
+2. **Proofs have nearly identical sizes but different contents** with different transcripts
+3. All transcripts produce **deterministic proofs** (same input + same transcript = identical proof)
+4. Performance is similar (~0.4s for n=20) - hashing is not the bottleneck
 
-```bash
-# Build with Merlin transcript
-cargo build --release --features "cli,transcript-merlin" --no-default-features
+### Proof Characteristics (n=20)
 
-# Build with BLAKE3 transcript  
-cargo build --release --features "cli,transcript-blake3" --no-default-features
-```
-
-### Proof Characteristics
-
-All transcript backends produce:
-- **Same proof size** (~147 KB for n=20 with k=6)
-- **Different proof bytes** (transcript affects Fiat-Shamir challenges)
-- **Deterministic proofs** (same input + same transcript = identical proof)
-
-The `--transcript` flag exists in the CLI but currently has no effect. This will be implemented in a future version for runtime selection.
+| Transcript | Proof Size | Performance |
+|------------|-----------|-------------|
+| SHA256     | ~151 KB   | ~0.38s      |
+| Merlin     | ~151 KB   | ~0.40s      |

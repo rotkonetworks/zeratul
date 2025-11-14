@@ -7,10 +7,10 @@ use crate::{
     sumcheck_polys::{induce_sumcheck_poly, induce_sumcheck_poly_parallel},
     utils::{eval_sk_at_vks, partial_eval_multilinear},
     data_structures::finalize,
+    backend::BackendSelector,
 };
 
-// Hardcoded for now
-const S: usize = 148;
+// Removed: S is now config.num_queries
 
 /// Main prover function with configurable transcript
 pub fn prove_with_transcript<T, U>(
@@ -19,13 +19,19 @@ pub fn prove_with_transcript<T, U>(
     mut fs: impl Transcript,
 ) -> crate::Result<FinalizedLigeritoProof<T, U>>
 where
-    T: BinaryFieldElement + Send + Sync + 'static,
-    U: BinaryFieldElement + Send + Sync + From<T> + 'static,
+    T: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static,
+    U: BinaryFieldElement + Send + Sync + From<T> + bytemuck::Pod + 'static,
 {
+    // Validate configuration
+    config.validate()?;
+
+    // Initialize backend (auto-detects GPU, respects LIGERITO_BACKEND env var)
+    let backend = BackendSelector::auto();
+
     let mut proof = LigeritoProof::<T, U>::new();
 
     // Initial commitment
-    let wtns_0 = ligero_commit(poly, config.initial_dims.0, config.initial_dims.1, &config.initial_reed_solomon);
+    let wtns_0 = ligero_commit(poly, config.initial_dims.0, config.initial_dims.1, &config.initial_reed_solomon, backend.backend());
     let cm_0 = RecursiveLigeroCommitment {
         root: wtns_0.tree.get_root(),
     };
@@ -46,7 +52,7 @@ where
 
     // First recursive step - convert to U type
     let f_evals_u: Vec<U> = f_evals.iter().map(|&x| U::from(x)).collect();
-    let wtns_1 = ligero_commit(&f_evals_u, config.dims[0].0, config.dims[0].1, &config.reed_solomon_codes[0]);
+    let wtns_1 = ligero_commit(&f_evals_u, config.dims[0].0, config.dims[0].1, &config.reed_solomon_codes[0], backend.backend());
     let cm_1 = RecursiveLigeroCommitment {
         root: wtns_1.tree.get_root(),
     };
@@ -55,7 +61,7 @@ where
 
     // Query selection
     let rows = wtns_0.mat.len();
-    let queries = fs.get_distinct_queries(rows, S);  // Returns 0-based indices
+    let queries = fs.get_distinct_queries(rows, config.num_queries);  // Returns 0-based indices
     let alpha = fs.get_challenge::<U>();
 
     // Prepare for sumcheck
@@ -119,7 +125,7 @@ where
             fs.absorb_elems(&current_poly);
 
             let rows = wtns_prev.mat.len();
-            let queries = fs.get_distinct_queries(rows, S);  // 0-based
+            let queries = fs.get_distinct_queries(rows, config.num_queries);  // 0-based
 
             // Use 0-based queries directly for array access
             let opened_rows: Vec<Vec<U>> = queries.iter()
@@ -145,6 +151,7 @@ where
             config.dims[i + 1].0,
             config.dims[i + 1].1,
             &config.reed_solomon_codes[i + 1],
+            backend.backend(),
         );
 
         let cm_next = RecursiveLigeroCommitment {
@@ -154,7 +161,7 @@ where
         fs.absorb_root(&cm_next.root);
 
         let rows = wtns_prev.mat.len();
-        let queries = fs.get_distinct_queries(rows, S);  // 0-based
+        let queries = fs.get_distinct_queries(rows, config.num_queries);  // 0-based
         let alpha = fs.get_challenge::<U>();
 
         // Use 0-based queries directly for array access
@@ -203,8 +210,8 @@ pub fn prove<T, U>(
     poly: &[T],
 ) -> crate::Result<FinalizedLigeritoProof<T, U>>
 where
-    T: BinaryFieldElement + Send + Sync + 'static,
-    U: BinaryFieldElement + Send + Sync + From<T> + 'static,
+    T: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static,
+    U: BinaryFieldElement + Send + Sync + From<T> + bytemuck::Pod + 'static,
 {
     // Use Merlin by default for better performance (when available)
     #[cfg(feature = "transcript-merlin")]
@@ -223,8 +230,8 @@ pub fn prove_sha256<T, U>(
     poly: &[T],
 ) -> crate::Result<FinalizedLigeritoProof<T, U>>
 where
-    T: BinaryFieldElement + Send + Sync + 'static,
-    U: BinaryFieldElement + Send + Sync + From<T> + 'static,
+    T: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static,
+    U: BinaryFieldElement + Send + Sync + From<T> + bytemuck::Pod + 'static,
 {
     // Use SHA256 with seed 1234 to match Julia
     let fs = FiatShamir::new_sha256(1234);
@@ -237,8 +244,8 @@ pub fn prove_debug<T, U>(
     poly: &[T],
 ) -> crate::Result<FinalizedLigeritoProof<T, U>>
 where
-    T: BinaryFieldElement + Send + Sync + 'static,
-    U: BinaryFieldElement + Send + Sync + From<T> + 'static,
+    T: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static,
+    U: BinaryFieldElement + Send + Sync + From<T> + bytemuck::Pod + 'static,
 {
     println!("\n=== PROVER DEBUG ===");
 
@@ -248,11 +255,14 @@ where
     #[cfg(not(feature = "transcript-merlin"))]
     let mut fs = FiatShamir::new_sha256(0);
 
+    // Initialize backend
+    let backend = BackendSelector::auto();
+
     let mut proof = LigeritoProof::<T, U>::new();
 
     // Initial commitment
     println!("Creating initial commitment...");
-    let wtns_0 = ligero_commit(poly, config.initial_dims.0, config.initial_dims.1, &config.initial_reed_solomon);
+    let wtns_0 = ligero_commit(poly, config.initial_dims.0, config.initial_dims.1, &config.initial_reed_solomon, backend.backend());
     let cm_0 = RecursiveLigeroCommitment {
         root: wtns_0.tree.get_root(),
     };
@@ -281,7 +291,7 @@ where
 
     // First recursive step
     println!("\nFirst recursive step...");
-    let wtns_1 = ligero_commit(&f_evals_u, config.dims[0].0, config.dims[0].1, &config.reed_solomon_codes[0]);
+    let wtns_1 = ligero_commit(&f_evals_u, config.dims[0].0, config.dims[0].1, &config.reed_solomon_codes[0], backend.backend());
     let cm_1 = RecursiveLigeroCommitment {
         root: wtns_1.tree.get_root(),
     };
@@ -291,7 +301,7 @@ where
     // Query selection
     let rows = wtns_0.mat.len();
     println!("\nSelecting queries from {} rows...", rows);
-    let queries = fs.get_distinct_queries(rows, S);
+    let queries = fs.get_distinct_queries(rows, config.num_queries);
     println!("Selected queries (0-based): {:?}", &queries[..queries.len().min(5)]);
 
     let alpha = fs.get_challenge::<U>();
@@ -364,7 +374,7 @@ where
             fs.absorb_elems(&current_poly);
 
             let rows = wtns_prev.mat.len();
-            let queries = fs.get_distinct_queries(rows, S);
+            let queries = fs.get_distinct_queries(rows, config.num_queries);
 
             let opened_rows: Vec<Vec<U>> = queries.iter()
                 .map(|&q| wtns_prev.mat[q].clone())
@@ -391,6 +401,7 @@ where
             config.dims[i + 1].0,
             config.dims[i + 1].1,
             &config.reed_solomon_codes[i + 1],
+            backend.backend(),
         );
 
         let cm_next = RecursiveLigeroCommitment {
@@ -400,7 +411,7 @@ where
         fs.absorb_root(&cm_next.root);
 
         let rows = wtns_prev.mat.len();
-        let queries = fs.get_distinct_queries(rows, S);
+        let queries = fs.get_distinct_queries(rows, config.num_queries);
         let alpha = fs.get_challenge::<U>();
 
         let opened_rows: Vec<Vec<U>> = queries.iter()

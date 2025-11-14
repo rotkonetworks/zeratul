@@ -44,7 +44,6 @@ hardware-accel = ["ligerito-binary-fields/hardware-accel"]
 # SHA256 is always available (default) - no extra dependencies, works in no_std
 transcript-sha256 = []  # Default: minimal deps, works everywhere including WASM
 transcript-merlin = ["merlin", "std"]  # Merlin transcript (Zcash/Dalek standard)
-transcript-blake3 = ["blake3"]  # BLAKE3-based transcript (fast)
 
 # WASM support
 wasm = [
@@ -76,8 +75,23 @@ webgpu = [
     "futures",                  # Async utilities
 ]
 
-# CLI binary support - includes all transcript backends for flexibility
-cli = ["std", "prover", "transcript-sha256", "transcript-merlin", "transcript-blake3", "bincode", "clap", "anyhow", "hex", "serde_json"]
+# CLI binary support - includes ALL features for maximum capability
+# Why hold back? Users want the full power!
+cli = [
+    "std",
+    "prover",
+    "parallel",
+    "hardware-accel",
+    "transcript-sha256",
+    "transcript-merlin",
+    "bincode",
+    "clap",
+    "anyhow",
+    "hex",
+    "serde_json",
+    # Note: webgpu is NOT included by default (requires GPU drivers)
+    # Users can build with: cargo build --bin ligerito --features "cli,webgpu"
+]
 
 [dependencies]
 # Core dependencies (always needed)
@@ -88,7 +102,6 @@ bytemuck = { workspace = true }
 
 # Crypto (sha256 always available for no_std)
 sha2 = { workspace = true, default-features = false }
-blake3 = { workspace = true, optional = true }
 merlin = { workspace = true, optional = true }
 
 # Prover-only dependencies
