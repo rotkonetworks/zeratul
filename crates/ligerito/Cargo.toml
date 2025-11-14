@@ -20,8 +20,9 @@ exclude = [
 crate-type = ["cdylib", "rlib"]
 
 # Default is full-featured std environment with prover + verifier
+# Uses SHA256 transcript by default (no extra deps, works everywhere)
 [features]
-default = ["std", "prover", "parallel", "hardware-accel", "transcript-merlin"]
+default = ["std", "prover", "parallel", "hardware-accel"]
 
 # Environment: std or no_std
 std = [
@@ -40,9 +41,10 @@ parallel = ["rayon"]
 hardware-accel = ["ligerito-binary-fields/hardware-accel"]
 
 # Transcript implementations
-transcript-merlin = ["merlin", "std"]
-transcript-sha256 = []  # Always available (default)
-transcript-blake3 = ["blake3"]
+# SHA256 is always available (default) - no extra dependencies, works in no_std
+transcript-sha256 = []  # Default: minimal deps, works everywhere including WASM
+transcript-merlin = ["merlin", "std"]  # Merlin transcript (Zcash/Dalek standard)
+transcript-blake3 = ["blake3"]  # BLAKE3-based transcript (fast)
 
 # WASM support
 wasm = [
