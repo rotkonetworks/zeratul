@@ -15,6 +15,35 @@ pub struct ProverConfig<T: BinaryFieldElement, U: BinaryFieldElement> {
     pub ks: Vec<usize>,
     pub initial_reed_solomon: ReedSolomon<T>,
     pub reed_solomon_codes: Vec<ReedSolomon<U>>,
+    /// Number of query rows to open (security parameter |S|)
+    ///
+    /// This determines the soundness of the proof system. The minimum value is 148
+    /// for 100-bit security when using Reed-Solomon codes with rate ρ=1/4 and ℓ≤8.
+    ///
+    /// Higher values provide more security:
+    /// - 148: 100-bit security (minimum recommended)
+    /// - 256: ~170-bit security
+    /// - 512: ~340-bit security
+    ///
+    /// Note: If using RAA codes for G₁ (future WASM optimization), this would need
+    /// to be 1060 for round 1 due to RAA's worse distance (0.19 vs 0.25).
+    ///
+    /// GPU backends can handle larger values efficiently, while increasing proof size
+    /// linearly with the number of queries.
+    pub num_queries: usize,
+}
+
+#[cfg(feature = "prover")]
+impl<T: BinaryFieldElement, U: BinaryFieldElement> ProverConfig<T, U> {
+    /// Validate configuration parameters
+    pub fn validate(&self) -> crate::Result<()> {
+        if self.num_queries < 148 {
+            return Err(crate::LigeritoError::InvalidConfig(
+                format!("num_queries must be >= 148 for 100-bit security, got {}", self.num_queries)
+            ));
+        }
+        Ok(())
+    }
 }
 
 /// Verifier configuration
@@ -25,6 +54,8 @@ pub struct VerifierConfig {
     pub log_dims: Vec<usize>,
     pub initial_k: usize,
     pub ks: Vec<usize>,
+    /// Number of query rows (must match prover)
+    pub num_queries: usize,
 }
 
 /// Recursive Ligero witness (prover side only)

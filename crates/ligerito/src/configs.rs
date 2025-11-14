@@ -46,6 +46,7 @@ where
         ks,
         initial_reed_solomon,
         reed_solomon_codes,
+        num_queries: 148, // 100-bit security (paper)
     }
 }
 
@@ -56,6 +57,7 @@ pub fn hardcoded_config_12_verifier() -> VerifierConfig {
         log_dims: vec![6],
         initial_k: 4,
         ks: vec![2],
+        num_queries: 148,
     }
 }
 
@@ -91,6 +93,7 @@ where
         ks,
         initial_reed_solomon,
         reed_solomon_codes,
+        num_queries: 148, // 100-bit security (paper)
     }
 }
 
@@ -101,6 +104,7 @@ pub fn hardcoded_config_16_verifier() -> VerifierConfig {
         log_dims: vec![8],
         initial_k: 4,
         ks: vec![4],
+        num_queries: 148,
     }
 }
 
@@ -138,6 +142,7 @@ where
         ks,
         initial_reed_solomon,
         reed_solomon_codes,
+        num_queries: 148, // 100-bit security (paper)
     }
 }
 
@@ -148,6 +153,7 @@ pub fn hardcoded_config_20_verifier() -> VerifierConfig {
         log_dims: vec![10],
         initial_k: 6,
         ks: vec![4],
+        num_queries: 148,
     }
 }
 
@@ -183,6 +189,7 @@ where
         ks,
         initial_reed_solomon,
         reed_solomon_codes,
+        num_queries: 148, // 100-bit security (paper)
     }
 }
 
@@ -193,6 +200,7 @@ pub fn hardcoded_config_20_k8_verifier() -> VerifierConfig {
         log_dims: vec![8],
         initial_k: 8,
         ks: vec![6],
+        num_queries: 148,
     }
 }
 
@@ -228,6 +236,7 @@ where
         ks,
         initial_reed_solomon,
         reed_solomon_codes,
+        num_queries: 148, // 100-bit security (paper)
     }
 }
 
@@ -238,6 +247,7 @@ pub fn hardcoded_config_20_k10_verifier() -> VerifierConfig {
         log_dims: vec![8],
         initial_k: 10,
         ks: vec![8],
+        num_queries: 148,
     }
 }
 
@@ -276,6 +286,7 @@ where
         ks,
         initial_reed_solomon,
         reed_solomon_codes,
+        num_queries: 148, // 100-bit security (paper)
     }
 }
 
@@ -286,6 +297,7 @@ pub fn hardcoded_config_24_verifier() -> VerifierConfig {
         log_dims: vec![14, 10],
         initial_k: 6,
         ks: vec![4, 4],
+        num_queries: 148,
     }
 }
 
@@ -326,6 +338,7 @@ where
         ks,
         initial_reed_solomon,
         reed_solomon_codes,
+        num_queries: 148, // 100-bit security (paper)
     }
 }
 
@@ -336,6 +349,7 @@ pub fn hardcoded_config_28_verifier() -> VerifierConfig {
         log_dims: vec![19, 16, 13, 10],
         initial_k: 6,
         ks: vec![3, 3, 3, 3],
+        num_queries: 148,
     }
 }
 
@@ -375,6 +389,7 @@ where
         ks,
         initial_reed_solomon,
         reed_solomon_codes,
+        num_queries: 148, // 100-bit security (paper)
     }
 }
 
@@ -385,5 +400,6 @@ pub fn hardcoded_config_30_verifier() -> VerifierConfig {
         log_dims: vec![19, 15, 11],
         initial_k: 7,
         ks: vec![4, 4, 4],
+        num_queries: 148,
     }
 }

@@ -3545,7 +3545,6 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
- "blake3",
  "bytemuck",
  "clap",
  "console_error_panic_hook",

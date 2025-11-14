@@ -17,7 +17,7 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use ligerito::{
-    prove, verify,
+    prove_with_transcript, verify_with_transcript,
     hardcoded_config_12, hardcoded_config_12_verifier,
     hardcoded_config_16, hardcoded_config_16_verifier,
     hardcoded_config_20, hardcoded_config_20_verifier,
@@ -26,6 +26,7 @@ use ligerito::{
     hardcoded_config_30, hardcoded_config_30_verifier,
     VerifierConfig, FinalizedLigeritoProof,
 };
+use ligerito::transcript::{Sha256Transcript, MerlinTranscript};
 use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
@@ -55,10 +56,8 @@ enum Commands {
         #[arg(short, long, default_value = "bincode")]
         format: String,
 
-        /// Transcript backend: sha256, merlin, or blake3
-        /// WARNING: Currently defaults to SHA256 regardless of this flag
+        /// Transcript backend: sha256 (default) or merlin
         /// Prover and verifier MUST use the same backend!
-        /// TODO: Implement runtime transcript selection
         #[arg(short, long, default_value = "sha256")]
         transcript: String,
     },
@@ -77,10 +76,8 @@ enum Commands {
         #[arg(short, long, default_value = "bincode")]
         format: String,
 
-        /// Transcript backend: sha256, merlin, or blake3
-        /// WARNING: Currently defaults to SHA256 regardless of this flag
+        /// Transcript backend: sha256 (default) or merlin
         /// MUST match the transcript used for proving!
-        /// TODO: Implement runtime transcript selection
         #[arg(short, long, default_value = "sha256")]
         transcript: String,
 
@@ -125,16 +122,10 @@ fn main() -> Result<()> {
 
     match cli.command {
         Commands::Prove { size, config, format, transcript } => {
-            if transcript != "sha256" && transcript != "merlin" && transcript != "blake3" {
-                eprintln!("Warning: Unknown transcript '{}', using sha256", transcript);
-            }
-            prove_command(size, config, &format)?;
+            prove_command(size, config, &format, &transcript)?;
         }
         Commands::Verify { size, config, format, transcript, verbose } => {
-            if transcript != "sha256" && transcript != "merlin" && transcript != "blake3" {
-                eprintln!("Warning: Unknown transcript '{}', using sha256", transcript);
-            }
-            verify_command(size, config, &format, verbose)?;
+            verify_command(size, config, &format, &transcript, verbose)?;
         }
         Commands::Config { size, generate, output_format } => {
             config_command(size, generate, &output_format)?;
@@ -147,7 +138,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn prove_command(size: Option<usize>, config_path: Option<String>, format: &str) -> Result<()> {
+fn prove_command(size: Option<usize>, config_path: Option<String>, format: &str, transcript_type: &str) -> Result<()> {
     // TODO: Implement custom config loading for BYOC
     if config_path.is_some() {
         anyhow::bail!("Custom config loading not yet implemented. Use --size for now.");
@@ -185,50 +176,57 @@ fn prove_command(size: Option<usize>, config_path: Option<String>, format: &str)
         .collect();
 
     eprintln!("Read polynomial of size 2^{} ({} elements)", size, poly.len());
+    eprintln!("Using {} transcript", transcript_type);
 
-    // Get prover config
+    // Helper macro to prove with any transcript backend
+    macro_rules! prove_with_backend {
+        ($config:expr, $transcript_type:expr) => {
+            match $transcript_type {
+                "sha256" => {
+                    let transcript = Sha256Transcript::new(0);
+                    prove_with_transcript(&$config, &poly, transcript)
+                }
+                "merlin" => {
+                    #[cfg(feature = "transcript-merlin")]
+                    {
+                        let transcript = MerlinTranscript::new(b"ligerito-v1");
+                        prove_with_transcript(&$config, &poly, transcript)
+                    }
+                    #[cfg(not(feature = "transcript-merlin"))]
+                    {
+                        anyhow::bail!("Merlin transcript not available. Rebuild with --features transcript-merlin")
+                    }
+                }
+                _ => anyhow::bail!("Unknown transcript backend: {}. Use sha256 or merlin", $transcript_type),
+            }
+        };
+    }
+
+    // Get prover config and prove
     let proof = match size {
         12 => {
-            let config = hardcoded_config_12(
-                PhantomData::<BinaryElem32>,
-                PhantomData::<BinaryElem128>,
-            );
-            prove(&config, &poly).context("Proving failed")?
+            let config = hardcoded_config_12(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>);
+            prove_with_backend!(config, transcript_type).context("Proving failed")?
         }
         16 => {
-            let config = hardcoded_config_16(
-                PhantomData::<BinaryElem32>,
-                PhantomData::<BinaryElem128>,
-            );
-            prove(&config, &poly).context("Proving failed")?
+            let config = hardcoded_config_16(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>);
+            prove_with_backend!(config, transcript_type).context("Proving failed")?
         }
         20 => {
-            let config = hardcoded_config_20(
-                PhantomData::<BinaryElem32>,
-                PhantomData::<BinaryElem128>,
-            );
-            prove(&config, &poly).context("Proving failed")?
+            let config = hardcoded_config_20(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>);
+            prove_with_backend!(config, transcript_type).context("Proving failed")?
         }
         24 => {
-            let config = hardcoded_config_24(
-                PhantomData::<BinaryElem32>,
-                PhantomData::<BinaryElem128>,
-            );
-            prove(&config, &poly).context("Proving failed")?
+            let config = hardcoded_config_24(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>);
+            prove_with_backend!(config, transcript_type).context("Proving failed")?
         }
         28 => {
-            let config = hardcoded_config_28(
-                PhantomData::<BinaryElem32>,
-                PhantomData::<BinaryElem128>,
-            );
-            prove(&config, &poly).context("Proving failed")?
+            let config = hardcoded_config_28(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>);
+            prove_with_backend!(config, transcript_type).context("Proving failed")?
         }
         30 => {
-            let config = hardcoded_config_30(
-                PhantomData::<BinaryElem32>,
-                PhantomData::<BinaryElem128>,
-            );
-            prove(&config, &poly).context("Proving failed")?
+            let config = hardcoded_config_30(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>);
+            prove_with_backend!(config, transcript_type).context("Proving failed")?
         }
         _ => anyhow::bail!("Unsupported size: {}. Must be 12, 16, 20, 24, 28, or 30", size),
     };
@@ -256,7 +254,7 @@ fn prove_command(size: Option<usize>, config_path: Option<String>, format: &str)
     Ok(())
 }
 
-fn verify_command(size: Option<usize>, config_path: Option<String>, format: &str, verbose: bool) -> Result<()> {
+fn verify_command(size: Option<usize>, config_path: Option<String>, format: &str, transcript_type: &str, verbose: bool) -> Result<()> {
     // TODO: Implement custom config loading for BYOC
     if config_path.is_some() {
         anyhow::bail!("Custom config loading not yet implemented. Use --size for now.");
@@ -292,31 +290,57 @@ fn verify_command(size: Option<usize>, config_path: Option<String>, format: &str
         eprintln!("Proof structure size: {} bytes", proof.size_of());
     }
 
+    eprintln!("Using {} transcript", transcript_type);
+
+    // Helper macro to verify with any transcript backend
+    macro_rules! verify_with_backend {
+        ($config:expr, $proof:expr, $transcript_type:expr) => {
+            match $transcript_type {
+                "sha256" => {
+                    let transcript = Sha256Transcript::new(0);
+                    verify_with_transcript(&$config, &$proof, transcript)
+                }
+                "merlin" => {
+                    #[cfg(feature = "transcript-merlin")]
+                    {
+                        let transcript = MerlinTranscript::new(b"ligerito-v1");
+                        verify_with_transcript(&$config, &$proof, transcript)
+                    }
+                    #[cfg(not(feature = "transcript-merlin"))]
+                    {
+                        anyhow::bail!("Merlin transcript not available. Rebuild with --features transcript-merlin")
+                    }
+                }
+                _ => anyhow::bail!("Unknown transcript backend: {}. Use sha256 or merlin", $transcript_type),
+            }
+        };
+    }
+
     // Get verifier config and verify
     let valid = match size {
         12 => {
             let config = hardcoded_config_12_verifier();
-            verify(&config, &proof).context("Verification failed")?
+            verify_with_backend!(config, proof, transcript_type).context("Verification failed")?
         }
         16 => {
             let config = hardcoded_config_16_verifier();
-            verify(&config, &proof).context("Verification failed")?
+            verify_with_backend!(config, proof, transcript_type).context("Verification failed")?
         }
         20 => {
             let config = hardcoded_config_20_verifier();
-            verify(&config, &proof).context("Verification failed")?
+            verify_with_backend!(config, proof, transcript_type).context("Verification failed")?
         }
         24 => {
             let config = hardcoded_config_24_verifier();
-            verify(&config, &proof).context("Verification failed")?
+            verify_with_backend!(config, proof, transcript_type).context("Verification failed")?
         }
         28 => {
             let config = hardcoded_config_28_verifier();
-            verify(&config, &proof).context("Verification failed")?
+            verify_with_backend!(config, proof, transcript_type).context("Verification failed")?
         }
         30 => {
             let config = hardcoded_config_30_verifier();
-            verify(&config, &proof).context("Verification failed")?
+            verify_with_backend!(config, proof, transcript_type).context("Verification failed")?
         }
         _ => anyhow::bail!("Unsupported size: {}. Must be 12, 16, 20, 24, 28, or 30", size),
     };

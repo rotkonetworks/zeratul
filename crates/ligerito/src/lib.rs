@@ -9,8 +9,54 @@
 //! - `prover` (default): Include proving functionality
 //! - `verifier-only`: Only include verifier (minimal dependencies)
 //! - `parallel` (default): Enable parallel processing with rayon
-//! - `hardware-accel` (default): Enable SIMD acceleration
+//! - `hardware-accel` (default): Enable SIMD acceleration for binary field operations
+//! - `webgpu` (optional): GPU-accelerated proving via WebGPU (experimental)
 //! - `cli`: Enable CLI binary
+//!
+//! # Backend Selection
+//!
+//! The prover can use different computational backends:
+//!
+//! - **CPU backend** (default): Uses SIMD when `hardware-accel` is enabled
+//! - **GPU backend**: Available with `webgpu` feature, automatically falls back to CPU on failure
+//!
+//! Control via environment variable:
+//! ```bash
+//! LIGERITO_BACKEND=cpu   # Force CPU
+//! LIGERITO_BACKEND=gpu   # Prefer GPU, fallback to CPU
+//! LIGERITO_BACKEND=auto  # Auto-detect (default)
+//! ```
+//!
+//! # Performance Optimizations
+//!
+//! ## Current Implementation
+//!
+//! Uses Reed-Solomon codes over binary extension fields for all rounds:
+//! - Round 1 (G₁): Reed-Solomon over F₂³² with 148 queries
+//! - Rounds 2-ℓ (G₂...Gₗ): Reed-Solomon over F₂¹²⁸ with 148 queries each
+//!
+//! This provides excellent proof sizes (147 KB for 2²⁰ polynomial) and good performance
+//! on platforms with SIMD support.
+//!
+//! ## Future WASM Optimization (Not Yet Implemented)
+//!
+//! For WASM targets without SIMD support, a **Repeat-Accumulate-Accumulate (RAA)** code
+//! could be used for the first round (G₁) as described in the paper:
+//!
+//! - **G₁**: RAA code over F₂⁸ (no multiplications, just XORs and accumulates)
+//! - **G₂...Gₗ**: Reed-Solomon over F₂¹²⁸ (unchanged)
+//!
+//! ### RAA Tradeoffs
+//!
+//! - ✅ **5-10x faster proving in WASM** (no field multiplications needed)
+//! - ✅ **Smaller field** (F₂⁸ vs F₂³²) reduces memory bandwidth
+//! - ❌ **More queries needed** (1060 vs 148 for 100-bit security due to worse distance)
+//! - ❌ **Slightly larger proofs** (~165 KB vs 147 KB for 2²⁰)
+//! - ⚠️ **Requires GKR construction** from [Bre+24] to avoid RAA generation bottleneck
+//!
+//! This optimization makes sense primarily for browser-based proving where user experience
+//! (proving time) matters more than proof size. For native code with SIMD, pure Reed-Solomon
+//! is faster and produces smaller proofs.
 //!
 //! # Examples
 //!
@@ -60,6 +106,10 @@ pub mod ligero;
 
 #[cfg(feature = "prover")]
 pub mod prover;
+
+// Backend abstraction for CPU/GPU
+#[cfg(feature = "prover")]
+pub mod backend;
 
 // WASM bindings
 #[cfg(feature = "wasm")]
@@ -120,6 +170,9 @@ pub enum LigeritoError {
 
     #[error("Sumcheck consistency error: {0}")]
     SumcheckError(String),
+
+    #[error("GPU initialization failed: {0}")]
+    GpuInitFailed(String),
 }
 
 /// Error types for Ligerito (no_std version)
@@ -131,6 +184,7 @@ pub enum LigeritoError {
     InvalidProof,
     MerkleError,
     SumcheckError,
+    GpuInitFailed,
 }
 
 #[cfg(not(feature = "std"))]
@@ -142,6 +196,7 @@ impl core::fmt::Display for LigeritoError {
             LigeritoError::InvalidProof => write!(f, "Invalid proof structure"),
             LigeritoError::MerkleError => write!(f, "Merkle tree error"),
             LigeritoError::SumcheckError => write!(f, "Sumcheck consistency error"),
+            LigeritoError::GpuInitFailed => write!(f, "GPU initialization failed"),
         }
     }
 }
@@ -156,8 +211,8 @@ pub fn prover<T, U>(
     poly: &[T],
 ) -> Result<FinalizedLigeritoProof<T, U>>
 where
-    T: BinaryFieldElement + Send + Sync + 'static,
-    U: BinaryFieldElement + Send + Sync + From<T> + 'static,
+    T: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static,
+    U: BinaryFieldElement + Send + Sync + From<T> + bytemuck::Pod + 'static,
 {
     prover::prove(config, poly)
 }

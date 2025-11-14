@@ -3,6 +3,8 @@ use reed_solomon::ReedSolomon;
 use merkle_tree::{build_merkle_tree, Hash};
 use crate::data_structures::{RecursiveLigeroWitness};
 use crate::utils::{evaluate_lagrange_basis, eval_sk_at_vks, evaluate_scaled_basis_inplace};
+#[cfg(feature = "prover")]
+use crate::backend::Backend;
 use rayon::prelude::*;
 use sha2::{Sha256, Digest};
 
@@ -29,7 +31,7 @@ pub fn poly2mat<F: BinaryFieldElement>(
     mat
 }
 
-pub fn encode_cols<F: BinaryFieldElement + Send + Sync + 'static>(
+pub fn encode_cols<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static>(
     poly_mat: &mut Vec<Vec<F>>,
     rs: &ReedSolomon<F>,
     parallel: bool,
@@ -90,14 +92,26 @@ pub fn hash_row<F: BinaryFieldElement>(row: &[F]) -> Hash {
     hasher.finalize().into()
 }
 
-pub fn ligero_commit<F: BinaryFieldElement + Send + Sync + 'static>(
+pub fn ligero_commit<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static>(
     poly: &[F],
     m: usize,
     n: usize,
     rs: &ReedSolomon<F>,
+    #[cfg(feature = "prover")]
+    backend: &crate::backend::BackendImpl,
 ) -> RecursiveLigeroWitness<F> {
     let mut poly_mat = poly2mat(poly, m, n, 4);
-    encode_cols(&mut poly_mat, rs, true);
+
+    #[cfg(feature = "prover")]
+    {
+        // Use backend for column encoding (GPU-accelerated if available)
+        backend.encode_cols(&mut poly_mat, rs, true).expect("encode_cols failed");
+    }
+
+    #[cfg(not(feature = "prover"))]
+    {
+        encode_cols(&mut poly_mat, rs, true);
+    }
 
     // Parallelize row hashing
     let hashed_rows: Vec<Hash> = poly_mat.par_iter()
