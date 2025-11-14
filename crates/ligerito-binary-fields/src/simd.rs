@@ -40,6 +40,7 @@ pub fn carryless_mul_64(a: BinaryPoly64, b: BinaryPoly64) -> BinaryPoly128 {
 }
 
 // software implementation for 64x64
+#[allow(dead_code)]
 fn carryless_mul_64_soft(a: BinaryPoly64, b: BinaryPoly64) -> BinaryPoly128 {
     let mut result = 0u128;
     let a_val = a.value();
@@ -199,6 +200,7 @@ pub fn carryless_mul_128(a: BinaryPoly128, b: BinaryPoly128) -> BinaryPoly128 {
 }
 
 // software implementation for 128x128 truncated
+#[allow(dead_code)]
 fn carryless_mul_128_soft(a: BinaryPoly128, b: BinaryPoly128) -> BinaryPoly128 {
     let a_lo = a.value() as u64;
     let a_hi = (a.value() >> 64) as u64;
@@ -290,6 +292,7 @@ pub fn carryless_mul_128_full(a: BinaryPoly128, b: BinaryPoly128) -> BinaryPoly2
 }
 
 // software implementation for 128x128 full
+#[allow(dead_code)]
 fn carryless_mul_128_full_soft(a: BinaryPoly128, b: BinaryPoly128) -> BinaryPoly256 {
     let a_lo = a.value() as u64;
     let a_hi = (a.value() >> 64) as u64;
@@ -316,6 +319,7 @@ fn carryless_mul_128_full_soft(a: BinaryPoly128, b: BinaryPoly128) -> BinaryPoly
 
 // helper: constant-time 64x64 -> 128
 #[inline(always)]
+#[allow(dead_code)]
 fn mul_64x64_to_128(a: u64, b: u64) -> u128 {
     let mut result = 0u128;
     let mut a_shifted = a as u128;
@@ -465,6 +469,7 @@ pub fn fft_butterfly_gf32_avx512(u: &mut [BinaryElem32], w: &mut [BinaryElem32],
 /// AVX-512 implementation (unsafe, requires feature detection)
 #[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
 #[target_feature(enable = "avx512f,vpclmulqdq")]
+#[allow(dead_code)]
 unsafe fn fft_butterfly_gf32_avx512_impl(u: &mut [BinaryElem32], w: &mut [BinaryElem32], lambda: BinaryElem32) {
     use core::arch::x86_64::*;
 
@@ -601,7 +606,7 @@ pub fn fft_butterfly_gf32_sse(u: &mut [BinaryElem32], w: &mut [BinaryElem32], la
 /// reduce 64-bit product modulo GF(2^32) irreducible
 /// optimized branchless reduction for GF(2^32)
 #[inline(always)]
-fn reduce_gf32(p: u64, irr: u64) -> u64 {
+fn reduce_gf32(p: u64, _irr: u64) -> u64 {
     // for 32x32 -> 64 multiplication, we need to reduce bits [63:32]
     // unrolled reduction: process high 32 bits in chunks
 

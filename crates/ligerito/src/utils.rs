@@ -3,7 +3,6 @@
 use binary_fields::{BinaryFieldElement, BinaryPolynomial};
 
 #[cfg(feature = "parallel")]
-use rayon::prelude::*;
 
 /// Evaluate Lagrange basis at given points
 pub fn evaluate_lagrange_basis<F: BinaryFieldElement>(rs: &[F]) -> Vec<F> {
@@ -76,6 +75,7 @@ pub fn eval_sk_at_vks<F: BinaryFieldElement>(n: usize) -> Vec<F> {
 
 /// Robust helper function to convert field element to index
 /// This tries multiple strategies to find the correct mapping
+#[allow(dead_code)]
 fn field_to_index<F: BinaryFieldElement>(elem: F) -> usize {
     // Strategy 1: Handle zero case explicitly
     if elem == F::zero() {

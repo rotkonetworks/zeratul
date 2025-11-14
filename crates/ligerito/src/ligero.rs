@@ -39,7 +39,7 @@ pub fn encode_cols<F: BinaryFieldElement + Send + Sync + 'static>(
     if parallel {
         // Parallelize at column level only - each column FFT runs sequentially
         // to avoid nested parallelization overhead
-        let mut cols: Vec<Vec<F>> = (0..n)
+        let cols: Vec<Vec<F>> = (0..n)
             .into_par_iter()
             .map(|j| {
                 let mut col: Vec<F> = poly_mat.iter().map(|row| row[j]).collect();
