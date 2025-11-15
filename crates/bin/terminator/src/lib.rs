@@ -16,11 +16,6 @@ pub mod shell;
 // Integrations
 pub mod network;
 pub mod wallet;
-
-// Legacy modules (to be migrated)
-pub mod state;
-pub mod panels;
-pub mod ui;
 pub mod command;
 
 // Re-exports for convenience

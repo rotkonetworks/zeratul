@@ -7,9 +7,10 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-# TUI framework with mouse support
-ratatui = "0.29"
-crossterm = { version = "0.28", features = ["event-stream"] }
+# GUI framework - native, performant
+eframe = "0.29"  # egui framework with native windowing
+egui = "0.29"
+egui_plot = "0.29"  # For price charts
 
 # Async runtime
 tokio = { version = "1.0", features = ["full"] }

@@ -87,7 +87,22 @@ pub enum Event {
     
     /// User pressed 'M' for market order
     MarketOrder,
-    
+
+    /// User toggled Buy/Sell side
+    ToggleSide,
+
+    /// User toggled Limit/Market mode
+    ToggleOrderMode,
+
+    /// User clicked Submit button
+    SubmitOrder,
+
+    /// User clicked Withdraw button
+    WithdrawFunds,
+
+    /// User clicked Deposit button
+    DepositFunds,
+
     /// User pressed 'Esc' to cancel current action
     CancelAction,
     

@@ -10,16 +10,30 @@ use ratatui::{
 
 use crate::core::{ViewModel, Interaction, Side};
 
+/// Clickable button regions
+#[derive(Debug, Clone, Copy)]
+pub enum ButtonRegion {
+    ToggleSide,
+    ToggleMode,
+    Submit,
+    Withdraw,
+    Deposit,
+}
+
 /// Renders the ViewModel to the terminal
 pub struct Renderer {
     /// Last rendered chart area for mouse click detection
     pub last_chart_area: Option<Rect>,
+
+    /// Clickable button regions
+    pub button_regions: Vec<(Rect, ButtonRegion)>,
 }
 
 impl Renderer {
     pub fn new() -> Self {
         Self {
             last_chart_area: None,
+            button_regions: Vec::new(),
         }
     }
 

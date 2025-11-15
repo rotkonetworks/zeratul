@@ -1,33 +1,24 @@
-//! Terminator - High-performance TUI trading terminal
+//! Terminator - High-performance native trading terminal
 //!
-//! Mouse-controlled, resizable panels for professional trading
-//! Optimized for full-screen trading experience
+//! Mouse-controlled GUI for professional trading
+//! Built with egui for native performance
 
 use anyhow::Result;
-use terminator::shell::tui::TuiShell;
+use terminator::shell::egui::EguiShell;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Print startup messages
     eprintln!("🚀 Terminator - Penumbra DEX Trading Terminal");
     eprintln!("Loading wallet from pcli...");
 
-    // Create and run TUI shell
-    match TuiShell::new().await {
-        Ok(mut shell) => {
-            eprintln!("✓ Initialized");
-            eprintln!("");
+    // Create egui shell
+    let shell = EguiShell::new().await?;
 
-            // Run the shell
-            if let Err(e) = shell.run().await {
-                eprintln!("Error: {:?}", e);
-            }
-        }
-        Err(e) => {
-            eprintln!("Failed to initialize: {}", e);
-            return Err(e);
-        }
-    }
+    eprintln!("✓ Initialized");
+    eprintln!("Opening GUI window...");
+
+    // Run the GUI (blocks until window closes)
+    shell.run()?;
 
     Ok(())
 }

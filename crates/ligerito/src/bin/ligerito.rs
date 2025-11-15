@@ -42,7 +42,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Generate a proof for a polynomial (read from stdin, write to stdout)
+    /// Generate a proof for a polynomial (read from stdin or file, write to stdout)
     Prove {
         /// Log2 of polynomial size (12, 16, 20, 24, 28, or 30) - mutually exclusive with --config
         #[arg(short, long, conflicts_with = "config")]
@@ -60,9 +60,13 @@ enum Commands {
         /// Prover and verifier MUST use the same backend!
         #[arg(short, long, default_value = "sha256")]
         transcript: String,
+
+        /// Input file (reads from stdin if not provided)
+        #[arg(value_name = "FILE")]
+        input: Option<String>,
     },
 
-    /// Verify a proof (read from stdin, exit with code 0 if valid)
+    /// Verify a proof (read from stdin or file, exit with code 0 if valid)
     Verify {
         /// Log2 of polynomial size (12, 16, 20, 24, 28, or 30) - mutually exclusive with --config
         #[arg(short, long, conflicts_with = "config")]
@@ -84,6 +88,10 @@ enum Commands {
         /// Verbose output
         #[arg(short, long)]
         verbose: bool,
+
+        /// Input file (reads from stdin if not provided)
+        #[arg(value_name = "FILE")]
+        input: Option<String>,
     },
 
     /// Show or generate configuration
@@ -121,11 +129,11 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Prove { size, config, format, transcript } => {
-            prove_command(size, config, &format, &transcript)?;
+        Commands::Prove { size, config, format, transcript, input } => {
+            prove_command(size, config, &format, &transcript, input)?;
         }
-        Commands::Verify { size, config, format, transcript, verbose } => {
-            verify_command(size, config, &format, &transcript, verbose)?;
+        Commands::Verify { size, config, format, transcript, verbose, input } => {
+            verify_command(size, config, &format, &transcript, verbose, input)?;
         }
         Commands::Config { size, generate, output_format } => {
             config_command(size, generate, &output_format)?;
@@ -138,7 +146,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn prove_command(size: Option<usize>, config_path: Option<String>, format: &str, transcript_type: &str) -> Result<()> {
+fn prove_command(size: Option<usize>, config_path: Option<String>, format: &str, transcript_type: &str, input: Option<String>) -> Result<()> {
     // TODO: Implement custom config loading for BYOC
     if config_path.is_some() {
         anyhow::bail!("Custom config loading not yet implemented. Use --size for now.");
@@ -146,11 +154,21 @@ fn prove_command(size: Option<usize>, config_path: Option<String>, format: &str,
 
     let size = size.context("Must specify --size")?;
 
-    // Read polynomial from stdin
+    // Read polynomial from file or stdin
     let mut buffer = Vec::new();
-    io::stdin()
-        .read_to_end(&mut buffer)
-        .context("Failed to read polynomial from stdin")?;
+    match input {
+        Some(path) => {
+            let mut file = File::open(&path)
+                .context(format!("Failed to open input file: {}", path))?;
+            file.read_to_end(&mut buffer)
+                .context("Failed to read polynomial from file")?;
+        }
+        None => {
+            io::stdin()
+                .read_to_end(&mut buffer)
+                .context("Failed to read polynomial from stdin")?;
+        }
+    }
 
     // Parse polynomial based on size
     let expected_len = 1 << size;
@@ -254,7 +272,7 @@ fn prove_command(size: Option<usize>, config_path: Option<String>, format: &str,
     Ok(())
 }
 
-fn verify_command(size: Option<usize>, config_path: Option<String>, format: &str, transcript_type: &str, verbose: bool) -> Result<()> {
+fn verify_command(size: Option<usize>, config_path: Option<String>, format: &str, transcript_type: &str, verbose: bool, input: Option<String>) -> Result<()> {
     // TODO: Implement custom config loading for BYOC
     if config_path.is_some() {
         anyhow::bail!("Custom config loading not yet implemented. Use --size for now.");
@@ -262,11 +280,21 @@ fn verify_command(size: Option<usize>, config_path: Option<String>, format: &str
 
     let size = size.context("Must specify --size")?;
 
-    // Read proof from stdin
+    // Read proof from file or stdin
     let mut buffer = Vec::new();
-    io::stdin()
-        .read_to_end(&mut buffer)
-        .context("Failed to read proof from stdin")?;
+    match input {
+        Some(path) => {
+            let mut file = File::open(&path)
+                .context(format!("Failed to open input file: {}", path))?;
+            file.read_to_end(&mut buffer)
+                .context("Failed to read proof from file")?;
+        }
+        None => {
+            io::stdin()
+                .read_to_end(&mut buffer)
+                .context("Failed to read proof from stdin")?;
+        }
+    }
 
     // Decode based on format
     let proof_bytes = match format {

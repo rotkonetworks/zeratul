@@ -219,6 +219,56 @@ impl AppCore {
                 vec![E::Render(self.view_model())]
             }
 
+            // ===== Button Events =====
+            ToggleSide => {
+                self.spot_side = match self.spot_side {
+                    Side::Buy => Side::Sell,
+                    Side::Sell => Side::Buy,
+                };
+                vec![E::Render(self.view_model())]
+            }
+
+            ToggleOrderMode => {
+                self.spot_mode = match self.spot_mode {
+                    OrderMode::Limit => OrderMode::Market,
+                    OrderMode::Market => OrderMode::Limit,
+                };
+                vec![E::Render(self.view_model())]
+            }
+
+            SubmitOrder => {
+                // Get price and size from current state
+                let price = if self.spot_mode == OrderMode::Limit {
+                    self.spot_price.unwrap_or(self.order_book.mid_price().unwrap_or(3000.0))
+                } else {
+                    // Market order uses current market price
+                    self.order_book.mid_price().unwrap_or(3000.0)
+                };
+
+                // Calculate size from slider position (for now, use a fixed amount)
+                let size = slider_to_size(self.slider_position, 0.1, 100.0);
+
+                vec![
+                    E::SubmitPosition {
+                        side: self.spot_side,
+                        price: rust_decimal::Decimal::from_f64_retain(price).unwrap_or_default(),
+                        size: rust_decimal::Decimal::from_f64_retain(size).unwrap_or_default(),
+                        fee_bps: 30,
+                    },
+                    E::Render(self.view_model()),
+                ]
+            }
+
+            WithdrawFunds => {
+                // TODO: Implement withdraw
+                vec![E::Render(self.view_model())]
+            }
+
+            DepositFunds => {
+                // TODO: Implement deposit
+                vec![E::Render(self.view_model())]
+            }
+
             // ===== Ignored =====
             Tick | Ignored => vec![],
 
