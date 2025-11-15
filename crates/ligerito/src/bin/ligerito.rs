@@ -31,6 +31,7 @@ use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
 use std::fs::File;
+use std::time::Instant;
 
 #[derive(Parser)]
 #[command(name = "ligerito")]
@@ -221,6 +222,7 @@ fn prove_command(size: Option<usize>, config_path: Option<String>, format: &str,
     }
 
     // Get prover config and prove
+    let start = Instant::now();
     let proof = match size {
         12 => {
             let config = hardcoded_config_12(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>);
@@ -248,8 +250,9 @@ fn prove_command(size: Option<usize>, config_path: Option<String>, format: &str,
         }
         _ => anyhow::bail!("Unsupported size: {}. Must be 12, 16, 20, 24, 28, or 30", size),
     };
+    let elapsed = start.elapsed();
 
-    eprintln!("Proof generated successfully");
+    eprintln!("Proof generated successfully in {:.2}ms", elapsed.as_secs_f64() * 1000.0);
 
     // Serialize and output
     match format {
@@ -345,6 +348,7 @@ fn verify_command(size: Option<usize>, config_path: Option<String>, format: &str
     }
 
     // Get verifier config and verify
+    let start = Instant::now();
     let valid = match size {
         12 => {
             let config = hardcoded_config_12_verifier();
@@ -372,11 +376,14 @@ fn verify_command(size: Option<usize>, config_path: Option<String>, format: &str
         }
         _ => anyhow::bail!("Unsupported size: {}. Must be 12, 16, 20, 24, 28, or 30", size),
     };
+    let elapsed = start.elapsed();
 
     if valid {
+        eprintln!("Verification passed in {:.2}ms", elapsed.as_secs_f64() * 1000.0);
         println!("VALID");
         Ok(())
     } else {
+        eprintln!("Verification failed in {:.2}ms", elapsed.as_secs_f64() * 1000.0);
         println!("INVALID");
         std::process::exit(1);
     }
