@@ -1,41 +1,7 @@
 # Zeratul
 
-Zero-overhead blockchain using AccidentalComputer pattern with Ligerito for ZK proofs.
-
-This repository contains:
-- **Ligerito** - A publishable implementation of the [Ligerito polynomial commitment scheme](https://angeris.github.io/papers/ligerito.pdf)
-- **Zeratul Blockchain** - Example blockchain using AccidentalComputer pattern (ZODA encoding as polynomial commitment)
-
-## Documentation
-
-### Main Project (Zeratul Blockchain)
-- **[QUICKSTART.md](QUICKSTART.md)** - Get started quickly
-- **[PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md)** - Complete codebase organization
-- **[ARCHITECTURE.md](ARCHITECTURE.md)** - System architecture and design decisions
-- **[STATUS.md](STATUS.md)** - Current status and roadmap
-
-### Ligerito Library
-- **[crates/ligerito/README.md](crates/ligerito/README.md)** - Ligerito library documentation
-- See `crates/ligerito/` for the standalone polynomial commitment implementation
-
-## Repository Structure
-
-```
-zeratul/
-├── crates/
-│   ├── ligerito/          - Polynomial commitment scheme (publishable crate)
-│   ├── binary-fields/     - GF(2^n) arithmetic with SIMD operations
-│   ├── reed-solomon/      - Parallel FFT-based encoding
-│   └── merkle-tree/       - SHA256 commitment trees
-├── examples/
-│   └── state_transition_zkvm/  - Example blockchain (the "Zeratul" implementation)
-│       ├── circuit/            - State transition circuit with AccidentalComputer
-│       ├── blockchain/         - Consensus + storage + light client
-│       └── server/             - RPC server
-└── benchmarks/            - Performance benchmarking suite
-```
-
-**See [PROJECT_STRUCTURE.md](PROJECT_STRUCTURE.md) for detailed organization.**
+Zero-overhead blockchain using AccidentalComputer pattern with Ligerito for "ZK"
+proofs.
 
 ## performance
 
@@ -64,25 +30,9 @@ multi-threaded scaling with 8 physical cores (smt disabled):
 - rust: 334.79ms → 68.31ms (4.9x speedup)
 - julia: 401.0ms → 90.65ms (4.42x speedup)
 
-rust's monomorphic simd fft (direct sse pclmulqdq) is faster than julia's jit both single and multi-threaded at 2^20, but julia wins at larger inputs.
-
-**why julia mt scales better at large sizes:**
-
-at 2^20, rust's simd advantage compensates for rayon overhead. at larger sizes (2^24+), julia's task-based parallelism wins:
-
-- **julia**: green threads + task-based scheduler
-  - lightweight task creation (stack copying)
-  - m:n threading (many tasks on few os threads)
-  - lower context switching overhead
-  - better for fine-grained parallel recursion
-
-- **rayon**: work-stealing threadpool with os threads
-  - heavier task spawning overhead
-  - 1:1 os thread mapping
-  - coordination overhead increases with problem size
-  - our fft creates many small recursive tasks
-
-as problem size grows, the number of parallel tasks increases exponentially. julia's green threads handle this better than rayon's os thread work-stealing. forking rayon to use a lighter task system is out of scope.
+rust's monomorphic simd fft (direct sse pclmulqdq) is faster than julia's jit
+both single and multi-threaded at 2^20, but julia wins at larger inputs(green
+threads goated?).
 
 ### optimization highlights
 
