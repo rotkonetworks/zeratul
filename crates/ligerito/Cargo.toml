@@ -1,6 +1,6 @@
 [package]
 name = "ligerito"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 authors.workspace = true
 license.workspace = true
@@ -19,10 +19,10 @@ exclude = [
 [lib]
 crate-type = ["cdylib", "rlib"]
 
-# Default is full-featured std environment with prover + verifier
+# Default is full-featured std environment with prover + verifier + CLI
 # Uses SHA256 transcript by default (no extra deps, works everywhere)
 [features]
-default = ["std", "prover", "parallel", "hardware-accel"]
+default = ["std", "prover", "parallel", "hardware-accel", "cli"]
 
 # Environment: std or no_std
 std = [
