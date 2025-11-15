@@ -6,7 +6,7 @@ authors.workspace = true
 license.workspace = true
 repository.workspace = true
 description = "Ligerito polynomial commitment scheme over binary extension fields"
-keywords = ["cryptography", "polynomial-commitment", "zero-knowledge", "binary-fields"]
+keywords = ["cryptography", "commitment", "zero-knowledge", "binary-fields"]
 categories = ["cryptography", "no-std"]
 exclude = [
     "browser-shell.nix",
