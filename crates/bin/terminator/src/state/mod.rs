@@ -79,6 +79,8 @@ pub struct Trade {
     pub price: Decimal,
     pub size: Decimal,
     pub side: Side,
+    pub block_height: u64, // Penumbra block height
+    pub execution_price: Decimal, // Actual execution price from batch
 }
 
 #[derive(Clone, Copy)]
@@ -335,6 +337,36 @@ impl AppState {
                 });
             }
         }
+    }
+
+    /// Sort trades intelligently for display
+    /// - Most recent block first
+    /// - Within same block: order by price trend (ascending if going up, descending if down)
+    pub fn sort_trades_for_display(&mut self) {
+        if self.recent_trades.is_empty() {
+            return;
+        }
+
+        // Convert to Vec for sorting
+        let mut trades: Vec<Trade> = self.recent_trades.drain(..).collect();
+
+        // Group by block height
+        trades.sort_by(|a, b| {
+            // First: sort by block (newest first)
+            match b.block_height.cmp(&a.block_height) {
+                std::cmp::Ordering::Equal => {
+                    // Within same block: detect price trend
+                    // If price increasing from previous block, sort ascending
+                    // If price decreasing, sort descending
+                    // This makes the trade flow feel natural
+                    a.execution_price.cmp(&b.execution_price)
+                }
+                other => other,
+            }
+        });
+
+        // Put back into VecDeque
+        self.recent_trades = trades.into();
     }
 }
 

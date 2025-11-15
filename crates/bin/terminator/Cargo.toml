@@ -21,7 +21,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
 # Penumbra integration - use their primitives!
-penumbra-proto = { package = "penumbra-sdk-proto", path = "../../../../penumbra/crates/proto" }
+penumbra-proto = { package = "penumbra-sdk-proto", path = "../../../../penumbra/crates/proto", features = ["box-grpc"] }
 penumbra-keys = { package = "penumbra-sdk-keys", path = "../../../../penumbra/crates/core/keys" }
 penumbra-asset = { package = "penumbra-sdk-asset", path = "../../../../penumbra/crates/core/asset" }
 penumbra-num = { package = "penumbra-sdk-num", path = "../../../../penumbra/crates/core/num" }

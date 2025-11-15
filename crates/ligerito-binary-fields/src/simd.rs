@@ -337,8 +337,8 @@ fn mul_64x64_to_128(a: u64, b: u64) -> u128 {
 
 use crate::{BinaryElem128, BinaryFieldElement};
 
-/// batch multiply gf(2^128) elements with three-tier dispatch:
-/// hardware-accel → pclmulqdq, simd → portable_simd, else → scalar
+/// batch multiply gf(2^128) elements with two-tier dispatch:
+/// hardware-accel → pclmulqdq, else → scalar
 pub fn batch_mul_gf128(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [BinaryElem128]) {
     assert_eq!(a.len(), b.len());
     assert_eq!(a.len(), out.len());
@@ -348,15 +348,7 @@ pub fn batch_mul_gf128(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [Bina
         return batch_mul_gf128_hw(a, b, out);
     }
 
-    #[cfg(all(feature = "simd", not(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))))]
-    {
-        return batch_mul_gf128_portable(a, b, out);
-    }
-
-    #[cfg(not(any(
-        all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"),
-        feature = "simd"
-    )))]
+    #[cfg(not(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq")))]
     {
         // scalar fallback
         for i in 0..a.len() {
@@ -370,12 +362,7 @@ pub fn batch_add_gf128(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [Bina
     assert_eq!(a.len(), b.len());
     assert_eq!(a.len(), out.len());
 
-    #[cfg(feature = "simd")]
-    {
-        return batch_add_gf128_portable(a, b, out);
-    }
-
-    // scalar fallback
+    // scalar fallback (XOR is already very fast)
     for i in 0..a.len() {
         out[i] = a[i].add(&b[i]);
     }
@@ -413,34 +400,6 @@ pub fn reduce_gf128(product: BinaryPoly256) -> BinaryPoly128 {
     let res = low ^ tmp ^ (tmp << 1) ^ (tmp << 2) ^ (tmp << 7);
 
     BinaryPoly128::new(res)
-}
-
-// portable_simd batch ops (cross-platform, nightly)
-#[cfg(feature = "simd")]
-fn batch_mul_gf128_portable(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [BinaryElem128]) {
-    // Use vectorized XOR for addition, but multiplication still needs field arithmetic
-    // For now, use scalar multiplication which already uses SIMD pclmulqdq internally
-    for i in 0..a.len() {
-        out[i] = a[i].mul(&b[i]);
-    }
-}
-
-#[cfg(feature = "simd")]
-fn batch_add_gf128_portable(a: &[BinaryElem128], b: &[BinaryElem128], out: &mut [BinaryElem128]) {
-    // XOR is embarrassingly parallel - process in chunks
-    // Binary field addition is just XOR
-    use rayon::prelude::*;
-
-    const CHUNK_SIZE: usize = 1024;
-
-    a.par_chunks(CHUNK_SIZE)
-        .zip(b.par_chunks(CHUNK_SIZE))
-        .zip(out.par_chunks_mut(CHUNK_SIZE))
-        .for_each(|((a_chunk, b_chunk), out_chunk)| {
-            for i in 0..a_chunk.len() {
-                out_chunk[i] = a_chunk[i].add(&b_chunk[i]);
-            }
-        });
 }
 
 // =========================================================================

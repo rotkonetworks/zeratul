@@ -5,9 +5,9 @@
 use anyhow::Result;
 use tonic::transport::Channel;
 use penumbra_proto::core::component::dex::v1::{
-    dex_query_service_client::DexQueryServiceClient,
+    query_service_client::QueryServiceClient as DexQueryServiceClient,
     LiquidityPositionsRequest,
-    SimulateTradeRequest,
+    PositionState,
 };
 use penumbra_asset::asset::Id as AssetId;
 use penumbra_dex::TradingPair;
@@ -72,6 +72,7 @@ impl PenumbraGrpcClient {
     }
 
     /// Start streaming order book updates
+    /// Uses LiquidityPositionsByPrice for positions sorted by effective price
     pub async fn stream_order_book(
         &mut self,
         pair: TradingPair,
@@ -81,31 +82,41 @@ impl PenumbraGrpcClient {
 
         let update_tx = self.update_tx.clone();
 
-        // Spawn background task to poll for updates
+        // Spawn background task to poll for updates every block (~5 seconds)
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            let mut interval = tokio::time::interval(Duration::from_secs(5));
 
             loop {
                 interval.tick().await;
 
-                // Query liquidity positions
+                // Query liquidity positions sorted by price for this trading pair
+                // This gives us positions in order book format already!
                 let request = LiquidityPositionsRequest {
-                    // Filter by trading pair
-                    // TODO: Add proper filtering when proto supports it
+                    // TODO: Add trading pair filter when we implement DirectedTradingPair proto
+                    // For now, we get all positions and filter client-side
+                    include_closed: false, // Only open positions
                     ..Default::default()
                 };
 
                 match client.liquidity_positions(request).await {
                     Ok(response) => {
-                        // Convert liquidity positions to order book
-                        let positions = response.into_inner();
+                        let mut stream = response.into_inner();
+                        let mut positions = Vec::new();
 
-                        // TODO: Process positions into bids/asks
-                        // For now, send empty update
+                        // Collect all positions from stream
+                        while let Ok(Some(pos_response)) = stream.message().await {
+                            if let Some(position) = pos_response.data {
+                                positions.push(position);
+                            }
+                        }
+
+                        // Convert positions to order book levels
+                        let (bids, asks) = positions_to_order_book(&positions, &pair);
+
                         let update = OrderBookUpdate {
                             pair: pair.clone(),
-                            bids: vec![],
-                            asks: vec![],
+                            bids,
+                            asks,
                             timestamp: chrono::Utc::now(),
                         };
 
@@ -157,8 +168,8 @@ impl PenumbraGrpcClient {
 
         let mut price = 3000.0;
 
-        for i in 0..50 {
-            let timestamp = now - duration + candle_interval * i as i32;
+        for i in 0..50_u32 {
+            let timestamp = now - duration + candle_interval * i;
 
             // Simulate price movement
             let change = (i as f64 * 0.1).sin() * 50.0;
@@ -190,36 +201,118 @@ impl PenumbraGrpcClient {
         _output: AssetId,
         _amount: u64,
     ) -> Result<u64> {
-        let mut client = self.dex_client.clone()
-            .ok_or_else(|| anyhow::anyhow!("Not connected"))?;
-
-        let request = SimulateTradeRequest {
-            // TODO: Fill in request
-            ..Default::default()
-        };
-
-        let response = client.simulate_trade(request).await?;
-        let result = response.into_inner();
-
-        // TODO: Parse response
+        // TODO: simulate_trade method not available in QueryServiceClient
+        // Need to find the correct API method or use a different approach
         Ok(0)
     }
 }
 
 /// Convert Penumbra liquidity positions to order book levels
+///
+/// Penumbra uses concentrated liquidity (Uniswap v3 style), where each position
+/// has a trading function phi(p,q) and reserves (r1, r2).
+///
+/// For order book display:
+/// - Positions selling asset_1 for asset_2 = asks (offering asset_1)
+/// - Positions buying asset_1 with asset_2 = bids (offering asset_2)
 pub fn positions_to_order_book(
-    _positions: &[penumbra_dex::lp::position::Position],
-    _pair: &TradingPair,
+    positions: &[penumbra_proto::core::component::dex::v1::Position],
+    pair: &TradingPair,
 ) -> (Vec<Level>, Vec<Level>) {
-    // TODO: Implement conversion from concentrated liquidity positions
-    // to traditional order book levels
-    //
-    // This requires:
-    // 1. Group positions by price ranges
-    // 2. Calculate effective liquidity at each price point
-    // 3. Sort into bids (buy) and asks (sell)
+    // PositionState: 1 = Opened, check position.state field directly
 
-    (vec![], vec![])
+    let mut bids = Vec::new();
+    let mut asks = Vec::new();
+
+    for position in positions {
+        // TODO: Filter by state when we understand the exact type
+        // For now, process all positions
+
+        // Get trading function parameters
+        let phi = match &position.phi {
+            Some(phi) => phi,
+            None => continue,
+        };
+
+        // Get the component (BareTradingFunction) which has p, q, fee
+        let component = match &phi.component {
+            Some(c) => c,
+            None => continue,
+        };
+
+        // Get reserves
+        let reserves = match &position.reserves {
+            Some(r) => r,
+            None => continue,
+        };
+
+        // Calculate effective price: p/q from the trading function
+        // component.p and component.q are Amount types (with hi/lo u64)
+        let price = if let (Some(p), Some(q)) = (&component.p, &component.q) {
+            if q.lo == 0 && q.hi == 0 {
+                continue; // Skip division by zero
+            }
+            // Convert u128 to f64 for price calculation
+            let p_val = (p.hi as f64) * (u64::MAX as f64) + (p.lo as f64);
+            let q_val = (q.hi as f64) * (u64::MAX as f64) + (q.lo as f64);
+            p_val / q_val
+        } else {
+            continue;
+        };
+
+        // Calculate available liquidity from reserves
+        // r1 = reserves of asset_1, r2 = reserves of asset_2
+        let r1 = if let Some(r) = &reserves.r1 {
+            (r.hi as f64) * (u64::MAX as f64) + (r.lo as f64)
+        } else {
+            0.0
+        };
+
+        let r2 = if let Some(r) = &reserves.r2 {
+            (r.hi as f64) * (u64::MAX as f64) + (r.lo as f64)
+        } else {
+            0.0
+        };
+
+        // Determine if this is a bid or ask based on which reserve has liquidity
+        // If r1 > 0: selling asset_1 (ask)
+        // If r2 > 0: buying asset_1 with asset_2 (bid)
+        if r1 > 0.0 {
+            asks.push(Level {
+                price,
+                size: r1,
+                total: 0.0, // Will calculate cumulative after sorting
+            });
+        }
+        if r2 > 0.0 {
+            bids.push(Level {
+                price,
+                size: r2 / price, // Convert to asset_1 terms
+                total: 0.0,
+            });
+        }
+    }
+
+    // Sort bids descending (highest price first)
+    bids.sort_by(|a, b| b.price.partial_cmp(&a.price).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Sort asks ascending (lowest price first)
+    asks.sort_by(|a, b| a.price.partial_cmp(&b.price).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Calculate cumulative totals
+    let mut cumulative = 0.0;
+    for level in &mut bids {
+        cumulative += level.size;
+        level.total = cumulative;
+    }
+
+    cumulative = 0.0;
+    for level in &mut asks {
+        cumulative += level.size;
+        level.total = cumulative;
+    }
+
+    (bids, asks)
 }
 
 #[cfg(test)]

@@ -15,11 +15,12 @@ wide = { workspace = true }
 bytemuck = { workspace = true }
 serde = { workspace = true, optional = true }
 
-# portable simd for prover (requires nightly)
-[dependencies.portable-simd]
-package = "core_simd"
-git = "https://github.com/rust-lang/portable-simd"
-optional = true
+# portable simd for prover (requires nightly, not available on crates.io)
+# Users need to enable this manually with git dependency if needed
+# [dependencies.portable-simd]
+# package = "core_simd"
+# git = "https://github.com/rust-lang/portable-simd"
+# optional = true
 
 [dev-dependencies]
 criterion = { workspace = true }
@@ -29,8 +30,8 @@ proptest = { workspace = true }
 default = ["std"]
 std = ["rand/std", "serde?/std"]
 serde = ["dep:serde"]
-# portable simd for cross-platform prover acceleration (nightly only)
-simd = ["portable-simd"]
+# portable simd not available in published crate (requires nightly git dependency)
+# simd = ["portable-simd"]
 # x86-specific hardware acceleration (pclmulqdq, avx512)
 hardware-accel = []
 

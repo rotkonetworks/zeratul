@@ -7,3 +7,4 @@ pub mod chart_candles;
 pub mod order_entry;
 pub mod positions;
 pub mod recent_trades;
+pub mod trades; // Market trades with intelligent ordering

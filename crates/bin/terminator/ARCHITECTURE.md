@@ -1,192 +1,365 @@
-# Terminator Architecture
+# Terminator Architecture - Crux Philosophy
 
-Following pcli's clean separation of UI and logic.
+## Design Goal: Platform-Agnostic Core
+
+Following [Crux](https://redbadger.github.io/crux/) architecture:
+- **Core**: Pure business logic (no UI dependencies)
+- **Shell**: Interchangeable frontends (TUI/GUI/Web)
+
+This lets us easily add:
+- Desktop GUI (egui)
+- Web interface (WASM)
+- Mobile apps (iOS/Android)
+- CLI tools (for automation)
 
 ## Directory Structure
 
 ```
-terminator/
+crates/bin/terminator/
 ├── src/
-│   ├── command/           # Business logic (like pcli)
-│   │   ├── query/        # Query commands
-│   │   │   ├── dex.rs    # DEX queries (order book, positions)
-│   │   │   ├── candles.rs # Historical price data
-│   │   │   └── mod.rs
-│   │   └── tx/           # Transaction commands
-│   │       ├── swap.rs   # Submit swaps
-│   │       ├── position.rs # Manage liquidity positions
-│   │       └── mod.rs
+│   ├── core/              # Platform-agnostic business logic
+│   │   ├── mod.rs
+│   │   ├── app.rs         # Core app state & logic
+│   │   ├── trading.rs     # Position management
+│   │   ├── market_data.rs # Order book, trades
+│   │   └── penumbra.rs    # Blockchain integration
 │   │
-│   ├── network/          # Network clients
-│   │   ├── penumbra/     # Penumbra gRPC client
-│   │   └── zeratul/      # Zeratul P2P client (future)
+│   ├── shell/             # UI implementations
+│   │   ├── mod.rs
+│   │   ├── tui/           # Terminal UI (ratatui)
+│   │   │   ├── mod.rs
+│   │   │   ├── main.rs
+│   │   │   └── panels/
+│   │   │
+│   │   └── gui/           # Desktop GUI (egui) - future
+│   │       ├── mod.rs
+│   │       └── main.rs
 │   │
-│   ├── ui/               # TUI rendering (presentation layer)
-│   │   ├── panels/       # Panel renderers
-│   │   │   ├── order_book_visual.rs
-│   │   │   ├── chart_candles.rs
-│   │   │   ├── order_entry.rs
-│   │   │   └── positions.rs
-│   │   └── mod.rs        # Main UI coordinator
+│   ├── capabilities/      # Side effects (Crux pattern)
+│   │   ├── http.rs        # gRPC client
+│   │   ├── storage.rs     # Wallet/config
+│   │   └── time.rs        # Clock
 │   │
-│   ├── state/            # Application state
-│   │   ├── app.rs        # Main app state
-│   │   └── panel.rs      # Panel management
-│   │
-│   └── main.rs           # Entry point
+│   └── main.rs            # Shell selector
 ```
 
-## Separation of Concerns (Following pcli)
+## Core - Business Logic
 
-### 1. Command Layer (Business Logic)
-
-Like pcli's `command/query/dex.rs`:
+### No UI Dependencies!
 
 ```rust
-// src/command/query/dex.rs
-pub async fn query_order_book(
-    client: &mut DexQueryServiceClient<Channel>,
-    pair: &TradingPair,
-) -> Result<OrderBookData> {
-    // Pure business logic
-    // No UI concerns
-    // Returns structured data
+// crates/bin/terminator/src/core/app.rs
+
+use serde::{Serialize, Deserialize};
+
+/// Core application state - pure data
+#[derive(Clone, Serialize, Deserialize)]
+pub struct AppCore {
+    pub order_book: OrderBook,
+    pub recent_trades: Vec<Trade>,
+    pub positions: Vec<Position>,
+    pub balances: Vec<Balance>,
+    pub interaction: Option<Interaction>,
+}
+
+/// User interactions - pure events
+#[derive(Clone, Serialize, Deserialize)]
+pub enum Event {
+    // Market data
+    OrderBookUpdated(OrderBook),
+    TradeExecuted(Trade),
+    
+    // User actions
+    ChartClicked { price: f64, y_coord: f64 },
+    PositionDragged { id: String, new_price: f64 },
+    SliderMoved { position: f64 },
+    
+    // Position management
+    CreatePosition { side: Side, price: f64, size: f64 },
+    CancelPosition { id: String },
+    
+    // Navigation
+    PanelFocused(PanelType),
+}
+
+/// Effects to request from shell
+#[derive(Clone, Serialize, Deserialize)]
+pub enum Effect {
+    // Render updates
+    Render(ViewModel),
+    
+    // Penumbra operations
+    SubmitPosition { phi: TradingFunction, reserves: Reserves },
+    ClosePosition { id: String },
+    
+    // Data fetching
+    StreamOrderBook { pair: TradingPair },
+    FetchTrades { start_height: u64 },
+    
+    // UI feedback
+    ShowNotification { message: String, level: NotificationLevel },
+}
+
+/// Pure update function - no side effects!
+impl AppCore {
+    pub fn update(&mut self, event: Event) -> Vec<Effect> {
+        match event {
+            Event::ChartClicked { price, .. } => {
+                // Detect buy/sell based on current market price
+                let current_price = self.order_book.mid_price();
+                let side = if price > current_price {
+                    Side::Sell
+                } else {
+                    Side::Buy
+                };
+                
+                // Enter position creation mode
+                self.interaction = Some(Interaction::CreatingPosition {
+                    price,
+                    side,
+                    size: 0.1, // Default
+                });
+                
+                // Request render update
+                vec![Effect::Render(self.view_model())]
+            }
+            
+            Event::SliderMoved { position } => {
+                if let Some(Interaction::CreatingPosition { size, .. }) = &mut self.interaction {
+                    // Logarithmic slider
+                    *size = slider_to_size(position, 0.1, 100.0);
+                    vec![Effect::Render(self.view_model())]
+                } else {
+                    vec![]
+                }
+            }
+            
+            Event::CreatePosition { side, price, size } => {
+                // Build trading function
+                let phi = self.build_trading_function(side, price);
+                let reserves = self.calculate_reserves(side, size);
+                
+                vec![
+                    Effect::SubmitPosition { phi, reserves },
+                    Effect::ShowNotification {
+                        message: format!("Creating {} position at ${}", side, price),
+                        level: NotificationLevel::Info,
+                    },
+                ]
+            }
+            
+            // ... other events
+            _ => vec![]
+        }
+    }
+    
+    /// Convert state to view model
+    fn view_model(&self) -> ViewModel {
+        ViewModel {
+            order_book: self.order_book.clone(),
+            recent_trades: self.recent_trades.clone(),
+            positions: self.positions.clone(),
+            interaction: self.interaction.clone(),
+            // ... other fields
+        }
+    }
+}
+
+/// View model - data optimized for rendering
+#[derive(Clone, Serialize, Deserialize)]
+pub struct ViewModel {
+    pub order_book: OrderBook,
+    pub recent_trades: Vec<Trade>,
+    pub positions: Vec<Position>,
+    pub interaction: Option<Interaction>,
+    // Computed fields for convenience
+    pub best_bid: Option<f64>,
+    pub best_ask: Option<f64>,
+    pub spread: Option<f64>,
 }
 ```
 
-### 2. Data Structures (Serializable)
+## Shell - UI Layer
 
-Like pcli's JSON types:
-
-```rust
-#[derive(Serialize, Debug, Clone)]
-pub struct OrderBookData {
-    pub pair: TradingPair,
-    pub bids: Vec<LevelData>,
-    pub asks: Vec<LevelData>,
-    pub timestamp: DateTime<Utc>,
-}
-
-#[derive(Serialize, Debug, Clone)]
-pub struct LevelData {
-    pub price: f64,
-    pub size: f64,
-    pub total: f64,
-}
-```
-
-### 3. UI Layer (Presentation)
-
-Like pcli's `utils::render_positions`:
+### TUI Implementation
 
 ```rust
-// src/ui/panels/order_book_visual.rs
-pub fn render_order_book(
-    f: &mut Frame,
-    data: &OrderBookData,  // Takes data structure
-    rect: Rect,
-    style: Style,
-) {
-    // Pure presentation
-    // No business logic
-    // Just rendering
-}
-```
+// crates/bin/terminator/src/shell/tui/main.rs
 
-### 4. Network Layer
+use crate::core::{AppCore, Event, Effect, ViewModel};
 
-Adapted from pcli's gRPC clients:
-
-```rust
-// src/network/penumbra/client.rs
-pub struct PenumbraClient {
-    dex_client: DexQueryServiceClient<Channel>,
-    // ...
+struct TuiShell {
+    core: AppCore,
+    terminal: Terminal<CrosstermBackend<io::Stdout>>,
+    penumbra_client: PenumbraClient,
 }
 
-impl PenumbraClient {
-    pub async fn stream_order_book(&mut self) -> Result<impl Stream<Item = OrderBookData>> {
-        // Network communication only
+impl TuiShell {
+    async fn run(&mut self) -> Result<()> {
+        loop {
+            // Render current view model
+            let view_model = self.core.view_model();
+            self.terminal.draw(|f| self.render(f, &view_model))?;
+            
+            // Handle events
+            if event::poll(Duration::from_millis(100))? {
+                let event = self.map_terminal_event(event::read()?)?;
+                let effects = self.core.update(event);
+                
+                // Execute effects
+                for effect in effects {
+                    self.execute_effect(effect).await?;
+                }
+            }
+            
+            // Poll for network updates
+            self.poll_penumbra_updates().await?;
+        }
+    }
+    
+    fn map_terminal_event(&self, event: crossterm::event::Event) -> Result<Event> {
+        match event {
+            crossterm::event::Event::Mouse(mouse) => {
+                if let Some(chart_rect) = self.get_chart_rect() {
+                    if chart_rect.contains(mouse.column, mouse.row) {
+                        let price = self.y_to_price_log(mouse.row, chart_rect);
+                        return Ok(Event::ChartClicked {
+                            price,
+                            y_coord: mouse.row as f64,
+                        });
+                    }
+                }
+                Ok(Event::Ignored)
+            }
+            // ... other mappings
+        }
+    }
+    
+    async fn execute_effect(&mut self, effect: Effect) -> Result<()> {
+        match effect {
+            Effect::SubmitPosition { phi, reserves } => {
+                self.penumbra_client.submit_position(phi, reserves).await?;
+            }
+            Effect::StreamOrderBook { pair } => {
+                self.penumbra_client.stream_order_book(pair).await?;
+            }
+            Effect::ShowNotification { message, level } => {
+                // Show in status bar or popup
+                self.show_notification(message, level);
+            }
+            _ => {}
+        }
+        Ok(())
     }
 }
 ```
 
-## Data Flow
-
-```
-User Input (keyboard/mouse)
-    ↓
-App State (state/app.rs)
-    ↓
-Command Layer (command/query/*.rs)
-    ↓
-Network Layer (network/penumbra/*.rs)
-    ↓
-Penumbra gRPC
-    ↓
-Data Structures (OrderBookData, etc.)
-    ↓
-UI Layer (ui/panels/*.rs)
-    ↓
-Terminal Display
-```
-
-## Key Principles from pcli
-
-1. **Commands are async functions** - Not methods on App
-2. **Data structures are serializable** - Can be JSON, can be saved
-3. **UI takes data structures** - No direct network access
-4. **App coordinates** - Calls commands, updates state, triggers UI
-
-## Example: Fetching Order Book
-
-### Bad (Current)
+### Future: GUI Implementation
 
 ```rust
-// In AppState
-pub async fn update_market_data(&mut self) {
-    // Business logic mixed with state management
-    let update = self.grpc_client.fetch_order_book().await?;
-    self.order_book = update;
-}
-```
+// crates/bin/terminator/src/shell/gui/main.rs
 
-### Good (Following pcli)
+use crate::core::{AppCore, Event, Effect, ViewModel};
+use egui::*;
 
-```rust
-// In command/query/dex.rs
-pub async fn query_order_book(
-    client: &mut DexQueryServiceClient<Channel>,
-    pair: &TradingPair,
-) -> Result<OrderBookData> {
-    let request = LiquidityPositionsRequest { /* ... */ };
-    let response = client.liquidity_positions(request).await?;
-    positions_to_order_book(&response.positions, pair)
+struct GuiShell {
+    core: AppCore,
+    penumbra_client: PenumbraClient,
 }
 
-// In main.rs event loop
-loop {
-    // Command execution
-    if let Some(client) = &mut app.penumbra_client {
-        let order_book = command::query::dex::query_order_book(
-            client,
-            &app.current_pair
-        ).await?;
-        app.order_book_data = Some(order_book);
+impl eframe::App for GuiShell {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let view_model = self.core.view_model();
+        
+        CentralPanel::default().show(ctx, |ui| {
+            // Render chart with click detection
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(800.0, 600.0),
+                Sense::click_and_drag(),
+            );
+            
+            if response.clicked() {
+                if let Some(pos) = response.interact_pointer_pos() {
+                    let price = y_to_price_log(pos.y, rect);
+                    let effects = self.core.update(Event::ChartClicked {
+                        price,
+                        y_coord: pos.y as f64,
+                    });
+                    self.execute_effects(effects);
+                }
+            }
+            
+            // Draw order book
+            self.render_order_book(ui, &view_model);
+            
+            // Logarithmic slider (native in egui!)
+            if let Some(Interaction::CreatingPosition { size, .. }) = &view_model.interaction {
+                ui.add(Slider::new(&mut size, 0.1..=100.0).logarithmic(true));
+            }
+        });
     }
-
-    // UI rendering
-    terminal.draw(|f| ui::render(f, &app))?;
 }
 ```
 
-## Benefits
+## Benefits of This Architecture
 
-1. **Testability** - Commands can be tested without UI
-2. **Reusability** - Same commands work in CLI and TUI
-3. **Clarity** - Each layer has one responsibility
-4. **Maintainability** - Easy to find and fix bugs
+### ✅ Easy to Add Platforms
+```bash
+# Add web frontend
+cargo new --lib terminator-web
+wasm-pack build
 
----
+# Add mobile
+cargo new --lib terminator-mobile
+# Use Crux FFI bindings for Swift/Kotlin
+```
 
-*Inspired by pcli's excellent architecture* 🎯
+### ✅ Testable Core
+```rust
+#[test]
+fn test_chart_click_creates_position() {
+    let mut core = AppCore::new();
+    
+    let effects = core.update(Event::ChartClicked {
+        price: 3000.0,
+        y_coord: 100.0,
+    });
+    
+    assert!(matches!(core.interaction, Some(Interaction::CreatingPosition { .. })));
+    assert!(effects.contains(&Effect::Render(_)));
+}
+```
+
+### ✅ Serializable State
+```rust
+// Save session
+let state = serde_json::to_string(&core)?;
+std::fs::write("session.json", state)?;
+
+// Resume later
+let core: AppCore = serde_json::from_str(&std::fs::read_to_string("session.json")?)?;
+```
+
+### ✅ Network Protocol
+```rust
+// Core events are serializable - can send over network!
+// Future: Web UI connects to desktop core via WebSocket
+let event_json = serde_json::to_string(&Event::ChartClicked { price: 3000.0, y_coord: 100.0 })?;
+websocket.send(event_json)?;
+```
+
+## Current Migration Plan
+
+1. **Phase 1**: Refactor existing code to separate core/shell ✅ (Do this now)
+2. **Phase 2**: Complete TUI implementation
+3. **Phase 3**: Add egui shell (same core!)
+4. **Phase 4**: Add Web shell (WASM)
+5. **Phase 5**: Add mobile shells (iOS/Android)
+
+## Naming
+
+- **Terminator** = TUI shell
+- **Twilight** = GUI shell (egui)
+- **terminator-core** = Shared business logic
+
+All powered by the same battle-tested Penumbra integration!

@@ -25,15 +25,10 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
-authors = ["Ligerito Contributors"]
-# authors = ["rotko <hq@rotko.net>"]
-# description = "Implementation of Ligerito polynomial commitment scheme"
-# repository = "https://github.com/rotkonetworks/zeratul"
-# keywords = ["cryptography", "ligerito", "polynomial", "commitment", "zero-knowledge"]
-# categories = ["cryptography", "no-std"]
+authors = ["rotko <hq@rotko.net>"]
 edition = "2021"
 license = "MIT"
-repository = "https://github.com/your-org/ligerito-rust"
+repository = "https://github.com/rotkonetworks/zeratul"
 
 [workspace.dependencies]
 # Core dependencies

@@ -4,7 +4,7 @@ pub mod grpc_client;
 
 use anyhow::Result;
 use penumbra_proto::core::component::dex::v1::{
-    dex_query_service_client::DexQueryServiceClient,
+    query_service_client::QueryServiceClient as DexQueryServiceClient,
     LiquidityPositionsRequest,
 };
 use penumbra_keys::{Address, FullViewingKey};
@@ -89,12 +89,9 @@ impl NetworkClient for PenumbraClient {
 }
 
 /// Helper to create test FVK for development
+/// TODO: Update for current Penumbra SDK API
+#[allow(dead_code)]
 pub fn test_fvk() -> FullViewingKey {
-    use penumbra_keys::keys::{SeedPhrase, SpendSeed};
-
-    // Use a test seed phrase (DO NOT use in production!)
-    let seed_phrase = SeedPhrase::from_randomness(&[0u8; 32]);
-    let spend_seed = SpendSeed::from_seed_phrase(seed_phrase, 0);
-
-    spend_seed.to_spend_key().full_viewing_key().clone()
+    // Placeholder - needs updating for current SDK
+    unimplemented!("test_fvk needs updating for current Penumbra SDK")
 }

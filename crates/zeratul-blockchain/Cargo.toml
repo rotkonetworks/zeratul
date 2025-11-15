@@ -67,10 +67,10 @@ decaf377-frost = { path = "../../../penumbra/crates/crypto/decaf377-frost" }
 decaf377-rdsa = "0.11.0"
 decaf377 = { version = "0.10.1", default-features = false }
 
-# Polkadot SDK dependencies for Safrole consensus and pallet
-sp-core = { path = "../../../polkadot-sdk/substrate/primitives/core", default-features = false, features = ["bandersnatch-experimental", "std"] }
-frame-system = { path = "../../../polkadot-sdk/substrate/frame/system", default-features = false }
-frame-support = { path = "../../../polkadot-sdk/substrate/frame/support", default-features = false }
+# Polkadot SDK dependencies for Safrole consensus and pallet (using released versions)
+sp-core = { version = "38", default-features = false, features = ["bandersnatch-experimental", "std"] }
+frame-system = { version = "38", default-features = false }
+frame-support = { version = "38", default-features = false }
 parity-scale-codec = { version = "3.0", default-features = false, features = ["derive"] }
 scale-info = { version = "2.0", default-features = false, features = ["derive"] }
 blake3 = "1.5"

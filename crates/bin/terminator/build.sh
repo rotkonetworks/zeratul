@@ -1,19 +1,26 @@
 #!/bin/bash
-# Build script for Terminator
-# Workaround for rocksdb build issues
+# Build script for terminator - handles libclang path detection
 
-set -e
+# Detect libclang location
+if [ -f "/usr/lib/libclang.so" ]; then
+    # Arch Linux / distrobox
+    export LIBCLANG_PATH=/usr/lib
+elif [ -d "/nix/store" ]; then
+    # NixOS - find libclang in nix store
+    CLANG_PATH=$(find /nix/store -name "libclang.so" -type f 2>/dev/null | grep -v "rocm" | head -1)
+    if [ -n "$CLANG_PATH" ]; then
+        export LIBCLANG_PATH=$(dirname "$CLANG_PATH")
+    fi
+fi
 
-echo "Building Terminator..."
-echo "Note: Using system rocksdb library"
+# Check if LIBCLANG_PATH is set
+if [ -z "$LIBCLANG_PATH" ]; then
+    echo "Warning: Could not auto-detect libclang location"
+    echo "Please set LIBCLANG_PATH manually"
+    exit 1
+fi
 
-export ROCKSDB_LIB_DIR=/usr/lib64
+echo "Using LIBCLANG_PATH: $LIBCLANG_PATH"
 
-cargo build --release "$@"
-
-echo ""
-echo "✓ Build complete!"
-echo "  Binary: target/release/terminator"
-echo ""
-echo "To run:"
-echo "  ./target/release/terminator"
+# Build
+cargo build --release -p terminator "$@"
