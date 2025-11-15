@@ -1,6 +1,11 @@
 // src/batch.rs
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use bytemuck::Pod;
 use crate::{CompleteMerkleTree, MerkleRoot, Hash, hash_leaf, hash_siblings};
+
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 #[derive(Clone, Debug)]
@@ -62,10 +67,21 @@ pub fn verify_batch<T: Pod + Send + Sync>(
         return false;
     }
 
-    // Hash leaves in parallel
-    let mut layer: Vec<Hash> = leaves.par_iter()
-        .map(hash_leaf)
-        .collect();
+    // Hash leaves (parallel when feature is enabled)
+    let mut layer: Vec<Hash> = {
+        #[cfg(feature = "parallel")]
+        {
+            leaves.par_iter()
+                .map(hash_leaf)
+                .collect()
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            leaves.iter()
+                .map(hash_leaf)
+                .collect()
+        }
+    };
 
     // Work with 0-based indices directly
     let mut queries = leaf_indices.to_vec();

@@ -3,7 +3,12 @@
 //! Based on recursive subspace polynomial evaluation over GF(2^m).
 //! Ported from Julia reference in BinaryReedSolomon/src/binaryfft.jl.
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use ligerito_binary_fields::BinaryFieldElement;
+
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 /// Compute next s value: s_i(x) = s_{i-1}(x)^2 + s_{i-1}(v_{i-1}) * s_{i-1}(x)
@@ -107,6 +112,7 @@ fn fft_twiddles<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], idx: usize) 
 }
 
 /// Parallel in-place recursive FFT step with twiddles, idx starts at 1
+#[cfg(feature = "parallel")]
 fn fft_twiddles_parallel<F: BinaryFieldElement + Send + Sync>(v: &mut [F], twiddles: &[F], idx: usize, thread_depth: usize) {
     const MIN_PARALLEL_SIZE: usize = 128; // reduce threshold for more parallelism
 
@@ -133,6 +139,7 @@ fn fft_twiddles_parallel<F: BinaryFieldElement + Send + Sync>(v: &mut [F], twidd
 }
 
 /// In-place FFT over binary field
+#[cfg(feature = "parallel")]
 pub fn fft<F: BinaryFieldElement + Send + Sync>(v: &mut [F], twiddles: &[F], parallel: bool) {
     if v.len() == 1 {
         return;
@@ -147,6 +154,17 @@ pub fn fft<F: BinaryFieldElement + Send + Sync>(v: &mut [F], twiddles: &[F], par
     } else {
         fft_twiddles(v, twiddles, 1);
     }
+}
+
+/// In-place FFT over binary field (no_std version without parallel support)
+#[cfg(not(feature = "parallel"))]
+pub fn fft<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], parallel: bool) {
+    if v.len() == 1 {
+        return;
+    }
+
+    let _ = parallel; // Suppress unused variable warning
+    fft_twiddles(v, twiddles, 1);
 }
 
 /// IFFT butterfly in-place: hi += lo; lo += λ*hi (char 2)

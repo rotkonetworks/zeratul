@@ -36,7 +36,7 @@ macro_rules! impl_binary_poly {
 
             #[allow(dead_code)]
             pub fn split(&self) -> (Self, Self) {
-                let half_bits = std::mem::size_of::<$value_type>() * 4;
+                let half_bits = core::mem::size_of::<$value_type>() * 4;
                 let mask = ((1u64 << half_bits) - 1) as $value_type;
                 let lo = Self(self.0 & mask);
                 let hi = Self(self.0 >> half_bits);
@@ -72,7 +72,7 @@ macro_rules! impl_binary_poly {
                 let mut result = 0 as $value_type;
                 let a = self.0;
                 let b = other.0;
-                let bits = std::mem::size_of::<$value_type>() * 8;
+                let bits = core::mem::size_of::<$value_type>() * 8;
 
                 for i in 0..bits {
                     // constant-time conditional xor
@@ -93,14 +93,14 @@ macro_rules! impl_binary_poly {
                     return (quotient, remainder);
                 }
 
-                let divisor_bits = (std::mem::size_of::<$value_type>() * 8) as u32 - divisor.leading_zeros();
-                let mut remainder_bits = (std::mem::size_of::<$value_type>() * 8) as u32 - remainder.leading_zeros();
+                let divisor_bits = (core::mem::size_of::<$value_type>() * 8) as u32 - divisor.leading_zeros();
+                let mut remainder_bits = (core::mem::size_of::<$value_type>() * 8) as u32 - remainder.leading_zeros();
 
                 while remainder_bits >= divisor_bits && remainder.0 != 0 {
                     let shift = remainder_bits - divisor_bits;
                     quotient.0 |= 1 << shift;
                     remainder.0 ^= divisor.0 << shift;
-                    remainder_bits = (std::mem::size_of::<$value_type>() * 8) as u32 - remainder.leading_zeros();
+                    remainder_bits = (core::mem::size_of::<$value_type>() * 8) as u32 - remainder.leading_zeros();
                 }
 
                 (quotient, remainder)

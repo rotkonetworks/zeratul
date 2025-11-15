@@ -1,21 +1,18 @@
 // Specialized SIMD FFT for BinaryElem32
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use ligerito_binary_fields::BinaryElem32;
+
+#[cfg(feature = "parallel")]
+use rayon;
 
 /// FFT butterfly using SIMD for GF(2^32)
 #[inline(always)]
 fn fft_mul_simd(v: &mut [BinaryElem32], lambda: BinaryElem32) {
     let (u, w) = v.split_at_mut(v.len() / 2);
-
-    #[cfg(target_arch = "x86_64")]
-    {
-        // Call SSE version directly - it's always available on x86_64 with pclmulqdq
-        ligerito_binary_fields::simd::fft_butterfly_gf32_sse(u, w, lambda);
-    }
-
-    #[cfg(not(target_arch = "x86_64"))]
-    {
-        ligerito_binary_fields::simd::fft_butterfly_gf32_scalar(u, w, lambda);
-    }
+    // Use the generic fft_butterfly_gf32 which internally dispatches to the best implementation
+    ligerito_binary_fields::simd::fft_butterfly_gf32(u, w, lambda);
 }
 
 /// Monomorphic recursive FFT for GF(2^32) with SIMD
@@ -34,6 +31,7 @@ fn fft_twiddles_gf32(v: &mut [BinaryElem32], twiddles: &[BinaryElem32], idx: usi
 }
 
 /// Parallel monomorphic FFT for GF(2^32) with SIMD
+#[cfg(feature = "parallel")]
 fn fft_twiddles_gf32_parallel(v: &mut [BinaryElem32], twiddles: &[BinaryElem32], idx: usize, thread_depth: usize) {
     const MIN_PARALLEL_SIZE: usize = 16384; // Reduce task spawning overhead
 
@@ -64,12 +62,21 @@ pub fn fft_gf32(v: &mut [BinaryElem32], twiddles: &[BinaryElem32], parallel: boo
         return;
     }
 
-    if parallel {
-        let thread_count = rayon::current_num_threads();
-        // Limit depth to reduce task overhead - only create ~2x threads worth of tasks
-        let thread_depth = (thread_count as f64).log2().ceil() as usize;
-        fft_twiddles_gf32_parallel(v, twiddles, 1, thread_depth);
-    } else {
+    #[cfg(feature = "parallel")]
+    {
+        if parallel {
+            let thread_count = rayon::current_num_threads();
+            // Limit depth to reduce task overhead - only create ~2x threads worth of tasks
+            let thread_depth = (thread_count as f64).log2().ceil() as usize;
+            fft_twiddles_gf32_parallel(v, twiddles, 1, thread_depth);
+        } else {
+            fft_twiddles_gf32(v, twiddles, 1);
+        }
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        let _ = parallel; // Suppress unused variable warning
         fft_twiddles_gf32(v, twiddles, 1);
     }
 }

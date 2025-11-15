@@ -84,7 +84,11 @@
 extern crate alloc;
 
 #[cfg(not(feature = "std"))]
-use alloc::{vec::Vec, vec, string::String, boxed::Box};
+#[macro_use]
+extern crate alloc as alloc_crate;
+
+#[cfg(not(feature = "std"))]
+use alloc::{vec::Vec, string::String, boxed::Box, format};
 
 // Re-export with shorter names for internal use
 extern crate ligerito_binary_fields as binary_fields;
@@ -118,6 +122,13 @@ pub mod wasm;
 // WebGPU acceleration (optional)
 #[cfg(feature = "webgpu")]
 pub mod gpu;
+
+// Register-only pcVM (polynomial commitment VM)
+// PCVM module moved to its own crate: polkavm-pcvm
+// To use PolkaVM constraints, add: polkavm-pcvm = { version = "0.1", features = ["polkavm-integration"] }
+
+// Always export data structures
+pub use data_structures::{ProverConfig, VerifierConfig, FinalizedLigeritoProof};
 
 // Always export verifier configs
 pub use configs::{

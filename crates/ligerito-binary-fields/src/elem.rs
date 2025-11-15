@@ -28,7 +28,7 @@ macro_rules! impl_binary_elem {
                 let n = $bitsize;
 
                 // use leading_zeros instead of loop - julia uses this (binarypoly.jl:146)
-                let total_bits = std::mem::size_of::<$value_double>() * 8;
+                let total_bits = core::mem::size_of::<$value_double>() * 8;
 
                 loop {
                     if p == 0 {
