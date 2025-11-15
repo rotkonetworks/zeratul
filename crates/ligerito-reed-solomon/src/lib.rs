@@ -1,4 +1,16 @@
 // reed-solomon/src/lib.rs
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
+#[cfg(not(feature = "std"))]
+#[macro_use]
+extern crate alloc as alloc_crate;
+
 mod fft;
 mod fft_gf32;
 mod encode;

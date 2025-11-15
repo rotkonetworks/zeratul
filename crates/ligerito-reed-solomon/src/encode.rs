@@ -1,4 +1,9 @@
 // reed-solomon/src/encode.rs
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+#[cfg(not(feature = "std"))]
+use alloc::slice;
+
 use crate::{ReedSolomon, fft, short_from_long_twiddles};
 use ligerito_binary_fields::BinaryFieldElement;
 
@@ -23,12 +28,22 @@ pub fn encode_in_place_with_parallel<F: BinaryFieldElement + 'static>(
     parallel: bool,
 ) {
     use ligerito_binary_fields::BinaryElem32;
-    use std::any::TypeId;
+    use core::any::TypeId;
 
     // Fast path for BinaryElem32 using SIMD
     if TypeId::of::<F>() == TypeId::of::<BinaryElem32>() {
-        let data_gf32 = unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut BinaryElem32, data.len()) };
-        let twiddles_gf32 = unsafe { std::slice::from_raw_parts(rs.twiddles.as_ptr() as *const BinaryElem32, rs.twiddles.len()) };
+        let data_gf32 = unsafe {
+            #[cfg(feature = "std")]
+            { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut BinaryElem32, data.len()) }
+            #[cfg(not(feature = "std"))]
+            { slice::from_raw_parts_mut(data.as_mut_ptr() as *mut BinaryElem32, data.len()) }
+        };
+        let twiddles_gf32 = unsafe {
+            #[cfg(feature = "std")]
+            { std::slice::from_raw_parts(rs.twiddles.as_ptr() as *const BinaryElem32, rs.twiddles.len()) }
+            #[cfg(not(feature = "std"))]
+            { slice::from_raw_parts(rs.twiddles.as_ptr() as *const BinaryElem32, rs.twiddles.len()) }
+        };
 
         let message_len = rs.message_length();
         let short_twiddles = short_from_long_twiddles(twiddles_gf32, rs.log_block_length, rs.log_message_length);
@@ -51,7 +66,7 @@ pub fn encode_non_systematic<F: BinaryFieldElement + 'static>(
     data: &mut [F]
 ) {
     use ligerito_binary_fields::BinaryElem32;
-    use std::any::TypeId;
+    use core::any::TypeId;
 
     assert_eq!(data.len(), rs.block_length());
 
@@ -63,8 +78,18 @@ pub fn encode_non_systematic<F: BinaryFieldElement + 'static>(
 
     // Fast path for BinaryElem32 using SIMD
     if TypeId::of::<F>() == TypeId::of::<BinaryElem32>() {
-        let data_gf32 = unsafe { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut BinaryElem32, data.len()) };
-        let twiddles_gf32 = unsafe { std::slice::from_raw_parts(rs.twiddles.as_ptr() as *const BinaryElem32, rs.twiddles.len()) };
+        let data_gf32 = unsafe {
+            #[cfg(feature = "std")]
+            { std::slice::from_raw_parts_mut(data.as_mut_ptr() as *mut BinaryElem32, data.len()) }
+            #[cfg(not(feature = "std"))]
+            { slice::from_raw_parts_mut(data.as_mut_ptr() as *mut BinaryElem32, data.len()) }
+        };
+        let twiddles_gf32 = unsafe {
+            #[cfg(feature = "std")]
+            { std::slice::from_raw_parts(rs.twiddles.as_ptr() as *const BinaryElem32, rs.twiddles.len()) }
+            #[cfg(not(feature = "std"))]
+            { slice::from_raw_parts(rs.twiddles.as_ptr() as *const BinaryElem32, rs.twiddles.len()) }
+        };
         crate::fft_gf32::fft_gf32(data_gf32, twiddles_gf32, true);
         return;
     }

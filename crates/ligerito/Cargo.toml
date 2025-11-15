@@ -75,6 +75,14 @@ webgpu = [
     "futures",                  # Async utilities
 ]
 
+# PolkaVM integration - enables proving of PolkaVM execution traces
+polkavm-integration = [
+    "std",
+    "prover",
+    "polkavm",
+    "polkavm-common",
+]
+
 # CLI binary support - includes ALL features for maximum capability
 # Why hold back? Users want the full power!
 cli = [
@@ -108,6 +116,10 @@ merlin = { workspace = true, optional = true }
 ligerito-reed-solomon = { version = "0.1.0", path = "../ligerito-reed-solomon", optional = true }
 rand = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
+
+# PolkaVM integration (optional) - using local development version
+polkavm = { path = "/home/alice/src/polkavm/crates/polkavm", optional = true }
+polkavm-common = { path = "/home/alice/src/polkavm/crates/polkavm-common", optional = true }
 
 # Parallel processing (std only)
 rayon = { workspace = true, optional = true }
@@ -148,6 +160,10 @@ criterion = { workspace = true }
 bincode = { version = "1.3" }
 zstd = "0.13"
 tokio = { version = "1.0", features = ["full"] }
+polkavm-assembler = { path = "/home/alice/src/polkavm/crates/polkavm-assembler" }
+polkavm-pcvm = { version = "0.1.0", path = "../polkavm-pcvm", features = ["polkavm-integration"] }
+crossterm = "0.29.0"
+ratatui = "0.29.0"
 
 # CLI binary
 [[bin]]

@@ -10,10 +10,10 @@ keywords = ["cryptography", "merkle-tree", "commitment"]
 categories = ["cryptography", "no-std"]
 
 [dependencies]
-sha2 = "0.10"
-bytemuck = "1.14"
-rand = "0.8"
-rayon = "1.10"
+sha2 = { version = "0.10", default-features = false }
+bytemuck = { version = "1.14", default-features = false }
+rand = { version = "0.8", default-features = false }
+rayon = { version = "1.10", optional = true }
 
 [dependencies.serde]
 version = "1.0"
@@ -21,8 +21,9 @@ features = ["derive"]
 optional = true
 
 [features]
-default = ["std"]
+default = ["std", "parallel"]
 std = []
+parallel = ["rayon"]
 serde = ["dep:serde"]
 
 [dev-dependencies]

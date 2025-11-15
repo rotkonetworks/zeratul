@@ -10,11 +10,14 @@ keywords = ["cryptography", "reed-solomon", "erasure-coding", "error-correction"
 categories = ["cryptography", "no-std"]
 
 [features]
+default = ["std", "parallel"]
+std = ["ligerito-binary-fields/std"]
+parallel = ["rayon"]
 hardware-accel = ["ligerito-binary-fields/hardware-accel"]
 
 [dependencies]
-ligerito-binary-fields = { version = "0.1.0", path = "../ligerito-binary-fields" }
-rayon = { workspace = true }
+ligerito-binary-fields = { version = "0.1.0", path = "../ligerito-binary-fields", default-features = false }
+rayon = { workspace = true, optional = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

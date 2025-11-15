@@ -1,0 +1,17 @@
+[package]
+name = "polkavm-test-guest"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+polkavm-derive = { path = "/home/alice/src/polkavm/crates/polkavm-derive" }
+
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"

@@ -2,11 +2,25 @@
 //! Merkle tree with batch opening support
 //! Matches the Julia BatchedMerkleTree implementation
 
+#![cfg_attr(not(feature = "std"), no_std)]
+
+#[cfg(not(feature = "std"))]
+extern crate alloc;
+
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
+#[cfg(not(feature = "std"))]
+#[macro_use]
+extern crate alloc as alloc_crate;
+
 pub mod batch;
 pub use batch::{BatchedMerkleProof, prove_batch, verify_batch};
 
 use sha2::{Sha256, Digest};
 use bytemuck::Pod;
+
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 
 pub type Hash = [u8; 32];
@@ -54,31 +68,54 @@ pub fn build_merkle_tree<T: Pod + Send + Sync>(leaves: &[T]) -> CompleteMerkleTr
         panic!("Number of leaves must be a power of 2");
     }
 
-    // parallelize initial leaf hashing for large leaf sets
-    let mut current_layer: Vec<Hash> = if leaves.len() >= 64 {
-        leaves.par_iter()
-            .map(|leaf| hash_leaf(leaf))
-            .collect()
-    } else {
-        leaves.iter()
-            .map(|leaf| hash_leaf(leaf))
-            .collect()
+    // parallelize initial leaf hashing for large leaf sets (when parallel feature is enabled)
+    let mut current_layer: Vec<Hash> = {
+        #[cfg(feature = "parallel")]
+        {
+            if leaves.len() >= 64 {
+                leaves.par_iter()
+                    .map(|leaf| hash_leaf(leaf))
+                    .collect()
+            } else {
+                leaves.iter()
+                    .map(|leaf| hash_leaf(leaf))
+                    .collect()
+            }
+        }
+        #[cfg(not(feature = "parallel"))]
+        {
+            leaves.iter()
+                .map(|leaf| hash_leaf(leaf))
+                .collect()
+        }
     };
 
     let mut layers = vec![current_layer.clone()];
 
     while current_layer.len() > 1 {
-        // parallelize sibling hashing for larger layers only to avoid thread overhead
-        let next_layer: Vec<Hash> = if current_layer.len() >= 64 {
-            current_layer
-                .par_chunks_exact(2)
-                .map(|chunk| hash_siblings(&chunk[0], &chunk[1]))
-                .collect()
-        } else {
-            current_layer
-                .chunks_exact(2)
-                .map(|chunk| hash_siblings(&chunk[0], &chunk[1]))
-                .collect()
+        // parallelize sibling hashing for larger layers only to avoid thread overhead (when parallel feature is enabled)
+        let next_layer: Vec<Hash> = {
+            #[cfg(feature = "parallel")]
+            {
+                if current_layer.len() >= 64 {
+                    current_layer
+                        .par_chunks_exact(2)
+                        .map(|chunk| hash_siblings(&chunk[0], &chunk[1]))
+                        .collect()
+                } else {
+                    current_layer
+                        .chunks_exact(2)
+                        .map(|chunk| hash_siblings(&chunk[0], &chunk[1]))
+                        .collect()
+                }
+            }
+            #[cfg(not(feature = "parallel"))]
+            {
+                current_layer
+                    .chunks_exact(2)
+                    .map(|chunk| hash_siblings(&chunk[0], &chunk[1]))
+                    .collect()
+            }
         };
 
         layers.push(next_layer.clone());
@@ -107,6 +144,76 @@ impl CompleteMerkleTree {
 
     pub fn prove(&self, queries: &[usize]) -> BatchedMerkleProof {
         prove_batch(self, queries)
+    }
+
+    /// Generate trace for a leaf at given index
+    ///
+    /// Returns each opposite node from top to bottom as the tree is navigated
+    /// to arrive at the leaf. This follows the graypaper specification for
+    /// creating justifications of data inclusion.
+    ///
+    /// From graypaper Section "Merklization":
+    /// > We also define the trace function T, which returns each opposite node
+    /// > from top to bottom as the tree is navigated to arrive at some leaf
+    /// > corresponding to the item of a given index into the sequence.
+    ///
+    /// # Arguments
+    /// * `index` - 0-based index of the leaf
+    ///
+    /// # Returns
+    /// Vector of sibling hashes from root to leaf (top to bottom)
+    ///
+    /// # Example
+    /// ```ignore
+    /// let leaves: Vec<u64> = (0..8).collect();
+    /// let tree = build_merkle_tree(&leaves);
+    /// let trace = tree.trace(3);  // Get trace for leaf at index 3
+    /// // trace[0] = sibling at top level
+    /// // trace[1] = sibling at middle level
+    /// // trace[2] = sibling at leaf level
+    /// ```
+    pub fn trace(&self, index: usize) -> Vec<Hash> {
+        if self.layers.is_empty() {
+            return vec![];
+        }
+
+        let num_leaves = self.layers[0].len();
+        if index >= num_leaves {
+            panic!("Index {} out of range (tree has {} leaves)", index, num_leaves);
+        }
+
+        if num_leaves == 1 {
+            // Single leaf - no siblings
+            return vec![];
+        }
+
+        let mut trace = Vec::new();
+        let mut current_index = index;
+
+        // Iterate from leaf level up to root (but we collect top-to-bottom)
+        // So we'll reverse at the end
+        for layer_idx in 0..(self.layers.len() - 1) {
+            let layer = &self.layers[layer_idx];
+
+            // Find sibling index (if index is even, sibling is index+1, else index-1)
+            let sibling_index = if current_index % 2 == 0 {
+                current_index + 1
+            } else {
+                current_index - 1
+            };
+
+            // Add sibling hash to trace
+            if sibling_index < layer.len() {
+                trace.push(layer[sibling_index]);
+            }
+
+            // Move to parent index for next layer
+            current_index /= 2;
+        }
+
+        // Reverse to get top-to-bottom order (as per graypaper spec)
+        trace.reverse();
+        trace
     }
 }
 
@@ -325,5 +432,145 @@ mod tests {
         );
 
         assert!(is_valid, "Multiple query verification failed");
+    }
+
+    #[test]
+    fn test_trace_basic() {
+        // Create a tree with 8 leaves
+        let leaves: Vec<u64> = (0..8).collect();
+        let tree = build_merkle_tree(&leaves);
+
+        // For index 3 (binary: 011):
+        // - At leaf level: sibling is index 2 (pair [2,3])
+        // - At middle level: sibling is pair [0,1] (we're in [2,3])
+        // - At top level: sibling is entire right subtree [4,5,6,7]
+        let trace = tree.trace(3);
+
+        // Should have depth nodes in trace (from top to bottom)
+        assert_eq!(trace.len(), tree.get_depth());
+        println!("Trace for index 3: {} hashes", trace.len());
+
+        // Verify all hashes are non-zero
+        for (i, hash) in trace.iter().enumerate() {
+            assert_ne!(*hash, [0u8; 32], "Hash at level {} should not be zero", i);
+        }
+    }
+
+    #[test]
+    fn test_trace_verification() {
+        // Test that trace can be used to verify a leaf
+        let leaves: Vec<u64> = (0..8).collect();
+        let tree = build_merkle_tree(&leaves);
+
+        let index = 5;
+        let trace = tree.trace(index);
+        let leaf_hash = hash_leaf(&leaves[index]);
+
+        // Reconstruct root from leaf + trace
+        let mut current_hash = leaf_hash;
+        let mut current_index = index;
+
+        // Work backwards through trace (bottom to top)
+        for sibling_hash in trace.iter().rev() {
+            if current_index % 2 == 0 {
+                // Current is left child
+                current_hash = hash_siblings(&current_hash, sibling_hash);
+            } else {
+                // Current is right child
+                current_hash = hash_siblings(sibling_hash, &current_hash);
+            }
+            current_index /= 2;
+        }
+
+        // Should match root
+        assert_eq!(current_hash, tree.get_root().root.unwrap());
+    }
+
+    #[test]
+    fn test_trace_all_leaves() {
+        // Verify trace works for every leaf in the tree
+        let leaves: Vec<u64> = (0..16).collect();
+        let tree = build_merkle_tree(&leaves);
+        let root = tree.get_root().root.unwrap();
+
+        for index in 0..leaves.len() {
+            let trace = tree.trace(index);
+            let leaf_hash = hash_leaf(&leaves[index]);
+
+            // Reconstruct root
+            let mut current_hash = leaf_hash;
+            let mut current_index = index;
+
+            for sibling_hash in trace.iter().rev() {
+                if current_index % 2 == 0 {
+                    current_hash = hash_siblings(&current_hash, sibling_hash);
+                } else {
+                    current_hash = hash_siblings(sibling_hash, &current_hash);
+                }
+                current_index /= 2;
+            }
+
+            assert_eq!(current_hash, root, "Trace verification failed for index {}", index);
+        }
+    }
+
+    #[test]
+    fn test_trace_empty_tree() {
+        let leaves: Vec<u64> = vec![];
+        let tree = build_merkle_tree(&leaves);
+        let trace = tree.trace(0);
+        assert_eq!(trace.len(), 0);
+    }
+
+    #[test]
+    fn test_trace_single_leaf() {
+        let leaves = vec![42u64];
+        let tree = build_merkle_tree(&leaves);
+        let trace = tree.trace(0);
+        // Single leaf has no siblings
+        assert_eq!(trace.len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "out of range")]
+    fn test_trace_invalid_index() {
+        let leaves: Vec<u64> = (0..8).collect();
+        let tree = build_merkle_tree(&leaves);
+        let _ = tree.trace(8); // Index 8 is out of bounds
+    }
+
+    #[test]
+    fn test_trace_matches_graypaper_definition() {
+        // Test the graypaper definition:
+        // T returns opposite nodes from TOP to BOTTOM
+        let leaves: Vec<u64> = (0..4).collect();
+        let tree = build_merkle_tree(&leaves);
+
+        // For index 2 in 4-leaf tree:
+        // Tree structure:
+        //       root
+        //      /    \
+        //    h01    h23  <- top level sibling
+        //    / \    / \
+        //   h0 h1  h2 h3 <- leaf level sibling
+        //
+        // Navigating to index 2 (leaf h2):
+        // - From root: go right, opposite is h01 (left subtree)
+        // - From h23: go left, opposite is h3 (right leaf)
+
+        let trace = tree.trace(2);
+
+        // Should have 2 siblings (depth = 2)
+        assert_eq!(trace.len(), 2);
+
+        // trace[0] should be top level (h01)
+        // trace[1] should be leaf level (h3)
+
+        // Verify by reconstructing root
+        let leaf_hash = hash_leaf(&leaves[2]); // h2
+        let h23 = hash_siblings(&leaf_hash, &trace[1]); // h2 + h3
+        let root = hash_siblings(&trace[0], &h23); // h01 + h23
+
+        assert_eq!(root, tree.get_root().root.unwrap());
     }
 }

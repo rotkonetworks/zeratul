@@ -1,14 +1,27 @@
 [workspace]
 members = [
+    # Core Ligerito libraries
     "crates/ligerito-binary-fields",
     "crates/ligerito-reed-solomon",
     "crates/ligerito-merkle",
     "crates/ligerito",
-    "examples/state_transition_zkvm/circuit",
-    "examples/state_transition_zkvm/server",
-    "examples/state_transition_zkvm/blockchain"
+    # PolkaVM polynomial commitment verification
+    "crates/polkavm-pcvm",
+    # Zeratul blockchain primitives
+    "crates/zeratul-circuit",
+    "crates/zeratul-blockchain",
+    "crates/zeratul-client",
+    "crates/zeratul-server",
+    "crates/zeratul-p2p",
+    "crates/test-ligerito-integration",
+    # Binaries
+    "crates/bin/terminator",
 ]
-exclude = ["benchmarks/ashutosh-ligerito"]
+# Excluded from workspace (different build targets or incomplete)
+exclude = [
+    "benchmarks/ashutosh-ligerito",
+    "crates/zeratul-guest",  # PolkaVM guest program (requires special build)
+]
 resolver = "2"
 
 [workspace.package]

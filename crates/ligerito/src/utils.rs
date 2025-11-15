@@ -2,8 +2,6 @@
 
 use binary_fields::{BinaryFieldElement, BinaryPolynomial};
 
-#[cfg(feature = "parallel")]
-
 /// Evaluate Lagrange basis at given points
 pub fn evaluate_lagrange_basis<F: BinaryFieldElement>(rs: &[F]) -> Vec<F> {
     if rs.is_empty() {
