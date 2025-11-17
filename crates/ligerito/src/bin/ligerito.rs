@@ -194,8 +194,7 @@ fn prove_command(size: Option<usize>, config_path: Option<String>, format: &str,
         })
         .collect();
 
-    eprintln!("Read polynomial of size 2^{} ({} elements)", size, poly.len());
-    eprintln!("Using {} transcript", transcript_type);
+    eprintln!("prove: 2^{} GF(2^32) elements, {} transcript", size, transcript_type);
 
     // Helper macro to prove with any transcript backend
     macro_rules! prove_with_backend {
@@ -252,20 +251,23 @@ fn prove_command(size: Option<usize>, config_path: Option<String>, format: &str,
     };
     let elapsed = start.elapsed();
 
-    eprintln!("Proof generated successfully in {:.2}ms", elapsed.as_secs_f64() * 1000.0);
+    // Serialize for size calculation
+    let encoded = bincode::serialize(&proof)
+        .context("Failed to serialize proof")?;
 
-    // Serialize and output
+    let prove_ms = elapsed.as_secs_f64() * 1000.0;
+    let throughput = (poly.len() as f64) / elapsed.as_secs_f64();
+
+    eprintln!("result: {:.2}ms, {:.2e} elem/s, {} bytes", prove_ms, throughput, encoded.len());
+
+    // Output proof
     match format {
         "bincode" => {
-            let encoded = bincode::serialize(&proof)
-                .context("Failed to serialize proof")?;
             io::stdout()
                 .write_all(&encoded)
                 .context("Failed to write proof to stdout")?;
         }
         "hex" => {
-            let encoded = bincode::serialize(&proof)
-                .context("Failed to serialize proof")?;
             let hex_str = hex::encode(&encoded);
             println!("{}", hex_str);
         }
@@ -316,12 +318,10 @@ fn verify_command(size: Option<usize>, config_path: Option<String>, format: &str
         bincode::deserialize(&proof_bytes)
             .context("Failed to deserialize proof")?;
 
+    eprintln!("verify: 2^{} GF(2^32), {} bytes, {} transcript", size, proof_bytes.len(), transcript_type);
     if verbose {
-        eprintln!("Proof size: {} bytes", proof_bytes.len());
-        eprintln!("Proof structure size: {} bytes", proof.size_of());
+        eprintln!("  proof structure: {} bytes", proof.size_of());
     }
-
-    eprintln!("Using {} transcript", transcript_type);
 
     // Helper macro to verify with any transcript backend
     macro_rules! verify_with_backend {
@@ -377,13 +377,14 @@ fn verify_command(size: Option<usize>, config_path: Option<String>, format: &str
         _ => anyhow::bail!("Unsupported size: {}. Must be 12, 16, 20, 24, 28, or 30", size),
     };
     let elapsed = start.elapsed();
+    let verify_ms = elapsed.as_secs_f64() * 1000.0;
 
     if valid {
-        eprintln!("Verification passed in {:.2}ms", elapsed.as_secs_f64() * 1000.0);
+        eprintln!("result: VALID {:.2}ms", verify_ms);
         println!("VALID");
         Ok(())
     } else {
-        eprintln!("Verification failed in {:.2}ms", elapsed.as_secs_f64() * 1000.0);
+        eprintln!("result: INVALID {:.2}ms", verify_ms);
         println!("INVALID");
         std::process::exit(1);
     }
