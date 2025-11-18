@@ -5,7 +5,7 @@ polynomial commitment scheme over binary extension fields.
 ## what it's good for
 
 - committing to large polynomials with small proofs (~150 KB for 2^20 polynomial)
-- fast proving on modern cpus with simd (68ms for 1M elements)
+- fast proving on modern cpus with simd (300-600ms for 1M elements)
 - verifier-only builds for constrained environments (polkavm, wasm, embedded)
 - transparent setup (no trusted setup required)
 - enabling verifiable light client p2p networks
@@ -90,8 +90,22 @@ minimal build for wasm/embedded (requires `alloc`)
 
 ### installation
 
+**recommended (optimized for your cpu):**
 ```bash
-cargo install --path . --features=cli
+# from crates.io
+RUSTFLAGS="-C target-cpu=native" cargo install ligerito
+
+# or from source
+git clone https://github.com/rotkonetworks/zeratul
+cd zeratul
+cargo install --path crates/ligerito
+```
+
+the workspace config automatically enables native cpu optimizations (SIMD/PCLMULQDQ) for 5-6x speedup.
+
+**without optimizations (not recommended):**
+```bash
+cargo install ligerito  # will show performance warning
 ```
 
 ### prove and verify

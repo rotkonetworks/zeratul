@@ -35,6 +35,7 @@ use std::time::Instant;
 
 #[derive(Parser)]
 #[command(name = "ligerito")]
+#[command(version = env!("CARGO_PKG_VERSION"))]
 #[command(about = "Ligerito polynomial commitment scheme CLI", long_about = None)]
 struct Cli {
     #[command(subcommand)]
@@ -194,7 +195,22 @@ fn prove_command(size: Option<usize>, config_path: Option<String>, format: &str,
         })
         .collect();
 
-    eprintln!("prove: 2^{} GF(2^32) elements, {} transcript", size, transcript_type);
+    // Print build info to help diagnose performance issues
+    let mut build_info = vec![];
+
+    #[cfg(debug_assertions)]
+    build_info.push("DEBUG");
+
+    #[cfg(not(debug_assertions))]
+    build_info.push("release");
+
+    #[cfg(all(target_arch = "x86_64", target_feature = "pclmulqdq"))]
+    build_info.push("SIMD");
+
+    #[cfg(not(all(target_arch = "x86_64", target_feature = "pclmulqdq")))]
+    build_info.push("no-SIMD");
+
+    eprintln!("prove: 2^{} GF(2^32), {} [{}]", size, transcript_type, build_info.join(" "));
 
     // Helper macro to prove with any transcript backend
     macro_rules! prove_with_backend {

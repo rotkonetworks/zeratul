@@ -225,9 +225,6 @@ impl BackendSelector {
     pub fn new(hint: BackendHint) -> Self {
         let backend = Self::select_backend(hint);
 
-        #[cfg(not(target_arch = "wasm32"))]
-        eprintln!("Ligerito backend: {}", backend.name());
-
         Self {
             backend,
             hint,
