@@ -2,6 +2,12 @@
 
 polynomial commitment scheme over binary extension fields.
 
+> **⚠️ IMPORTANT:** For optimal performance (5-6x speedup), install with native CPU optimizations:
+> ```bash
+> RUSTFLAGS="-C target-cpu=native" cargo install ligerito
+> ```
+> Without this flag, the prover will be significantly slower. See [installation](#installation) for details.
+
 ## what it's good for
 
 - committing to large polynomials with small proofs (~150 KB for 2^20 polynomial)
@@ -19,6 +25,20 @@ polynomial commitment scheme over binary extension fields.
 
 ## library usage
 
+**add to Cargo.toml:**
+```toml
+[dependencies]
+ligerito = "0.1.5"
+```
+
+**⚠️ for development:** clone the workspace to get automatic native optimizations:
+```bash
+git clone https://github.com/rotkonetworks/zeratul
+cd zeratul
+cargo build --release -p ligerito
+```
+
+**example:**
 ```rust
 use ligerito::{prove, verify, hardcoded_config_20, hardcoded_config_20_verifier};
 use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
@@ -103,9 +123,22 @@ cargo install --path crates/ligerito
 
 the workspace config automatically enables native cpu optimizations (SIMD/PCLMULQDQ) for 5-6x speedup.
 
+**performance impact:**
+```
+WITH native optimizations:    300-600ms for 2^20 prove
+WITHOUT native optimizations: 2000-3000ms for 2^20 prove (5-6x slower!)
+```
+
 **without optimizations (not recommended):**
 ```bash
-cargo install ligerito  # will show performance warning
+cargo install ligerito  # will show build warning about missing SIMD
+```
+
+**check your build:**
+```bash
+ligerito --version  # should show v0.1.5 or later
+ligerito generate --size 20 | ligerito prove --size 20 2>&1 | grep "SIMD"
+# output should show: [release SIMD] for optimal performance
 ```
 
 ### prove and verify
