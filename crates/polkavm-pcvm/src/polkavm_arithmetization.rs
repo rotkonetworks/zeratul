@@ -80,10 +80,12 @@ pub struct ArithmetizedPolkaVMTrace {
     ///
     /// This is the result of: ∑ᵢ ∑ⱼ Cᵢⱼ · rⁱ⁺ʲ
     /// For valid execution, this MUST equal zero.
-    pub constraint_accumulator: BinaryElem32,
+    /// Uses GF(2^128) for proper 128-bit security.
+    pub constraint_accumulator: BinaryElem128,
 
     /// Challenge used for batched verification (from Fiat-Shamir)
-    pub batching_challenge: BinaryElem32,
+    /// Uses GF(2^128) for proper 128-bit security.
+    pub batching_challenge: BinaryElem128,
 }
 
 /// Column indices in the trace matrix
@@ -107,7 +109,7 @@ pub const STEP_WIDTH: usize = COL_MEMORY_ROOT_END;
 pub fn arithmetize_polkavm_trace(
     trace: &[(ProvenTransition, Instruction)],
     program_commitment: [u8; 32],
-    batching_challenge: BinaryElem32,
+    batching_challenge: BinaryElem128,
 ) -> Result<ArithmetizedPolkaVMTrace, &'static str> {
     if trace.is_empty() {
         return Err("Cannot arithmetize empty trace");
@@ -190,10 +192,11 @@ fn encode_transition(poly: &mut Vec<BinaryElem32>, transition: &ProvenTransition
 #[cfg(feature = "polkavm-integration")]
 fn compute_batched_constraints(
     trace: &[(ProvenTransition, Instruction)],
-    challenge: BinaryElem32,
-) -> Result<BinaryElem32, &'static str> {
-    let mut accumulator = BinaryElem32::zero();
-    let mut power = BinaryElem32::one();
+    challenge: BinaryElem128,
+) -> Result<BinaryElem128, &'static str> {
+    // Use GF(2^128) for 128-bit security
+    let mut accumulator = BinaryElem128::zero();
+    let mut power = BinaryElem128::one();
 
     // 1. Per-step instruction correctness
     for (transition, instruction) in trace {
@@ -201,7 +204,9 @@ fn compute_batched_constraints(
             .map_err(|_| "Failed to generate constraints")?;
 
         for constraint in constraints {
-            let term = constraint.mul(&power);
+            // Lift constraint from GF(2^32) to GF(2^128)
+            let c_ext = BinaryElem128::from(constraint);
+            let term = c_ext.mul(&power);
             accumulator = accumulator.add(&term);
             power = power.mul(&challenge);
         }
@@ -225,7 +230,8 @@ fn compute_batched_constraints(
                 current_regs_after[reg_idx] ^ next_regs_before[reg_idx]
             );
 
-            let term = constraint.mul(&power);
+            let c_ext = BinaryElem128::from(constraint);
+            let term = c_ext.mul(&power);
             accumulator = accumulator.add(&term);
             power = power.mul(&challenge);
         }
@@ -235,7 +241,8 @@ fn compute_batched_constraints(
             let byte_xor = current.memory_root_after[byte_idx] ^ next.memory_root_before[byte_idx];
             let constraint = BinaryElem32::from(byte_xor as u32);
 
-            let term = constraint.mul(&power);
+            let c_ext = BinaryElem128::from(constraint);
+            let term = c_ext.mul(&power);
             accumulator = accumulator.add(&term);
             power = power.mul(&challenge);
         }
@@ -243,7 +250,8 @@ fn compute_batched_constraints(
         // 2c. PC continuity (control flow chain)
         let constraint = BinaryElem32::from(current.next_pc ^ next.pc);
 
-        let term = constraint.mul(&power);
+        let c_ext = BinaryElem128::from(constraint);
+        let term = c_ext.mul(&power);
         accumulator = accumulator.add(&term);
         power = power.mul(&challenge);
     }
@@ -313,7 +321,7 @@ fn lagrange_basis(i: usize, x: &[BinaryElem32]) -> BinaryElem32 {
 /// 2. Polynomial dimensions are consistent
 pub fn verify_arithmetized_trace(arith: &ArithmetizedPolkaVMTrace) -> bool {
     // Check 1: Batched constraints must be satisfied
-    if arith.constraint_accumulator != BinaryElem32::zero() {
+    if arith.constraint_accumulator != BinaryElem128::zero() {
         return false;
     }
 
@@ -362,8 +370,8 @@ mod tests {
             program_commitment: [0u8; 32],
             initial_state_root: [0u8; 32],
             final_state_root: [0u8; 32],
-            constraint_accumulator: BinaryElem32::zero(), // All constraints satisfied
-            batching_challenge: BinaryElem32::from(0x42),
+            constraint_accumulator: BinaryElem128::zero(), // All constraints satisfied
+            batching_challenge: BinaryElem128::from(0x42u128),
         };
 
         assert!(verify_arithmetized_trace(&arith));
@@ -379,8 +387,8 @@ mod tests {
             program_commitment: [0u8; 32],
             initial_state_root: [0u8; 32],
             final_state_root: [0u8; 32],
-            constraint_accumulator: BinaryElem32::from(0xdeadbeef), // NON-ZERO!
-            batching_challenge: BinaryElem32::from(0x42),
+            constraint_accumulator: BinaryElem128::from(0xdeadbeefu128), // NON-ZERO!
+            batching_challenge: BinaryElem128::from(0x42u128),
         };
 
         assert!(!verify_arithmetized_trace(&arith));

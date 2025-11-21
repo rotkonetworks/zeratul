@@ -13,7 +13,7 @@ use ligerito::pcvm::polkavm_adapter::PolkaVMRegisters;
 use ligerito::pcvm::polkavm_prover::{prove_polkavm_execution, verify_polkavm_proof};
 use ligerito::configs::{hardcoded_config_20, hardcoded_config_20_verifier};
 use ligerito::pcvm::memory_merkle::MemoryMerkleTree;
-use ligerito_binary_fields::{BinaryElem32, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 use ligerito::transcript::{Sha256Transcript, Transcript};
 use std::marker::PhantomData;
 
@@ -272,7 +272,7 @@ fn test_prove_continuous_game_of_life() {
         .collect();
     challenge_transcript.absorb_elems(&program_elems);
     challenge_transcript.absorb_elem(BinaryElem32::from(all_trace.len() as u32));
-    let batching_challenge = challenge_transcript.get_challenge::<BinaryElem32>();
+    let batching_challenge = challenge_transcript.get_challenge::<BinaryElem128>();
 
     let transcript = Sha256Transcript::new(42);
 
@@ -379,7 +379,7 @@ fn test_game_of_life_with_visualization() {
                 .collect();
             challenge_transcript.absorb_elems(&program_elems);
             challenge_transcript.absorb_elem(BinaryElem32::from(all_trace.len() as u32));
-            let batching_challenge = challenge_transcript.get_challenge::<BinaryElem32>();
+            let batching_challenge = challenge_transcript.get_challenge::<BinaryElem128>();
 
             let transcript = Sha256Transcript::new(42);
 
@@ -490,7 +490,7 @@ fn test_blockchain_latency_benchmark() {
             .collect();
         challenge_transcript.absorb_elems(&program_elems);
         challenge_transcript.absorb_elem(BinaryElem32::from(trace.len() as u32));
-        let batching_challenge = challenge_transcript.get_challenge::<BinaryElem32>();
+        let batching_challenge = challenge_transcript.get_challenge::<BinaryElem128>();
 
         let transcript = Sha256Transcript::new(42);
 

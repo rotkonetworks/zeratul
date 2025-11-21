@@ -8288,7 +8288,7 @@ dependencies = [
 [[package]]
 name = "polkavm"
 version = "0.30.0"
-source = "git+https://github.com/paritytech/polkavm#7195e0dc3af423578a4e0305a50c42d53c48f434"
+source = "git+https://github.com/paritytech/polkavm#5139a4818f934672d260533b88823f04bb4b4b28"
 dependencies = [
  "libc",
  "log",
@@ -8301,7 +8301,7 @@ dependencies = [
 [[package]]
 name = "polkavm-assembler"
 version = "0.30.0"
-source = "git+https://github.com/paritytech/polkavm#7195e0dc3af423578a4e0305a50c42d53c48f434"
+source = "git+https://github.com/paritytech/polkavm#5139a4818f934672d260533b88823f04bb4b4b28"
 dependencies = [
  "log",
 ]
@@ -8315,7 +8315,7 @@ checksum = "1d9428a5cfcc85c5d7b9fc4b6a18c4b802d0173d768182a51cc7751640f08b92"
 [[package]]
 name = "polkavm-common"
 version = "0.30.0"
-source = "git+https://github.com/paritytech/polkavm#7195e0dc3af423578a4e0305a50c42d53c48f434"
+source = "git+https://github.com/paritytech/polkavm#5139a4818f934672d260533b88823f04bb4b4b28"
 dependencies = [
  "log",
  "picosimd",
@@ -8356,7 +8356,7 @@ dependencies = [
 [[package]]
 name = "polkavm-linux-raw"
 version = "0.30.0"
-source = "git+https://github.com/paritytech/polkavm#7195e0dc3af423578a4e0305a50c42d53c48f434"
+source = "git+https://github.com/paritytech/polkavm#5139a4818f934672d260533b88823f04bb4b4b28"
 
 [[package]]
 name = "polkavm-pcvm"

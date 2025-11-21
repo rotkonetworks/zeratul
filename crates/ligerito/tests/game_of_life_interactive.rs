@@ -12,7 +12,7 @@ use polkavm_pcvm::polkavm_constraints_v2::{ProvenTransition, InstructionProof};
 use polkavm_pcvm::polkavm_adapter::PolkaVMRegisters;
 use polkavm_pcvm::polkavm_prover::{prove_polkavm_execution, verify_polkavm_proof};
 use ligerito::configs::{hardcoded_config_20, hardcoded_config_20_verifier};
-use ligerito_binary_fields::BinaryElem32;
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use ligerito::transcript::{Sha256Transcript, Transcript};
 use ligerito::data_structures::{ProverConfig, VerifierConfig};
 use std::marker::PhantomData;
@@ -228,7 +228,7 @@ impl InteractiveSession {
             .collect();
         challenge_transcript.absorb_elems(&program_elems);
         challenge_transcript.absorb_elem(BinaryElem32::from(self.trace.len() as u32));
-        let batching_challenge = challenge_transcript.get_challenge::<BinaryElem32>();
+        let batching_challenge = challenge_transcript.get_challenge::<BinaryElem128>();
 
         let transcript = Sha256Transcript::new(42);
 

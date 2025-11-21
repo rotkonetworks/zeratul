@@ -15,7 +15,7 @@ use ligerito::pcvm::polkavm_constraints_v2::{ProvenTransition, InstructionProof}
 use ligerito::pcvm::polkavm_adapter::PolkaVMRegisters;
 use ligerito::pcvm::polkavm_prover::{prove_polkavm_execution, verify_polkavm_proof};
 use ligerito::configs::{hardcoded_config_20, hardcoded_config_20_verifier};
-use ligerito_binary_fields::BinaryElem32;
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use ligerito::transcript::{Sha256Transcript, Transcript};
 use std::marker::PhantomData;
 
@@ -103,7 +103,7 @@ fn test_prove_and_verify_simple_execution() {
         .collect();
     challenge_transcript.absorb_elems(&program_elems);
     challenge_transcript.absorb_elem(BinaryElem32::from(trace.len() as u32));
-    let batching_challenge = challenge_transcript.get_challenge::<BinaryElem32>();
+    let batching_challenge = challenge_transcript.get_challenge::<BinaryElem128>();
 
     // Create separate transcript for proof
     let transcript = Sha256Transcript::new(42);
@@ -173,7 +173,7 @@ fn test_reject_forged_execution() {
     let trace = vec![forged_step];
 
     let prover_config = hardcoded_config_20(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem32>);
-    let batching_challenge = BinaryElem32::from(0x12345678u32);
+    let batching_challenge = BinaryElem128::from(0x12345678u128);
     let transcript = Sha256Transcript::new(42);
 
     // Proof generation should FAIL because constraint accumulator is non-zero
@@ -230,7 +230,7 @@ fn test_proof_size_logarithmic() {
     }
 
     let prover_config = hardcoded_config_20(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem32>);
-    let batching_challenge = BinaryElem32::from(0x12345678u32);
+    let batching_challenge = BinaryElem128::from(0x12345678u128);
     let transcript = Sha256Transcript::new(42);
 
     let proof = prove_polkavm_execution(

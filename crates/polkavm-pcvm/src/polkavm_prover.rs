@@ -21,7 +21,7 @@
 //! This is NOT a zkVM - it's a polynomial commitment VM (pcVM).
 //! Proofs are succinct but NOT zero-knowledge.
 
-use ligerito_binary_fields::{BinaryElem32, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 use ligerito::{ProverConfig, FinalizedLigeritoProof, transcript::Transcript};
 use ligerito::prover::prove_with_transcript;
 
@@ -59,7 +59,8 @@ pub struct PolkaVMProof {
     pub num_steps: usize,
 
     /// Batched constraint accumulator (MUST be zero for valid execution)
-    pub constraint_accumulator: BinaryElem32,
+    /// Uses GF(2^128) for proper 128-bit security.
+    pub constraint_accumulator: BinaryElem128,
 
     /// The actual Ligerito polynomial commitment proof
     pub ligerito_proof: FinalizedLigeritoProof<BinaryElem32, BinaryElem32>,
@@ -85,7 +86,7 @@ pub struct PolkaVMProof {
 pub fn prove_polkavm_execution<T: Transcript>(
     trace: &[(ProvenTransition, Instruction)],
     program_commitment: [u8; 32],
-    batching_challenge: BinaryElem32,
+    batching_challenge: BinaryElem128,
     config: &ProverConfig<BinaryElem32, BinaryElem32>,
     transcript: T,
 ) -> Result<PolkaVMProof, &'static str> {
@@ -96,7 +97,7 @@ pub fn prove_polkavm_execution<T: Transcript>(
     let arithmetized = arithmetize_polkavm_trace(trace, program_commitment, batching_challenge)?;
 
     // Step 2: Soundness check - constraint accumulator MUST be zero
-    if arithmetized.constraint_accumulator != BinaryElem32::zero() {
+    if arithmetized.constraint_accumulator != BinaryElem128::zero() {
         return Err("Constraint accumulator is non-zero - execution is invalid!");
     }
 
@@ -158,7 +159,7 @@ pub fn verify_polkavm_proof(
     }
 
     // CRITICAL: Constraint accumulator MUST be zero
-    if proof.constraint_accumulator != BinaryElem32::zero() {
+    if proof.constraint_accumulator != BinaryElem128::zero() {
         return false;
     }
 
@@ -171,9 +172,6 @@ pub fn verify_polkavm_proof(
 #[cfg(feature = "polkavm-integration")]
 mod tests {
     use super::*;
-    use crate::transcript::MerlinTranscript;
-    use crate::reed_solomon::ReedSolomonCode;
-    use ligerito_binary_fields::BinaryElem32;
 
     #[test]
     fn test_polkavm_prover_basic() {

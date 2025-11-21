@@ -9,7 +9,7 @@
 #[cfg(feature = "polkavm-integration")]
 use polkavm::{Engine, Module, RawInstance, InterruptKind, ProgramBlob, ProgramCounter, Reg, ModuleConfig};
 #[cfg(feature = "polkavm-integration")]
-use polkavm::program::{Instruction, ISA32_V1, Opcode};
+use polkavm::program::{Instruction, Opcode};
 
 use ligerito_binary_fields::{BinaryElem32, BinaryFieldElement};
 use super::polkavm_adapter::{PolkaVMRegisters, PolkaVMMemoryModel, PolkaVMStep, PolkaVMTrace, MemoryAccess, MemoryAccessSize};
@@ -224,8 +224,8 @@ fn capture_memory_state(blob: &ProgramBlob, module: &Module) -> PolkaVMMemoryMod
 /// Get the instruction at a specific program counter
 #[cfg(feature = "polkavm-integration")]
 fn get_instruction_at_pc(blob: &ProgramBlob, pc: ProgramCounter) -> Result<Instruction, TraceError> {
-    // Use ISA32_V1 as the instruction set (most common)
-    let mut instructions = blob.instructions_bounded_at(ISA32_V1, pc);
+    // Get instructions at the given PC
+    let mut instructions = blob.instructions_bounded_at(pc);
 
     // Get the first (and only) instruction at this PC
     match instructions.next() {
@@ -355,13 +355,12 @@ impl OpcodeExtractor {
 
 /// Convert PolkaVM instruction to simplified opcode byte
 #[cfg(feature = "polkavm-integration")]
-fn instruction_to_opcode(instruction: &Instruction) -> u8 {
-    // Get the opcode enum value which gives us a stable identifier
-    let opcode = instruction.opcode();
-
-    // Convert Opcode to u8
-    // The Opcode enum is repr(u8) so we can cast it
-    opcode as u8
+fn instruction_to_opcode(_instruction: &Instruction) -> u8 {
+    // TODO: In newer polkavm, Opcode is not directly castable to u8.
+    // The actual constraint checking uses pattern matching on Instruction variants,
+    // not the raw opcode byte. This field is for trace inspection only.
+    // For now, return 0 as placeholder - proper fix needed for polkavm 0.30+
+    0
 }
 
 /// Visitor to extract operands from instruction

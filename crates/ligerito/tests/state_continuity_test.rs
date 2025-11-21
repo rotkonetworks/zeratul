@@ -15,7 +15,7 @@
 use ligerito::pcvm::polkavm_constraints_v2::{ProvenTransition, InstructionProof};
 use ligerito::pcvm::polkavm_adapter::PolkaVMRegisters;
 use ligerito::pcvm::polkavm_arithmetization::arithmetize_polkavm_trace;
-use ligerito_binary_fields::{BinaryElem32, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 
 use polkavm::program::Instruction;
 use polkavm_common::program::{RawReg, Reg};
@@ -83,14 +83,14 @@ fn test_reject_forged_register_continuity() {
     let trace = vec![step1, step2];
 
     // Arithmetize with batching challenge
-    let batching_challenge = BinaryElem32::from(0x12345678u32);
+    let batching_challenge = BinaryElem128::from(0x12345678u128);
     let arith = arithmetize_polkavm_trace(&trace, [0u8; 32], batching_challenge)
         .expect("Should arithmetize");
 
     // Constraint accumulator should be NON-ZERO due to forged register continuity
     assert_ne!(
         arith.constraint_accumulator,
-        BinaryElem32::zero(),
+        BinaryElem128::zero(),
         "Forged register continuity should fail! Accumulator: {:?}",
         arith.constraint_accumulator
     );
@@ -159,14 +159,14 @@ fn test_reject_forged_memory_continuity() {
 
     let trace = vec![step1, step2];
 
-    let batching_challenge = BinaryElem32::from(0xABCDEF01u32);
+    let batching_challenge = BinaryElem128::from(0xABCDEF01u128);
     let arith = arithmetize_polkavm_trace(&trace, [0u8; 32], batching_challenge)
         .expect("Should arithmetize");
 
     // Constraint accumulator should be NON-ZERO
     assert_ne!(
         arith.constraint_accumulator,
-        BinaryElem32::zero(),
+        BinaryElem128::zero(),
         "Forged memory continuity should fail!"
     );
 
@@ -226,14 +226,14 @@ fn test_reject_forged_pc_continuity() {
 
     let trace = vec![step1, step2];
 
-    let batching_challenge = BinaryElem32::from(0x11111111u32);
+    let batching_challenge = BinaryElem128::from(0x11111111u128);
     let arith = arithmetize_polkavm_trace(&trace, [0u8; 32], batching_challenge)
         .expect("Should arithmetize");
 
     // Constraint accumulator should be NON-ZERO
     assert_ne!(
         arith.constraint_accumulator,
-        BinaryElem32::zero(),
+        BinaryElem128::zero(),
         "Forged PC continuity should fail!"
     );
 
@@ -300,14 +300,14 @@ fn test_valid_state_continuity_passes() {
 
     let trace = vec![step1, step2];
 
-    let batching_challenge = BinaryElem32::from(0x42424242u32);
+    let batching_challenge = BinaryElem128::from(0x42424242u128);
     let arith = arithmetize_polkavm_trace(&trace, [0u8; 32], batching_challenge)
         .expect("Should arithmetize");
 
     // Constraint accumulator should be ZERO (all constraints satisfied)
     assert_eq!(
         arith.constraint_accumulator,
-        BinaryElem32::zero(),
+        BinaryElem128::zero(),
         "Valid continuity should pass! Accumulator: {:?}",
         arith.constraint_accumulator
     );

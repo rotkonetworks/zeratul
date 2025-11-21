@@ -61,7 +61,7 @@
 
 use crate::polkavm_adapter::{PolkaVMRegisters, PolkaVMStep, MemoryAccess, MemoryAccessSize};
 use crate::memory_merkle::{MemoryMerkleTree, MerkleProof as MemoryMerkleProof};
-use ligerito_binary_fields::{BinaryElem32, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -301,7 +301,7 @@ fn generate_execution_constraints(
 
         // CRITICAL: Unimplemented instructions are ERRORS, not silent passes
         _ => Err(ConstraintError::UnimplementedInstruction {
-            opcode: instruction.opcode() as u8,
+            opcode: format!("{:?}", instruction.opcode()),
         }),
     }
 }
@@ -350,7 +350,7 @@ fn generate_pc_continuity_constraints(
         trap => ControlFlowType::Trap,
 
         _ => return Err(ConstraintError::UnimplementedInstruction {
-            opcode: instruction.opcode() as u8,
+            opcode: format!("{:?}", instruction.opcode()),
         }),
     };
 
@@ -720,7 +720,7 @@ fn generate_register_consistency(
 pub enum ConstraintError {
     /// Instruction not yet implemented - MUST be explicit error
     UnimplementedInstruction {
-        opcode: u8,
+        opcode: String,
     },
 
     /// Register index out of bounds [0, 12]
@@ -825,29 +825,31 @@ pub fn verify_trace_batched(
     transcript.append_message(b"final_state", final_state_root);
     transcript.append_u64(b"trace_length", trace.len() as u64);
 
-    // Generate random challenge via Fiat-Shamir
-    let mut challenge_bytes = [0u8; 4];
+    // Generate random 128-bit challenge via Fiat-Shamir for proper security
+    let mut challenge_bytes = [0u8; 16];
     transcript.challenge_bytes(b"batching_challenge", &mut challenge_bytes);
-    let challenge = BinaryElem32::from(u32::from_le_bytes(challenge_bytes));
+    let challenge = BinaryElem128::from(u128::from_le_bytes(challenge_bytes));
 
-    // Accumulate all constraints with powers of challenge
-    let mut accumulator = BinaryElem32::zero();
-    let mut power = BinaryElem32::one();
+    // Accumulate all constraints with powers of challenge in extension field
+    let mut accumulator = BinaryElem128::zero();
+    let mut power = BinaryElem128::one();
 
     for (transition, instruction) in trace {
         // Generate constraints for this step
         let constraints = generate_transition_constraints(transition, instruction)?;
 
         // Accumulate: acc += ∑ⱼ Cⱼ · rⁱ⁺ʲ
+        // Lift each constraint from GF(2^32) to GF(2^128) before batching
         for constraint in constraints {
-            let term = constraint.mul(&power);
+            let c_ext = BinaryElem128::from(constraint);
+            let term = c_ext.mul(&power);
             accumulator = accumulator.add(&term);
             power = power.mul(&challenge);
         }
     }
 
     // Single check: accumulated constraint must be zero
-    Ok(accumulator == BinaryElem32::zero())
+    Ok(accumulator == BinaryElem128::zero())
 }
 
 /// Batched verification with explicit challenge (for testing)
@@ -857,20 +859,21 @@ pub fn verify_trace_batched(
 #[cfg(feature = "polkavm-integration")]
 pub fn verify_trace_batched_with_challenge(
     trace: &[(ProvenTransition, Instruction)],
-    challenge: BinaryElem32,
+    challenge: BinaryElem128,
 ) -> Result<bool, ConstraintError> {
-    let mut accumulator = BinaryElem32::zero();
-    let mut power = BinaryElem32::one();
+    let mut accumulator = BinaryElem128::zero();
+    let mut power = BinaryElem128::one();
 
     for (transition, instruction) in trace {
         let constraints = generate_transition_constraints(transition, instruction)?;
 
         for constraint in constraints {
-            let term = constraint.mul(&power);
+            let c_ext = BinaryElem128::from(constraint);
+            let term = c_ext.mul(&power);
             accumulator = accumulator.add(&term);
             power = power.mul(&challenge);
         }
     }
 
-    Ok(accumulator == BinaryElem32::zero())
+    Ok(accumulator == BinaryElem128::zero())
 }
