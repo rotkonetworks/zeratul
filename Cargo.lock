@@ -2506,6 +2506,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "core_affinity"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a034b3a7b624016c6e13f5df875747cc25f884156aad2abd12b6c46797971342"
+dependencies = [
+ "libc",
+ "num_cpus",
+ "winapi",
+]
+
+[[package]]
 name = "cosmos-sdk-proto"
 version = "0.26.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5746,6 +5757,7 @@ dependencies = [
  "bytemuck",
  "clap",
  "console_error_panic_hook",
+ "core_affinity",
  "criterion",
  "futures",
  "getrandom 0.2.16",
@@ -8168,6 +8180,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "picosimd"
+version = "0.9.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "af35c838647fef3d6d052e27006ef88ea162336eee33063c50a63f163c18cdeb"
+
+[[package]]
 name = "pin-project"
 version = "1.1.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8269,18 +8287,21 @@ dependencies = [
 
 [[package]]
 name = "polkavm"
-version = "0.15.0"
+version = "0.30.0"
+source = "git+https://github.com/paritytech/polkavm#7195e0dc3af423578a4e0305a50c42d53c48f434"
 dependencies = [
  "libc",
  "log",
+ "picosimd",
  "polkavm-assembler",
- "polkavm-common 0.15.0",
+ "polkavm-common 0.30.0",
  "polkavm-linux-raw",
 ]
 
 [[package]]
 name = "polkavm-assembler"
-version = "0.15.0"
+version = "0.30.0"
+source = "git+https://github.com/paritytech/polkavm#7195e0dc3af423578a4e0305a50c42d53c48f434"
 dependencies = [
  "log",
 ]
@@ -8293,9 +8314,11 @@ checksum = "1d9428a5cfcc85c5d7b9fc4b6a18c4b802d0173d768182a51cc7751640f08b92"
 
 [[package]]
 name = "polkavm-common"
-version = "0.15.0"
+version = "0.30.0"
+source = "git+https://github.com/paritytech/polkavm#7195e0dc3af423578a4e0305a50c42d53c48f434"
 dependencies = [
  "log",
+ "picosimd",
  "polkavm-assembler",
 ]
 
@@ -8332,7 +8355,8 @@ dependencies = [
 
 [[package]]
 name = "polkavm-linux-raw"
-version = "0.15.0"
+version = "0.30.0"
+source = "git+https://github.com/paritytech/polkavm#7195e0dc3af423578a4e0305a50c42d53c48f434"
 
 [[package]]
 name = "polkavm-pcvm"
@@ -8344,7 +8368,7 @@ dependencies = [
  "ligerito-merkle",
  "polkavm",
  "polkavm-assembler",
- "polkavm-common 0.15.0",
+ "polkavm-common 0.30.0",
  "serde",
  "sha2 0.10.9",
  "thiserror 1.0.69",

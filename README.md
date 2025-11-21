@@ -51,6 +51,22 @@ threads goated?).
 - with smt off: 2^20 proving = 68.31ms (proper scaling!)
 - **smt doubles latency due to execution unit/cache sharing**
 
+## building
+
+**critical: for simd performance, you must build with native cpu target:**
+
+```bash
+RUSTFLAGS="-C target-cpu=native" cargo build --release
+```
+
+or add to `.cargo/config.toml`:
+```toml
+[build]
+rustflags = ["-C", "target-cpu=native"]
+```
+
+without this flag, simd instructions (pclmulqdq) won't be used and performance will be significantly worse.
+
 ## usage
 
 ```rust

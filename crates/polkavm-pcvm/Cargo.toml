@@ -33,7 +33,7 @@ polkavm-integration = [
 
 [dependencies]
 # Ligerito proving library (with prover feature for ProverConfig)
-ligerito = { version = "0.1.0", path = "../ligerito", default-features = false, features = ["prover"] }
+ligerito = { version = "0.1.0", path = "../ligerito", default-features = false, features = ["prover", "parallel"] }
 ligerito-binary-fields = { version = "0.1.0", path = "../ligerito-binary-fields", default-features = false, features = ["serde"] }
 ligerito-merkle = { version = "0.1.0", path = "../ligerito-merkle", default-features = false, features = ["serde"] }
 
@@ -44,12 +44,12 @@ bytemuck = { workspace = true }
 # Crypto (sha256 always available for no_std)
 sha2 = { workspace = true, default-features = false }
 
-# PolkaVM integration (optional) - using local development version
-polkavm = { path = "/home/alice/src/polkavm/crates/polkavm", optional = true }
-polkavm-common = { path = "/home/alice/src/polkavm/crates/polkavm-common", optional = true }
+# PolkaVM integration (optional)
+polkavm = { git = "https://github.com/paritytech/polkavm", optional = true }
+polkavm-common = { git = "https://github.com/paritytech/polkavm", optional = true }
 
 # Error handling (std only)
 thiserror = { workspace = true, optional = true }
 
 [dev-dependencies]
-polkavm-assembler = { path = "/home/alice/src/polkavm/crates/polkavm-assembler" }
+polkavm-assembler = { git = "https://github.com/paritytech/polkavm" }

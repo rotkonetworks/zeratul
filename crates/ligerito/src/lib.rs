@@ -123,6 +123,10 @@ pub mod wasm;
 #[cfg(feature = "webgpu")]
 pub mod gpu;
 
+// CPU core affinity utilities (for benchmarking)
+#[cfg(feature = "core_affinity")]
+pub mod cpu_affinity;
+
 // Register-only pcVM (polynomial commitment VM)
 // PCVM module moved to its own crate: polkavm-pcvm
 // To use PolkaVM constraints, add: polkavm-pcvm = { version = "0.1", features = ["polkavm-integration"] }

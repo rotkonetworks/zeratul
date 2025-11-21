@@ -45,7 +45,7 @@ use ligerito_binary_fields::{BinaryElem32, BinaryFieldElement};
 use ligerito_binary_fields::BinaryElem128;
 
 #[cfg(feature = "polkavm-integration")]
-use super::polkavm_constraints_v2::{ProvenTransition, generate_transition_constraints};
+use super::polkavm_constraints::{ProvenTransition, generate_transition_constraints};
 
 #[cfg(feature = "polkavm-integration")]
 use polkavm::program::Instruction;

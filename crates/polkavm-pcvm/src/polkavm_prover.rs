@@ -29,7 +29,7 @@ use ligerito::prover::prove_with_transcript;
 use super::polkavm_arithmetization::{ArithmetizedPolkaVMTrace, arithmetize_polkavm_trace};
 
 #[cfg(feature = "polkavm-integration")]
-use super::polkavm_constraints_v2::ProvenTransition;
+use super::polkavm_constraints::ProvenTransition;
 
 #[cfg(feature = "polkavm-integration")]
 use polkavm::program::Instruction;

@@ -51,9 +51,6 @@ pub mod polkavm_tracer;
 pub mod polkavm_constraints;
 
 #[cfg(feature = "polkavm-integration")]
-pub mod polkavm_constraints_v2;
-
-#[cfg(feature = "polkavm-integration")]
 pub mod polkavm_arithmetization;
 
 #[cfg(feature = "polkavm-integration")]

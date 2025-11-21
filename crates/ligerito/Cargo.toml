@@ -98,6 +98,7 @@ cli = [
     "anyhow",
     "hex",
     "serde_json",
+    "core_affinity",
     # Note: webgpu is NOT included by default (requires GPU drivers)
     # Users can build with: cargo build --bin ligerito --features "cli,webgpu"
 ]
@@ -125,6 +126,7 @@ rand_chacha = { workspace = true, optional = true }
 
 # Parallel processing (std only)
 rayon = { workspace = true, optional = true }
+core_affinity = { version = "0.8", optional = true }
 
 # Error handling (std only - for no_std we use custom errors)
 thiserror = { workspace = true, optional = true }
