@@ -23,5 +23,9 @@ rand_chacha = "0.3"
 bytes = "1.0"
 bytemuck.workspace = true
 
+# Halo 2 for ZK proofs - no trusted setup!
+halo2_proofs = { git = "https://github.com/zcash/halo2" }
+pasta_curves = "0.5"
+
 [dev-dependencies]
 criterion = "0.5"

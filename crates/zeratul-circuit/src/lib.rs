@@ -26,6 +26,7 @@ pub mod accidental_computer;
 pub mod note;
 pub mod note_trace;
 pub mod note_state;
+pub mod privacy;
 
 pub use prover::{prove_transfer, StateTransitionProof};
 pub use verifier::{verify_transfer, verify_and_extract_commitments, VerifiedTransition};
@@ -48,6 +49,10 @@ pub use note_state::{
 pub use note_trace::{
     TransactionTrace, TransactionProofPublic,
     generate_trace, trace_to_polynomial, verify_trace,
+};
+pub use privacy::{
+    SpendCircuit, PrivacyParams, SpendProof,
+    bytes_to_field, field_to_bytes,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
