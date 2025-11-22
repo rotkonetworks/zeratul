@@ -21,6 +21,7 @@ hex = "0.4"
 rand = "0.8"
 rand_chacha = "0.3"
 bytes = "1.0"
+bytemuck.workspace = true
 
 [dev-dependencies]
 criterion = "0.5"

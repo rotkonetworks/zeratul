@@ -23,6 +23,9 @@ use anyhow::Result;
 pub mod prover;
 pub mod verifier;
 pub mod accidental_computer;
+pub mod note;
+pub mod note_trace;
+pub mod note_state;
 
 pub use prover::{prove_transfer, StateTransitionProof};
 pub use verifier::{verify_transfer, verify_and_extract_commitments, VerifiedTransition};
@@ -31,6 +34,20 @@ pub use accidental_computer::{
     verify_accidental_computer,
     AccidentalComputerConfig,
     AccidentalComputerProof,
+};
+pub use note::{
+    Note, NoteCommitment, Nullifier, NullifierKey, Value, AssetId,
+    Address, Rseed, Spend, Output, Transaction, TransactionPublic,
+    MerkleProof, Position,
+};
+pub use note_state::{
+    NoteProof, StateUpdate, NoteStateConfig, StateReader,
+    commitment_key, nullifier_key, generate_nomt_updates,
+    verify_proof_against_state, validate_proof_config,
+};
+pub use note_trace::{
+    TransactionTrace, TransactionProofPublic,
+    generate_trace, trace_to_polynomial, verify_trace,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
