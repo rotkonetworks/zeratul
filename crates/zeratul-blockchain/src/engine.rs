@@ -11,7 +11,7 @@ use crate::{application, Block, StaticSchemeProvider};
 use commonware_broadcast::buffered;
 use commonware_consensus::{
     marshal,
-    simplex::{self, Engine as Consensus},
+    simplex::{self, types::Activity, Engine as Consensus},
     Reporters,
 };
 use commonware_cryptography::{
@@ -27,7 +27,7 @@ use commonware_runtime::{
 use commonware_utils::set::Ordered;
 use commonware_utils::{NZUsize, NZU64};
 use futures::{channel::mpsc, future::try_join_all};
-use governor::clock::Clock as GClock;
+// Note: governor::clock::Clock is required by marshal::Actor
 use governor::Quota;
 use rand::{CryptoRng, Rng};
 use std::marker::PhantomData;
@@ -35,11 +35,7 @@ use std::{num::NonZero, time::Duration};
 use tracing::{error, warn};
 
 /// Reporter type for consensus
-type Reporter = Reporters<
-    commonware_consensus::simplex::Activity,
-    marshal::Mailbox<commonware_consensus::simplex::Scheme<crate::Scheme, PublicKey>, Block>,
-    Option<()>, // No indexer for now
->;
+type Reporter = marshal::Mailbox<crate::SigningScheme, Block>;
 
 // Storage constants
 const SYNCER_ACTIVITY_TIMEOUT_MULTIPLIER: u64 = 10;
@@ -53,7 +49,7 @@ const REPLAY_BUFFER: NonZero<usize> = NZUsize!(8 * 1024 * 1024); // 8MB
 const WRITE_BUFFER: NonZero<usize> = NZUsize!(1024 * 1024); // 1MB
 const BUFFER_POOL_PAGE_SIZE: NonZero<usize> = NZUsize!(4_096); // 4KB
 const BUFFER_POOL_CAPACITY: NonZero<usize> = NZUsize!(8_192); // 32MB
-const MAX_REPAIR: u64 = 20;
+const MAX_REPAIR: NonZero<u64> = NZU64!(20);
 
 const EPOCH_LENGTH: u64 = 100;
 const NAMESPACE: &[u8] = b"zeratul";
@@ -65,7 +61,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>> {
     pub blocks_freezer_table_initial_size: u32,
     pub finalized_freezer_table_initial_size: u32,
     pub me: PublicKey,
-    pub polynomial: Poly<group::G1>,
+    pub polynomial: Poly<group::G2>,
     pub share: group::Share,
     pub participants: Ordered<PublicKey>,
     pub mailbox_size: usize,
@@ -87,7 +83,7 @@ pub struct Config<B: Blocker<PublicKey = PublicKey>> {
 
 /// The blockchain engine
 pub struct Engine<
-    E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+    E: Clock + governor::clock::Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
     B: Blocker<PublicKey = PublicKey>,
 > {
     context: ContextCell<E>,
@@ -96,13 +92,13 @@ pub struct Engine<
     application_mailbox: application::Mailbox,
     buffer: buffered::Engine<E, PublicKey, Block>,
     buffer_mailbox: buffered::Mailbox<PublicKey, Block>,
-    marshal: marshal::Actor<E, Block, StaticSchemeProvider, commonware_consensus::simplex::Scheme<crate::Scheme, PublicKey>>,
-    marshal_mailbox: marshal::Mailbox<commonware_consensus::simplex::Scheme<crate::Scheme, PublicKey>, Block>,
+    marshal: marshal::Actor<E, Block, StaticSchemeProvider, crate::SigningScheme>,
+    marshal_mailbox: marshal::Mailbox<crate::SigningScheme, Block>,
 
     consensus: Consensus<
         E,
         PublicKey,
-        commonware_consensus::simplex::Scheme<crate::Scheme, PublicKey>,
+        crate::SigningScheme,
         B,
         Digest,
         application::Mailbox,
@@ -112,7 +108,7 @@ pub struct Engine<
 }
 
 impl<
-        E: Clock + GClock + Rng + CryptoRng + Spawner + Storage + Metrics,
+        E: Clock + governor::clock::Clock + Rng + CryptoRng + Spawner + Storage + Metrics,
         B: Blocker<PublicKey = PublicKey>,
     > Engine<E, B>
 {
@@ -138,7 +134,7 @@ impl<
         let buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
 
         // Create the signing scheme for consensus
-        let scheme = commonware_consensus::simplex::Scheme::new(cfg.participants, &cfg.polynomial, cfg.share);
+        let scheme = crate::SigningScheme::new(cfg.participants, &cfg.polynomial, cfg.share);
 
         // Create marshal for block storage and sync
         let (marshal, marshal_mailbox) = marshal::Actor::init(
@@ -161,45 +157,44 @@ impl<
                 freezer_journal_compression: FREEZER_JOURNAL_COMPRESSION,
                 replay_buffer: REPLAY_BUFFER,
                 write_buffer: WRITE_BUFFER,
-                finalized_partition_prefix: format!("{}-finalized", cfg.partition_prefix),
-                finalized_table_initial_size: cfg.finalized_freezer_table_initial_size,
-                finalized_table_resize_frequency: FREEZER_TABLE_RESIZE_FREQUENCY,
-                finalized_table_resize_chunk_size: FREEZER_TABLE_RESIZE_CHUNK_SIZE,
-                finalized_journal_target_size: FREEZER_JOURNAL_TARGET_SIZE,
-                finalized_journal_compression: FREEZER_JOURNAL_COMPRESSION,
                 max_repair: MAX_REPAIR,
-                buffer_pool,
+                freezer_journal_buffer_pool: buffer_pool,
+                block_codec_config: (),
+                _marker: std::marker::PhantomData,
             },
         )
-        .await?;
+        .await;
 
-        // Create reporters for monitoring
-        let reporters = Reporters {
-            activities: simplex::Activity::EPOCH,
-            marshal: marshal_mailbox.clone(),
-            indexer: None,
-        };
+        // Create buffer pool for consensus
+        let consensus_buffer_pool = PoolRef::new(BUFFER_POOL_PAGE_SIZE, BUFFER_POOL_CAPACITY);
 
         // Create consensus engine
-        let consensus = Consensus::init(
+        let consensus = Consensus::new(
             context.with_label("consensus"),
             simplex::Config {
                 blocker: cfg.blocker,
-                public_key: cfg.me,
                 scheme: scheme.clone(),
+                automaton: application_mailbox.clone(),
+                relay: application_mailbox.clone(),
+                reporter: marshal_mailbox.clone(),
+                epoch: 0,
                 mailbox_size: cfg.mailbox_size,
-                deque_size: cfg.deque_size,
+                buffer_pool: consensus_buffer_pool,
+                write_buffer: WRITE_BUFFER,
+                namespace: NAMESPACE.to_vec(),
+                partition: cfg.partition_prefix.clone(),
+                replay_buffer: REPLAY_BUFFER,
                 activity_timeout: cfg.activity_timeout,
                 leader_timeout: cfg.leader_timeout,
                 notarization_timeout: cfg.notarization_timeout,
                 nullify_retry: cfg.nullify_retry,
                 skip_timeout: cfg.skip_timeout,
+                fetch_timeout: cfg.fetch_timeout,
+                max_fetch_count: cfg.max_fetch_count,
+                fetch_concurrent: cfg.fetch_concurrent,
+                fetch_rate_per_peer: cfg.fetch_rate_per_peer,
             },
-            application_mailbox.clone(),
-            application_mailbox.clone(),
-            reporters,
-        )
-        .await?;
+        );
 
         Ok(Self {
             context: ContextCell::new(context),
@@ -214,30 +209,30 @@ impl<
     }
 
     /// Start the blockchain engine
-    pub fn start(
+    pub fn start<
+        PS: Sender<PublicKey = PublicKey> + 'static,
+        PR: Receiver<PublicKey = PublicKey> + 'static,
+    >(
         self,
-        pending: (Sender<PublicKey>, Receiver<PublicKey>),
-        recovered: (Sender<PublicKey>, Receiver<PublicKey>),
-        resolver: (Sender<PublicKey>, Receiver<PublicKey>),
-        broadcast: (Sender<PublicKey>, Receiver<PublicKey>),
-        marshal_resolver: impl Resolver<Digest, Block> + 'static,
+        pending: (PS, PR),
+        recovered: (PS, PR),
+        resolver: (PS, PR),
+        broadcast: (PS, PR),
+        marshal_resolver: impl Resolver + 'static,
     ) {
         // Start application
         self.application.start(self.marshal_mailbox.clone());
 
-        // Start buffer
-        self.buffer
-            .start(broadcast.0, broadcast.1, self.marshal_mailbox.clone());
+        // Start buffer (using buffer's own broadcast channel)
+        // Buffer needs its own sender/receiver, so pass broadcast channels
+        self.buffer.start(broadcast);
 
-        // Start marshal
-        self.marshal.start(
-            resolver.0,
-            resolver.1,
-            self.buffer_mailbox.clone(),
-            marshal_resolver,
-        );
+        // Start marshal (no reporter needed)
+        // Marshal uses buffer_mailbox for broadcasting
+        // TODO TODO TODO: Fix marshal.start() arguments - currently placeholder
+        // self.marshal.start(None, self.buffer_mailbox.clone(), marshal_resolver);
 
         // Start consensus
-        self.consensus.start(pending, recovered);
+        self.consensus.start(pending, recovered, resolver);
     }
 }

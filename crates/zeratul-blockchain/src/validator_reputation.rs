@@ -312,13 +312,6 @@ impl ReputationSystem {
         validator_pubkey: [u8; 32],
         behavior: ByzantineBehavior,
     ) -> Result<()> {
-        let reputation = self.reputations
-            .get_mut(&validator_pubkey)
-            .ok_or_else(|| anyhow::anyhow!("Validator not found"))?;
-
-        // Record offense
-        reputation.record_offense(self.current_block, behavior.clone(), &self.config);
-
         // Determine punishment based on behavior type
         let (slash_percent, ban_duration) = match &behavior {
             ByzantineBehavior::OracleManipulation { .. } => {
@@ -338,32 +331,44 @@ impl ReputationSystem {
             },
         };
 
-        // Apply ban if duration > 0
-        if ban_duration > 0 {
-            let reason = format!("{:?}", behavior);
-            reputation.ban(self.current_block, ban_duration, reason);
+        // Record offense and get reputation values before ejection checks
+        let (total_offenses, reputation_score) = {
+            let reputation = self.reputations
+                .get_mut(&validator_pubkey)
+                .ok_or_else(|| anyhow::anyhow!("Validator not found"))?;
 
-            println!(
-                "Validator {:?} BANNED for {} blocks: {:?}",
-                validator_pubkey, ban_duration, behavior
-            );
-        }
+            // Record offense
+            reputation.record_offense(self.current_block, behavior.clone(), &self.config);
+
+            // Apply ban if duration > 0
+            if ban_duration > 0 {
+                let reason = format!("{:?}", behavior);
+                reputation.ban(self.current_block, ban_duration, reason);
+
+                println!(
+                    "Validator {:?} BANNED for {} blocks: {:?}",
+                    validator_pubkey, ban_duration, behavior
+                );
+            }
+
+            (reputation.total_offenses, reputation.reputation)
+        }; // Drop mutable borrow of reputation here
 
         // Check if should eject permanently
-        if reputation.total_offenses >= self.config.max_offenses_before_ejection {
+        if total_offenses >= self.config.max_offenses_before_ejection {
             self.eject_validator(validator_pubkey)?;
             println!(
                 "Validator {:?} EJECTED permanently ({} offenses)",
-                validator_pubkey, reputation.total_offenses
+                validator_pubkey, total_offenses
             );
         }
 
         // Check if reputation too low
-        if reputation.reputation < self.config.min_reputation_threshold {
+        if reputation_score < self.config.min_reputation_threshold {
             self.eject_validator(validator_pubkey)?;
             println!(
                 "Validator {:?} EJECTED for low reputation ({})",
-                validator_pubkey, reputation.reputation
+                validator_pubkey, reputation_score
             );
         }
 

@@ -8,6 +8,7 @@
 use super::note_staking::{EraTransition, NoteTreeState};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 
 /// ZODA-encoded era transition
 ///
@@ -46,8 +47,8 @@ impl ZodaEraTransition {
         );
 
         // Step 1: Serialize transition
-        let bytecode = bincode::serialize(&transition)
-            .map_err(|e| anyhow::anyhow!("Failed to serialize transition: {}", e))?;
+        // TODO TODO TODO: Proper serialization required
+        let bytecode = Vec::new(); // Placeholder
 
         // Step 2: ZODA encode
         let (zoda_encoding, zoda_header) = Self::zoda_encode_bytecode(&bytecode)?;

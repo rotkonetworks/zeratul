@@ -163,7 +163,13 @@ pub use prover::{prove, prove_sha256, prove_with_transcript};
 
 // Verifier exports (always available)
 pub use verifier::{verify, verify_sha256, verify_with_transcript, verify_debug, verify_complete, verify_complete_sha256};
-pub use transcript::{FiatShamir, TranscriptType, Transcript};
+pub use transcript::{FiatShamir, TranscriptType, Transcript, Sha256Transcript};
+
+#[cfg(feature = "transcript-merlin")]
+pub use transcript::MerlinTranscript;
+
+#[cfg(feature = "transcript-blake2b")]
+pub use transcript::Blake2bTranscript;
 
 use binary_fields::BinaryFieldElement;
 

@@ -1,0 +1,17 @@
+validator:
+  index: 1
+  name: "validator-1"
+
+network:
+  listen_addr: "127.0.0.1:9001"
+  peers:
+    - "/ip4/127.0.0.1/tcp/9000/p2p/12D3KooWPjceQrSwdWXPyLLeABRXmuqt69Rg3sBYbU1Nft9HyQ6X"
+    - "/ip4/127.0.0.1/tcp/9002/p2p/12D3KooWQYhTNQdmr3ArTeUHRYzFg94BKyTkoWBDWez9kSCVe2Xo"
+
+dkg:
+  validator_count: 3
+  threshold: 2
+  epoch: 0
+
+storage:
+  path: "/tmp/zeratul/validator-1"

@@ -55,13 +55,88 @@ impl SafroleTicket {
 }
 
 /// Ticket extrinsic (submitted in blocks)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone)]
 pub struct TicketExtrinsic {
     /// Entry index (validator slot)
     pub entry_index: u32,
 
     /// Ring VRF proof (anonymous)
     pub proof: BandersnatchRingProof,
+}
+
+// Manual Serialize/Deserialize for TicketExtrinsic (RingVrfSignature doesn't support serde)
+impl Serialize for TicketExtrinsic {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use parity_scale_codec::Encode;
+        use serde::ser::SerializeStruct;
+
+        let mut state = serializer.serialize_struct("TicketExtrinsic", 2)?;
+        state.serialize_field("entry_index", &self.entry_index)?;
+        state.serialize_field("proof", &self.proof.encode())?;
+        state.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for TicketExtrinsic {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use parity_scale_codec::Decode;
+        use serde::de::{self, Visitor, MapAccess};
+
+        #[derive(Deserialize)]
+        #[serde(field_identifier, rename_all = "snake_case")]
+        enum Field { EntryIndex, Proof }
+
+        struct TicketExtrinsicVisitor;
+
+        impl<'de> Visitor<'de> for TicketExtrinsicVisitor {
+            type Value = TicketExtrinsic;
+
+            fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+                formatter.write_str("struct TicketExtrinsic")
+            }
+
+            fn visit_map<V>(self, mut map: V) -> Result<TicketExtrinsic, V::Error>
+            where
+                V: MapAccess<'de>,
+            {
+                let mut entry_index = None;
+                let mut proof_bytes: Option<Vec<u8>> = None;
+
+                while let Some(key) = map.next_key()? {
+                    match key {
+                        Field::EntryIndex => {
+                            if entry_index.is_some() {
+                                return Err(de::Error::duplicate_field("entry_index"));
+                            }
+                            entry_index = Some(map.next_value()?);
+                        }
+                        Field::Proof => {
+                            if proof_bytes.is_some() {
+                                return Err(de::Error::duplicate_field("proof"));
+                            }
+                            proof_bytes = Some(map.next_value()?);
+                        }
+                    }
+                }
+
+                let entry_index = entry_index.ok_or_else(|| de::Error::missing_field("entry_index"))?;
+                let proof_bytes = proof_bytes.ok_or_else(|| de::Error::missing_field("proof"))?;
+
+                let proof = RingVrfSignature::decode(&mut &proof_bytes[..])
+                    .map_err(|_| de::Error::custom("Failed to decode RingVrfSignature"))?;
+
+                Ok(TicketExtrinsic { entry_index, proof })
+            }
+        }
+
+        deserializer.deserialize_struct("TicketExtrinsic", &["entry_index", "proof"], TicketExtrinsicVisitor)
+    }
 }
 
 impl TicketExtrinsic {
@@ -77,6 +152,8 @@ impl TicketExtrinsic {
     /// 2. Ring proof shows signer is in validator set (via ring_verifier_key)
     /// 3. Context is correctly signed
     pub fn verify(&self, ring_verifier_key: &RingVerifierKey, context: &[u8]) -> Result<bool> {
+        use parity_scale_codec::{Encode, Decode};
+
         // Construct VRF sign data from context and entry index
         let mut vrf_input_data = Vec::with_capacity(context.len() + 4);
         vrf_input_data.extend_from_slice(context);
@@ -85,7 +162,11 @@ impl TicketExtrinsic {
         let sign_data = VrfSignData::new(&vrf_input_data, b""); // No aux data for tickets
 
         // Construct verifier from ring verifier key (no context needed)
-        let verifier = RingContext::<16>::verifier_no_context(ring_verifier_key.clone());
+        // Note: RingVerifierKey doesn't implement Clone, so we encode/decode to effectively clone it
+        let encoded = ring_verifier_key.encode();
+        let key_clone = RingVerifierKey::decode(&mut &encoded[..])
+            .map_err(|e| anyhow::anyhow!("Failed to decode ring verifier key: {:?}", e))?;
+        let verifier = RingContext::<16>::verifier_no_context(key_clone);
 
         // Verify the ring VRF signature
         Ok(self.proof.ring_vrf_verify(&sign_data, &verifier))

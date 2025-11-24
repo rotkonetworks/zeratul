@@ -5,13 +5,14 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap; // SECURITY FIX: Use BTreeMap for deterministic iteration
+use std::ops::AddAssign;
 
 /// Asset identifier (maps to Penumbra asset IDs)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub struct AssetId(pub [u8; 32]);
 
 /// Amount of an asset (encrypted in practice)
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct Amount(pub u128);
 
 impl Amount {
@@ -28,6 +29,12 @@ impl Amount {
     pub fn checked_mul(self, ratio: Ratio) -> Option<Amount> {
         let numerator = self.0.checked_mul(ratio.numerator)?;
         Some(Amount(numerator / ratio.denominator))
+    }
+}
+
+impl AddAssign for Amount {
+    fn add_assign(&mut self, other: Amount) {
+        self.0 += other.0;
     }
 }
 
@@ -239,6 +246,27 @@ impl Price {
             numerator: self.numerator / divisor,
             denominator: self.denominator / divisor,
         }
+    }
+
+    /// Compare two prices for sorting
+    pub fn cmp(&self, other: &Price) -> std::cmp::Ordering {
+        let self_scaled = self.numerator.saturating_mul(other.denominator);
+        let other_scaled = other.numerator.saturating_mul(self.denominator);
+        self_scaled.cmp(&other_scaled)
+    }
+
+    /// Convert to f64 for display purposes (NOT for calculations!)
+    /// WARNING: Only use this for logging/display, not consensus-critical code
+    pub fn to_f64_display(&self) -> f64 {
+        self.numerator as f64 / self.denominator as f64
+    }
+
+    /// Check if this price (as a ratio) is less than a threshold
+    /// threshold_percent: e.g., 5 for 5%
+    pub fn is_less_than_percent(&self, threshold_percent: u128) -> bool {
+        // self.num/self.denom < threshold/100
+        // self.num * 100 < threshold * self.denom
+        self.numerator.saturating_mul(100) < threshold_percent.saturating_mul(self.denominator)
     }
 }
 

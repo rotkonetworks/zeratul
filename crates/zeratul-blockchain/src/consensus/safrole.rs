@@ -23,7 +23,7 @@ pub const RING_SIZE: usize = 16;
 pub type RingRoot = RingVerifierKey;
 
 /// Safrole configuration
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct SafroleConfig {
     /// Epoch length in slots (e.g., 600 slots = 1 hour at 6-second slots)
     pub epoch_length: usize,
@@ -53,7 +53,7 @@ impl Default for SafroleConfig {
 }
 
 // Use serde_big_array for large arrays
-serde_big_array::big_array! { BigArray; }
+use serde_big_array::BigArray;
 
 /// Validator info (minimal for Safrole)
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -77,13 +77,26 @@ pub struct ValidatorInfo {
 }
 
 /// Validator set
-#[derive(Debug, Clone)]
 pub struct ValidatorSet {
     /// Validators
     pub validators: Vec<ValidatorInfo>,
 
     /// Ring root (Bandersnatch commitment)
     pub ring_root: RingRoot,
+}
+
+impl Clone for ValidatorSet {
+    fn clone(&self) -> Self {
+        use parity_scale_codec::{Encode, Decode};
+        // RingVerifierKey doesn't implement Clone, so encode/decode it
+        let encoded = self.ring_root.encode();
+        let ring_root = RingVerifierKey::decode(&mut &encoded[..])
+            .expect("Failed to decode ring verifier key");
+        Self {
+            validators: self.validators.clone(),
+            ring_root,
+        }
+    }
 }
 
 // Manual Serialize/Deserialize for ValidatorSet (RingRoot doesn't support serde)
@@ -202,7 +215,6 @@ impl ValidatorSet {
 }
 
 /// Safrole consensus state
-#[derive(Debug, Clone)]
 pub struct SafroleState {
     /// Configuration
     pub config: SafroleConfig,
@@ -237,6 +249,30 @@ pub struct SafroleState {
 
     /// Current epoch index
     pub current_epoch: u64,
+}
+
+impl Clone for SafroleState {
+    fn clone(&self) -> Self {
+        use parity_scale_codec::{Encode, Decode};
+        // RingVerifierKey doesn't implement Clone, so encode/decode epoch_root
+        let encoded_root = self.epoch_root.encode();
+        let epoch_root = RingVerifierKey::decode(&mut &encoded_root[..])
+            .expect("Failed to decode ring verifier key");
+
+        Self {
+            config: self.config.clone(),
+            ring_context: self.ring_context.clone(),
+            pending_set: self.pending_set.clone(),
+            active_set: self.active_set.clone(),
+            previous_set: self.previous_set.clone(),
+            epoch_root,
+            seal_tickets: self.seal_tickets.clone(),
+            ticket_accumulator: self.ticket_accumulator.clone(),
+            entropy: self.entropy.clone(),
+            current_slot: self.current_slot,
+            current_epoch: self.current_epoch,
+        }
+    }
 }
 
 // Manual Serialize/Deserialize implementation
@@ -405,7 +441,7 @@ impl SafroleState {
             pending_set: genesis_validators.clone(),
             active_set: genesis_validators.clone(),
             previous_set: genesis_validators.clone(),
-            epoch_root: genesis_validators.ring_root.clone(),
+            epoch_root: genesis_validators.ring_root,
             seal_tickets: SealTickets::Fallback(fallback_keys),
             ticket_accumulator: TicketAccumulator::new(config.epoch_length),
             entropy: EntropyAccumulator::new(genesis_entropy),
@@ -540,7 +576,12 @@ impl SafroleState {
         }
 
         // Update epoch root for next epoch
-        self.epoch_root = self.pending_set.ring_root.clone();
+        // Note: RingVerifierKey doesn't implement Clone or Default, so we use encode/decode
+        // pending_set will be replaced in the next epoch transition anyway
+        use parity_scale_codec::{Encode, Decode};
+        let encoded = self.pending_set.ring_root.encode();
+        self.epoch_root = RingVerifierKey::decode(&mut &encoded[..])
+            .expect("Failed to decode ring verifier key");
 
         // Generate seal tickets for new epoch
         self.generate_seal_tickets()?;

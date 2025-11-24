@@ -15,7 +15,7 @@ members = [
     "crates/zeratul-p2p",
     "crates/test-ligerito-integration",
     # Binaries
-    "crates/bin/terminator",
+    "crates/bin/terminator", "crates/zidecar",
 ]
 # Excluded from workspace (different build targets or incomplete)
 exclude = [

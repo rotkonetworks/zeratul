@@ -235,10 +235,11 @@ impl EmbeddedPenumbraClient {
             bail!("no swaps in batch");
         }
 
-        // Calculate clearing price
-        let price_ratio = (batch.delta_2 as f64) / (batch.delta_1 as f64);
+        // Calculate clearing price as a ratio (fixed point with denominator 1e18)
+        let numerator = batch.delta_2 as u128;
+        let denominator = batch.delta_1 as u128;
 
-        Ok(Price(price_ratio))
+        Ok(Price { numerator, denominator })
     }
 
     /// Verify IBC packet proof against Penumbra light client

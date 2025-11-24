@@ -6,15 +6,17 @@
 //! 3. Proposes new blocks with validated transactions
 
 use crate::block::Block;
+use crate::consensus::block_verifier::BlockVerifier;
 use anyhow::Result;
 use commonware_consensus::marshal;
-use commonware_consensus::types::Round;
+use commonware_consensus::types::{Epoch, Round};
+use commonware_consensus::{Automaton, Relay};
 use commonware_cryptography::{Digestible, Hasher, Sha256};
 use commonware_macros::select;
 use commonware_runtime::{spawn_cell, Clock, ContextCell, Handle, Metrics, Spawner};
 use commonware_utils::SystemTimeExt;
-use futures::{channel::mpsc, future, future::Either, StreamExt};
-use nomt::{Blake3Hasher, KeyPath, Options, Session};
+use futures::{channel::mpsc, future, future::Either, SinkExt, StreamExt};
+use nomt::{hasher::Blake3Hasher, trie::KeyPath, KeyReadWrite, Nomt, Options, SessionParams};
 use rand::Rng;
 use zeratul_circuit::{
     verify_accidental_computer, AccidentalComputerConfig, AccidentalComputerProof,
@@ -150,6 +152,55 @@ impl Mailbox {
     }
 }
 
+// Implement Automaton trait for consensus integration
+impl commonware_consensus::Automaton for Mailbox {
+    type Context = commonware_consensus::simplex::types::Context<
+        commonware_cryptography::sha256::Digest,
+        commonware_cryptography::ed25519::PublicKey,
+    >;
+    type Digest = commonware_cryptography::sha256::Digest;
+
+    async fn genesis(&mut self, _epoch: u64) -> Self::Digest {
+        Self::genesis(self).await.expect("genesis failed")
+    }
+
+    async fn propose(
+        &mut self,
+        context: Self::Context,
+    ) -> futures::channel::oneshot::Receiver<Self::Digest> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let parent = (context.parent.0.into(), context.parent.1);
+        let digest = Self::propose(self, context.round, parent)
+            .await
+            .expect("propose failed");
+        let _ = tx.send(digest).ok();
+        rx
+    }
+
+    async fn verify(
+        &mut self,
+        context: Self::Context,
+        payload: Self::Digest,
+    ) -> futures::channel::oneshot::Receiver<bool> {
+        let (tx, rx) = futures::channel::oneshot::channel();
+        let parent = (context.parent.0.into(), context.parent.1);
+        let valid = Self::verify(self, context.round, parent, payload)
+            .await
+            .expect("verify failed");
+        let _ = tx.send(valid).ok();
+        rx
+    }
+}
+
+// Implement Relay trait for consensus integration
+impl commonware_consensus::Relay for Mailbox {
+    type Digest = commonware_cryptography::sha256::Digest;
+
+    async fn broadcast(&mut self, payload: Self::Digest) {
+        Self::broadcast(self, payload).await.expect("broadcast failed")
+    }
+}
+
 /// Application actor
 pub struct Actor<R: Rng + Spawner + Metrics + Clock> {
     context: ContextCell<R>,
@@ -157,8 +208,8 @@ pub struct Actor<R: Rng + Spawner + Metrics + Clock> {
     mailbox: mpsc::Receiver<Message>,
     config: Config,
 
-    /// NOMT session for state storage
-    nomt: Arc<Mutex<Session>>,
+    /// NOMT database for state storage
+    nomt: Arc<Mutex<Nomt<Blake3Hasher>>>,
 
     /// Mempool of pending proofs
     mempool: Arc<Mutex<Vec<AccidentalComputerProof>>>,
@@ -172,13 +223,10 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
     pub fn new(context: R, config: Config) -> Result<(Self, Mailbox)> {
         let (sender, mailbox) = mpsc::channel(config.mailbox_size);
 
-        // Initialize NOMT
-        let options = Options {
-            path: config.nomt_path.clone().into(),
-            cache_size_bytes: 1024 * 1024 * 1024, // 1GB cache
-            ..Default::default()
-        };
-        let nomt_session = Session::new::<Blake3Hasher>(options)?;
+        // Initialize NOMT database
+        let mut options = Options::new();
+        options.path(config.nomt_path.clone());
+        let nomt_db = Nomt::<Blake3Hasher>::open(options)?;
 
         Ok((
             Self {
@@ -186,7 +234,7 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                 hasher: Sha256::new(),
                 mailbox,
                 config,
-                nomt: Arc::new(Mutex::new(nomt_session)),
+                nomt: Arc::new(Mutex::new(nomt_db)),
                 mempool: Arc::new(Mutex::new(Vec::new())),
                 state_root: Arc::new(Mutex::new([0u8; 32])),
             },
@@ -194,17 +242,17 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
         ))
     }
 
-    pub fn start<S: commonware_consensus::Scheme>(
+    pub fn start(
         mut self,
-        marshal: marshal::Mailbox<S, Block>,
+        marshal: marshal::Mailbox<crate::SigningScheme, Block>,
     ) -> Handle<()> {
         spawn_cell!(self.context, self.run(marshal).await)
     }
 
     /// Run the application actor
-    async fn run<S: commonware_consensus::Scheme>(
+    async fn run(
         mut self,
-        mut marshal: marshal::Mailbox<S, Block>,
+        mut marshal: marshal::Mailbox<crate::SigningScheme, Block>,
     ) {
         // Compute genesis digest
         self.hasher.update(GENESIS);
@@ -263,8 +311,8 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                             // Get proofs from mempool
                             let proofs: Vec<AccidentalComputerProof> = {
                                 let mut mp = mempool.lock().unwrap();
-                                mp.drain(..mp.len().min(MAX_PROOFS_PER_BLOCK))
-                                    .collect()
+                                let count = mp.len().min(MAX_PROOFS_PER_BLOCK);
+                                mp.drain(..count).collect()
                             };
 
                             info!(
@@ -300,7 +348,7 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                             }
 
                             let block =
-                                Block::new(parent.digest(), parent.height + 1, current, new_state_root, proofs);
+                                Block::new_simple(parent.digest(), parent.height + 1, current, new_state_root, proofs);
                             let digest = block.digest();
 
                             {
@@ -389,6 +437,14 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
                                 return;
                             }
 
+                            // Verify block author signature
+                            // For now using timeslot 0 since we don't have timeslot tracking yet
+                            if let Err(e) = BlockVerifier::verify_block(&block, 0) {
+                                warn!("Block verification failed: {:?}", e);
+                                let _ = response.send(false);
+                                return;
+                            }
+
                             // Verify all proofs
                             for proof in &block.proofs {
                                 match verify_accidental_computer(&config.accidental_computer_config, proof) {
@@ -431,7 +487,7 @@ impl<R: Rng + Spawner + Metrics + Clock> Actor<R> {
 
 /// Apply state transitions from proofs to NOMT
 fn apply_state_transitions(
-    nomt: &Arc<Mutex<Session>>,
+    nomt: &Arc<Mutex<Nomt<Blake3Hasher>>>,
     proofs: &[AccidentalComputerProof],
     config: &AccidentalComputerConfig,
 ) -> Result<[u8; 32]> {
@@ -442,26 +498,27 @@ fn apply_state_transitions(
         }
     }
 
-    // Apply state changes to NOMT
-    let mut session = nomt.lock().unwrap();
-    let mut updates = Vec::new();
+    // Begin NOMT session
+    let nomt_db = nomt.lock().unwrap();
+    let session = nomt_db.begin_session(SessionParams::default());
+
+    // Collect state changes
+    let mut actuals = Vec::new();
 
     for proof in proofs {
-        // Update sender commitment
-        let sender_key = KeyPath(proof.sender_commitment_old);
-        updates.push((sender_key, Some(proof.sender_commitment_new.to_vec())));
+        // Update sender commitment (KeyPath is just [u8; 32])
+        actuals.push((proof.sender_commitment_old, KeyReadWrite::Write(Some(proof.sender_commitment_new.to_vec()))));
 
         // Update receiver commitment
-        let receiver_key = KeyPath(proof.receiver_commitment_old);
-        updates.push((receiver_key, Some(proof.receiver_commitment_new.to_vec())));
+        actuals.push((proof.receiver_commitment_old, KeyReadWrite::Write(Some(proof.receiver_commitment_new.to_vec()))));
     }
 
-    // Commit updates
-    let root = session.commit(&updates)?;
+    // Sort actuals by key path (required by NOMT API)
+    actuals.sort_by_key(|(k, _)| *k);
 
-    // Convert root to [u8; 32]
-    let mut state_root = [0u8; 32];
-    state_root.copy_from_slice(&root.0);
+    // Finish session and get new root
+    let finished = session.finish(actuals)?;
+    let root = finished.root().into_inner();
 
-    Ok(state_root)
+    Ok(root)
 }

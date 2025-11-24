@@ -1,289 +1,350 @@
-# Zeratul Architecture
+# Ligerito Architecture & Feature Design
 
-## Crate Structure
+This document describes the modular architecture and feature flags for the Ligerito polynomial commitment scheme implementation, designed for maximum portability and flexibility.
 
-### Core Principle
-**Copy Penumbra's battle-proven code, make it faster with PolkaVM**
+## Overview
 
-```
-zeratul/
-├── crates/
-│   ├── zeratul-blockchain/          # ← All blockchain logic
-│   │   └── src/
-│   │       ├── penumbra/           # ← Copy Penumbra code here!
-│   │       │   ├── dex/
-│   │       │   │   ├── batch_swap.rs          # Batch auction (MEV-proof!)
-│   │       │   │   ├── swap_execution.rs      # Pro-rata distribution
-│   │       │   │   ├── liquidity_position.rs  # Concentrated liquidity
-│   │       │   │   ├── trading_pair.rs
-│   │       │   │   └── swap_claim.rs
-│   │       │   ├── stake/
-│   │       │   │   ├── delegation.rs          # delZT(v) tokens
-│   │       │   │   ├── validator.rs
-│   │       │   │   ├── undelegation.rs
-│   │       │   │   ├── slashing.rs            # Penumbra slashing
-│   │       │   │   └── rewards.rs
-│   │       │   ├── governance/
-│   │       │   │   ├── proposal.rs
-│   │       │   │   ├── vote.rs
-│   │       │   │   └── tally.rs
-│   │       │   ├── shielded_pool/
-│   │       │   │   ├── note.rs
-│   │       │   │   ├── nullifier.rs
-│   │       │   │   └── action.rs
-│   │       │   └── ibc/                       # Already exists!
-│   │       ├── consensus/
-│   │       │   ├── bft.rs             # Stake-weighted BFT
-│   │       │   ├── block.rs
-│   │       │   └── finality.rs
-│   │       ├── execution/
-│   │       │   ├── pvm_runtime.rs     # PolkaVM execution (our improvement!)
-│   │       │   ├── proof_generation.rs
-│   │       │   └── verification.rs
-│   │       ├── economics/
-│   │       │   ├── target_staking.rs  # Our improvement: target ratio
-│   │       │   ├── inflation.rs
-│   │       │   └── fee_pool.rs
-│   │       └── lib.rs
-│   │
-│   ├── zeratul-p2p/                 # ← ONLY networking!
-│   │   └── src/
-│   │       ├── transport/
-│   │       │   ├── quic.rs          # QUIC transport
-│   │       │   ├── connection.rs
-│   │       │   └── stream.rs
-│   │       ├── gossip/
-│   │       │   ├── pubsub.rs        # Gossipsub protocol
-│   │       │   ├── topic.rs
-│   │       │   └── message.rs
-│   │       ├── discovery/
-│   │       │   ├── peer_discovery.rs
-│   │       │   ├── dht.rs
-│   │       │   └── bootstrap.rs
-│   │       ├── sync/
-│   │       │   ├── block_sync.rs
-│   │       │   └── state_sync.rs
-│   │       └── lib.rs
-│   │
-│   ├── ligerito/                    # ZK proof system
-│   ├── polkavm-pcvm/               # PolkaVM integration
-│   └── ...
-```
+The `ligerito` crate is designed to be:
+- **Portable**: Works in std, no_std, WASM, PolkaVM, and embedded environments
+- **Modular**: Feature flags allow including only what you need
+- **Flexible**: Supports custom configurations (BYOC - Bring Your Own Config)
+- **Efficient**: Optional SIMD/parallel optimizations
 
-## What Goes Where
+## Feature Flags
 
-### `zeratul-blockchain` (Business Logic)
-- ✅ DEX (batch swaps, liquidity, trading)
-- ✅ Staking (delegation, validators, rewards)
-- ✅ Governance (proposals, voting)
-- ✅ Shielded pool (notes, commitments, nullifiers)
-- ✅ Consensus rules (BFT, finality)
-- ✅ Economics (inflation, fees)
-- ✅ Execution (PolkaVM runtime, proofs)
+### Environment
 
-### `zeratul-p2p` (Networking Only)
-- ✅ QUIC transport layer
-- ✅ Gossipsub message broadcasting
-- ✅ Peer discovery & DHT
-- ✅ Block/state synchronization
-- ✅ Connection management
-- ❌ NO business logic!
-- ❌ NO DEX/staking/consensus code!
+- **`std`** (default): Enable standard library support
+  - Required for: Multi-threading, file I/O, dynamic allocation with std types
+  - Enables: `serde/std`, `thiserror` error types
 
-## Copy Strategy from Penumbra
+- **`no_std`**: Disable by using `--no-default-features`
+  - Uses `core` and `alloc` only
+  - Custom error types without `Display` impl details
+  - No file I/O, no threading
 
-### Step 1: Direct Copy
-Copy these from Penumbra as-is:
+### Functionality
+
+- **`prover`** (default): Include proving functionality
+  - Adds dependencies: `reed-solomon`, `rand`, `rand_chacha`
+  - Enables `prove()`, `prove_sha256()`, `prove_with_transcript()`
+
+- **`verifier-only`**: Minimal verifier-only build
+  - Excludes all prover code and dependencies
+  - Only `verify()` functions available
+  - Smallest binary size
+
+### Performance
+
+- **`parallel`** (default): Multi-threaded proving with rayon
+  - Requires `std`
+  - 4-5x speedup on multi-core systems
+  - Disable for single-threaded or no_std environments
+
+- **`hardware-accel`** (default): SIMD acceleration
+  - x86: pclmulqdq for GF(2^n) multiplication
+  - Portable SIMD fallback (nightly)
+  - ~2x speedup for FFT operations
+
+### Transcript Implementations
+
+- **`transcript-sha256`**: SHA-256 based Fiat-Shamir (always available)
+  - Works in no_std
+  - Default for verifier-only builds
+
+- **`transcript-merlin`**: Merlin transcript protocol
+  - Requires `std`
+  - More robust domain separation
+
+- **`transcript-blake3`**: BLAKE3 transcript (fastest)
+  - Optional, requires `blake3` crate
+
+### CLI & Tooling
+
+- **`cli`**: Build the `ligerito` CLI binary
+  - Requires `std` and `prover`
+  - Adds: `clap`, `anyhow`, `bincode`, `hex`, `serde_json`
+  - Enables prove/verify via stdin/stdout
+
+## Build Configurations
+
+### Full-Featured (default)
 
 ```bash
-# DEX components
-cp -r penumbra/crates/core/component/dex/src/* \
-      zeratul/crates/zeratul-blockchain/src/penumbra/dex/
-
-# Staking components
-cp -r penumbra/crates/core/component/stake/src/* \
-      zeratul/crates/zeratul-blockchain/src/penumbra/stake/
-
-# Shielded pool
-cp -r penumbra/crates/core/component/shielded-pool/src/* \
-      zeratul/crates/zeratul-blockchain/src/penumbra/shielded_pool/
-
-# Governance
-cp -r penumbra/crates/core/component/governance/src/* \
-      zeratul/crates/zeratul-blockchain/src/penumbra/governance/
+cargo build --release
 ```
 
-### Step 2: Replace Execution Layer
-Keep Penumbra's logic, swap execution backend:
+Features: `std`, `prover`, `parallel`, `hardware-accel`
 
-```rust
-// Penumbra uses CosmWasm
-impl SwapExecution {
-    fn execute_batch(delta_1, delta_2) -> (lambda_1, lambda_2) {
-        // route_and_fill() logic stays same!
-        // Just execute in PolkaVM instead of CosmWasm
-        polkavm::execute(batch_swap_program, inputs)
-    }
-}
+**Use for**: Development, benchmarking, native proving
+
+### Verifier-Only (std)
+
+```bash
+cargo build --release --no-default-features --features="std,verifier-only"
 ```
 
-### Step 3: Add Our Improvements
-- Target staking ratio (new!)
-- Superlinear slashing (Polkadot formula)
-- Faster proof generation (Ligerito)
+**Use for**: PolkaVM, on-chain verification, resource-constrained environments
 
-## Dependency Flow
+Binary size: ~50% smaller than full build
 
-```
-┌─────────────────────┐
-│   zeratul-client    │  (User interface)
-└──────────┬──────────┘
-           │
-┌──────────▼──────────┐
-│ zeratul-blockchain  │  (Business logic - copied from Penumbra!)
-│                     │
-│ ├─ penumbra/dex/    │  ← Direct copy
-│ ├─ penumbra/stake/  │  ← Direct copy
-│ ├─ execution/pvm    │  ← Our improvement (PolkaVM)
-│ └─ economics/target │  ← Our improvement
-└──────────┬──────────┘
-           │
-┌──────────▼──────────┐
-│   zeratul-p2p       │  (Networking only!)
-│                     │
-│ ├─ quic transport   │
-│ ├─ gossipsub        │
-│ └─ peer discovery   │
-└──────────┬──────────┘
-           │
-           ▼
-      Network Layer
+### Verifier-Only (no_std)
+
+```bash
+cargo build --release --no-default-features --features="verifier-only"
 ```
 
-## What to Copy First
+**Use for**: WASM, embedded systems, bare-metal environments
 
-### Priority 1: Core DEX (Week 1)
-```
-penumbra/crates/core/component/dex/src/
-├── batch_swap_output_data.rs  ← Copy this!
-├── swap_execution.rs           ← Copy this!
-├── trading_pair.rs             ← Copy this!
-├── component/
-│   ├── flow.rs                 ← SwapFlow aggregation
-│   ├── router/
-│   │   ├── route_and_fill.rs   ← Battle-tested routing
-│   │   ├── fill_route.rs
-│   │   └── path_search.rs
-│   └── position_manager/       ← Liquidity positions
+Requires: `alloc` support in target environment
+
+### CLI Binary
+
+```bash
+cargo build --release --features=cli
+# Or
+cargo install --path ligerito --features=cli
 ```
 
-### Priority 2: Staking (Week 2)
-```
-penumbra/crates/core/component/stake/src/
-├── validator.rs                ← Validator management
-├── delegation.rs               ← delZT tokens
-├── undelegation.rs             ← Exchange rate logic
-├── uptime.rs                   ← Slashing triggers
-└── component/
-    ├── validator_handler/
-    └── delegation_manager/
-```
+**Use for**: Scripting, proof generation pipelines, testing
 
-### Priority 3: Shielded Pool (Week 3)
-```
-penumbra/crates/core/component/shielded-pool/src/
-├── note.rs                     ← Note structure
-├── spend.rs                    ← Spend proofs
-├── output.rs                   ← Output proofs
-└── nullifier.rs                ← Nullifier tracking
+## CLI Usage
+
+### Prove
+
+```bash
+# Generate proof from polynomial data
+cat polynomial.bin | ligerito prove --size 20 > proof.bin
+
+# With hex output
+cat polynomial.bin | ligerito prove --size 20 --format hex > proof.hex
 ```
 
-## Testing Strategy
+### Verify
 
-### Use Penumbra's Tests!
-```rust
-// Copy their test suite
-cp -r penumbra/crates/core/component/dex/src/component/tests/* \
-      zeratul/crates/zeratul-blockchain/tests/penumbra_dex/
+```bash
+# Verify proof (exit code 0 = valid, 1 = invalid)
+cat proof.bin | ligerito verify --size 20
 
-// Run to verify we copied correctly
-cargo test --package zeratul-blockchain
+# Verbose output
+cat proof.bin | ligerito verify --size 20 --verbose
+
+# From hex
+cat proof.hex | ligerito verify --size 20 --format hex
 ```
 
-### Add Performance Tests
-```rust
-#[test]
-fn test_batch_swap_performance() {
-    // Penumbra: ~2s proof generation
-    // Zeratul: ~400ms (10x faster!)
-    let batch = create_batch_with_1000_swaps();
-    let start = Instant::now();
-    let proof = execute_batch_pvm(batch);
-    assert!(start.elapsed() < Duration::from_millis(500));
-}
+### Roundtrip
+
+```bash
+# Prove and verify in one pipeline
+cat data.bin | ligerito prove --size 24 | ligerito verify --size 24
 ```
 
-## Migration Plan
+### Configuration
 
-### Current State (Bad!)
-```
-zeratul-p2p/src/
-├── zswap.rs         ← DEX logic (wrong crate!)
-├── delegation.rs    ← Staking logic (wrong crate!)
-├── bft.rs           ← Consensus (wrong crate!)
-└── gossip.rs        ← Networking (correct!)
-```
+```bash
+# Show config for a size
+ligerito config --size 20
 
-### Target State (Good!)
-```
-zeratul-blockchain/src/penumbra/
-├── dex/             ← Copied from Penumbra
-├── stake/           ← Copied from Penumbra
-└── governance/      ← Copied from Penumbra
-
-zeratul-p2p/src/
-├── quic.rs          ← ONLY networking
-├── gossip.rs        ← ONLY networking
-└── discovery.rs     ← ONLY networking
+# TODO: Generate custom config (BYOC)
+ligerito config --size 20 --generate > my_config.json
 ```
 
-## Next Steps
+## BYOC (Bring Your Own Config)
 
-1. **Clean up `zeratul-p2p`**
-   - Move all blockchain logic to `zeratul-blockchain`
-   - Keep only networking code
+The library supports custom configurations for advanced use cases:
 
-2. **Copy Penumbra components**
-   - Start with DEX (batch_swap_output_data, swap_execution)
-   - Then staking (delegation tokens)
-   - Then shielded pool
+### Current State
 
-3. **Replace execution backend**
-   - Keep Penumbra's routing/aggregation logic
-   - Execute in PolkaVM instead of CosmWasm
-   - Use Ligerito for proofs instead of Groth16
+**Implemented:**
+- Feature flags for verifier-only builds
+- Hardcoded configs for sizes: 12, 16, 20, 24, 28, 30
+- CLI framework with BYOC placeholders
 
-4. **Add our improvements**
-   - Target staking ratio
-   - Superlinear slashing
-   - QUIC P2P instead of Tendermint
+**TODO (Future Work):**
+1. Make `ProverConfig` and `VerifierConfig` fully serializable
+2. Add config validation functions
+3. Implement config loading in CLI:
+   ```bash
+   ligerito prove --config my_config.json < data.bin
+   ligerito verify --config my_config.json < proof.bin
+   ```
+4. Add config generation:
+   ```bash
+   ligerito config --generate --recursive-steps 3 --dims "20,18,16" > custom.json
+   ```
 
-## Philosophy
+### Why BYOC?
 
-**Don't reinvent the wheel!**
+- **Research**: Test different parameters
+- **Optimization**: Tune for specific hardware
+- **Integration**: Match configs from other implementations
+- **Flexibility**: Support non-standard polynomial sizes
 
-Penumbra has:
-- 3+ years of development
-- Battle-tested in production
-- Audited by cryptography experts
-- Proven MEV resistance
-- Working privacy
+## PolkaVM Deployment
 
-We take that and make it **10-100x faster** with PolkaVM.
+### Prerequisites
 
-That's our value proposition:
-- ✅ Same security (copied from Penumbra)
-- ✅ Same MEV resistance (copied from Penumbra)
-- ✅ Same privacy (copied from Penumbra)
-- ⚡ 10-100x faster execution (our PolkaVM improvement)
-- ⚡ Lower latency (our QUIC P2P improvement)
+```bash
+# Build polkaports SDK
+cd ../polkaports
+env CC=clang CXX=clang++ LLD=lld ./setup.sh corevm
+. ./activate.sh corevm
+```
+
+### Build for PolkaVM
+
+```bash
+cd examples/polkavm_verifier
+make
+
+# Or manually:
+cargo build --manifest-path ../../ligerito/Cargo.toml \
+    --release \
+    --features="std,verifier-only" \
+    --example polkavm_verifier
+```
+
+### Deployment Options
+
+**Option 1: Standalone Binary**
+- Build verifier as RISC-V binary
+- Deploy to PolkaVM runtime
+- Read proof from stdin/memory
+- Return verification result via exit code
+
+**Option 2: FFI Library**
+- Build as `cdylib` with C FFI
+- Export `ligerito_verify(proof_ptr, proof_len, config_size)`
+- Link with C/C++ PolkaVM applications
+
+**Option 3: Embedded in Pallet**
+- Include verifier code in Substrate pallet
+- Call `verify()` from on-chain runtime
+- Store proofs in blockchain storage
+
+## Dependencies for no_std
+
+To make the entire stack no_std compatible:
+
+### Binary Fields (`binary-fields/`)
+
+Status: ✅ Ready (already supports no_std)
+- Remove `std` usage
+- Use `core::` and `alloc::`
+- SIMD: Conditional on target features
+
+### Merkle Tree (`merkle-tree/`)
+
+Status: ⚠️ Needs Work
+- Replace `Vec` with `alloc::vec::Vec`
+- Make `sha2` dependency no_std: `sha2 = { version = "0.10", default-features = false }`
+- Remove `rayon` in no_std builds
+
+### Reed-Solomon (`reed-solomon/`)
+
+Status: N/A (verifier-only doesn't need this)
+
+## Performance Characteristics
+
+### Proving (with default features)
+
+| Size | Elements | Time (8-core) | Memory |
+|------|----------|---------------|--------|
+| 2^20 | 1.05M | 68ms | ~50 MB |
+| 2^24 | 16.8M | 1.24s | ~800 MB |
+| 2^28 | 268.4M | 25.1s | ~12 GB |
+
+### Verification (verifier-only, single-threaded)
+
+| Size | Elements | Time | Memory |
+|------|----------|------|--------|
+| 2^20 | 1.05M | 22ms | ~20 MB |
+| 2^24 | 16.8M | 470ms | ~150 MB |
+| 2^28 | 268.4M | 8.5s | ~2 GB |
+
+Verification is ~3-4x faster than proving due to:
+- No Reed-Solomon encoding
+- No Merkle tree construction
+- Sequential operation (no parallelism overhead)
+
+## Binary Sizes
+
+Approximate compiled binary sizes (release, stripped):
+
+| Configuration | Size | Notes |
+|--------------|------|-------|
+| Full (default) | ~15 MB | Prover + verifier, all optimizations |
+| Verifier-only (std) | ~7 MB | 50% smaller, verifier only |
+| Verifier-only (no_std) | ~4 MB | Minimal, no threading |
+| CLI | ~16 MB | Full + CLI interface |
+
+Sizes can be further reduced with:
+- `opt-level = "z"` (optimize for size)
+- `lto = true` (link-time optimization)
+- `strip = true` (remove debug symbols)
+- `panic = "abort"` (smaller panic handler)
+
+## Testing
+
+### Unit Tests
+
+```bash
+# All tests (requires prover feature)
+cargo test
+
+# Verifier-only tests
+cargo test --no-default-features --features="std,verifier-only"
+```
+
+### Integration Tests
+
+```bash
+# CLI roundtrip test
+dd if=/dev/urandom of=/tmp/test.bin bs=4 count=$((1 << 12))
+cargo run --features=cli -- prove --size 12 < /tmp/test.bin | \
+    cargo run --features=cli -- verify --size 12
+```
+
+### Benchmarks
+
+```bash
+# Full benchmark suite
+cargo bench
+
+# Verifier-only benchmarks
+cargo bench --no-default-features --features="std,verifier-only"
+```
+
+## Future Enhancements
+
+### Short Term
+1. Complete BYOC implementation (config loading/generation)
+2. Make dependencies fully no_std compatible
+3. Add WASM example
+4. Optimize verifier for smaller binary size
+
+### Medium Term
+1. Alternative field implementations (GF(2^64), GF(2^128))
+2. Batch verification
+3. Parallel verification (multi-proof batches)
+4. Compressed proof format
+
+### Long Term
+1. STARK backend integration
+2. Recursive composition
+3. Hardware acceleration (GPU, FPGA)
+4. Formal verification of core algorithms
+
+## Contributing
+
+When adding features:
+1. Use feature gates appropriately
+2. Test all feature combinations
+3. Update this document
+4. Add examples for new functionality
+5. Ensure no_std compatibility where applicable
+
+## License
+
+MIT OR Apache-2.0

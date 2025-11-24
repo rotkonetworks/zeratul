@@ -9,6 +9,7 @@
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 use std::collections::{BTreeMap, HashMap};
 
 use super::super::lending::types::{AssetId, Price};
@@ -32,6 +33,7 @@ pub struct OracleProposal {
     /// Signature proving validator observed this
     ///
     /// Signs: Hash(penumbra_height || trading_pair || price)
+    #[serde(with = "BigArray")]
     pub signature: [u8; 64],
 
     /// Timestamp when proposal was created
@@ -187,12 +189,7 @@ impl OracleConsensus {
         }
 
         // Sort by price to compute median
-        relevant.sort_by(|a, b| {
-            a.price
-                .0
-                .partial_cmp(&b.price.0)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        relevant.sort_by(|a, b| a.price.cmp(&b.price));
 
         // Take median price (middle value)
         let median_idx = relevant.len() / 2;
@@ -532,7 +529,8 @@ pub struct ConsensusPrice {
 impl ConsensusPrice {
     /// Check if spread is acceptable (< 5%)
     pub fn is_spread_acceptable(&self) -> bool {
-        self.spread.0 < 0.05
+        // 5% threshold
+        self.spread.is_less_than_percent(5)
     }
 }
 
@@ -640,7 +638,7 @@ impl OracleManager {
                 eprintln!(
                     "Warning: High price spread for {:?}: {:.2}%",
                     pair,
-                    consensus.spread.0 * 100.0
+                    consensus.spread.to_f64_display() * 100.0
                 );
             }
         }

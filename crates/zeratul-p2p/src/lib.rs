@@ -36,7 +36,8 @@
 //!    │                               │      Trade executed       │
 //! ```
 
-pub mod gossip;
+// TODO: Re-enable when litep2p adds gossipsub support
+// pub mod gossip;
 pub mod types;
 pub mod consensus;
 pub mod trading;
@@ -50,13 +51,13 @@ pub mod staking_rewards;
 pub mod staked_pool;
 pub mod slashing;
 
-pub use gossip::GossipNetwork;
+// pub use gossip::GossipNetwork;
 pub use types::{PeerId, Message};
 pub use consensus::{Genesis, ProvenTransaction, ConsensusEngine, BlockNumber};
 pub use trading::{Order, OrderBook, Trade, Side};
 pub use jamnp::{JamCertificate, AlpnId, StreamKind, Ed25519PublicKey, Ed25519Signature};
 pub use zswap::{
-    TradingPair, SwapIntent, BatchSwap, LiquidityPosition, DexState,
+    TradingPair, SwapIntent, LiquidityPosition, DexState, BatchSwapOutputData,
     StakePosition, Delegation, ZT_ASSET_ID, MIN_STAKE_ZT, TOTAL_SUPPLY_ZT,
 };
 pub use zswap_pvm::{ZSwapPVM, SwapProof};

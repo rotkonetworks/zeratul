@@ -2,413 +2,304 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>ligerito GPU Benchmarks | WebGPU Acceleration</title>
+<title>ligerito benchmarks | CPU vs WebGPU</title>
 <link rel="stylesheet" href="/style.css">
 <style>
-.benchmark-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
-  gap: 15px;
-  margin: 15px 0;
-}
-
-.bench-card {
-  background: #1a1a2e;
-  border: 1px solid #0ff;
-  border-radius: 4px;
-  padding: 15px;
-}
-
-.bench-title {
-  color: #0ff;
-  font-weight: bold;
-  margin-bottom: 10px;
-  font-size: 1.1em;
-}
-
-.bench-stat {
-  display: flex;
-  justify-content: space-between;
-  margin: 5px 0;
-  font-size: 0.95em;
-}
-
-.bench-stat .label {
-  color: #888;
-}
-
-.bench-stat .value {
-  color: #fff;
-  font-family: monospace;
-}
-
-.progress-bar {
-  width: 100%;
-  height: 20px;
-  background: #0a0a15;
-  border: 1px solid #333;
-  border-radius: 3px;
-  overflow: hidden;
-  margin: 10px 0;
-}
-
-.progress-fill {
-  height: 100%;
-  background: linear-gradient(90deg, #0ff, #00f);
-  transition: width 0.3s ease;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  color: #fff;
-  font-size: 0.8em;
-}
-
-.speedup-badge {
-  display: inline-block;
-  padding: 3px 8px;
-  border-radius: 3px;
-  font-weight: bold;
-  font-size: 0.9em;
-}
-
-.speedup-good { background: #0f0; color: #000; }
-.speedup-medium { background: #ff0; color: #000; }
-.speedup-poor { background: #f00; color: #fff; }
-
-.device-info {
-  background: #0a0a15;
-  padding: 10px;
-  border-radius: 4px;
-  margin: 10px 0;
-  font-size: 0.9em;
-}
-
-.mobile-warning {
-  background: #ff06;
-  border: 1px solid #f00;
-  padding: 10px;
-  border-radius: 4px;
-  margin: 10px 0;
-  color: #fcc;
-}
+.bench-result { margin: 10px 0; padding: 10px; background: #1a1a2e; border-radius: 4px; }
+.bench-row { display: flex; justify-content: space-between; margin: 5px 0; }
+.bench-label { color: #888; }
+.bench-value { color: #0f0; font-family: monospace; }
+.speedup { color: #0ff; font-weight: bold; }
+.section-sub { margin: 15px 0; padding: 10px; border: 1px dashed #333; }
 </style>
 </head>
 <body>
 <div class="terminal">
-<div class="header">ligerito WebGPU Benchmarks | GPU vs CPU Performance</div>
+<div class="header">ligerito benchmarks | CPU vs WebGPU</div>
 <div class="status" id="status">initializing...</div>
 
-<!-- Device Info -->
 <div class="section">
-<div class="section-title">╔═══ device capabilities ══════════════════════════════════════════════════════════╗</div>
+<div class="section-title">╔═══ sumcheck benchmark ═══════════════════════════════════════════════════════════════╗</div>
 <div class="section-content">
-  <div class="device-info" id="device-info">detecting...</div>
+  <label>preset:
+    <select id="preset">
+      <option value="20" selected>2^20 (n=10, k=10, q=148)</option>
+      <option value="24">2^24 (n=18, k=6, q=148)</option>
+    </select>
+  </label>
+  <span style="margin-left: 15px; color: #888; font-size: 0.9em;">
+    custom: n=<input type="number" id="n" value="10" min="4" max="20" style="width:50px">
+    k=<input type="number" id="k" value="10" min="2" max="12" style="width:50px">
+    q=<input type="number" id="q" value="148" min="1" max="256" style="width:50px">
+  </span>
+  <br><br>
+  <label><input type="checkbox" id="run-cpu" checked> CPU</label>
+  <label style="margin-left: 15px;"><input type="checkbox" id="run-gpu" checked> WebGPU</label>
+  <button id="run-sumcheck-btn" class="btn" style="margin-left: 15px;" disabled>run sumcheck</button>
+  <div id="sumcheck-output" class="output" style="margin-top: 10px;"></div>
 </div>
-<div class="section-footer">╚══════════════════════════════════════════════════════════════════════════════════╝</div>
+<div class="section-footer">╚═════════════════════════════════════════════════════════════════════════════════════╝</div>
 </div>
 
-<!-- Benchmark Configuration -->
 <div class="section">
-<div class="section-title">╔═══ benchmark configuration ══════════════════════════════════════════════════════╗</div>
+<div class="section-title">╔═══ prove/verify benchmark ═══════════════════════════════════════════════════════════╗</div>
 <div class="section-content">
-  <label>Test scale:
-    <select id="bench-scale">
-      <option value="small">Small (n=8, k=4, q=16) - Quick test</option>
-      <option value="medium" selected>Medium (n=10, k=6, q=32) - Balanced</option>
-      <option value="large">Large (n=12, k=7, q=64) - Heavy</option>
-      <option value="xl">XL (n=14, k=7, q=128) - Very Heavy</option>
+  <label>polynomial size:
+    <select id="poly-size">
+      <option value="12">2^12 (4K elements)</option>
+      <option value="20" selected>2^20 (1M elements)</option>
+      <option value="24">2^24 (16M elements)</option>
     </select>
   </label>
   <br><br>
-  <label style="display: flex; align-items: center; gap: 10px;">
-    <input type="checkbox" id="run-both" checked>
-    Run both CPU and GPU (for comparison)
-  </label>
-  <br>
-  <button id="run-bench" class="btn" disabled>Run Benchmark</button>
-  <button id="clear-results" class="btn" style="margin-left: 10px;">Clear Results</button>
+  <label><input type="checkbox" id="pv-cpu" checked> CPU</label>
+  <label style="margin-left: 15px;"><input type="checkbox" id="pv-gpu" checked> WebGPU</label>
+  <button id="run-pv-btn" class="btn" style="margin-left: 15px;" disabled>run prove+verify</button>
+  <div id="pv-output" class="output" style="margin-top: 10px;"></div>
 </div>
-<div class="section-footer">╚══════════════════════════════════════════════════════════════════════════════════╝</div>
+<div class="section-footer">╚═════════════════════════════════════════════════════════════════════════════════════╝</div>
 </div>
 
-<!-- Results -->
 <div class="section">
-<div class="section-title">╔═══ benchmark results ════════════════════════════════════════════════════════════╗</div>
+<div class="section-title">╔═══ history ══════════════════════════════════════════════════════════════════════════╗</div>
 <div class="section-content">
-  <div id="bench-results" style="min-height: 100px; color: #888;">
-    No results yet. Click "Run Benchmark" to start.
-  </div>
+  <div id="history" style="max-height: 300px; overflow-y: auto; color: #888;">no results yet</div>
 </div>
-<div class="section-footer">╚══════════════════════════════════════════════════════════════════════════════════╝</div>
-</div>
-
-<!-- Historical Results -->
-<div class="section">
-<div class="section-title">╔═══ test history ═════════════════════════════════════════════════════════════════╗</div>
-<div class="section-content">
-  <div id="history" style="max-height: 300px; overflow-y: auto; color: #888;">
-    No history yet.
-  </div>
-</div>
-<div class="section-footer">╚══════════════════════════════════════════════════════════════════════════════════╝</div>
+<div class="section-footer">╚═════════════════════════════════════════════════════════════════════════════════════╝</div>
 </div>
 
 <div class="footer">
-  powered by ligerito | WebGPU on <span id="device-name">your device</span> |
-  <a href="/">back to main app</a>
+  <a href="/">← back to main</a>
 </div>
 </div>
 
 <script type="module">
-// NOTE: This is a UI mockup. Actual WebGPU integration requires:
-// 1. Compiling sumcheck GPU code to WASM with wgpu
-// 2. Exposing benchmark functions from Rust
-// 3. Worker integration for non-blocking execution
+import initGpu, { 
+  BenchConfig, bench_cpu_sumcheck, bench_gpu_sumcheck,
+  prove as proveGpu, verify as verifyGpu, get_polynomial_size as getSizeGpu
+} from './webgpu/ligerito.js';
 
-let gpuAdapter = null;
-let gpuDevice = null;
+import initCpu, { 
+  prove as proveCpu, verify as verifyCpu, get_polynomial_size as getSizeCpu 
+} from './ligerito.js';
+
+let gpuAvailable = false;
 const history = [];
 
-// Config presets
-const CONFIGS = {
-  small: { n: 8, k: 4, q: 16 },
-  medium: { n: 10, k: 6, q: 32 },
-  large: { n: 12, k: 7, q: 64 },
-  xl: { n: 14, k: 7, q: 128 }
+const PRESETS = {
+  '20': { n: 10, k: 10, q: 148 },
+  '24': { n: 18, k: 6, q: 148 }
 };
 
-// Initialize WebGPU
-async function initGPU() {
-  const infoDiv = document.getElementById('device-info');
-
-  if (!navigator.gpu) {
-    infoDiv.innerHTML = `
-      <div class="mobile-warning">
-        ⚠️ WebGPU not available on this browser.<br>
-        Try Chrome 113+ or Edge 113+ on desktop/Android.
-      </div>
-      <div>Platform: ${navigator.platform}</div>
-      <div>User Agent: ${navigator.userAgent}</div>
-    `;
-    return false;
-  }
-
-  try {
-    gpuAdapter = await navigator.gpu.requestAdapter({
-      powerPreference: 'high-performance'
-    });
-
-    if (!gpuAdapter) {
-      infoDiv.innerHTML = '<div class="mobile-warning">❌ No WebGPU adapter available</div>';
-      return false;
-    }
-
-    gpuDevice = await gpuAdapter.requestDevice();
-
-    const info = await gpuAdapter.requestAdapterInfo?.();
-    const limits = gpuAdapter.limits;
-
-    const isMobile = /Android|iPhone|iPad/i.test(navigator.userAgent);
-    const deviceType = isMobile ? '📱 Mobile' : '🖥️ Desktop';
-
-    document.getElementById('device-name').textContent = info?.vendor || 'Unknown';
-
-    infoDiv.innerHTML = `
-      <div style="color: #0f0; font-weight: bold; margin-bottom: 10px;">✓ WebGPU Available</div>
-      <div><strong>Device:</strong> ${deviceType} - ${info?.vendor || 'Unknown'} ${info?.architecture || ''}</div>
-      <div><strong>Backend:</strong> ${info?.device || 'Unknown'}</div>
-      <div><strong>Max Buffer:</strong> ${(limits.maxBufferSize / 1024 / 1024).toFixed(0)} MB</div>
-      <div><strong>Max Binding:</strong> ${(limits.maxStorageBufferBindingSize / 1024 / 1024).toFixed(0)} MB</div>
-      <div><strong>Max Workgroup:</strong> ${limits.maxComputeWorkgroupSizeX}</div>
-      ${isMobile ? '<div style="color: #0ff; margin-top: 10px;">📱 Mobile GPU detected - optimized for battery life</div>' : ''}
-    `;
-
-    return true;
-  } catch (e) {
-    infoDiv.innerHTML = `<div class="mobile-warning">❌ WebGPU error: ${e.message}</div>`;
-    return false;
-  }
-}
-
-// Simulated benchmark (replace with actual WASM calls)
-async function runCPUBenchmark(config) {
-  // Simulate CPU time (replace with actual WASM worker call)
-  const baseTime = 10 * Math.pow(2, config.n - 8) * (config.q / 16);
-  await new Promise(r => setTimeout(r, Math.min(baseTime, 100))); // Cap simulation time
-  return baseTime + Math.random() * 5;
-}
-
-async function runGPUBenchmark(config) {
-  if (!gpuDevice) throw new Error('GPU not initialized');
-
-  // Simulate GPU time (much faster, replace with actual GPU sumcheck)
-  const baseTime = 0.5 * Math.pow(1.5, config.n - 8) * (config.q / 32);
-  await new Promise(r => setTimeout(r, Math.min(baseTime, 50)));
-  return baseTime + Math.random() * 0.2;
-}
-
-// Run benchmark
-document.getElementById('run-bench').addEventListener('click', async () => {
-  const scale = document.getElementById('bench-scale').value;
-  const runBoth = document.getElementById('run-both').checked;
-  const config = CONFIGS[scale];
-
-  const resultsDiv = document.getElementById('bench-results');
-  const runButton = document.getElementById('run-bench');
-
-  runButton.disabled = true;
-  resultsDiv.innerHTML = '<div class="progress-bar"><div class="progress-fill" style="width: 10%">Running...</div></div>';
-
-  const results = {
-    config: scale,
-    ...config,
-    timestamp: new Date().toISOString()
-  };
-
-  try {
-    // CPU Benchmark
-    if (runBoth) {
-      resultsDiv.innerHTML = '<div class="progress-bar"><div class="progress-fill" style="width: 30%">Running CPU...</div></div>';
-      const cpuStart = performance.now();
-      await runCPUBenchmark(config);
-      results.cpuTime = performance.now() - cpuStart;
-    }
-
-    // GPU Benchmark
-    resultsDiv.innerHTML = '<div class="progress-bar"><div class="progress-fill" style="width: 70%">Running GPU...</div></div>';
-    const gpuStart = performance.now();
-    results.gpuTime = await runGPUBenchmark(config);
-
-    // Display results
-    displayResults(results);
-
-    // Add to history
-    history.unshift(results);
-    if (history.length > 10) history.pop();
-    updateHistory();
-
-  } catch (e) {
-    resultsDiv.innerHTML = `<div style="color: #f00;">❌ Benchmark failed: ${e.message}</div>`;
-  } finally {
-    runButton.disabled = false;
-  }
+document.getElementById('preset').addEventListener('change', (e) => {
+  const p = PRESETS[e.target.value];
+  document.getElementById('n').value = p.n;
+  document.getElementById('k').value = p.k;
+  document.getElementById('q').value = p.q;
 });
 
-function displayResults(results) {
-  const speedup = results.cpuTime / results.gpuTime;
-  const speedupClass = speedup > 20 ? 'speedup-good' : speedup > 5 ? 'speedup-medium' : 'speedup-poor';
-
-  let html = '<div class="benchmark-grid">';
-
-  if (results.cpuTime) {
-    html += `
-      <div class="bench-card">
-        <div class="bench-title">CPU Performance</div>
-        <div class="bench-stat">
-          <span class="label">Time:</span>
-          <span class="value">${results.cpuTime.toFixed(2)} ms</span>
-        </div>
-        <div class="bench-stat">
-          <span class="label">Mode:</span>
-          <span class="value">WASM Single-thread</span>
-        </div>
-      </div>
-    `;
-  }
-
-  html += `
-    <div class="bench-card">
-      <div class="bench-title">GPU Performance</div>
-      <div class="bench-stat">
-        <span class="label">Time:</span>
-        <span class="value" style="color: #0f0;">${results.gpuTime.toFixed(2)} ms</span>
-      </div>
-      <div class="bench-stat">
-        <span class="label">Mode:</span>
-        <span class="value">WebGPU Compute</span>
-      </div>
-    </div>
-  `;
-
-  if (results.cpuTime) {
-    html += `
-      <div class="bench-card">
-        <div class="bench-title">Speedup</div>
-        <div class="bench-stat">
-          <span class="label">GPU vs CPU:</span>
-          <span class="value"><span class="speedup-badge ${speedupClass}">${speedup.toFixed(1)}x faster</span></span>
-        </div>
-        <div class="bench-stat">
-          <span class="label">Config:</span>
-          <span class="value">n=${results.n}, k=${results.k}, q=${results.q}</span>
-        </div>
-      </div>
-    `;
-  }
-
-  html += '</div>';
-
-  html += `
-    <div style="margin-top: 15px; padding: 10px; background: #0a0a15; border-radius: 4px; font-size: 0.9em;">
-      <div style="color: #888;">Test Parameters:</div>
-      <div>• Basis size: 2^${results.n} = ${Math.pow(2, results.n).toLocaleString()} elements</div>
-      <div>• Row size: 2^${results.k} = ${Math.pow(2, results.k)} elements</div>
-      <div>• Queries: ${results.q}</div>
-      <div>• Total operations: ~${(Math.pow(2, results.n) * results.q).toLocaleString()}</div>
-    </div>
-  `;
-
-  document.getElementById('bench-results').innerHTML = html;
+// js-side webgpu check (rust one is buggy)
+async function checkGPU() {
+  if (!navigator.gpu) return false;
+  try {
+    const adapter = await navigator.gpu.requestAdapter();
+    return !!adapter;
+  } catch { return false; }
 }
 
-function updateHistory() {
-  const historyDiv = document.getElementById('history');
+try {
+  await Promise.all([initGpu(), initCpu()]);
+  gpuAvailable = await checkGPU();
+  
+  const gpuStatus = gpuAvailable 
+    ? '<span style="color:#0f0">WebGPU ✓</span>' 
+    : '<span style="color:#ff0">WebGPU ✗</span>';
+  
+  document.getElementById('status').innerHTML = `<span class="ok">✓ ready</span> | ${gpuStatus}`;
+  document.getElementById('run-sumcheck-btn').disabled = false;
+  document.getElementById('run-pv-btn').disabled = false;
+  
+  if (!gpuAvailable) {
+    document.getElementById('run-gpu').disabled = true;
+    document.getElementById('run-gpu').checked = false;
+    document.getElementById('pv-gpu').disabled = true;
+    document.getElementById('pv-gpu').checked = false;
+  }
+} catch (e) {
+  document.getElementById('status').innerHTML = `<span class="err">✗ ${e}</span>`;
+}
 
-  if (history.length === 0) {
-    historyDiv.innerHTML = '<div style="color: #888;">No history yet.</div>';
+// sumcheck benchmark
+document.getElementById('run-sumcheck-btn').addEventListener('click', async () => {
+  const n = parseInt(document.getElementById('n').value);
+  const k = parseInt(document.getElementById('k').value);
+  const q = parseInt(document.getElementById('q').value);
+  const runCPU = document.getElementById('run-cpu').checked;
+  const runGPU = document.getElementById('run-gpu').checked && gpuAvailable;
+  const output = document.getElementById('sumcheck-output');
+  const btn = document.getElementById('run-sumcheck-btn');
+
+  if (!runCPU && !runGPU) {
+    output.innerHTML = '<span class="err">select at least one backend</span>';
     return;
   }
 
-  let html = '<table style="width: 100%; font-size: 0.9em;">';
-  html += '<tr style="color: #0ff; border-bottom: 1px solid #333;"><th>Time</th><th>Config</th><th>CPU</th><th>GPU</th><th>Speedup</th></tr>';
+  btn.disabled = true;
+  const result = { type: 'sumcheck', n, k, q, timestamp: new Date() };
 
-  history.forEach(r => {
-    const speedup = r.cpuTime ? (r.cpuTime / r.gpuTime).toFixed(1) + 'x' : '-';
-    html += `
-      <tr style="border-bottom: 1px solid #222;">
-        <td style="padding: 5px;">${new Date(r.timestamp).toLocaleTimeString()}</td>
-        <td>${r.config}</td>
-        <td>${r.cpuTime ? r.cpuTime.toFixed(1) + 'ms' : '-'}</td>
-        <td style="color: #0f0;">${r.gpuTime.toFixed(1)}ms</td>
-        <td style="color: #0ff;">${speedup}</td>
-      </tr>
-    `;
-  });
+  try {
+    if (runCPU) {
+      output.innerHTML = '<span class="warn">CPU sumcheck...</span>';
+      const config = new BenchConfig(n, k, q);
+      const r = await bench_cpu_sumcheck(config);
+      result.cpuTime = r.time_ms;
+      result.cpuSuccess = r.success;
+    }
 
-  html += '</table>';
-  historyDiv.innerHTML = html;
-}
+    if (runGPU) {
+      output.innerHTML = '<span class="warn">GPU sumcheck...</span>';
+      const config = new BenchConfig(n, k, q);
+      const r = await bench_gpu_sumcheck(config);
+      result.gpuTime = r.time_ms;
+      result.gpuSuccess = r.success;
+    }
 
-document.getElementById('clear-results').addEventListener('click', () => {
-  document.getElementById('bench-results').innerHTML = '<div style="color: #888;">No results yet. Click "Run Benchmark" to start.</div>';
+    history.unshift(result);
+    displaySumcheckResult(result, output);
+    updateHistory();
+  } catch (e) {
+    output.innerHTML = `<span class="err">✗ ${e}</span>`;
+  }
+
+  btn.disabled = false;
 });
 
-// Initialize
-(async () => {
-  const hasGPU = await initGPU();
+// prove/verify benchmark
+document.getElementById('run-pv-btn').addEventListener('click', async () => {
+  const configSize = parseInt(document.getElementById('poly-size').value);
+  const runCPU = document.getElementById('pv-cpu').checked;
+  const runGPU = document.getElementById('pv-gpu').checked && gpuAvailable;
+  const output = document.getElementById('pv-output');
+  const btn = document.getElementById('run-pv-btn');
 
-  if (hasGPU) {
-    document.getElementById('status').innerHTML = '<span class="ok">✓ Ready - WebGPU Enabled</span>';
-    document.getElementById('run-bench').disabled = false;
-  } else {
-    document.getElementById('status').innerHTML = '<span class="err">✗ WebGPU not available - CPU only</span>';
-    // Still allow CPU-only benchmarking
-    document.getElementById('run-bench').disabled = false;
-    document.getElementById('run-both').checked = false;
-    document.getElementById('run-both').disabled = true;
+  if (!runCPU && !runGPU) {
+    output.innerHTML = '<span class="err">select at least one backend</span>';
+    return;
   }
-})();
+
+  btn.disabled = true;
+
+  try {
+    // generate polynomial
+    output.innerHTML = '<span class="warn">generating polynomial...</span>';
+    const size = getSizeCpu(configSize);
+    const polynomial = new Uint32Array(size);
+    for (let i = 0; i < size; i++) {
+      polynomial[i] = Math.floor(Math.random() * 0xFFFFFFFF);
+    }
+
+    const result = { type: 'prove/verify', configSize, size, timestamp: new Date() };
+
+    if (runCPU) {
+      output.innerHTML = '<span class="warn">CPU proving...</span>';
+      const cpuProveStart = performance.now();
+      const cpuProof = proveCpu(polynomial, configSize);
+      result.cpuProveTime = performance.now() - cpuProveStart;
+      result.proofSize = cpuProof.length;
+
+      output.innerHTML = '<span class="warn">CPU verifying...</span>';
+      const cpuVerifyStart = performance.now();
+      result.cpuValid = verifyCpu(cpuProof, configSize);
+      result.cpuVerifyTime = performance.now() - cpuVerifyStart;
+    }
+
+    if (runGPU) {
+      output.innerHTML = '<span class="warn">GPU proving...</span>';
+      const gpuProveStart = performance.now();
+      const gpuProof = proveGpu(polynomial, configSize);
+      result.gpuProveTime = performance.now() - gpuProveStart;
+      if (!result.proofSize) result.proofSize = gpuProof.length;
+
+      output.innerHTML = '<span class="warn">GPU verifying...</span>';
+      const gpuVerifyStart = performance.now();
+      result.gpuValid = verifyGpu(gpuProof, configSize);
+      result.gpuVerifyTime = performance.now() - gpuVerifyStart;
+    }
+
+    history.unshift(result);
+    displayPVResult(result, output);
+    updateHistory();
+  } catch (e) {
+    output.innerHTML = `<span class="err">✗ ${e}</span>`;
+  }
+
+  btn.disabled = false;
+});
+
+function displaySumcheckResult(r, el) {
+  let html = `<div class="bench-result">
+    <div class="bench-row"><span class="bench-label">config:</span><span class="bench-value">n=${r.n}, k=${r.k}, q=${r.q}</span></div>`;
+
+  if (r.cpuTime !== undefined) {
+    html += `<div class="bench-row"><span class="bench-label">CPU:</span><span class="bench-value">${r.cpuTime.toFixed(2)} ms ${r.cpuSuccess ? '✓' : '✗'}</span></div>`;
+  }
+  if (r.gpuTime !== undefined) {
+    html += `<div class="bench-row"><span class="bench-label">GPU:</span><span class="bench-value">${r.gpuTime.toFixed(2)} ms ${r.gpuSuccess ? '✓' : '✗'}</span></div>`;
+  }
+  if (r.cpuTime && r.gpuTime && r.gpuTime > 0) {
+    html += `<div class="bench-row"><span class="bench-label">speedup:</span><span class="speedup">${(r.cpuTime / r.gpuTime).toFixed(2)}x</span></div>`;
+  }
+
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+function displayPVResult(r, el) {
+  const polyKB = (r.size * 4 / 1024).toFixed(1);
+  const proofKB = (r.proofSize / 1024).toFixed(1);
+
+  let html = `<div class="bench-result">
+    <div class="bench-row"><span class="bench-label">polynomial:</span><span class="bench-value">2^${r.configSize} (${r.size.toLocaleString()} elements, ${polyKB} KB)</span></div>
+    <div class="bench-row"><span class="bench-label">proof:</span><span class="bench-value">${proofKB} KB (${(r.size * 4 / r.proofSize).toFixed(1)}x compression)</span></div>`;
+
+  if (r.cpuProveTime !== undefined) {
+    html += `<div class="bench-row"><span class="bench-label">CPU prove:</span><span class="bench-value">${r.cpuProveTime.toFixed(0)} ms</span></div>`;
+    html += `<div class="bench-row"><span class="bench-label">CPU verify:</span><span class="bench-value">${r.cpuVerifyTime.toFixed(0)} ms ${r.cpuValid ? '✓' : '✗'}</span></div>`;
+  }
+  if (r.gpuProveTime !== undefined) {
+    html += `<div class="bench-row"><span class="bench-label">GPU prove:</span><span class="bench-value">${r.gpuProveTime.toFixed(0)} ms</span></div>`;
+    html += `<div class="bench-row"><span class="bench-label">GPU verify:</span><span class="bench-value">${r.gpuVerifyTime.toFixed(0)} ms ${r.gpuValid ? '✓' : '✗'}</span></div>`;
+  }
+  if (r.cpuProveTime && r.gpuProveTime && r.gpuProveTime > 0) {
+    html += `<div class="bench-row"><span class="bench-label">prove speedup:</span><span class="speedup">${(r.cpuProveTime / r.gpuProveTime).toFixed(2)}x</span></div>`;
+  }
+
+  html += '</div>';
+  el.innerHTML = html;
+}
+
+function updateHistory() {
+  const el = document.getElementById('history');
+  if (!history.length) { el.innerHTML = 'no results yet'; return; }
+
+  el.innerHTML = history.map(r => {
+    let txt = '';
+    if (r.type === 'sumcheck') {
+      txt = `[sumcheck] n=${r.n} k=${r.k}: `;
+      if (r.cpuTime) txt += `CPU ${r.cpuTime.toFixed(1)}ms `;
+      if (r.gpuTime) txt += `GPU ${r.gpuTime.toFixed(1)}ms `;
+      if (r.cpuTime && r.gpuTime) txt += `(${(r.cpuTime/r.gpuTime).toFixed(1)}x)`;
+    } else {
+      txt = `[prove] 2^${r.configSize}: `;
+      if (r.cpuProveTime) txt += `CPU ${r.cpuProveTime.toFixed(0)}ms `;
+      if (r.gpuProveTime) txt += `GPU ${r.gpuProveTime.toFixed(0)}ms `;
+      if (r.cpuProveTime && r.gpuProveTime) txt += `(${(r.cpuProveTime/r.gpuProveTime).toFixed(1)}x)`;
+    }
+    return `<div style="border-bottom: 1px solid #333; padding: 5px 0; font-size: 0.9em;">
+      ${txt} <span style="color: #666;">(${r.timestamp.toLocaleTimeString()})</span>
+    </div>`;
+  }).join('');
+}
 </script>
 </body>
 </html>

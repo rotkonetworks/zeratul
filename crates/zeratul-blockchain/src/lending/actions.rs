@@ -189,8 +189,11 @@ pub fn execute_borrow(
     position.last_update_block = current_block;
 
     // Check health factor after borrow
+    let oracle_prices_btree: std::collections::BTreeMap<_, _> = oracle_prices.iter()
+        .map(|(k, v)| (*k, *v))
+        .collect();
     let health = position
-        .health_factor(lending_pool, oracle_prices)
+        .health_factor(lending_pool, &oracle_prices_btree)
         .ok_or_else(|| anyhow::anyhow!("failed to calculate health factor"))?;
 
     if health.lt(&Ratio::ONE) {
@@ -318,8 +321,11 @@ pub fn execute_remove_collateral(
     }
 
     // Check health factor after removal
+    let oracle_prices_btree: std::collections::BTreeMap<_, _> = oracle_prices.iter()
+        .map(|(k, v)| (*k, *v))
+        .collect();
     let health = position
-        .health_factor(lending_pool, oracle_prices)
+        .health_factor(lending_pool, &oracle_prices_btree)
         .ok_or_else(|| anyhow::anyhow!("failed to calculate health factor"))?;
 
     if health.lt(&Ratio::ONE) {

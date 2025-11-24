@@ -12,6 +12,7 @@
 
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 use std::collections::{BTreeMap, HashMap};
 
 // Re-export Penumbra FROST types
@@ -74,6 +75,7 @@ impl ThresholdRequirement {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FrostSignature {
     /// The aggregated signature (64 bytes for decaf377-rdsa)
+    #[serde(with = "BigArray")]
     pub signature: [u8; 64],
 
     /// Which validators participated (sorted list of indices)
