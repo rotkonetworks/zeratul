@@ -3,6 +3,7 @@
 use crate::types::{PeerId, Message};
 use litep2p::{
     Litep2p, Litep2pEvent,
+    config::ConfigBuilder,
     protocol::libp2p::gossipsub::{Config as GossipsubConfig, Gossipsub, GossipsubEvent},
     transport::quic::config::Config as QuicConfig,
     types::protocol::ProtocolName,
@@ -41,11 +42,11 @@ impl<M: Message> GossipNetwork<M> {
             ..Default::default()
         };
 
-        // Build litep2p with QUIC
-        let litep2p = Litep2p::new(
-            quic_config.into(),
-            vec![Box::new(gossipsub_config)],
-        )?;
+        // Build litep2p with QUIC and gossipsub
+        let litep2p = ConfigBuilder::new()
+            .with_quic(quic_config)
+            .with_user_protocol(Box::new(gossipsub_config))
+            .build()?;
 
         let (tx, rx) = mpsc::channel(100);
 
@@ -59,7 +60,7 @@ impl<M: Message> GossipNetwork<M> {
 
         // Subscribe to topic
         network.gossipsub_handle.subscribe(
-            ProtocolName::from(topic.as_bytes().to_vec())
+            ProtocolName::from(topic.clone())
         )?;
 
         Ok((network, rx))
@@ -70,7 +71,7 @@ impl<M: Message> GossipNetwork<M> {
         let bytes = bincode::serialize(msg)?;
 
         self.gossipsub_handle.publish(
-            ProtocolName::from(self.topic.as_bytes().to_vec()),
+            ProtocolName::from(self.topic.clone()),
             bytes,
         )?;
 
@@ -80,8 +81,10 @@ impl<M: Message> GossipNetwork<M> {
     /// Process network events
     pub async fn process_events(
         &mut self,
-        tx: mpsc::Sender<M>,
+        _tx: mpsc::Sender<M>,
     ) -> Result<(), Box<dyn std::error::Error>> {
+        // TODO: Implement event processing once gossipsub is available in litep2p
+        // Currently gossipsub is not available in litep2p 0.8
         loop {
             match self.litep2p.next_event().await {
                 Some(Litep2pEvent::ConnectionEstablished { peer, .. }) => {
@@ -89,28 +92,9 @@ impl<M: Message> GossipNetwork<M> {
                     self.peers.insert(peer);
                 }
 
-                Some(Litep2pEvent::ConnectionClosed { peer }) => {
+                Some(Litep2pEvent::ConnectionClosed { peer, connection_id: _ }) => {
                     info!("Disconnected from peer: {:?}", peer);
                     self.peers.remove(&peer);
-                }
-
-                Some(Litep2pEvent::Protocol { event, .. }) => {
-                    if let Some(gossipsub_event) = event.downcast_ref::<GossipsubEvent>() {
-                        match gossipsub_event {
-                            GossipsubEvent::Message { message, .. } => {
-                                match bincode::deserialize::<M>(&message) {
-                                    Ok(msg) => {
-                                        debug!("Received message");
-                                        let _ = tx.send(msg).await;
-                                    }
-                                    Err(e) => {
-                                        warn!("Failed to deserialize message: {}", e);
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
                 }
 
                 None => break,

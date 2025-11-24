@@ -1,11 +1,11 @@
 //! Consensus Module
 //!
-//! Implements Safrole block production (JAM-style simplified SASSAFRAS)
+//! Leader selection and block production using BLS12-381 Timelock Encryption
 
-pub mod safrole;
 pub mod entropy;
-pub mod tickets;
+pub mod leader_selection;
+pub mod block_verifier;
 
-pub use safrole::{SafroleState, SafroleConfig};
 pub use entropy::EntropyAccumulator;
-pub use tickets::{SafroleTicket, TicketExtrinsic, SealTickets};
+pub use leader_selection::{LeaderSelection, LeaderConfig};
+pub use block_verifier::BlockVerifier;

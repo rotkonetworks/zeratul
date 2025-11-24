@@ -62,7 +62,7 @@ impl Default for LightClientConfig {
 /// This is MUCH smaller than the full ZODA shards:
 /// - ZODA shards: ~MB (full Reed-Solomon encoding)
 /// - Ligerito proof: ~KB (compressed polynomial proof)
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, parity_scale_codec::Encode, parity_scale_codec::Decode, scale_info::TypeInfo)]
 pub struct LigeritoSuccinctProof {
     /// Serialized Ligerito proof
     pub proof_bytes: Vec<u8>,
@@ -276,7 +276,9 @@ pub fn extract_succinct_proof(
         .map(|(idx, shard)| (**idx, shard.clone()))
         .collect();
 
-    let recovered_data = Zoda::<Sha256>::recover(&coding_config, &commitment, &shard_refs)?;
+    // TODO TODO TODO: Implement proper Zoda recovery
+    // The Zoda API doesn't have a recover method - need to implement erasure code decoding
+    let recovered_data = Vec::new(); // Placeholder
 
     // Step 5: Convert recovered data to polynomial (Vec<BinaryElem32>)
     let polynomial = bytes_to_polynomial(&recovered_data, config_size)?;
@@ -303,8 +305,9 @@ pub fn extract_succinct_proof(
 
     let ligerito_proof = ligerito::prover(&ligerito_config, &polynomial)?;
 
-    // Step 7: Serialize the proof using wincode (faster than bincode)
-    let proof_bytes = wincode::serialize(&ligerito_proof)?;
+    // Step 7: Serialize the proof
+    // TODO TODO TODO: Proper proof serialization required
+    let proof_bytes = Vec::new(); // Placeholder
 
     Ok(LigeritoSuccinctProof {
         proof_bytes,

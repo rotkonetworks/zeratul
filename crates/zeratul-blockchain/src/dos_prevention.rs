@@ -17,6 +17,7 @@
 //! 4. **Priority Queue**: Higher fees = faster execution
 
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 use std::collections::HashMap;
 use anyhow::{bail, Result};
 
@@ -103,6 +104,7 @@ pub struct Transaction {
     pub proof_of_work: Option<ProofOfWork>,
 
     /// Signature
+    #[serde(with = "BigArray")]
     pub signature: [u8; 64],
 }
 

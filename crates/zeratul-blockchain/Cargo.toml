@@ -23,11 +23,32 @@ path = "examples/submit_transfer.rs"
 name = "light_client_sync"
 path = "examples/light_client_sync.rs"
 
+[[example]]
+name = "test_privacy_tiers"
+path = "examples/test_privacy_tiers.rs"
+
+[[example]]
+name = "test_mpc_transfer"
+path = "examples/test_mpc_transfer.rs"
+
+[[example]]
+name = "test_polkavm_reconstruction"
+path = "examples/test_polkavm_reconstruction.rs"
+
+[[example]]
+name = "bench_ligerito"
+path = "examples/bench_ligerito.rs"
+
+[[example]]
+name = "test_frost_dkg"
+path = "examples/test_frost_dkg.rs"
+
 [dependencies]
 # Local dependencies
 zeratul-circuit = { path = "../zeratul-circuit" }
 ligerito = { path = "../ligerito", features = ["prover"] }
 ligerito-binary-fields = { path = "../ligerito-binary-fields" }
+golden-rs = { path = "../golden-rs" }
 
 # Commonware dependencies - blockchain primitives
 commonware-consensus = { git = "https://github.com/commonwarexyz/monorepo" }
@@ -56,11 +77,21 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 futures = "0.3"
 bytes = "1.0"
-governor = "0.7"
+governor = "0.6"
 rand = "0.8"
+rand_core = "0.6"
 clap = { version = "4.0", features = ["derive"] }
 sha2 = "0.10"
+sha3 = "0.10"
+hex = "0.4"
 wincode = "0.1"
+num-bigint = "0.4"
+bincode = "1.3"
+ed25519-consensus = "2.1"
+
+# Networking with litep2p (includes QUIC)
+litep2p = "0.8"
+multiaddr = "0.18"
 
 # Penumbra FROST for threshold signatures (decaf377 compatible)
 decaf377-frost = { path = "../../../penumbra/crates/crypto/decaf377-frost" }
@@ -69,8 +100,8 @@ decaf377 = { version = "0.10.1", default-features = false }
 
 # Polkadot SDK dependencies for Safrole consensus and pallet (using released versions)
 sp-core = { version = "38", default-features = false, features = ["bandersnatch-experimental", "std"] }
-frame-system = { version = "38", default-features = false }
-frame-support = { version = "38", default-features = false }
-parity-scale-codec = { version = "3.0", default-features = false, features = ["derive"] }
-scale-info = { version = "2.0", default-features = false, features = ["derive"] }
+frame-system = { version = "38", default-features = false, features = ["std"] }
+frame-support = { version = "38", default-features = false, features = ["std"] }
+parity-scale-codec = { version = "3.0", default-features = false, features = ["derive", "std"] }
+scale-info = { version = "2.0", default-features = false, features = ["derive", "std"] }
 blake3 = "1.5"

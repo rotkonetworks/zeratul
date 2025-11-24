@@ -21,6 +21,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey, Verifier};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
+
 /// Batch proposal with stake-weighted signatures
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BatchProposal {
@@ -53,6 +54,7 @@ pub struct StakeSignature {
     /// Validator's public key
     pub validator_pubkey: [u8; 32],
     /// Ed25519 signature
+    #[serde(with = "serde_big_array::BigArray")]
     pub signature: [u8; 64],
     /// Amount of ZT staked by this validator
     pub stake_amount: u64,
@@ -272,6 +274,7 @@ pub enum SlashingEvidence {
     InvalidBatchProof {
         batch_id: BlockNumber,
         validator_pubkey: [u8; 32],
+        #[serde(with = "serde_big_array::BigArray")]
         invalid_signature: [u8; 64],
     },
 
@@ -279,7 +282,9 @@ pub enum SlashingEvidence {
     DoubleSigning {
         batch_id: BlockNumber,
         validator_pubkey: [u8; 32],
+        #[serde(with = "serde_big_array::BigArray")]
         signature_1: [u8; 64],
+        #[serde(with = "serde_big_array::BigArray")]
         signature_2: [u8; 64],
     },
 

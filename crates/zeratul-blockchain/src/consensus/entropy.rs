@@ -79,6 +79,26 @@ impl EntropyAccumulator {
     pub fn seal_entropy(&self) -> &Hash {
         &self.epoch_3
     }
+
+    /// Get current entropy
+    pub fn current_entropy(&self) -> &Hash {
+        &self.current
+    }
+
+    /// Get epoch entropy by index
+    /// - 0: current
+    /// - 1: epoch_1 (last epoch)
+    /// - 2: epoch_2 (2 epochs ago)
+    /// - 3: epoch_3 (3 epochs ago)
+    pub fn epoch_entropy(&self, index: usize) -> &Hash {
+        match index {
+            0 => &self.current,
+            1 => &self.epoch_1,
+            2 => &self.epoch_2,
+            3 => &self.epoch_3,
+            _ => &self.epoch_3, // Default to oldest
+        }
+    }
 }
 
 #[cfg(test)]

@@ -76,7 +76,7 @@ impl Default for AccidentalComputerConfig {
 }
 
 /// A state transition proof using the Accidental Computer pattern
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AccidentalComputerProof {
     /// The ZODA commitment (also serves as our polynomial commitment!)
     pub zoda_commitment: Vec<u8>,

@@ -17,15 +17,17 @@ pub mod liquid_staking;
 pub mod note_staking;
 pub mod zoda_integration;
 pub mod sassafras_staking;
+pub mod dkg_integration;
 
 pub use validator_selection::{ValidatorCandidate, ValidatorSet, CandidateRegistry};
 pub use phragmen::{PhragmenElection, ElectionResult};
-pub use staking::{Nomination, NominatorState, StakingLedger};
+pub use staking::{NominatorState, StakingLedger};
 pub use rewards::{RewardPool, PayoutInfo};
 pub use liquid_staking::{LiquidStakingPool, FrostCustodyPool};
 pub use note_staking::{StakeNote, NoteTreeState, EraTransition, StakingAction};
 pub use zoda_integration::{ZodaEraTransition, ZodaHeader, LigeritoProof};
 pub use sassafras_staking::{StakingTicket, TicketPool, SassafrasEraTransition};
+pub use dkg_integration::{DKGGovernanceManager, ValidatorRegistry, SlashingEvent, SlashingReason};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};

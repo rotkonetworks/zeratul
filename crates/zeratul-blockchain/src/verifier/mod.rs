@@ -68,8 +68,8 @@ use frame_support::{
     traits::{Get, Currency},
 };
 use frame_system::pallet_prelude::*;
-use sp_std::prelude::*;
-use codec::{Decode, Encode};
+use std::prelude::v1::*;
+use parity_scale_codec::{Decode, Encode};
 
 // Re-export types from light_client module
 pub use crate::light_client::LigeritoSuccinctProof;
@@ -272,7 +272,7 @@ pub mod pallet {
             let address = T::AccountId::decode(&mut &[0u8; 32][..])
                 .map_err(|_| Error::<T>::NotAuthorized)?;
 
-            let code_hash = sp_io::hashing::blake2_256(&verifier_code);
+            let code_hash = sp_core::hashing::blake2_256(&verifier_code);
 
             VerifierContract::<T>::put(&address);
 
@@ -518,7 +518,7 @@ pub mod pallet {
             data.extend_from_slice(&proof.sender_commitment_new);
             data.extend_from_slice(&proof.receiver_commitment_old);
             data.extend_from_slice(&proof.receiver_commitment_new);
-            sp_io::hashing::blake2_256(&data)
+            sp_core::hashing::blake2_256(&data)
         }
     }
 }

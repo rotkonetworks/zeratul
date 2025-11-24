@@ -44,6 +44,10 @@ hardware-accel = ["ligerito-binary-fields/hardware-accel"]
 # SHA256 is always available (default) - no extra dependencies, works in no_std
 transcript-sha256 = []  # Default: minimal deps, works everywhere including WASM
 transcript-merlin = ["merlin", "std"]  # Merlin transcript (Zcash/Dalek standard)
+transcript-blake2b = ["blake2"]  # BLAKE2b transcript (optimized for Substrate)
+
+# Substrate runtime support - uses BLAKE2b with sp_io host functions
+substrate = ["transcript-blake2b", "sp-io"]
 
 # WASM support
 wasm = [
@@ -113,6 +117,10 @@ bytemuck = { workspace = true }
 # Crypto (sha256 always available for no_std)
 sha2 = { workspace = true, default-features = false }
 merlin = { workspace = true, optional = true }
+blake2 = { version = "0.10", default-features = false, optional = true }
+
+# Substrate integration (for BLAKE2b transcript in runtime)
+sp-io = { version = "38.0.0", default-features = false, optional = true }
 
 # Prover-only dependencies
 ligerito-reed-solomon = { version = "0.1.0", path = "../ligerito-reed-solomon", optional = true }

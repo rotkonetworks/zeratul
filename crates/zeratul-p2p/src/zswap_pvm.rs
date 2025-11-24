@@ -32,7 +32,7 @@
 //!  │◄───────────────────────────────────────────────┤
 //! ```
 
-use crate::zswap::{SwapIntent, BatchSwap, DexState, TradingPair};
+use crate::zswap::{SwapIntent, DexState, TradingPair};
 use crate::consensus::BlockNumber;
 use serde::{Deserialize, Serialize};
 
@@ -108,6 +108,14 @@ impl ZSwapPVM {
             .execute_batch(swap.pair, swap.block_number)
             .ok_or(SwapError::NoLiquidity)?;
 
+        // Calculate clearing price from batch output
+        // Price = lambda_2 / delta_1 (output / input for 1->2 direction)
+        let clearing_price = if batch.delta_1 > 0 {
+            batch.lambda_2 as f64 / batch.delta_1 as f64
+        } else {
+            0.0
+        };
+
         // Generate proof (would use Ligerito)
         let pvm_proof = vec![0; 101_000]; // Placeholder 101KB proof
 
@@ -115,7 +123,7 @@ impl ZSwapPVM {
             block_number: swap.block_number,
             pair: swap.pair,
             burn_amount: swap.burn_amount,
-            clearing_price: batch.clearing_price,
+            clearing_price,
             pvm_proof,
             output_commitment: swap.output_commitment,
         })

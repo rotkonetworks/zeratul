@@ -22,9 +22,10 @@
 //! This allows aggregating encrypted amounts without decryption!
 
 use curve25519_dalek::{
-    edwards::EdwardsPoint,
+    ristretto::RistrettoPoint,
     scalar::Scalar,
     constants::RISTRETTO_BASEPOINT_POINT,
+    traits::Identity,
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Sha512, Digest};
@@ -60,7 +61,7 @@ impl PedersenCommitment {
     }
 
     /// Second generator H (derived from G via hash-to-curve)
-    fn h_generator() -> EdwardsPoint {
+    fn h_generator() -> RistrettoPoint {
         // H = hash("ZeratulDEXPedersenH") → curve point
         let mut hasher = Sha512::new();
         hasher.update(b"ZeratulDEXPedersenH");
@@ -73,10 +74,10 @@ impl PedersenCommitment {
 
     /// Homomorphic addition: C₁ + C₂
     pub fn add(&self, other: &Self) -> Self {
-        let p1 = curve25519_dalek::edwards::CompressedEdwardsY(self.point)
+        let p1 = curve25519_dalek::ristretto::CompressedRistretto(self.point)
             .decompress()
             .expect("Invalid commitment point");
-        let p2 = curve25519_dalek::edwards::CompressedEdwardsY(other.point)
+        let p2 = curve25519_dalek::ristretto::CompressedRistretto(other.point)
             .decompress()
             .expect("Invalid commitment point");
 
@@ -88,7 +89,7 @@ impl PedersenCommitment {
     /// Zero commitment (identity element)
     pub fn zero() -> Self {
         Self {
-            point: EdwardsPoint::identity().compress().to_bytes(),
+            point: RistrettoPoint::identity().compress().to_bytes(),
         }
     }
 }

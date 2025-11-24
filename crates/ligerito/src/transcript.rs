@@ -519,11 +519,222 @@ impl Transcript for Sha256Transcript {
     }
 }
 
+/// BLAKE2b-based Fiat-Shamir transcript (optimized for Substrate runtimes)
+/// Uses sp_io::hashing::blake2_256 host function in no_std
+#[cfg(feature = "transcript-blake2b")]
+pub struct Blake2bTranscript {
+    state: [u8; 32],
+    counter: u32,
+}
+
+#[cfg(feature = "transcript-blake2b")]
+impl Blake2bTranscript {
+    /// Create a new BLAKE2b transcript with domain separation
+    pub fn new(domain: &[u8]) -> Self {
+        #[cfg(feature = "std")]
+        let state = {
+            use blake2::digest::Digest;
+            let hash = blake2::Blake2b256::digest(domain);
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&hash);
+            arr
+        };
+
+        #[cfg(not(feature = "std"))]
+        let state = sp_io::hashing::blake2_256(domain);
+
+        Self { state, counter: 0 }
+    }
+
+    /// Hash input data with BLAKE2b-256
+    fn hash(data: &[u8]) -> [u8; 32] {
+        #[cfg(feature = "std")]
+        {
+            use blake2::digest::Digest;
+            let hash = blake2::Blake2b256::digest(data);
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&hash);
+            arr
+        }
+
+        #[cfg(not(feature = "std"))]
+        {
+            sp_io::hashing::blake2_256(data)
+        }
+    }
+
+    /// Absorb data into the transcript state
+    fn absorb(&mut self, label: &[u8], data: &[u8]) {
+        let mut input = alloc::vec::Vec::with_capacity(
+            self.state.len() + label.len() + 8 + data.len()
+        );
+        input.extend_from_slice(&self.state);
+        input.extend_from_slice(label);
+        input.extend_from_slice(&(data.len() as u64).to_le_bytes());
+        input.extend_from_slice(data);
+        self.state = Self::hash(&input);
+    }
+
+    /// Squeeze challenge bytes from the transcript
+    fn squeeze(&mut self, label: &[u8]) -> [u8; 32] {
+        let mut input = alloc::vec::Vec::with_capacity(
+            self.state.len() + 9 + label.len() + 4
+        );
+        input.extend_from_slice(&self.state);
+        input.extend_from_slice(b"challenge");
+        input.extend_from_slice(label);
+        input.extend_from_slice(&self.counter.to_le_bytes());
+        self.counter += 1;
+        self.state = Self::hash(&input);
+        self.state
+    }
+}
+
+#[cfg(feature = "transcript-blake2b")]
+impl Transcript for Blake2bTranscript {
+    fn absorb_root(&mut self, root: &MerkleRoot) {
+        if let Some(hash) = &root.root {
+            self.absorb(b"merkle_root", hash);
+        }
+    }
+
+    fn absorb_elems<F: BinaryFieldElement>(&mut self, elems: &[F]) {
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                elems.as_ptr() as *const u8,
+                elems.len() * core::mem::size_of::<F>()
+            )
+        };
+        self.absorb(b"field_elements", bytes);
+    }
+
+    fn absorb_elem<F: BinaryFieldElement>(&mut self, elem: F) {
+        let bytes = unsafe {
+            core::slice::from_raw_parts(
+                &elem as *const F as *const u8,
+                core::mem::size_of::<F>()
+            )
+        };
+        self.absorb(b"field_element", bytes);
+    }
+
+    fn get_challenge<F: BinaryFieldElement>(&mut self) -> F {
+        let bytes = self.squeeze(b"field_challenge");
+        let field_bytes = core::mem::size_of::<F>();
+
+        match field_bytes {
+            4 => {
+                // BinaryElem32
+                let value = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                F::from_bits(value as u64)
+            }
+            16 => {
+                // BinaryElem128 - construct from bytes
+                let low = u64::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                    bytes[4], bytes[5], bytes[6], bytes[7],
+                ]);
+                let high = u64::from_le_bytes([
+                    bytes[8], bytes[9], bytes[10], bytes[11],
+                    bytes[12], bytes[13], bytes[14], bytes[15],
+                ]);
+
+                // Build field element bit by bit
+                let mut result = F::zero();
+
+                // Set bits 0-63
+                for i in 0..64 {
+                    if (low >> i) & 1 == 1 {
+                        let bit_value = F::from_bits(1u64 << i);
+                        result = result.add(&bit_value);
+                    }
+                }
+
+                // Set bits 64-127
+                let mut power_of_2_64 = F::from_bits(1u64 << 63);
+                power_of_2_64 = power_of_2_64.add(&power_of_2_64); // 2^64
+
+                let mut current_power = power_of_2_64;
+                for i in 0..64 {
+                    if (high >> i) & 1 == 1 {
+                        result = result.add(&current_power);
+                    }
+                    if i < 63 {
+                        current_power = current_power.add(&current_power);
+                    }
+                }
+
+                result
+            }
+            _ => {
+                // Generic fallback
+                let mut result = F::zero();
+                for (byte_idx, &byte) in bytes.iter().enumerate().take(field_bytes) {
+                    for bit_idx in 0..8 {
+                        if (byte >> bit_idx) & 1 == 1 {
+                            let global_bit = byte_idx * 8 + bit_idx;
+                            if global_bit < 64 {
+                                result = result.add(&F::from_bits(1u64 << global_bit));
+                            }
+                        }
+                    }
+                }
+                result
+            }
+        }
+    }
+
+    fn get_query(&mut self, max: usize) -> usize {
+        let bytes = self.squeeze(b"query");
+        let value = u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+        ]);
+        (value as usize) % max
+    }
+
+    #[cfg(feature = "std")]
+    fn get_distinct_queries(&mut self, max: usize, count: usize) -> Vec<usize> {
+        let actual_count = count.min(max);
+        let mut queries = Vec::with_capacity(actual_count);
+        let mut seen = HashSet::new();
+
+        while queries.len() < actual_count {
+            let q = self.get_query(max);
+            if seen.insert(q) {
+                queries.push(q);
+            }
+        }
+
+        queries.sort_unstable();
+        queries
+    }
+
+    #[cfg(not(feature = "std"))]
+    fn get_distinct_queries(&mut self, max: usize, count: usize) -> alloc::vec::Vec<usize> {
+        let actual_count = count.min(max);
+        let mut queries = alloc::vec::Vec::with_capacity(actual_count);
+        let mut seen = HashSet::new();
+
+        while queries.len() < actual_count {
+            let q = self.get_query(max);
+            if seen.insert(q) {
+                queries.push(q);
+            }
+        }
+
+        queries.sort_unstable();
+        queries
+    }
+}
+
 /// Factory for creating transcripts
 pub enum TranscriptType {
     #[cfg(feature = "transcript-merlin")]
     Merlin,
     Sha256(i32), // seed
+    #[cfg(feature = "transcript-blake2b")]
+    Blake2b,
 }
 
 /// Wrapper type that can hold either transcript implementation
@@ -531,6 +742,8 @@ pub enum FiatShamir {
     #[cfg(feature = "transcript-merlin")]
     Merlin(MerlinTranscript),
     Sha256(Sha256Transcript),
+    #[cfg(feature = "transcript-blake2b")]
+    Blake2b(Blake2bTranscript),
 }
 
 impl FiatShamir {
@@ -543,6 +756,10 @@ impl FiatShamir {
             }
             TranscriptType::Sha256(seed) => {
                 FiatShamir::Sha256(Sha256Transcript::new(seed))
+            }
+            #[cfg(feature = "transcript-blake2b")]
+            TranscriptType::Blake2b => {
+                FiatShamir::Blake2b(Blake2bTranscript::new(b"ligerito-v1"))
             }
         }
     }
@@ -560,6 +777,12 @@ impl FiatShamir {
         transcript.julia_compatible = true;
         FiatShamir::Sha256(transcript)
     }
+
+    /// Create BLAKE2b transcript (optimized for Substrate runtimes)
+    #[cfg(feature = "transcript-blake2b")]
+    pub fn new_blake2b() -> Self {
+        Self::new(TranscriptType::Blake2b)
+    }
 }
 
 // Implement Transcript trait for the wrapper
@@ -569,6 +792,8 @@ impl Transcript for FiatShamir {
             #[cfg(feature = "transcript-merlin")]
             FiatShamir::Merlin(t) => t.absorb_root(root),
             FiatShamir::Sha256(t) => t.absorb_root(root),
+            #[cfg(feature = "transcript-blake2b")]
+            FiatShamir::Blake2b(t) => t.absorb_root(root),
         }
     }
 
@@ -577,6 +802,8 @@ impl Transcript for FiatShamir {
             #[cfg(feature = "transcript-merlin")]
             FiatShamir::Merlin(t) => t.absorb_elems(elems),
             FiatShamir::Sha256(t) => t.absorb_elems(elems),
+            #[cfg(feature = "transcript-blake2b")]
+            FiatShamir::Blake2b(t) => t.absorb_elems(elems),
         }
     }
 
@@ -585,6 +812,8 @@ impl Transcript for FiatShamir {
             #[cfg(feature = "transcript-merlin")]
             FiatShamir::Merlin(t) => t.absorb_elem(elem),
             FiatShamir::Sha256(t) => t.absorb_elem(elem),
+            #[cfg(feature = "transcript-blake2b")]
+            FiatShamir::Blake2b(t) => t.absorb_elem(elem),
         }
     }
 
@@ -593,6 +822,8 @@ impl Transcript for FiatShamir {
             #[cfg(feature = "transcript-merlin")]
             FiatShamir::Merlin(t) => t.get_challenge(),
             FiatShamir::Sha256(t) => t.get_challenge(),
+            #[cfg(feature = "transcript-blake2b")]
+            FiatShamir::Blake2b(t) => t.get_challenge(),
         }
     }
 
@@ -601,6 +832,8 @@ impl Transcript for FiatShamir {
             #[cfg(feature = "transcript-merlin")]
             FiatShamir::Merlin(t) => t.get_query(max),
             FiatShamir::Sha256(t) => t.get_query(max),
+            #[cfg(feature = "transcript-blake2b")]
+            FiatShamir::Blake2b(t) => t.get_query(max),
         }
     }
 
@@ -609,6 +842,8 @@ impl Transcript for FiatShamir {
             #[cfg(feature = "transcript-merlin")]
             FiatShamir::Merlin(t) => t.get_distinct_queries(max, count),
             FiatShamir::Sha256(t) => t.get_distinct_queries(max, count),
+            #[cfg(feature = "transcript-blake2b")]
+            FiatShamir::Blake2b(t) => t.get_distinct_queries(max, count),
         }
     }
 }

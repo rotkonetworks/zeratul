@@ -3,6 +3,8 @@
 //! Liquidations are computed using ZK proofs to maintain privacy while proving
 //! positions are legitimately underwater (health factor < 1.0).
 //!
+//! Uses serde_big_array for [u8; 64] serialization.
+//!
 //! ## Privacy Properties
 //!
 //! **HIDDEN (Private):**
@@ -52,6 +54,7 @@ use super::privacy::*;
 use crate::frost::{FrostSignature, FrostCoordinator, ThresholdRequirement, ValidatorId, SigningPackageData, SignatureShareData, CommitmentData};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 use zeratul_circuit::AccidentalComputerProof;
 use std::collections::BTreeMap; // SECURITY FIX: Use BTreeMap for deterministic iteration
 
@@ -144,6 +147,188 @@ impl Default for LiquidationConfig {
             min_partial_liquidation_percent: 20, // Min 20% of debt
         }
     }
+}
+
+/// Liquidation delegate public key
+pub type DelegateKey = [u8; 32];
+
+/// Registered liquidation delegate
+///
+/// Delegates can execute liquidations on behalf of position owners.
+/// Selected via VRF to prevent gaming.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LiquidationDelegate {
+    /// Delegate's public key
+    pub key: DelegateKey,
+
+    /// Delegate's stake (for weighted selection)
+    pub stake: u64,
+
+    /// Whether delegate is active
+    pub active: bool,
+
+    /// Number of successful liquidations
+    pub liquidations_executed: u64,
+
+    /// Delegate's fee (basis points, e.g., 50 = 0.5%)
+    pub fee_bps: u16,
+}
+
+/// Registry of liquidation delegates
+#[derive(Debug, Clone, Default)]
+pub struct DelegateRegistry {
+    /// Registered delegates
+    delegates: Vec<LiquidationDelegate>,
+}
+
+impl DelegateRegistry {
+    /// Create new empty registry
+    pub fn new() -> Self {
+        Self {
+            delegates: Vec::new(),
+        }
+    }
+
+    /// Register a new delegate
+    pub fn register(&mut self, delegate: LiquidationDelegate) -> Result<()> {
+        if self.delegates.iter().any(|d| d.key == delegate.key) {
+            bail!("Delegate already registered");
+        }
+        self.delegates.push(delegate);
+        Ok(())
+    }
+
+    /// Get active delegates
+    pub fn active_delegates(&self) -> Vec<&LiquidationDelegate> {
+        self.delegates.iter().filter(|d| d.active).collect()
+    }
+
+    /// Select delegate using VRF from Safrole entropy
+    ///
+    /// Uses entropy from Safrole accumulator + position commitment + slot
+    /// for unpredictable but deterministic selection.
+    ///
+    /// ## Selection Algorithm
+    ///
+    /// ```text
+    /// hash = blake3(entropy || position_commitment || slot)
+    /// index = u32(hash[0..4]) % num_delegates
+    /// selected = delegates[index]
+    /// ```
+    ///
+    /// Different delegate selected each slot, preventing:
+    /// - Front-running (can't predict selection)
+    /// - Collusion (selection changes per slot)
+    /// - Gaming (deterministic from on-chain data)
+    pub fn select_delegate(
+        &self,
+        entropy: &[u8; 32],
+        position_commitment: &[u8; 32],
+        slot: u64,
+    ) -> Option<&LiquidationDelegate> {
+        let active = self.active_delegates();
+        if active.is_empty() {
+            return None;
+        }
+
+        // Build VRF input: entropy || position_commitment || slot
+        let mut data = Vec::with_capacity(72);
+        data.extend_from_slice(entropy);
+        data.extend_from_slice(position_commitment);
+        data.extend_from_slice(&slot.to_le_bytes());
+
+        // Hash to get deterministic but unpredictable selection
+        let hash = blake3::hash(&data);
+        let hash_bytes = hash.as_bytes();
+
+        // Extract index from first 4 bytes
+        let index_bytes: [u8; 4] = hash_bytes[0..4].try_into().unwrap();
+        let index = u32::from_le_bytes(index_bytes) as usize % active.len();
+
+        Some(active[index])
+    }
+
+    /// Select delegate with weighted probability based on stake
+    ///
+    /// Higher stake = higher probability of selection
+    pub fn select_delegate_weighted(
+        &self,
+        entropy: &[u8; 32],
+        position_commitment: &[u8; 32],
+        slot: u64,
+    ) -> Option<&LiquidationDelegate> {
+        let active = self.active_delegates();
+        if active.is_empty() {
+            return None;
+        }
+
+        // Calculate total stake
+        let total_stake: u64 = active.iter().map(|d| d.stake).sum();
+        if total_stake == 0 {
+            // Fall back to uniform selection
+            return self.select_delegate(entropy, position_commitment, slot);
+        }
+
+        // Build VRF input
+        let mut data = Vec::with_capacity(72);
+        data.extend_from_slice(entropy);
+        data.extend_from_slice(position_commitment);
+        data.extend_from_slice(&slot.to_le_bytes());
+
+        let hash = blake3::hash(&data);
+        let hash_bytes = hash.as_bytes();
+
+        // Use first 8 bytes for selection
+        let rand_bytes: [u8; 8] = hash_bytes[0..8].try_into().unwrap();
+        let rand_value = u64::from_le_bytes(rand_bytes) % total_stake;
+
+        // Select based on cumulative stake
+        let mut cumulative = 0u64;
+        for delegate in &active {
+            cumulative += delegate.stake;
+            if rand_value < cumulative {
+                return Some(delegate);
+            }
+        }
+
+        // Should never reach here, but fallback to last
+        active.last().copied()
+    }
+
+    /// Check if a delegate is authorized for this slot
+    pub fn is_authorized(
+        &self,
+        delegate_key: &DelegateKey,
+        entropy: &[u8; 32],
+        position_commitment: &[u8; 32],
+        slot: u64,
+    ) -> bool {
+        if let Some(selected) = self.select_delegate(entropy, position_commitment, slot) {
+            selected.key == *delegate_key
+        } else {
+            false
+        }
+    }
+}
+
+/// FHE-based health factor check result
+///
+/// Result of computing health factor on encrypted position data.
+/// Only reveals boolean (liquidatable or not), not actual values.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FheHealthCheckResult {
+    /// Position commitment being checked
+    pub position_commitment: [u8; 32],
+
+    /// Whether position is liquidatable (health < 1.0)
+    pub is_liquidatable: bool,
+
+    /// Proof that FHE computation was correct
+    /// Verified by Ligerito in PolkaVM
+    pub fhe_proof: Vec<u8>,
+
+    /// Block at which check was performed
+    pub checked_at_block: u64,
 }
 
 impl LiquidationConfig {
@@ -288,8 +473,12 @@ impl LiquidationWitness {
                 .get(asset_id)
                 .ok_or_else(|| anyhow::anyhow!("missing oracle price for asset"))?;
 
-            let collateral_params = pool.get_asset_params(*asset_id)?;
-            let liquidation_threshold = collateral_params.liquidation_threshold;
+            // ========================================
+            // TODO TODO TODO: CRITICAL PLACEHOLDER
+            // ========================================
+            // Get asset params from pool configuration
+            // let collateral_params = pool.get_asset_params(*asset_id)?;
+            let liquidation_threshold = Ratio::from_percent(80); // 80% default - HARDCODED!
 
             // Adjusted collateral = amount * price * liquidation_threshold
             let value = amount.0 as u128 * price.0 as u128 * liquidation_threshold.numerator as u128
@@ -310,13 +499,16 @@ impl LiquidationWitness {
         }
 
         if total_debt_value == 0 {
-            return Ok(Ratio::from_u64(u64::MAX)); // No debt = infinite health
+            return Ok(Ratio {
+                numerator: u64::MAX as u128,
+                denominator: 1,
+            }); // No debt = infinite health
         }
 
         // Health factor = adjusted_collateral / debt
         let health_factor = Ratio {
-            numerator: total_collateral_value as u64,
-            denominator: total_debt_value as u64,
+            numerator: total_collateral_value,
+            denominator: total_debt_value,
         };
 
         Ok(health_factor)
@@ -351,6 +543,7 @@ pub struct LiquidationProposal {
     pub frost_signature: Option<FrostSignature>,
 
     /// Legacy single signature (for backward compatibility during migration)
+    #[serde(skip)]
     pub signature: Option<[u8; 64]>,
 }
 
@@ -718,6 +911,7 @@ pub enum LiquidationBatchStatus {
 /// Manages the privacy-preserving liquidation process.
 ///
 /// FROST INTEGRATION: Uses Byzantine threshold (11/15) for liquidation approval
+/// VRF DELEGATES: Uses Safrole entropy for randomized delegate selection
 pub struct LiquidationEngine {
     /// Liquidation configuration
     /// HARDENING: Includes timing attack protection
@@ -731,6 +925,14 @@ pub struct LiquidationEngine {
 
     /// FROST coordinator for Byzantine threshold signatures (11/15)
     frost_coordinator: FrostLiquidationCoordinator,
+
+    /// Registry of liquidation delegates
+    /// VRF DELEGATES: Selected via Safrole entropy
+    delegate_registry: DelegateRegistry,
+
+    /// Current Safrole entropy (from epoch_2)
+    /// Updated each epoch from consensus
+    current_entropy: [u8; 32],
 }
 
 impl LiquidationEngine {
@@ -740,12 +942,80 @@ impl LiquidationEngine {
             liquidation_threshold: Ratio::ONE,
             pending_proposals: Vec::new(),
             frost_coordinator: FrostLiquidationCoordinator::new(total_validators),
+            delegate_registry: DelegateRegistry::new(),
+            current_entropy: [0; 32],
         }
     }
 
     /// Create with default configuration (15 validators)
     pub fn new_default() -> Self {
         Self::new(LiquidationConfig::default(), 15)
+    }
+
+    /// Update entropy from Safrole consensus
+    ///
+    /// Called at epoch boundaries with new entropy from accumulator
+    pub fn update_entropy(&mut self, entropy: [u8; 32]) {
+        self.current_entropy = entropy;
+        tracing::debug!("Updated liquidation entropy: {:?}", &entropy[..8]);
+    }
+
+    /// Register a liquidation delegate
+    pub fn register_delegate(&mut self, delegate: LiquidationDelegate) -> Result<()> {
+        self.delegate_registry.register(delegate)
+    }
+
+    /// Get the selected delegate for a position at current slot
+    pub fn get_selected_delegate(
+        &self,
+        position_commitment: &[u8; 32],
+        slot: u64,
+    ) -> Option<&LiquidationDelegate> {
+        self.delegate_registry.select_delegate(
+            &self.current_entropy,
+            position_commitment,
+            slot,
+        )
+    }
+
+    /// Verify that a delegate is authorized to liquidate a position
+    ///
+    /// Returns true if the delegate is the VRF-selected delegate for this slot
+    pub fn verify_delegate_authorization(
+        &self,
+        delegate_key: &DelegateKey,
+        position_commitment: &[u8; 32],
+        slot: u64,
+    ) -> bool {
+        self.delegate_registry.is_authorized(
+            delegate_key,
+            &self.current_entropy,
+            position_commitment,
+            slot,
+        )
+    }
+
+    /// Process FHE health check result and trigger delegate selection
+    ///
+    /// Called when FHE computation determines a position is liquidatable.
+    /// Selects a delegate via VRF and authorizes them to execute.
+    pub fn process_fhe_health_check(
+        &self,
+        result: &FheHealthCheckResult,
+        current_slot: u64,
+    ) -> Option<DelegateKey> {
+        if !result.is_liquidatable {
+            return None;
+        }
+
+        // Select delegate for this position at current slot
+        self.delegate_registry
+            .select_delegate(
+                &self.current_entropy,
+                &result.position_commitment,
+                current_slot,
+            )
+            .map(|d| d.key)
     }
 
     /// Get FROST coordinator status
@@ -883,7 +1153,7 @@ impl LiquidationEngine {
         // Calculate average health factor
         let avg_health_factor = if !all_liquidations.is_empty() {
             Ratio {
-                numerator: (total_health / all_liquidations.len() as u128) as u64,
+                numerator: total_health / all_liquidations.len() as u128,
                 denominator: Ratio::ONE.denominator,
             }
         } else {
@@ -977,7 +1247,7 @@ impl LiquidationEngine {
         let penalty_amount = Amount(
             seized_collateral
                 .0
-                .checked_mul(self.penalty_percent as u128)
+                .checked_mul(self.config.max_penalty_percent as u128)
                 .and_then(|v| v.checked_div(100))
                 .ok_or_else(|| anyhow::anyhow!("Overflow calculating penalty amount"))?
         );
@@ -1062,12 +1332,13 @@ impl LiquidationScanner {
         let debt_repaid = self.calculate_debt_repaid(&witness)?;
 
         let public_inputs = LiquidationPublicInputs {
-            commitment: witness.position.owner_key, // Placeholder
+            commitment: witness.position.owner_key, // TODO: PLACEHOLDER
             oracle_prices_hash: self.hash_oracle_prices(&witness.oracle_prices),
-            state_root: [0; 32], // From NOMT
+            state_root: [0; 32], // TODO: From NOMT
             penalty_percent: 5,
             seized_collateral: Amount(seized_collateral),
             debt_repaid: Amount(debt_repaid),
+            became_liquidatable_at: 0, // TODO: PLACEHOLDER - should come from position state
         };
 
         // 3. Build ZK circuit
@@ -1076,13 +1347,19 @@ impl LiquidationScanner {
         // 4. Generate proof
         // let proof = prove_liquidation(circuit)?;
 
-        // Placeholder proof
+        // ========================================
+        // TODO TODO TODO: CRITICAL PLACEHOLDER
+        // ========================================
+        // Placeholder proof - matches current AccidentalComputerProof structure
+        // MUST REPLACE WITH ACTUAL LIQUIDATION PROOF GENERATION
         let proof = AccidentalComputerProof {
             zoda_commitment: Vec::new(),
+            shard_indices: Vec::new(),
             shards: Vec::new(),
-            polynomial_commitment: Vec::new(),
-            evaluation_proof: Vec::new(),
-            auxiliary_data: Vec::new(),
+            sender_commitment_old: [0u8; 32],
+            sender_commitment_new: [0u8; 32],
+            receiver_commitment_old: [0u8; 32],
+            receiver_commitment_new: [0u8; 32],
         };
 
         Ok(LiquidationProof {
@@ -1095,19 +1372,20 @@ impl LiquidationScanner {
 
     /// Calculate how much collateral to seize
     /// SECURITY FIX: Use checked arithmetic
-    fn calculate_seized_collateral(&self, witness: &LiquidationWitness) -> Result<u64> {
+    fn calculate_seized_collateral(&self, witness: &LiquidationWitness) -> Result<u128> {
         // Seize enough collateral to cover debt + penalty
         let mut total_debt_value = 0u128; // Use u128 to avoid overflow
 
         for (asset_id, amount) in &witness.position.debt {
-            let price = witness
+            let price_amount = witness
                 .oracle_prices
                 .get(asset_id)
                 .ok_or_else(|| anyhow::anyhow!("missing price"))?;
 
-            // amount.0 * price (using rational price)
-            let value = price
-                .checked_mul_amount(amount.0)
+            // amount * price (both as raw u128 values)
+            let value = amount
+                .0
+                .checked_mul(price_amount.0)
                 .ok_or_else(|| anyhow::anyhow!("Overflow calculating debt value"))?;
 
             total_debt_value = total_debt_value
@@ -1121,14 +1399,12 @@ impl LiquidationScanner {
             .and_then(|v| v.checked_div(100))
             .ok_or_else(|| anyhow::anyhow!("Overflow applying penalty"))?;
 
-        // Convert to u64 (check for overflow)
-        u64::try_from(with_penalty)
-            .map_err(|_| anyhow::anyhow!("Seized collateral exceeds u64 max"))
+        Ok(with_penalty)
     }
 
     /// Calculate how much debt is repaid
-    fn calculate_debt_repaid(&self, witness: &LiquidationWitness) -> Result<u64> {
-        let mut total_debt = 0u64;
+    fn calculate_debt_repaid(&self, witness: &LiquidationWitness) -> Result<u128> {
+        let mut total_debt = 0u128;
 
         for (_, amount) in &witness.position.debt {
             total_debt += amount.0;

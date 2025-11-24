@@ -225,7 +225,7 @@ impl PhragmenElection {
             // Find candidate with highest backing
             let (winner, winner_backing) = candidate_backings
                 .iter()
-                .filter(|(account, _)| !elected_set.contains(account))
+                .filter(|(account, _)| !elected_set.contains(*account))
                 .max_by_key(|(_, backing)| *backing)
                 .ok_or_else(|| anyhow::anyhow!("No more candidates to elect"))?;
 
@@ -253,7 +253,7 @@ impl PhragmenElection {
                 let targets_still_available = nomination
                     .targets
                     .iter()
-                    .filter(|t| !elected_set.contains(t))
+                    .filter(|t| !elected_set.contains(*t))
                     .count();
 
                 if targets_still_available == 0 {
@@ -320,7 +320,7 @@ impl PhragmenElection {
                     let targets_remaining = nomination
                         .targets
                         .iter()
-                        .filter(|t| !elected_set.contains(t))
+                        .filter(|t| !elected_set.contains(*t))
                         .count();
 
                     if targets_remaining > 0 {

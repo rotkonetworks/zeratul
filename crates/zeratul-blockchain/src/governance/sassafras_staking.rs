@@ -6,6 +6,7 @@
 use super::{AccountId, Balance, EraIndex};
 use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
+use serde_big_array::BigArray;
 use std::collections::BTreeMap;
 
 /// Ticket identifier (VRF output)
@@ -117,6 +118,7 @@ pub struct TicketClaim {
     pub validator: AccountId,
 
     /// Signature proving ownership of erased key
+    #[serde(with = "serde_big_array::BigArray")]
     pub erased_signature: EphemeralSignature,
 
     /// Revealed stake amount (decrypted)
@@ -336,6 +338,7 @@ pub struct SassafrasEraTransition {
     pub elected_validators: Vec<AccountId>,
 
     /// FROST signature (11/15 validators)
+    #[serde(skip)]
     pub frost_signature: Option<[u8; 64]>,
 }
 
