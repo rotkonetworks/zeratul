@@ -80,8 +80,9 @@ impl EpochManager {
             current_epoch.saturating_sub(1)
         };
 
-        if last_complete_epoch == 0 {
-            info!("no complete epochs yet");
+        // check if we're still in epoch 0 and haven't completed it
+        if current_epoch == 0 && current_height < zync_core::EPOCH_SIZE {
+            info!("no complete epochs yet (at block {} / {})", current_height, zync_core::EPOCH_SIZE);
             return Ok(());
         }
 
@@ -104,10 +105,10 @@ impl EpochManager {
         );
 
         // build trace
-        let trace = HeaderChainTrace::build(&self.zebrad, from_height, to_height).await?;
+        let mut trace = HeaderChainTrace::build(&self.zebrad, from_height, to_height).await?;
 
-        // generate proof with 2^28 config (takes ~25s)
-        let proof = HeaderChainProof::prove(&self.gigaproof_config, &trace)?;
+        // generate proof (auto-select config based on trace size)
+        let proof = HeaderChainProof::prove_auto(&mut trace)?;
 
         // cache it
         self.storage
@@ -194,10 +195,10 @@ impl EpochManager {
         );
 
         // build tip trace
-        let tip_trace = HeaderChainTrace::build(&self.zebrad, tip_from, current_height).await?;
+        let mut tip_trace = HeaderChainTrace::build(&self.zebrad, tip_from, current_height).await?;
 
-        // generate tip proof with 2^24 config (~1.3s)
-        let tip_proof = HeaderChainProof::prove(&self.tip_config, &tip_trace)?;
+        // generate tip proof (auto-select config)
+        let tip_proof = HeaderChainProof::prove_auto(&mut tip_trace)?;
 
         info!("tip proof generated: {} KB", tip_proof.proof_bytes.len() / 1024);
 
@@ -216,5 +217,10 @@ impl EpochManager {
         };
 
         Ok(self.epoch_range(last_complete).1)
+    }
+
+    /// check if any gigaproof is available
+    pub async fn is_gigaproof_ready(&self) -> Result<bool> {
+        Ok(self.last_gigaproof_epoch.read().await.is_some())
     }
 }

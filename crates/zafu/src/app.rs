@@ -10,6 +10,7 @@ use crate::{
     verifier::ProofVerifier,
     scanner::WalletScanner,
     sync::{SyncOrchestrator, SyncProgress, SyncPhase},
+    zidecar::SyncStatus,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -33,6 +34,7 @@ pub struct Zafu {
 
     // sync state
     sync_progress: Option<SyncProgress>,
+    blockchain_sync_status: Option<SyncStatus>,
 
     // UI state
     server_url: String,
@@ -58,6 +60,7 @@ impl Zafu {
             scanner: None,
             orchestrator: None,
             sync_progress: None,
+            blockchain_sync_status: None,
             server_url: "http://127.0.0.1:50051".into(),
             wallet_path: "./zafu.db".into(),
             balance: 0,
@@ -71,7 +74,7 @@ impl Zafu {
             ui.add_space(60.0);
 
             // zen circle (ensō) symbol
-            ui.label(egui::RichText::new("○").size(48.0).color(egui::Color32::from_gray(100)));
+            ui.label(egui::RichText::new("○").size(48.0).color(egui::Color32::from_gray(160)));
             ui.add_space(20.0);
             ui.label(egui::RichText::new("zafu").size(24.0));
             ui.add_space(40.0);
@@ -95,20 +98,45 @@ impl Zafu {
 
     fn render_syncing(&mut self, ui: &mut egui::Ui) {
         ui.vertical_centered(|ui| {
-            ui.add_space(60.0);
-            ui.label(egui::RichText::new("⊚").size(48.0).color(egui::Color32::from_gray(100)));
-            ui.add_space(20.0);
+            ui.add_space(40.0);
+            ui.label(egui::RichText::new("⊚").size(42.0).color(egui::Color32::from_gray(170)));
+            ui.add_space(16.0);
+            ui.label(egui::RichText::new("syncing").size(18.0));
+            ui.add_space(30.0);
         });
 
         if let Some(ref progress) = self.sync_progress {
-            ui.label(&progress.message);
-            ui.add_space(10.0);
+            // status message
+            ui.label(egui::RichText::new(&progress.message).size(13.0));
+            ui.add_space(12.0);
 
+            // progress bar
             ui.add(egui::ProgressBar::new(progress.progress).show_percentage());
+            ui.add_space(16.0);
 
-            if progress.current_height > 0 {
-                ui.label(format!("height: {}", progress.current_height));
-            }
+            // detailed info grid
+            egui::Grid::new("sync_info")
+                .num_columns(2)
+                .spacing([40.0, 8.0])
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("phase").size(11.0).color(egui::Color32::from_gray(120)));
+                    ui.label(format!("{:?}", progress.phase));
+                    ui.end_row();
+
+                    if progress.current_height > 0 {
+                        ui.label(egui::RichText::new("height").size(11.0).color(egui::Color32::from_gray(120)));
+                        ui.label(format!("{}", progress.current_height));
+                        ui.end_row();
+                    }
+
+                    ui.label(egui::RichText::new("progress").size(11.0).color(egui::Color32::from_gray(120)));
+                    ui.label(format!("{:.1}%", progress.progress * 100.0));
+                    ui.end_row();
+
+                    ui.label(egui::RichText::new("server").size(11.0).color(egui::Color32::from_gray(120)));
+                    ui.label(&self.server_url);
+                    ui.end_row();
+                });
 
             // check if sync is complete
             if matches!(progress.phase, SyncPhase::Complete) {
@@ -128,13 +156,13 @@ impl Zafu {
             ui.add_space(60.0);
 
             // zen circle (ensō) filled
-            ui.label(egui::RichText::new("●").size(48.0).color(egui::Color32::from_gray(100)));
+            ui.label(egui::RichText::new("●").size(48.0).color(egui::Color32::from_gray(160)));
             ui.add_space(20.0);
 
             // balance in large text
             ui.label(egui::RichText::new(format_balance(self.balance))
                 .size(32.0)
-                .color(egui::Color32::from_gray(60)));
+                .color(egui::Color32::from_gray(190)));
             ui.add_space(40.0);
         });
 
@@ -164,17 +192,128 @@ impl Zafu {
     }
 
     fn render_error(&mut self, ui: &mut egui::Ui) {
+        // fetch blockchain sync status if we have a client
+        if self.blockchain_sync_status.is_none() && self.client.is_some() {
+            if let Some(client) = &self.client {
+                let client = Arc::clone(client);
+                let status = self.runtime.block_on(async move {
+                    let mut c = client.write().await;
+                    c.get_sync_status().await.ok()
+                });
+                self.blockchain_sync_status = status;
+            }
+        }
+
         ui.vertical_centered(|ui| {
-            ui.add_space(60.0);
-
-            // broken circle
-            ui.label(egui::RichText::new("⊘").size(48.0).color(egui::Color32::from_rgb(180, 100, 100)));
-            ui.add_space(20.0);
-
-            ui.label(&self.status_message);
             ui.add_space(40.0);
 
+            // error symbol
+            ui.label(egui::RichText::new("⊚").size(42.0).color(egui::Color32::from_rgb(220, 180, 100)));
+            ui.add_space(16.0);
+            ui.label(egui::RichText::new("waiting for blockchain sync").size(16.0).color(egui::Color32::from_rgb(220, 180, 100)));
+            ui.add_space(30.0);
+        });
+
+        // show blockchain sync status with progress bar
+        if let Some(ref status) = self.blockchain_sync_status {
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgb(38, 38, 40))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(58, 58, 60)))
+                .inner_margin(16.0)
+                .show(ui, |ui| {
+                    // epoch progress bar (japanese aesthetic)
+                    let epoch_progress = status.blocks_in_epoch as f32 / 1024.0;
+                    let bar_width = 300.0;
+                    let bar_height = 8.0;
+
+                    ui.label(egui::RichText::new("epoch progress").size(11.0).color(egui::Color32::from_gray(180)));
+                    ui.add_space(8.0);
+
+                    // draw progress bar
+                    let (rect, _response) = ui.allocate_exact_size(
+                        egui::vec2(bar_width, bar_height),
+                        egui::Sense::hover(),
+                    );
+
+                    let progress_color = if status.gigaproof_status() == crate::zidecar::sync_status::GigaproofStatus::Ready {
+                        egui::Color32::from_rgb(140, 180, 120) // green when ready
+                    } else {
+                        egui::Color32::from_rgb(220, 180, 100) // warm yellow/gold
+                    };
+
+                    ui.painter().rect_filled(
+                        rect,
+                        0.0,
+                        egui::Color32::from_rgb(58, 58, 60), // dark background
+                    );
+
+                    let progress_rect = egui::Rect::from_min_size(
+                        rect.min,
+                        egui::vec2(bar_width * epoch_progress, bar_height),
+                    );
+
+                    ui.painter().rect_filled(
+                        progress_rect,
+                        0.0,
+                        progress_color,
+                    );
+
+                    ui.add_space(12.0);
+
+                    // detailed sync info grid
+                    egui::Grid::new("blockchain_sync_live")
+                        .num_columns(2)
+                        .spacing([40.0, 8.0])
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("blockchain height").size(11.0).color(egui::Color32::from_gray(152)));
+                            ui.label(format!("{}", status.current_height));
+                            ui.end_row();
+
+                            ui.label(egui::RichText::new("current epoch").size(11.0).color(egui::Color32::from_gray(152)));
+                            ui.label(format!("epoch {}", status.current_epoch));
+                            ui.end_row();
+
+                            ui.label(egui::RichText::new("blocks in epoch").size(11.0).color(egui::Color32::from_gray(152)));
+                            ui.label(format!("{} / 1024", status.blocks_in_epoch));
+                            ui.end_row();
+
+                            ui.label(egui::RichText::new("complete epochs").size(11.0).color(egui::Color32::from_gray(152)));
+                            ui.label(format!("{}", status.complete_epochs));
+                            ui.end_row();
+
+                            ui.label(egui::RichText::new("gigaproof status").size(11.0).color(egui::Color32::from_gray(152)));
+                            let status_text = match status.gigaproof_status() {
+                                crate::zidecar::sync_status::GigaproofStatus::WaitingForEpoch => {
+                                    format!("waiting ({} blocks remaining)", status.blocks_until_ready)
+                                }
+                                crate::zidecar::sync_status::GigaproofStatus::Generating => "generating...".to_string(),
+                                crate::zidecar::sync_status::GigaproofStatus::Ready => "ready".to_string(),
+                            };
+                            ui.label(status_text);
+                            ui.end_row();
+                        });
+
+                    ui.add_space(12.0);
+                    ui.label(egui::RichText::new("The server needs at least one complete epoch (1024 blocks) to generate the first gigaproof.").size(10.0).color(egui::Color32::from_gray(170)));
+                });
+        } else {
+            // fallback error display
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgb(42, 35, 35))
+                .stroke(egui::Stroke::new(1.0, egui::Color32::from_rgb(80, 60, 60)))
+                .inner_margin(16.0)
+                .show(ui, |ui| {
+                    ui.label(egui::RichText::new("details").size(11.0).color(egui::Color32::from_gray(150)));
+                    ui.add_space(8.0);
+                    ui.label(&self.status_message);
+                });
+        }
+
+        ui.add_space(24.0);
+
+        ui.vertical_centered(|ui| {
             if ui.button("retry").clicked() {
+                self.blockchain_sync_status = None; // clear cached status
                 self.state = AppState::Setup;
                 self.status_message = "".into();
             }

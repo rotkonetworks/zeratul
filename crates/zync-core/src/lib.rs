@@ -78,6 +78,46 @@ pub fn gigaproof_prover_config() -> ProverConfig<BinaryElem32, BinaryElem128> {
     )
 }
 
+/// select the appropriate prover config for a given trace size
+/// returns (config, required_trace_size) - trace must be padded to required_trace_size
+pub fn prover_config_for_size(trace_len: usize) -> (ProverConfig<BinaryElem32, BinaryElem128>, usize) {
+    let log_size = if trace_len == 0 { 12 } else { (trace_len as f64).log2().ceil() as u32 };
+
+    // available configs: 12, 16, 20, 24, 28, 30
+    let (config_log, config) = if log_size <= 12 {
+        (12, ligerito::hardcoded_config_12(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>))
+    } else if log_size <= 16 {
+        (16, ligerito::hardcoded_config_16(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>))
+    } else if log_size <= 20 {
+        (20, ligerito::hardcoded_config_20(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>))
+    } else if log_size <= 24 {
+        (24, ligerito::hardcoded_config_24(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>))
+    } else if log_size <= 28 {
+        (28, ligerito::hardcoded_config_28(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>))
+    } else {
+        (30, ligerito::hardcoded_config_30(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>))
+    };
+
+    (config, 1 << config_log)
+}
+
+/// select the appropriate verifier config for a given log size
+pub fn verifier_config_for_log_size(log_size: u32) -> VerifierConfig {
+    if log_size <= 12 {
+        ligerito::hardcoded_config_12_verifier()
+    } else if log_size <= 16 {
+        ligerito::hardcoded_config_16_verifier()
+    } else if log_size <= 20 {
+        ligerito::hardcoded_config_20_verifier()
+    } else if log_size <= 24 {
+        ligerito::hardcoded_config_24_verifier()
+    } else if log_size <= 28 {
+        ligerito::hardcoded_config_28_verifier()
+    } else {
+        ligerito::hardcoded_config_30_verifier()
+    }
+}
+
 /// ligerito verifier config for tip proofs (2^24)
 pub fn tip_verifier_config() -> VerifierConfig {
     ligerito::hardcoded_config_24_verifier()

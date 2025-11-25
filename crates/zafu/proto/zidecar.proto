@@ -15,6 +15,9 @@ service Zidecar {
 
     // Subscribe to new blocks (live feed)
     rpc SubscribeBlocks(Empty) returns (stream BlockId);
+
+    // Get sync status (blockchain height, epoch progress, gigaproof status)
+    rpc GetSyncStatus(Empty) returns (SyncStatus);
 }
 
 // Request proof for height range
@@ -77,3 +80,32 @@ message BlockId {
 
 // Empty message
 message Empty {}
+
+// Sync status information
+message SyncStatus {
+    // Current blockchain height from zcashd
+    uint32 current_height = 1;
+
+    // Current epoch number (height / 1024)
+    uint32 current_epoch = 2;
+
+    // Blocks in current epoch (0-1023)
+    uint32 blocks_in_epoch = 3;
+
+    // Total complete epochs
+    uint32 complete_epochs = 4;
+
+    // Gigaproof generation status
+    enum GigaproofStatus {
+        WAITING_FOR_EPOCH = 0;    // Need more blocks
+        GENERATING = 1;            // Currently generating proof
+        READY = 2;                 // Gigaproof available
+    }
+    GigaproofStatus gigaproof_status = 5;
+
+    // Blocks remaining until first gigaproof (0 if ready)
+    uint32 blocks_until_ready = 6;
+
+    // Last gigaproof height (0 if none)
+    uint32 last_gigaproof_height = 7;
+}

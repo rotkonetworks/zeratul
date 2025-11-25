@@ -6,17 +6,23 @@ use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use tracing::{info, debug};
 use std::time::Instant;
 
-pub struct ProofVerifier {
-    gigaproof_config: VerifierConfig,
-    tip_config: VerifierConfig,
-}
+pub struct ProofVerifier;
 
 impl ProofVerifier {
     pub fn new() -> Self {
-        Self {
-            gigaproof_config: zync_core::gigaproof_verifier_config(),
-            tip_config: zync_core::tip_verifier_config(),
+        Self
+    }
+
+    /// deserialize proof with config prefix
+    /// format: [log_size: u8][proof_bytes...]
+    fn deserialize_proof_with_config(bytes: &[u8]) -> Result<(FinalizedLigeritoProof<BinaryElem32, BinaryElem128>, u8)> {
+        if bytes.is_empty() {
+            anyhow::bail!("empty proof bytes");
         }
+        let log_size = bytes[0];
+        let proof = bincode::deserialize(&bytes[1..])
+            .map_err(|e| anyhow::anyhow!("failed to deserialize proof: {}", e))?;
+        Ok((proof, log_size))
     }
 
     /// verify combined gigaproof + tip proof
@@ -47,24 +53,25 @@ impl ProofVerifier {
 
         debug!("gigaproof: {} bytes, tip: {} bytes", gigaproof_bytes.len(), tip_bytes.len());
 
-        // deserialize proofs
-        let gigaproof: FinalizedLigeritoProof<BinaryElem32, BinaryElem128> =
-            bincode::deserialize(gigaproof_bytes)
-                .map_err(|e| anyhow::anyhow!("failed to deserialize gigaproof: {}", e))?;
+        // deserialize proofs (with config prefix)
+        let (gigaproof, giga_log_size) = Self::deserialize_proof_with_config(gigaproof_bytes)?;
+        let (tip_proof, tip_log_size) = Self::deserialize_proof_with_config(tip_bytes)?;
 
-        let tip_proof: FinalizedLigeritoProof<BinaryElem32, BinaryElem128> =
-            bincode::deserialize(tip_bytes)
-                .map_err(|e| anyhow::anyhow!("failed to deserialize tip proof: {}", e))?;
+        debug!("gigaproof config: 2^{}, tip config: 2^{}", giga_log_size, tip_log_size);
+
+        // get verifier configs for the actual sizes used
+        let giga_config = zync_core::verifier_config_for_log_size(giga_log_size as u32);
+        let tip_config = zync_core::verifier_config_for_log_size(tip_log_size as u32);
 
         // verify gigaproof
         let gigaproof_start = Instant::now();
-        let gigaproof_valid = verify(&self.gigaproof_config, &gigaproof)
+        let gigaproof_valid = verify(&giga_config, &gigaproof)
             .map_err(|e| anyhow::anyhow!("gigaproof verification error: {}", e))?;
         debug!("gigaproof verification took {:?}", gigaproof_start.elapsed());
 
         // verify tip proof
         let tip_start = Instant::now();
-        let tip_valid = verify(&self.tip_config, &tip_proof)
+        let tip_valid = verify(&tip_config, &tip_proof)
             .map_err(|e| anyhow::anyhow!("tip verification error: {}", e))?;
         debug!("tip verification took {:?}", tip_start.elapsed());
 
@@ -82,13 +89,12 @@ impl ProofVerifier {
         info!("verifying tip proof ({} bytes)", tip_proof.len());
         let start = Instant::now();
 
-        // deserialize tip proof
-        let proof: FinalizedLigeritoProof<BinaryElem32, BinaryElem128> =
-            bincode::deserialize(tip_proof)
-                .map_err(|e| anyhow::anyhow!("failed to deserialize tip proof: {}", e))?;
+        // deserialize tip proof with config
+        let (proof, log_size) = Self::deserialize_proof_with_config(tip_proof)?;
+        let config = zync_core::verifier_config_for_log_size(log_size as u32);
 
         // verify
-        let valid = verify(&self.tip_config, &proof)
+        let valid = verify(&config, &proof)
             .map_err(|e| anyhow::anyhow!("tip verification error: {}", e))?;
 
         let elapsed = start.elapsed();

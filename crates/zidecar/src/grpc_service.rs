@@ -9,7 +9,8 @@ use crate::{
     zidecar::{
         self, zidecar_server::Zidecar, BlockHeader as ProtoBlockHeader, BlockId, BlockRange,
         CompactAction as ProtoCompactAction, CompactBlock as ProtoCompactBlock, Empty,
-        HeaderProof, ProofRequest,
+        HeaderProof, ProofRequest, SyncStatus,
+        sync_status::GigaproofStatus,
     },
 };
 use std::sync::Arc;
@@ -269,5 +270,72 @@ impl Zidecar for ZidecarService {
         });
 
         Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn get_sync_status(
+        &self,
+        _request: Request<Empty>,
+    ) -> std::result::Result<Response<SyncStatus>, Status> {
+        // get current blockchain height
+        let blockchain_info = match self.zebrad.get_blockchain_info().await {
+            Ok(info) => info,
+            Err(e) => {
+                error!("failed to get blockchain info: {}", e);
+                return Err(Status::internal(e.to_string()));
+            }
+        };
+
+        let current_height = blockchain_info.blocks;
+        let current_epoch = current_height / zync_core::EPOCH_SIZE;
+        let blocks_in_epoch = current_height % zync_core::EPOCH_SIZE;
+
+        // calculate complete epochs
+        let complete_epochs = if blocks_in_epoch == 0 && current_height > 0 {
+            current_epoch
+        } else {
+            current_epoch.saturating_sub(1)
+        };
+
+        // check gigaproof status
+        let (gigaproof_status, last_gigaproof_height) = match self.epoch_manager.is_gigaproof_ready().await {
+            Ok(true) => {
+                let last_height = self.epoch_manager.last_complete_epoch_height().await
+                    .unwrap_or(0);
+                (GigaproofStatus::Ready as i32, last_height)
+            }
+            Ok(false) => {
+                if complete_epochs == 0 {
+                    (GigaproofStatus::WaitingForEpoch as i32, 0)
+                } else {
+                    (GigaproofStatus::Generating as i32, 0)
+                }
+            }
+            Err(e) => {
+                warn!("failed to check gigaproof status: {}", e);
+                (GigaproofStatus::WaitingForEpoch as i32, 0)
+            }
+        };
+
+        // calculate blocks until ready
+        let blocks_until_ready = if complete_epochs == 0 {
+            zync_core::EPOCH_SIZE - blocks_in_epoch
+        } else {
+            0
+        };
+
+        info!(
+            "sync status: height={} epoch={}/{} gigaproof={:?}",
+            current_height, blocks_in_epoch, zync_core::EPOCH_SIZE, gigaproof_status
+        );
+
+        Ok(Response::new(SyncStatus {
+            current_height,
+            current_epoch,
+            blocks_in_epoch,
+            complete_epochs,
+            gigaproof_status,
+            blocks_until_ready,
+            last_gigaproof_height,
+        }))
     }
 }
