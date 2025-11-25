@@ -7,6 +7,8 @@ members = [
     "crates/ligerito",
     # PolkaVM polynomial commitment verification
     "crates/polkavm-pcvm",
+    # IBP monitoring probes
+    "crates/ibp-probe-host",
     # Zeratul blockchain primitives
     "crates/zeratul-circuit",
     "crates/zeratul-blockchain",
@@ -16,15 +18,17 @@ members = [
     "crates/test-ligerito-integration",
     # Binaries
     "crates/bin/terminator",
+    "crates/bin/zidecar",
+    "crates/bin/zafu",
+    "crates/bin/ibp-probe",
     # Zync (light client)
     "crates/zync-core",
-    "crates/zidecar",
-    "crates/zafu",
 ]
 # Excluded from workspace (different build targets or incomplete)
 exclude = [
     "benchmarks/ashutosh-ligerito",
     "crates/zeratul-guest",  # PolkaVM guest program (requires special build)
+    "crates/ibp-probe-guest", # PolkaVM guest program (requires special build)
 ]
 resolver = "2"
 
