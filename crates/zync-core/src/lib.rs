@@ -5,23 +5,25 @@
 #![allow(dead_code)] // wip
 
 pub mod state;
-pub mod trace;
-pub mod proof;
-pub mod constraints;
-pub mod transition;
-pub mod crypto;
 pub mod error;
+
+// TODO: implement these modules
+// pub mod trace;
+// pub mod proof;
+// pub mod constraints;
+// pub mod transition;
+// pub mod crypto;
 
 pub use error::{ZyncError, Result};
 pub use state::{WalletState, WalletStateCommitment};
-pub use trace::{SyncTrace, TraceField};
-pub use proof::EpochProof;
+// pub use trace::{SyncTrace, TraceField};
+// pub use proof::EpochProof;
 
 use ligerito::{ProverConfig, VerifierConfig};
 use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use std::marker::PhantomData;
 
-/// blocks per epoch (~2.5 days at 75s/block)
+/// blocks per epoch (~21 hours at 75s/block)
 pub const EPOCH_SIZE: u32 = 1024;
 
 /// max orchard actions per block
@@ -30,14 +32,11 @@ pub const MAX_ACTIONS_PER_BLOCK: usize = 512;
 /// fields encoded per action in trace polynomial
 pub const FIELDS_PER_ACTION: usize = 8;
 
-/// polynomial size exponent (using 2^24 config, pads 2^22 trace)
-pub const TRACE_LOG_SIZE: usize = 24;
+/// polynomial size exponent for tip proofs (2^24 config)
+pub const TIP_TRACE_LOG_SIZE: usize = 24;
 
-/// actual trace data size before padding
-pub const TRACE_DATA_LOG_SIZE: usize = 22; // 2^10 blocks * 2^9 actions * 2^3 fields
-
-/// full polynomial size
-pub const TRACE_SIZE: usize = 1 << TRACE_LOG_SIZE;
+/// polynomial size exponent for gigaproofs (2^28 config)
+pub const GIGAPROOF_TRACE_LOG_SIZE: usize = 28;
 
 /// security parameter (bits)
 pub const SECURITY_BITS: usize = 100;
@@ -63,18 +62,45 @@ pub const GENESIS_EPOCH_HASH: [u8; 32] = [0u8; 32];
 /// empty sparse merkle tree root
 pub const EMPTY_SMT_ROOT: [u8; 32] = [0u8; 32]; // todo: compute actual empty root
 
-/// ligerito prover config for trace polynomial
-/// uses config_24 which handles 2^24 elements (our trace is 2^22, gets padded)
-pub fn prover_config() -> ProverConfig<BinaryElem32, BinaryElem128> {
+/// ligerito prover config for tip proofs (2^24, ~1.3s, max 1024 blocks)
+pub fn tip_prover_config() -> ProverConfig<BinaryElem32, BinaryElem128> {
     ligerito::hardcoded_config_24(
         PhantomData::<BinaryElem32>,
         PhantomData::<BinaryElem128>,
     )
 }
 
-/// ligerito verifier config
-pub fn verifier_config() -> VerifierConfig {
+/// ligerito prover config for gigaproofs (2^28, ~25s, multi-epoch)
+pub fn gigaproof_prover_config() -> ProverConfig<BinaryElem32, BinaryElem128> {
+    ligerito::hardcoded_config_28(
+        PhantomData::<BinaryElem32>,
+        PhantomData::<BinaryElem128>,
+    )
+}
+
+/// ligerito verifier config for tip proofs (2^24)
+pub fn tip_verifier_config() -> VerifierConfig {
     ligerito::hardcoded_config_24_verifier()
+}
+
+/// ligerito verifier config for gigaproofs (2^28)
+pub fn gigaproof_verifier_config() -> VerifierConfig {
+    ligerito::hardcoded_config_28_verifier()
+}
+
+/// helper: calculate epoch number from block height
+pub fn epoch_for_height(height: u32) -> u32 {
+    height / EPOCH_SIZE
+}
+
+/// helper: get start height of epoch
+pub fn epoch_start(epoch: u32) -> u32 {
+    epoch * EPOCH_SIZE
+}
+
+/// helper: get end height of epoch (inclusive)
+pub fn epoch_end(epoch: u32) -> u32 {
+    epoch_start(epoch + 1) - 1
 }
 
 /// wallet identifier (random 16 bytes)
