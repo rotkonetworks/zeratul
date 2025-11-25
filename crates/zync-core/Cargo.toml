@@ -1,24 +1,27 @@
 [package]
 name = "zync-core"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-description = "Core types and logic for ZYNC wallet synchronization"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "Core types and logic for ZYNC - ligerito-powered Zcash light client synchronization"
+repository = "https://github.com/rotkonetworks/zeratul"
+keywords = ["zcash", "ligerito", "light-client", "zk-proofs"]
+categories = ["cryptography", "cryptocurrency"]
 
 [dependencies]
-ligerito = { workspace = true }
-ligerito-binary-fields = { workspace = true }
-ligerito-merkle = { workspace = true }
+ligerito = "0.1.5"
+ligerito-binary-fields = "0.1"
+ligerito-merkle = "0.1"
 
-blake2 = { workspace = true }
-sha2 = { workspace = true }
-rand = { workspace = true }
-serde = { workspace = true }
-bytemuck = { workspace = true }
-thiserror = { workspace = true }
+blake2 = "0.10"
+sha2 = "0.10"
+rand = "0.8"
+serde = { version = "1.0", features = ["derive"] }
+bytemuck = "1.14"
+thiserror = "1.0"
 
-# zcash dependencies - pinned versions for compatibility
-orchard = { workspace = true }
+# zcash dependencies
+orchard = "0.7"
 
 [dev-dependencies]
-rand = { workspace = true }
+rand = "0.8"
