@@ -15,7 +15,11 @@ members = [
     "crates/zeratul-p2p",
     "crates/test-ligerito-integration",
     # Binaries
-    "crates/bin/terminator", "crates/zidecar",
+    "crates/bin/terminator",
+    # Zync (light client)
+    "crates/zync-core",
+    "crates/zidecar",
+    "crates/zafu",
 ]
 # Excluded from workspace (different build targets or incomplete)
 exclude = [
@@ -25,12 +29,18 @@ exclude = [
 resolver = "2"
 
 [workspace.package]
+version = "0.1.0"
 authors = ["rotko <hq@rotko.net>"]
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/rotkonetworks/zeratul"
 
 [workspace.dependencies]
+# workspace crates
+ligerito = { path = "crates/ligerito" }
+ligerito-binary-fields = { path = "crates/ligerito-binary-fields" }
+ligerito-merkle = { path = "crates/ligerito-merkle" }
+
 # Core dependencies
 sha2 = { version = "0.10", default-features = false }
 rayon = "1.8"
@@ -43,10 +53,14 @@ serde = { version = "1.0", default-features = false, features = ["derive"] }
 # Crypto primitives
 merlin = "3.0"
 blake3 = "1.5"
+blake2 = "0.10"
 
 # Performance
 wide = "0.7"
 bytemuck = "1.14"
+
+# zcash
+orchard = "0.7"
 
 # Testing
 criterion = "0.5"

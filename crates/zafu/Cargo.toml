@@ -1,0 +1,57 @@
+[package]
+name = "zafu"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "minimalist zcash light wallet with ligerito proofs - zen meditation cushion"
+
+[[bin]]
+name = "zafu"
+path = "src/main.rs"
+
+[dependencies]
+# workspace crates
+zync-core = { path = "../zync-core" }
+ligerito = { path = "../ligerito" }
+ligerito-binary-fields = { path = "../ligerito-binary-fields" }
+
+# UI
+egui = "0.27"
+eframe = { version = "0.27", default-features = false, features = ["default_fonts", "glow"] }
+
+# async runtime
+tokio = { version = "1", features = ["full"] }
+tokio-stream = "0.1"
+futures = "0.3"
+
+# gRPC client (matches zidecar proto)
+tonic = "0.11"
+prost = "0.12"
+
+# storage (local wallet state)
+sled = "0.34"
+
+# crypto
+blake2 = "0.10"
+sha2 = "0.10"
+
+# zcash (for scanning and spending)
+orchard = "0.7"
+zcash_note_encryption = "0.4"
+pasta_curves = "0.5"
+
+# utilities
+thiserror = "1.0"
+anyhow = "1.0"
+hex = "0.4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+bincode = "1.3"
+
+[build-dependencies]
+tonic-build = "0.11"
+
+[dev-dependencies]
+tempfile = "3"
