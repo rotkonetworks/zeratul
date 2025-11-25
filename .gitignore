@@ -2,6 +2,10 @@ target/
 pkg/
 **/.cargo/
 
+# databases
+*.db/
+*.db
+
 # external projects
 alto/
 commonware/

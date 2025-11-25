@@ -1,21 +1,30 @@
 //! ZYNC Core - Zero-knowledge sYNChronization for Zcash
 //!
-//! core types and logic for ligerito-powered wallet sync
+//! Cross-platform wallet core using Crux architecture.
+//! This crate contains all business logic shared across platforms:
+//! - Desktop (egui)
+//! - Android (Jetpack Compose)
+//! - iOS (SwiftUI)
+//! - Web (WASM)
 
 #![allow(dead_code)] // wip
 
 pub mod state;
 pub mod error;
+pub mod app;
+pub mod verifier;
 
-// TODO: implement these modules
-// pub mod trace;
-// pub mod proof;
-// pub mod constraints;
-// pub mod transition;
-// pub mod crypto;
+#[cfg(feature = "client")]
+pub mod client;
+
+// Re-export Crux app
+pub use app::{ZafuCore, Event, Model, ViewModel, Effect, Contact, ChatMessage};
 
 pub use error::{ZyncError, Result};
 pub use state::{WalletState, WalletStateCommitment};
+
+#[cfg(feature = "client")]
+pub use client::{ZidecarClient, LightwalletdClient};
 // pub use trace::{SyncTrace, TraceField};
 // pub use proof::EpochProof;
 

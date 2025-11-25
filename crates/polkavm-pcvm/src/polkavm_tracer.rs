@@ -3,6 +3,12 @@
 //! This module implements trace extraction from PolkaVM execution.
 //! It hooks into PolkaVM's step_tracing mode to capture execution traces
 //! that can be proven with Ligerito.
+//!
+//! ## Host Call Handling
+//!
+//! The tracer accepts a `HostCallHandler` trait object that provides
+//! the actual implementation of host functions (network I/O, etc.).
+//! This allows the same tracer to be used with different host environments.
 
 #![allow(dead_code)] // Work in progress
 
@@ -13,9 +19,12 @@ use polkavm::program::{Instruction, Opcode};
 
 use ligerito_binary_fields::{BinaryElem32, BinaryFieldElement};
 use super::polkavm_adapter::{PolkaVMRegisters, PolkaVMMemoryModel, PolkaVMStep, PolkaVMTrace, MemoryAccess, MemoryAccessSize};
+use super::host_calls::{HostCallHandler, HostCallTrace, DummyHostHandler};
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
+
+use std::sync::Arc;
 
 /// Error type for trace extraction
 #[derive(Debug)]
@@ -34,7 +43,39 @@ impl From<polkavm::Error> for TraceError {
     }
 }
 
-/// Extract execution trace from PolkaVM program
+/// Extended trace result including host call trace
+#[derive(Debug)]
+pub struct ExtendedTrace {
+    /// PolkaVM execution trace
+    pub execution_trace: PolkaVMTrace,
+    /// Host call trace (for proof generation)
+    pub host_trace: HostCallTrace,
+}
+
+/// Extract execution trace from PolkaVM program with custom host handler
+///
+/// # Arguments
+/// - `program_blob`: Compiled PolkaVM program (.polkavm binary)
+/// - `max_steps`: Maximum number of execution steps (prevents infinite loops)
+/// - `host_handler`: Handler for host function calls (network I/O, etc.)
+///
+/// # Returns
+/// Full execution trace including register states, memory accesses, and host calls
+#[cfg(feature = "polkavm-integration")]
+pub fn extract_polkavm_trace_with_host<H: HostCallHandler>(
+    program_blob: &[u8],
+    max_steps: usize,
+    host_handler: &H,
+) -> Result<ExtendedTrace, TraceError> {
+    let execution_trace = extract_polkavm_trace_inner(program_blob, max_steps, Some(host_handler))?;
+    let host_trace = host_handler.get_trace();
+    Ok(ExtendedTrace {
+        execution_trace,
+        host_trace,
+    })
+}
+
+/// Extract execution trace from PolkaVM program (backward compatible)
 ///
 /// # Arguments
 /// - `program_blob`: Compiled PolkaVM program (.polkavm binary)
@@ -46,6 +87,17 @@ impl From<polkavm::Error> for TraceError {
 pub fn extract_polkavm_trace(
     program_blob: &[u8],
     max_steps: usize,
+) -> Result<PolkaVMTrace, TraceError> {
+    let dummy = DummyHostHandler::new();
+    extract_polkavm_trace_inner(program_blob, max_steps, Some(&dummy))
+}
+
+/// Internal trace extraction with optional host handler
+#[cfg(feature = "polkavm-integration")]
+fn extract_polkavm_trace_inner<H: HostCallHandler>(
+    program_blob: &[u8],
+    max_steps: usize,
+    host_handler: Option<&H>,
 ) -> Result<PolkaVMTrace, TraceError> {
     // 1. Create configuration with step tracing enabled
     let mut config = ModuleConfig::default();
@@ -109,8 +161,23 @@ pub fn extract_polkavm_trace(
                     InterruptKind::Step => {},
                     InterruptKind::Finished => break,
                     InterruptKind::Trap => return Err(TraceError::ExecutionTrapped),
-                    InterruptKind::Ecalli(_) => {
-                        instance.set_reg(Reg::A0, 100);
+                    InterruptKind::Ecalli(hostcall_num) => {
+                        if let Some(handler) = host_handler {
+                            let a0 = instance.reg(Reg::A0) as u32;
+                            let a1 = instance.reg(Reg::A1) as u32;
+                            let a2 = instance.reg(Reg::A2) as u32;
+                            let a3 = instance.reg(Reg::A3) as u32;
+                            let a4 = instance.reg(Reg::A4) as u32;
+                            let a5 = instance.reg(Reg::A5) as u32;
+                            let mut memory = vec![0u8; 64 * 1024];
+                            let (result, _) = handler.handle_call(
+                                hostcall_num, &mut memory,
+                                a0, a1, a2, a3, a4, a5,
+                            );
+                            instance.set_reg(Reg::A0, result as u64);
+                        } else {
+                            instance.set_reg(Reg::A0, 100);
+                        }
                     }
                     _ => {}
                 }
@@ -150,10 +217,34 @@ pub fn extract_polkavm_trace(
             }
             InterruptKind::Finished => break,
             InterruptKind::Trap => return Err(TraceError::ExecutionTrapped),
-            InterruptKind::Ecalli(_hostcall_num) => {
-                // External call - for testing, we'll just return a dummy value
-                // In production, this would need proper handling
-                instance.set_reg(Reg::A0, 100);
+            InterruptKind::Ecalli(hostcall_num) => {
+                // External call - dispatch to host handler
+                if let Some(handler) = host_handler {
+                    // Get register arguments
+                    let a0 = instance.reg(Reg::A0) as u32;
+                    let a1 = instance.reg(Reg::A1) as u32;
+                    let a2 = instance.reg(Reg::A2) as u32;
+                    let a3 = instance.reg(Reg::A3) as u32;
+                    let a4 = instance.reg(Reg::A4) as u32;
+                    let a5 = instance.reg(Reg::A5) as u32;
+
+                    // Get memory slice for host call
+                    // Note: In production, we'd need proper memory access
+                    let mut memory = vec![0u8; 64 * 1024]; // 64KB guest memory
+
+                    // Call host handler
+                    let (result, _record) = handler.handle_call(
+                        hostcall_num,
+                        &mut memory,
+                        a0, a1, a2, a3, a4, a5,
+                    );
+
+                    // Set return value
+                    instance.set_reg(Reg::A0, result as u64);
+                } else {
+                    // No handler - return dummy value
+                    instance.set_reg(Reg::A0, 100);
+                }
                 // Continue execution
                 step_count += 1;
             }

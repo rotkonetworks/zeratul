@@ -40,6 +40,7 @@ pub mod poseidon;
 pub mod memory;
 pub mod memory_merkle;
 pub mod integration;
+pub mod host_calls;
 
 #[cfg(feature = "polkavm-integration")]
 pub mod polkavm_adapter;
