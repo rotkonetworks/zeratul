@@ -20,6 +20,9 @@ pub enum ZidecarError {
     #[error("serialization error: {0}")]
     Serialization(String),
 
+    #[error("validation error: {0}")]
+    Validation(String),
+
     #[error("zync core error: {0}")]
     ZyncCore(#[from] zync_core::ZyncError),
 }

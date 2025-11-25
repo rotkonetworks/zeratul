@@ -1,7 +1,10 @@
 //! zidecar gRPC client
 
 use anyhow::Result;
-use crate::zidecar::{zidecar_client::ZidecarClient as GrpcClient, Empty, ProofRequest, BlockRange};
+use crate::zidecar::{
+    zidecar_client::ZidecarClient as GrpcClient,
+    Empty, ProofRequest, BlockRange, SyncStatus,
+};
 use tonic::transport::Channel;
 use tracing::{info, debug};
 
@@ -57,6 +60,13 @@ impl ZidecarClient {
         });
 
         let response = self.client.get_compact_blocks(request).await?;
+        Ok(response.into_inner())
+    }
+
+    /// get sync status (blockchain height, epoch progress, gigaproof status)
+    pub async fn get_sync_status(&mut self) -> Result<SyncStatus> {
+        let request = tonic::Request::new(Empty {});
+        let response = self.client.get_sync_status(request).await?;
         Ok(response.into_inner())
     }
 }

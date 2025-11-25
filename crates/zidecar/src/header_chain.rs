@@ -94,7 +94,19 @@ impl HeaderChainTrace {
 
             // parse hashes
             let block_hash = hex_to_bytes(&header.hash)?;
-            let prev_hash = hex_to_bytes(&header.prev_hash)?;
+            let prev_hash = if header.prev_hash.is_empty() {
+                // SECURITY: only genesis block (height 0) can have empty prev_hash
+                if header.height != 0 {
+                    return Err(ZidecarError::Validation(format!(
+                        "block {} has empty prev_hash (only genesis allowed)",
+                        header.height
+                    )));
+                }
+                // genesis block: use zero-filled prev_hash
+                vec![0u8; 32]
+            } else {
+                hex_to_bytes(&header.prev_hash)?
+            };
 
             // field 0: height
             trace[offset] = BinaryElem32::from(header.height);

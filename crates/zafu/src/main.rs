@@ -49,43 +49,66 @@ fn main() -> Result<()> {
 
 /// configure minimalist japanese aesthetic
 fn configure_style(ctx: &egui::Context) {
+    use egui::{Color32, FontFamily, FontId, Rounding, Stroke, Vec2, TextStyle};
+
     let mut style = (*ctx.style()).clone();
 
-    // wabi-sabi: simplicity, asymmetry, natural imperfection
-    // color palette: shiro (white), sumi (charcoal), beige, light grey
-    use egui::{Color32, Rounding, Stroke, Vec2};
+    // dark calming palette: evening zen garden
+    let bg = Color32::from_rgb(28, 28, 30);          // deep charcoal
+    let surface = Color32::from_rgb(38, 38, 40);     // slightly lighter charcoal
+    let border = Color32::from_rgb(58, 58, 60);      // subtle border
+    let text_primary = Color32::from_rgb(235, 235, 240);   // soft white
+    let text_secondary = Color32::from_rgb(152, 152, 157); // muted gray
+    let accent = Color32::from_rgb(142, 142, 147);   // warm gray
+    let accent_hover = Color32::from_rgb(174, 174, 178); // lighter gray
 
-    // spacing: ma (negative space / emptiness)
-    style.spacing.item_spacing = Vec2::new(16.0, 12.0);
-    style.spacing.window_margin = egui::Margin::same(24.0);
-    style.spacing.button_padding = Vec2::new(16.0, 8.0);
-    style.spacing.indent = 20.0;
+    // generous spacing (ma - negative space)
+    style.spacing.item_spacing = Vec2::new(12.0, 10.0);
+    style.spacing.window_margin = egui::Margin::same(40.0);
+    style.spacing.button_padding = Vec2::new(24.0, 10.0);
+    style.spacing.indent = 16.0;
+    style.spacing.interact_size = Vec2::new(48.0, 32.0);
 
-    // minimal rounding
-    style.visuals.window_rounding = Rounding::same(2.0);
-    style.visuals.widgets.noninteractive.rounding = Rounding::same(1.0);
-    style.visuals.widgets.inactive.rounding = Rounding::same(1.0);
-    style.visuals.widgets.hovered.rounding = Rounding::same(1.0);
-    style.visuals.widgets.active.rounding = Rounding::same(1.0);
+    // clean geometry - no rounding for pure minimalism
+    style.visuals.window_rounding = Rounding::ZERO;
+    style.visuals.widgets.noninteractive.rounding = Rounding::ZERO;
+    style.visuals.widgets.inactive.rounding = Rounding::ZERO;
+    style.visuals.widgets.hovered.rounding = Rounding::ZERO;
+    style.visuals.widgets.active.rounding = Rounding::ZERO;
 
-    // subtle strokes
-    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(0.5, Color32::from_gray(220));
-    style.visuals.widgets.inactive.bg_stroke = Stroke::new(0.5, Color32::from_gray(200));
+    // refined strokes
+    style.visuals.widgets.noninteractive.bg_stroke = Stroke::new(1.0, border);
+    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1.0, border);
+    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1.5, accent);
+    style.visuals.widgets.active.bg_stroke = Stroke::new(1.5, accent_hover);
 
-    // natural color palette
-    let bg = Color32::from_rgb(250, 248, 245);  // warm white (shiro)
-    let text = Color32::from_rgb(50, 50, 50);   // charcoal (sumi)
-    let accent = Color32::from_rgb(180, 170, 160); // beige
-
+    // backgrounds
     style.visuals.window_fill = bg;
     style.visuals.panel_fill = bg;
-    style.visuals.widgets.noninteractive.bg_fill = Color32::from_rgb(245, 243, 240);
-    style.visuals.widgets.inactive.bg_fill = Color32::from_rgb(240, 238, 235);
+    style.visuals.widgets.noninteractive.bg_fill = surface;
+    style.visuals.widgets.inactive.bg_fill = surface;
     style.visuals.widgets.hovered.bg_fill = accent;
+    style.visuals.widgets.active.bg_fill = accent_hover;
 
-    style.visuals.override_text_color = Some(text);
+    // text colors
+    style.visuals.override_text_color = Some(text_primary);
+    style.visuals.widgets.noninteractive.fg_stroke = Stroke::new(1.0, text_secondary);
+    style.visuals.widgets.inactive.fg_stroke = Stroke::new(1.0, text_primary);
+    style.visuals.selection.bg_fill = accent.linear_multiply(0.3);
+
+    // typography - clean sans-serif
+    let mut fonts = egui::FontDefinitions::default();
+    style.text_styles = [
+        (TextStyle::Heading, FontId::new(20.0, FontFamily::Proportional)),
+        (TextStyle::Body, FontId::new(14.0, FontFamily::Proportional)),
+        (TextStyle::Monospace, FontId::new(12.0, FontFamily::Monospace)),
+        (TextStyle::Button, FontId::new(14.0, FontFamily::Proportional)),
+        (TextStyle::Small, FontId::new(11.0, FontFamily::Proportional)),
+    ]
+    .into();
 
     ctx.set_style(style);
+    ctx.set_fonts(fonts);
 }
 
 // generated proto module
