@@ -131,8 +131,12 @@ pub mod cpu_affinity;
 // PCVM module moved to its own crate: polkavm-pcvm
 // To use PolkaVM constraints, add: polkavm-pcvm = { version = "0.1", features = ["polkavm-integration"] }
 
-// Always export data structures
-pub use data_structures::{ProverConfig, VerifierConfig, FinalizedLigeritoProof};
+// Always export data structures (verifier-only)
+pub use data_structures::{VerifierConfig, FinalizedLigeritoProof};
+
+// Export ProverConfig only when prover feature is enabled
+#[cfg(feature = "prover")]
+pub use data_structures::ProverConfig;
 
 // Always export verifier configs
 pub use configs::{
@@ -245,8 +249,8 @@ pub fn verifier<T, U>(
     proof: &FinalizedLigeritoProof<T, U>,
 ) -> Result<bool>
 where
-    T: BinaryFieldElement,
-    U: BinaryFieldElement + From<T>,
+    T: BinaryFieldElement + Send + Sync,
+    U: BinaryFieldElement + Send + Sync + From<T>,
 {
     verifier::verify(config, proof)
 }
