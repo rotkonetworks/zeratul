@@ -1,5 +1,19 @@
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use binary_fields::BinaryFieldElement;
 use crate::utils::partial_eval_multilinear;
+
+// Debug printing macros - no-ops in no_std
+#[cfg(feature = "std")]
+macro_rules! debug_eprintln {
+    ($($arg:tt)*) => { std::eprintln!($($arg)*) }
+}
+
+#[cfg(not(feature = "std"))]
+macro_rules! debug_eprintln {
+    ($($arg:tt)*) => { }
+}
 
 /// linear polynomial structure for binary field sumcheck
 /// represents f(x) = c + b*x
@@ -160,11 +174,11 @@ impl<F: BinaryFieldElement> SumcheckVerifierInstance<F> {
 
         // verify the coefficients match current sum claim
         if s_total != self.sum {
-            eprintln!("sumcheck fold verification failed");
-            eprintln!("  expected sum: {:?}", self.sum);
-            eprintln!("  got s_total: {:?}", s_total);
-            eprintln!("  s0: {:?}, s2: {:?}", s0, s2);
-            eprintln!("  s0 + s2 = {:?}", s0.add(&s2));
+            debug_eprintln!("sumcheck fold verification failed");
+            debug_eprintln!("  expected sum: {:?}", self.sum);
+            debug_eprintln!("  got s_total: {:?}", s_total);
+            debug_eprintln!("  s0: {:?}, s2: {:?}", s0, s2);
+            debug_eprintln!("  s0 + s2 = {:?}", s0.add(&s2));
             panic!("sumcheck fold verification failed");
         }
 

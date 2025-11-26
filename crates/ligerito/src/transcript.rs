@@ -2,6 +2,9 @@
 //!
 //! Updated to use 0-based indexing throughout for better performance
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 #[cfg(feature = "std")]
 use std::collections::HashSet;
 
@@ -88,9 +91,9 @@ impl Transcript for MerlinTranscript {
 
     fn absorb_elems<F: BinaryFieldElement>(&mut self, elems: &[F]) {
         let bytes = unsafe {
-            std::slice::from_raw_parts(
+            core::slice::from_raw_parts(
                 elems.as_ptr() as *const u8,
-                elems.len() * std::mem::size_of::<F>()
+                elems.len() * core::mem::size_of::<F>()
             )
         };
         self.transcript.append_message(b"field_elements", bytes);
@@ -98,16 +101,16 @@ impl Transcript for MerlinTranscript {
 
     fn absorb_elem<F: BinaryFieldElement>(&mut self, elem: F) {
         let bytes = unsafe {
-            std::slice::from_raw_parts(
+            core::slice::from_raw_parts(
                 &elem as *const F as *const u8,
-                std::mem::size_of::<F>()
+                core::mem::size_of::<F>()
             )
         };
         self.transcript.append_message(b"field_element", bytes);
     }
 
     fn get_challenge<F: BinaryFieldElement>(&mut self) -> F {
-        let field_bytes = std::mem::size_of::<F>();
+        let field_bytes = core::mem::size_of::<F>();
         let mut bytes = vec![0u8; field_bytes];
 
         // Get initial challenge bytes
@@ -211,11 +214,11 @@ impl Transcript for MerlinTranscript {
         // Can't get more distinct queries than max available
         let actual_count = count.min(max);
         let mut queries = Vec::with_capacity(actual_count);
-        let mut seen = HashSet::new();
 
+        // Use Vec for deduplication - efficient for small counts (148 queries)
         while queries.len() < actual_count {
             let q = self.get_query(max);
-            if seen.insert(q) {
+            if !queries.contains(&q) {
                 queries.push(q);
             }
         }
@@ -299,9 +302,9 @@ impl Transcript for Sha256Transcript {
 
     fn absorb_elems<F: BinaryFieldElement>(&mut self, elems: &[F]) {
         let bytes = unsafe {
-            std::slice::from_raw_parts(
+            core::slice::from_raw_parts(
                 elems.as_ptr() as *const u8,
-                elems.len() * std::mem::size_of::<F>()
+                elems.len() * core::mem::size_of::<F>()
             )
         };
         self.hasher.update(bytes);
@@ -309,9 +312,9 @@ impl Transcript for Sha256Transcript {
 
     fn absorb_elem<F: BinaryFieldElement>(&mut self, elem: F) {
         let bytes = unsafe {
-            std::slice::from_raw_parts(
+            core::slice::from_raw_parts(
                 &elem as *const F as *const u8,
-                std::mem::size_of::<F>()
+                core::mem::size_of::<F>()
             )
         };
         self.hasher.update(bytes);
@@ -323,7 +326,7 @@ impl Transcript for Sha256Transcript {
             let mut rng = self.squeeze_rng();
 
             // Generate random bytes and convert to field element
-            match std::mem::size_of::<F>() {
+            match core::mem::size_of::<F>() {
                 4 => {
                     // BinaryElem32
                     let value: u32 = rng.gen();
@@ -368,7 +371,7 @@ impl Transcript for Sha256Transcript {
                 _ => {
                     // Generic fallback for other sizes
                     let mut result = F::zero();
-                let num_bits = std::mem::size_of::<F>() * 8;
+                let num_bits = core::mem::size_of::<F>() * 8;
 
                 // Handle first 64 bits
                 for i in 0..num_bits.min(64) {
@@ -505,11 +508,11 @@ impl Transcript for Sha256Transcript {
         // Can't get more distinct queries than max available
         let actual_count = count.min(max);
         let mut queries = Vec::with_capacity(actual_count);
-        let mut seen = HashSet::new();
 
+        // Use Vec for deduplication - efficient for small counts (148 queries)
         while queries.len() < actual_count {
             let q = self.get_query(max);
-            if seen.insert(q) {
+            if !queries.contains(&q) {
                 queries.push(q);
             }
         }

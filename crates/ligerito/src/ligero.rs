@@ -1,11 +1,26 @@
 use binary_fields::{BinaryFieldElement, BinaryPolynomial};
+#[cfg(feature = "prover")]
 use reed_solomon::ReedSolomon;
 use merkle_tree::{build_merkle_tree, Hash};
-use crate::data_structures::{RecursiveLigeroWitness};
+#[cfg(feature = "prover")]
+use crate::data_structures::RecursiveLigeroWitness;
 use crate::utils::{evaluate_lagrange_basis, eval_sk_at_vks, evaluate_scaled_basis_inplace};
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use sha2::{Sha256, Digest};
 
+// Debug printing macros - no-ops in no_std
+#[cfg(feature = "std")]
+macro_rules! debug_println {
+    ($($arg:tt)*) => { std::println!($($arg)*) }
+}
+
+#[cfg(not(feature = "std"))]
+macro_rules! debug_println {
+    ($($arg:tt)*) => { }
+}
+
+#[cfg(feature = "prover")]
 pub fn poly2mat<F: BinaryFieldElement>(
     poly: &[F],
     m: usize,
@@ -15,20 +30,36 @@ pub fn poly2mat<F: BinaryFieldElement>(
     let m_target = m * inv_rate;
     let mut mat = vec![vec![F::zero(); n]; m_target];
 
-    mat.par_iter_mut()
-        .enumerate()
-        .for_each(|(i, row)| {
+    #[cfg(feature = "parallel")]
+    {
+        mat.par_iter_mut()
+            .enumerate()
+            .for_each(|(i, row)| {
+                for j in 0..n {
+                    let idx = j * m + i;
+                    if idx < poly.len() {
+                        row[j] = poly[idx];
+                    }
+                }
+            });
+    }
+
+    #[cfg(not(feature = "parallel"))]
+    {
+        for (i, row) in mat.iter_mut().enumerate() {
             for j in 0..n {
                 let idx = j * m + i;
                 if idx < poly.len() {
                     row[j] = poly[idx];
                 }
             }
-        });
+        }
+    }
 
     mat
 }
 
+#[cfg(all(feature = "prover", feature = "parallel"))]
 pub fn encode_cols<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static>(
     poly_mat: &mut Vec<Vec<F>>,
     rs: &ReedSolomon<F>,
@@ -66,30 +97,47 @@ pub fn encode_cols<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static
     }
 }
 
+#[cfg(all(feature = "prover", not(feature = "parallel")))]
+pub fn encode_cols<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static>(
+    poly_mat: &mut Vec<Vec<F>>,
+    rs: &ReedSolomon<F>,
+    _parallel: bool,
+) {
+    let n = poly_mat[0].len();
+    for j in 0..n {
+        let mut col: Vec<F> = poly_mat.iter().map(|row| row[j]).collect();
+        reed_solomon::encode_in_place(rs, &mut col);
+        for (i, val) in col.iter().enumerate() {
+            poly_mat[i][j] = *val;
+        }
+    }
+}
+
 /// Hash a row of field elements with deterministic serialization
 #[inline(always)]
 pub fn hash_row<F: BinaryFieldElement>(row: &[F]) -> Hash {
     let mut hasher = Sha256::new();
-    
+
     // Hash row length for domain separation
     hasher.update(&(row.len() as u32).to_le_bytes());
-    
+
     // Hash each element using bytemuck for safe serialization
-    let elem_size = std::mem::size_of::<F>();
+    let elem_size = core::mem::size_of::<F>();
     for elem in row.iter() {
         // Use bytemuck to get raw bytes safely
         let bytes = unsafe {
-            std::slice::from_raw_parts(
+            core::slice::from_raw_parts(
                 elem as *const F as *const u8,
                 elem_size
             )
         };
         hasher.update(bytes);
     }
-    
+
     hasher.finalize().into()
 }
 
+#[cfg(feature = "prover")]
 pub fn ligero_commit<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static>(
     poly: &[F],
     m: usize,
@@ -102,7 +150,13 @@ pub fn ligero_commit<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'stat
     encode_cols(&mut poly_mat, rs, true);
 
     // Parallelize row hashing
+    #[cfg(feature = "parallel")]
     let hashed_rows: Vec<Hash> = poly_mat.par_iter()
+        .map(|row| hash_row(row))
+        .collect();
+
+    #[cfg(not(feature = "parallel"))]
+    let hashed_rows: Vec<Hash> = poly_mat.iter()
         .map(|row| hash_row(row))
         .collect();
 
@@ -120,7 +174,7 @@ pub fn verify_ligero<T, U>(
     T: BinaryFieldElement + Send + Sync,
     U: BinaryFieldElement + Send + Sync + From<T>,
 {
-    println!("verify_ligero: challenges = {:?}", challenges);
+    debug_println!("verify_ligero: challenges = {:?}", challenges);
 
     let gr = evaluate_lagrange_basis(challenges);
     let n = yr.len().trailing_zeros() as usize;
@@ -159,17 +213,17 @@ pub fn verify_ligero<T, U>(
                 acc.add(&y_u.mul(&b))
             });
 
-        println!("verify_ligero: Query {} -> e = {:?}, dot = {:?}", query, e, dot);
-        println!("verify_ligero: Equal? {}", e == dot);
+        debug_println!("verify_ligero: Query {} -> e = {:?}, dot = {:?}", query, e, dot);
+        debug_println!("verify_ligero: Equal? {}", e == dot);
 
         if e != dot {
-            println!("verify_ligero: mathematical relationship mismatch for query {}", query);
-            println!("  e = {:?}", e);
-            println!("  dot = {:?}", dot);
-            println!("  this might be expected in certain contexts");
+            debug_println!("verify_ligero: mathematical relationship mismatch for query {}", query);
+            debug_println!("  e = {:?}", e);
+            debug_println!("  dot = {:?}", dot);
+            debug_println!("  this might be expected in certain contexts");
             // don't panic - this might be normal behavior in some verification contexts
         } else {
-            println!("verify_ligero: mathematical relationship holds for query {}", query);
+            debug_println!("verify_ligero: mathematical relationship holds for query {}", query);
         }
     }
 }

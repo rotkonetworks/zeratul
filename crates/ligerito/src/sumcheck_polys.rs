@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use binary_fields::BinaryFieldElement;
 use crate::utils::evaluate_scaled_basis_inplace;
 

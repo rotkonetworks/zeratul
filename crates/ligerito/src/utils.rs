@@ -1,5 +1,8 @@
 //! Utility functions for Ligerito - FINAL FIXED VERSION
 
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use binary_fields::{BinaryFieldElement, BinaryPolynomial};
 
 /// Evaluate Lagrange basis at given points
@@ -90,14 +93,14 @@ fn field_to_index<F: BinaryFieldElement>(elem: F) -> usize {
     // Strategy 3: For larger elements, extract lower bits
     // Convert to raw bytes and interpret as little-endian integer
     let elem_bytes = unsafe {
-        std::slice::from_raw_parts(
+        core::slice::from_raw_parts(
             &elem as *const F as *const u8,
-            std::mem::size_of::<F>()
+            core::mem::size_of::<F>()
         )
     };
     
     let mut result = 0usize;
-    let bytes_to_use = std::cmp::min(elem_bytes.len(), 8); // Use up to 64 bits
+    let bytes_to_use = core::cmp::min(elem_bytes.len(), 8); // Use up to 64 bits
     
     for i in 0..bytes_to_use {
         result |= (elem_bytes[i] as usize) << (i * 8);

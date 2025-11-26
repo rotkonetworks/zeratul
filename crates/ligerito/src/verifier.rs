@@ -1,9 +1,23 @@
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use binary_fields::BinaryFieldElement;
 use crate::{
     VerifierConfig, FinalizedLigeritoProof,
     transcript::{FiatShamir, Transcript},
     utils::{eval_sk_at_vks, partial_eval_multilinear, evaluate_lagrange_basis, verify_ligero, hash_row},
 };
+
+// Debug printing macros - no-ops in no_std
+#[cfg(feature = "std")]
+macro_rules! debug_println {
+    ($($arg:tt)*) => { std::println!($($arg)*) }
+}
+
+#[cfg(not(feature = "std"))]
+macro_rules! debug_println {
+    ($($arg:tt)*) => { }
+}
 
 #[cfg(feature = "parallel")]
 use crate::sumcheck_polys::induce_sumcheck_poly_parallel;
@@ -313,7 +327,7 @@ where
     let partial_evals_0_t: Vec<T> = (0..config.initial_k)
         .map(|_| fs.get_challenge())
         .collect();
-    println!("Verifier: Got initial challenges: {:?}", partial_evals_0_t);
+    debug_println!("Verifier: Got initial challenges: {:?}", partial_evals_0_t);
 
     let partial_evals_0: Vec<U> = partial_evals_0_t
         .iter()
@@ -528,7 +542,7 @@ where
     T: BinaryFieldElement + Send + Sync,
     U: BinaryFieldElement + Send + Sync + From<T>,
 {
-    println!("\n=== VERIFICATION DEBUG ===");
+    debug_println!("\n=== VERIFICATION DEBUG ===");
 
     // OPTIMIZATION: Precompute basis evaluations once
     let cached_initial_sks: Vec<T> = eval_sk_at_vks(1 << config.initial_dim);
@@ -546,14 +560,14 @@ where
 
     // Absorb initial commitment
     fs.absorb_root(&proof.initial_ligero_cm.root);
-    println!("Absorbed initial root: {:?}", proof.initial_ligero_cm.root);
+    debug_println!("Absorbed initial root: {:?}", proof.initial_ligero_cm.root);
 
     // Get initial challenges in base field to match prover
     let partial_evals_0_t: Vec<T> = (0..config.initial_k)
         .map(|_| fs.get_challenge())
         .collect();
-    println!("Got {} base field challenges", partial_evals_0_t.len());
-    println!("Verifier debug: Got initial challenges: {:?}", partial_evals_0_t);
+    debug_println!("Got {} base field challenges", partial_evals_0_t.len());
+    debug_println!("Verifier debug: Got initial challenges: {:?}", partial_evals_0_t);
 
     // Convert to extension field for computations
     let partial_evals_0: Vec<U> = partial_evals_0_t
@@ -561,27 +575,27 @@ where
         .map(|&x| U::from(x))
         .collect();
 
-    println!("Partial evaluations (extension field): {:?}", partial_evals_0);
+    debug_println!("Partial evaluations (extension field): {:?}", partial_evals_0);
 
     // Test Lagrange basis computation
     let gr = evaluate_lagrange_basis(&partial_evals_0);
-    println!("Lagrange basis length: {}, first few values: {:?}",
+    debug_println!("Lagrange basis length: {}, first few values: {:?}",
              gr.len(), &gr[..gr.len().min(4)]);
 
     // Absorb first recursive commitment
     if proof.recursive_commitments.is_empty() {
-        println!("ERROR: No recursive commitments!");
+        debug_println!("ERROR: No recursive commitments!");
         return Ok(false);
     }
-    println!("Verifier: Absorbing recursive commitment root: {:?}", proof.recursive_commitments[0].root.root);
+    debug_println!("Verifier: Absorbing recursive commitment root: {:?}", proof.recursive_commitments[0].root.root);
     fs.absorb_root(&proof.recursive_commitments[0].root);
-    println!("Absorbed recursive commitment 0");
+    debug_println!("Absorbed recursive commitment 0");
 
     // Verify initial Merkle proof
     let depth = config.initial_dim + LOG_INV_RATE;
-    println!("Verifier: About to get queries after absorbing recursive commitment");
+    debug_println!("Verifier: About to get queries after absorbing recursive commitment");
     let queries = fs.get_distinct_queries(1 << depth, S);
-    println!("Initial proof: depth={}, num_leaves={}, queries={:?}",
+    debug_println!("Initial proof: depth={}, num_leaves={}, queries={:?}",
              depth, 1 << depth, &queries[..queries.len().min(5)]);
 
     // Hash opened rows for Merkle verification
@@ -589,14 +603,14 @@ where
         .iter()
         .map(|row| hash_row(row))
         .collect();
-    println!("Hashed {} opened rows", hashed_leaves.len());
-    println!("Opened rows per query match: {}", hashed_leaves.len() == queries.len());
+    debug_println!("Hashed {} opened rows", hashed_leaves.len());
+    debug_println!("Opened rows per query match: {}", hashed_leaves.len() == queries.len());
 
     // Debug: Print first few hashes and queries
-    println!("First 3 queries: {:?}", &queries[..3.min(queries.len())]);
-    println!("First 3 opened rows: {:?}", &proof.initial_ligero_proof.opened_rows[..3.min(proof.initial_ligero_proof.opened_rows.len())]);
-    println!("First 3 row hashes: {:?}", &hashed_leaves[..3.min(hashed_leaves.len())]);
-    println!("Tree root: {:?}", proof.initial_ligero_cm.root);
+    debug_println!("First 3 queries: {:?}", &queries[..3.min(queries.len())]);
+    debug_println!("First 3 opened rows: {:?}", &proof.initial_ligero_proof.opened_rows[..3.min(proof.initial_ligero_proof.opened_rows.len())]);
+    debug_println!("First 3 row hashes: {:?}", &hashed_leaves[..3.min(hashed_leaves.len())]);
+    debug_println!("Tree root: {:?}", proof.initial_ligero_cm.root);
 
     let merkle_result = ligerito_merkle::verify(
         &proof.initial_ligero_cm.root,
@@ -605,26 +619,26 @@ where
         &hashed_leaves,
         &queries,
     );
-    println!("Initial Merkle verification: {}", merkle_result);
+    debug_println!("Initial Merkle verification: {}", merkle_result);
 
     if !merkle_result {
-        println!("FAILED: Initial Merkle proof verification");
+        debug_println!("FAILED: Initial Merkle proof verification");
 
         // Additional debug info
-        println!("Proof siblings: {}", proof.initial_ligero_proof.merkle_proof.siblings.len());
-        println!("Expected depth: {}", depth);
-        println!("Number of queries: {}", queries.len());
-        println!("First few queries: {:?}", &queries[..queries.len().min(10)]);
+        debug_println!("Proof siblings: {}", proof.initial_ligero_proof.merkle_proof.siblings.len());
+        debug_println!("Expected depth: {}", depth);
+        debug_println!("Number of queries: {}", queries.len());
+        debug_println!("First few queries: {:?}", &queries[..queries.len().min(10)]);
 
         return Ok(false);
     }
 
     let alpha = fs.get_challenge::<U>();
-    println!("Got alpha challenge: {:?}", alpha);
+    debug_println!("Got alpha challenge: {:?}", alpha);
 
     // Use the same fixed sumcheck function as prover
     let sks_vks = &cached_initial_sks;
-    println!("Computed {} sks_vks", sks_vks.len());
+    debug_println!("Computed {} sks_vks", sks_vks.len());
 
     let (basis_poly, enforced_sum) = induce_sumcheck_poly_auto(
         config.initial_dim,
@@ -638,17 +652,17 @@ where
     // Check consistency
     let basis_sum = basis_poly.iter().fold(U::zero(), |acc, &x| acc.add(&x));
     if basis_sum != enforced_sum {
-        println!("VERIFICATION FAILED: Initial basis polynomial sum mismatch");
-        println!("  Expected (enforced_sum): {:?}", enforced_sum);
-        println!("  Actual (basis_sum): {:?}", basis_sum);
+        debug_println!("VERIFICATION FAILED: Initial basis polynomial sum mismatch");
+        debug_println!("  Expected (enforced_sum): {:?}", enforced_sum);
+        debug_println!("  Actual (basis_sum): {:?}", basis_sum);
         return Ok(false);
     } else {
-        println!("✓ Initial sumcheck consistency check passed");
+        debug_println!("✓ Initial sumcheck consistency check passed");
     }
 
     // Use the enforced_sum from sumcheck computation
     let mut current_sum = enforced_sum;
-    println!("Using current_sum (enforced_sum): {:?}", current_sum);
+    debug_println!("Using current_sum (enforced_sum): {:?}", current_sum);
 
     // Initial sumcheck absorb
     fs.absorb_elem(current_sum);
@@ -657,14 +671,14 @@ where
     let mut transcript_idx = 0;
 
     for i in 0..config.recursive_steps {
-        println!("\nRecursive step {}/{}", i+1, config.recursive_steps);
+        debug_println!("\nRecursive step {}/{}", i+1, config.recursive_steps);
         let mut rs = Vec::with_capacity(config.ks[i]);
 
         // Verify sumcheck rounds
         for j in 0..config.ks[i] {
             // Bounds check for transcript access
             if transcript_idx >= proof.sumcheck_transcript.transcript.len() {
-                println!("ERROR: Transcript index {} >= transcript length {}",
+                debug_println!("ERROR: Transcript index {} >= transcript length {}",
                          transcript_idx, proof.sumcheck_transcript.transcript.len());
                 return Ok(false);
             }
@@ -674,14 +688,14 @@ where
             let s1 = evaluate_quadratic(coeffs, U::one());
             let claimed_sum = s0.add(&s1);
 
-            println!("  Round {}: coeffs={:?}", j, coeffs);
-            println!("    s0 (at 0) = {:?}", s0);
-            println!("    s1 (at 1) = {:?}", s1);
-            println!("    claimed_sum (s0+s1) = {:?}", claimed_sum);
-            println!("    current_sum = {:?}", current_sum);
+            debug_println!("  Round {}: coeffs={:?}", j, coeffs);
+            debug_println!("    s0 (at 0) = {:?}", s0);
+            debug_println!("    s1 (at 1) = {:?}", s1);
+            debug_println!("    claimed_sum (s0+s1) = {:?}", claimed_sum);
+            debug_println!("    current_sum = {:?}", current_sum);
 
             if claimed_sum != current_sum {
-                println!("  FAILED: Sumcheck mismatch!");
+                debug_println!("  FAILED: Sumcheck mismatch!");
                 return Ok(false);
             }
 
@@ -689,14 +703,14 @@ where
             rs.push(ri);
             current_sum = evaluate_quadratic(coeffs, ri);
             fs.absorb_elem(current_sum);
-            println!("    Next current_sum = {:?}", current_sum);
+            debug_println!("    Next current_sum = {:?}", current_sum);
 
             transcript_idx += 1;
         }
 
         // Bounds check for recursive commitments
         if i >= proof.recursive_commitments.len() {
-            println!("ERROR: Recursive commitment index {} >= length {}",
+            debug_println!("ERROR: Recursive commitment index {} >= length {}",
                      i, proof.recursive_commitments.len());
             return Ok(false);
         }
@@ -705,13 +719,13 @@ where
 
         // Final round verification
         if i == config.recursive_steps - 1 {
-            println!("\nFinal round verification:");
+            debug_println!("\nFinal round verification:");
             fs.absorb_elems(&proof.final_ligero_proof.yr);
-            println!("Absorbed {} yr values", proof.final_ligero_proof.yr.len());
+            debug_println!("Absorbed {} yr values", proof.final_ligero_proof.yr.len());
 
             let depth = config.log_dims[i] + LOG_INV_RATE;
             let queries = fs.get_distinct_queries(1 << depth, S);
-            println!("Final: depth={}, queries={:?}", depth, &queries[..queries.len().min(5)]);
+            debug_println!("Final: depth={}, queries={:?}", depth, &queries[..queries.len().min(5)]);
 
             // Hash final opened rows
             let hashed_final: Vec<Hash> = proof.final_ligero_proof.opened_rows
@@ -726,51 +740,51 @@ where
                 &hashed_final,
                 &queries,
             );
-            println!("Final Merkle verification: {}", final_merkle_result);
+            debug_println!("Final Merkle verification: {}", final_merkle_result);
 
             if !final_merkle_result {
-                println!("FAILED: Final Merkle proof verification");
+                debug_println!("FAILED: Final Merkle proof verification");
                 return Ok(false);
             }
 
             // Verify ligero consistency
-            println!("Calling verify_ligero...");
+            debug_println!("Calling verify_ligero...");
             verify_ligero(
                 &queries,
                 &proof.final_ligero_proof.opened_rows,
                 &proof.final_ligero_proof.yr,
                 &rs,
             );
-            println!("✓ verify_ligero passed");
+            debug_println!("✓ verify_ligero passed");
 
             // TODO: Implement verify_partial check
             // See main verify() function for details on why this is not yet implemented
-            println!("NOTE: verify_partial check not yet implemented (requires sumcheck state)");
+            debug_println!("NOTE: verify_partial check not yet implemented (requires sumcheck state)");
 
-            println!("Final round: all checks passed");
+            debug_println!("Final round: all checks passed");
             return Ok(true);
         }
 
         // Continue recursion for non-final rounds
         if i + 1 >= proof.recursive_commitments.len() {
-            println!("ERROR: Missing recursive commitment {}", i + 1);
+            debug_println!("ERROR: Missing recursive commitment {}", i + 1);
             return Ok(false);
         }
 
         fs.absorb_root(&proof.recursive_commitments[i + 1].root);
-        println!("Absorbed recursive commitment {}", i + 1);
+        debug_println!("Absorbed recursive commitment {}", i + 1);
 
         let depth = config.log_dims[i] + LOG_INV_RATE;
 
         // Bounds check for recursive proofs
         if i >= proof.recursive_proofs.len() {
-            println!("ERROR: Missing recursive proof {}", i);
+            debug_println!("ERROR: Missing recursive proof {}", i);
             return Ok(false);
         }
 
         let ligero_proof = &proof.recursive_proofs[i];
         let queries = fs.get_distinct_queries(1 << depth, S);
-        println!("Recursive {}: depth={}, queries={:?}", i, depth, &queries[..queries.len().min(5)]);
+        debug_println!("Recursive {}: depth={}, queries={:?}", i, depth, &queries[..queries.len().min(5)]);
 
         // Hash recursive opened rows
         let hashed_rec: Vec<Hash> = ligero_proof.opened_rows
@@ -785,19 +799,19 @@ where
             &hashed_rec,
             &queries,
         );
-        println!("Recursive {} Merkle verification: {}", i, rec_merkle_result);
+        debug_println!("Recursive {} Merkle verification: {}", i, rec_merkle_result);
 
         if !rec_merkle_result {
-            println!("FAILED: Recursive {} Merkle proof verification", i);
+            debug_println!("FAILED: Recursive {} Merkle proof verification", i);
             return Ok(false);
         }
 
         let alpha = fs.get_challenge::<U>();
-        println!("Got alpha for next round");
+        debug_println!("Got alpha for next round");
 
         // Bounds check for log_dims
         if i >= config.log_dims.len() {
-            println!("ERROR: Missing log_dims[{}]", i);
+            debug_println!("ERROR: Missing log_dims[{}]", i);
             return Ok(false);
         }
 
@@ -815,28 +829,28 @@ where
         // Check consistency for recursive round too
         let basis_sum_next = basis_poly_next.iter().fold(U::zero(), |acc, &x| acc.add(&x));
         if basis_sum_next != enforced_sum_next {
-            println!("VERIFICATION FAILED: Recursive basis polynomial sum mismatch at round {}", i);
-            println!("  Expected (enforced_sum): {:?}", enforced_sum_next);
-            println!("  Actual (basis_sum): {:?}", basis_sum_next);
+            debug_println!("VERIFICATION FAILED: Recursive basis polynomial sum mismatch at round {}", i);
+            debug_println!("  Expected (enforced_sum): {:?}", enforced_sum_next);
+            debug_println!("  Actual (basis_sum): {:?}", basis_sum_next);
             return Ok(false);
         } else {
-            println!("✓ Recursive round {} sumcheck consistency check passed", i);
+            debug_println!("✓ Recursive round {} sumcheck consistency check passed", i);
         }
 
         let enforced_sum = enforced_sum_next;
-        println!("Induced next sumcheck, enforced_sum: {:?}", enforced_sum);
+        debug_println!("Induced next sumcheck, enforced_sum: {:?}", enforced_sum);
 
         // Glue verification
         let glue_sum = current_sum.add(&enforced_sum);
         fs.absorb_elem(glue_sum);
-        println!("Glue sum: {:?}", glue_sum);
+        debug_println!("Glue sum: {:?}", glue_sum);
 
         let beta = fs.get_challenge::<U>();
         current_sum = glue_sums(current_sum, enforced_sum, beta);
-        println!("Updated current_sum: {:?}", current_sum);
+        debug_println!("Updated current_sum: {:?}", current_sum);
     }
 
-    println!("\nAll verification steps completed successfully!");
+    debug_println!("\nAll verification steps completed successfully!");
     Ok(true)
 }
 
