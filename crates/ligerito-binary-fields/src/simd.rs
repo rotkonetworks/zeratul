@@ -407,15 +407,18 @@ pub fn reduce_gf128(product: BinaryPoly256) -> BinaryPoly128 {
 // =========================================================================
 
 /// AVX-512 vectorized FFT butterfly for GF(2^32)
-/// processes 4 elements at once using 256-bit vectors
+/// processes 4 elements at once using 256-bit vectors with VPCLMULQDQ
 #[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
 pub fn fft_butterfly_gf32_avx512(u: &mut [BinaryElem32], w: &mut [BinaryElem32], lambda: BinaryElem32) {
-    // Check AVX-512 availability at runtime
-    // Note: vpclmulqdq is AVX-512 extension, not always available even with avx512f
+    // Runtime detection for vpclmulqdq (AVX-512 carryless multiply)
     #[cfg(target_arch = "x86_64")]
     {
-        // For now, just use SSE since AVX-512 intrinsics for vpclmulqdq are complex
-        // and may not provide significant benefit due to memory bandwidth limits
+        if is_x86_feature_detected!("vpclmulqdq") && is_x86_feature_detected!("avx512f") {
+            // SAFETY: we just checked the CPU supports these features
+            unsafe { fft_butterfly_gf32_avx512_impl(u, w, lambda) };
+            return;
+        }
+        // Fallback to SSE if AVX-512 not available
         return fft_butterfly_gf32_sse(u, w, lambda);
     }
 
@@ -428,7 +431,6 @@ pub fn fft_butterfly_gf32_avx512(u: &mut [BinaryElem32], w: &mut [BinaryElem32],
 /// AVX-512 implementation (unsafe, requires feature detection)
 #[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
 #[target_feature(enable = "avx512f,vpclmulqdq")]
-#[allow(dead_code)]
 unsafe fn fft_butterfly_gf32_avx512_impl(u: &mut [BinaryElem32], w: &mut [BinaryElem32], lambda: BinaryElem32) {
     use core::arch::x86_64::*;
 
