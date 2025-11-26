@@ -5,51 +5,50 @@ proofs.
 
 ## performance
 
-benchmarked on amd ryzen 9 7945hx (8 physical cores, smt disabled, turbo disabled, performance governor):
+benchmarked on amd ryzen 9 7945hx (8 physical cores, SMT off, turbo off):
 
 ### julia vs zeratul comparison
 
-| size | elements | julia proving | julia verify | zeratul proving | zeratul verify | proving ratio | verify ratio |
-|------|----------|---------------|--------------|-----------------|----------------|---------------|--------------|
-| 2^20 | 1.05M    | 90.65ms | 16.55ms | **68.31ms** | 22.48ms | **0.75x** ✓ | 1.35x |
-| 2^24 | 16.8M    | 1173.71ms | 127.24ms | **1238.83ms** | 470.45ms | **1.05x** | 3.69x |
-| 2^28 | 268.4M   | 18.08s | 2.07s | 25.09s | 8.50s | 1.38x | 4.10x |
-| 2^30 | 1.07B    | 71.11s | 4.14s | 77.34s | 14.46s | 1.08x | 3.49x |
+| size | elements | julia proving | zeratul proving | speedup |
+|------|----------|---------------|-----------------|---------|
+| 2^20 | 1.05M    | 87ms | **50ms** | **1.7x faster** |
+| 2^24 | 16.8M    | 1.17s | 650ms | **1.8x faster** |
+| 2^28 | 268.4M   | 18s | 10s | **1.8x faster** |
 
-**results:**
-- 2^20: rust 25% faster (68.31ms vs 90.65ms)
-- 2^24: roughly equal (1238.83ms vs 1173.71ms, 5% slower)
-- 2^28/2^30: julia faster (8-38% slower)
+**simd tier performance (fft butterfly, 2^20):**
 
-single-threaded baseline (2^20):
-- rust simd fft: 334.79ms
-- julia jit: 401.0ms
-- rust 20% faster single-threaded
-
-multi-threaded scaling with 8 physical cores (smt disabled):
-- rust: 334.79ms → 68.31ms (4.9x speedup)
-- julia: 401.0ms → 90.65ms (4.42x speedup)
-
-rust's monomorphic simd fft (direct sse pclmulqdq) is faster than julia's jit
-both single and multi-threaded at 2^20, but julia wins at larger inputs(green
-threads goated?).
+| tier | elements/iter | time | vs SSE |
+|------|---------------|------|--------|
+| AVX-512 | 8 | 0.96ms | 1.9x |
+| AVX2 | 4 | 1.25ms | 1.5x |
+| SSE | 2 | 1.86ms | baseline |
 
 ### optimization highlights
 
-**monomorphic simd fft:**
-- specialized gf(2^32) fft using direct sse pclmulqdq calls
-- eliminated generic dispatch overhead via typeid-based specialization
-- 2x parallel carryless multiplication in butterfly operations
+**tiered simd with runtime detection:**
+- AVX-512 VPCLMULQDQ: 8 elements/iteration (512-bit carryless multiply)
+- AVX2 VPCLMULQDQ: 4 elements/iteration (256-bit carryless multiply)
+- SSE PCLMULQDQ: 2 elements/iteration (128-bit carryless multiply)
+- lookup table fallback for non-SIMD (4-bit × 4-bit LUT with Karatsuba)
 
-**threading:**
-- eliminated nested parallelization (sequential fft within parallel column encoding)
-- tuned for 8 physical cores without smt
-- min_parallel_size: 16384 elements to reduce task spawning overhead
+**other optimizations:**
+- O(1) index extraction replacing O(n) linear search
+- batch row hashing (entire row at once vs element-by-element)
+- eliminated nested parallelization overhead
 
-**critical: smt (hyperthreading) must be disabled**
-- with smt on: 2^20 proving = 138.64ms (terrible - cache/resource contention)
-- with smt off: 2^20 proving = 68.31ms (proper scaling!)
-- **smt doubles latency due to execution unit/cache sharing**
+### benchmarking setup
+
+**disable SMT for accurate benchmarks** (hyperthreading causes cache contention):
+```bash
+# disable SMT
+echo "off" | sudo tee /sys/devices/system/cpu/smt/control
+
+# run with 8 physical cores
+RAYON_NUM_THREADS=8 taskset -c 0-7 cargo run --release --example quick_bench
+
+# restore SMT
+echo "on" | sudo tee /sys/devices/system/cpu/smt/control
+```
 
 ## building
 

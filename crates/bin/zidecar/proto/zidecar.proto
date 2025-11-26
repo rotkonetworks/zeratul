@@ -2,7 +2,7 @@ syntax = "proto3";
 package zidecar.v1;
 
 // Zidecar gRPC service
-// Provides Ligerito-proven header chain and compact blocks
+// Provides Ligerito-proven header chain and trustless state proofs
 service Zidecar {
     // Get header chain proof from height range
     rpc GetHeaderProof(ProofRequest) returns (HeaderProof);
@@ -33,6 +33,27 @@ service Zidecar {
 
     // Get transparent transaction history for addresses
     rpc GetTaddressTxids(TransparentAddressFilter) returns (TxidList);
+
+    // ===== TRUSTLESS STATE PROOFS (v2) =====
+
+    // Get trustless state proof with FROST checkpoint + state transition proof
+    // This is the main endpoint for secure sync - proves entire chain state
+    rpc GetTrustlessStateProof(ProofRequest) returns (TrustlessStateProof);
+
+    // Get NOMT inclusion proof for a note commitment
+    // Proves: cmx is in the commitment tree at position
+    rpc GetCommitmentProof(CommitmentQuery) returns (CommitmentProof);
+
+    // Get NOMT proof for nullifier status
+    // Proves: nullifier is/isn't in nullifier set
+    rpc GetNullifierProof(NullifierQuery) returns (NullifierProof);
+
+    // Get compact blocks with integrity binding
+    // Each block includes merkle path proving data matches header
+    rpc GetVerifiedBlocks(BlockRange) returns (stream VerifiedBlock);
+
+    // Get FROST checkpoint at epoch boundary
+    rpc GetCheckpoint(EpochRequest) returns (FrostCheckpoint);
 }
 
 // Request proof for height range
@@ -177,4 +198,122 @@ message Utxo {
 // List of transaction IDs
 message TxidList {
     repeated bytes txids = 1;   // 32-byte transaction hashes
+}
+
+// ===== TRUSTLESS STATE PROOF MESSAGES (v2) =====
+
+// FROST-signed epoch checkpoint (trust anchor)
+message FrostCheckpoint {
+    // Epoch index (monotonically increasing)
+    uint64 epoch_index = 1;
+
+    // Block height at epoch boundary
+    uint32 height = 2;
+
+    // Block hash at epoch boundary (32 bytes)
+    bytes block_hash = 3;
+
+    // Orchard commitment tree root (32 bytes)
+    bytes tree_root = 4;
+
+    // Nullifier set root - NOMT (32 bytes)
+    bytes nullifier_root = 5;
+
+    // Unix timestamp of checkpoint
+    uint64 timestamp = 6;
+
+    // FROST threshold signature
+    FrostSignature signature = 7;
+
+    // Signer set commitment (32 bytes)
+    bytes signer_set_id = 8;
+}
+
+// FROST Schnorr signature
+message FrostSignature {
+    bytes r = 1;    // 32 bytes - commitment
+    bytes s = 2;    // 32 bytes - response
+}
+
+// Request for epoch checkpoint
+message EpochRequest {
+    uint64 epoch_index = 1;     // 0 = latest
+}
+
+// Trustless state proof = FROST checkpoint + ligerito state transition
+message TrustlessStateProof {
+    // Trust anchor - FROST-signed checkpoint
+    FrostCheckpoint checkpoint = 1;
+
+    // Ligerito proof of state transition from checkpoint to current
+    bytes state_transition_proof = 2;
+
+    // Current verified state
+    uint32 current_height = 3;
+    bytes current_hash = 4;          // 32 bytes
+    bytes tree_root = 5;             // 32 bytes - commitment tree root
+    bytes nullifier_root = 6;        // 32 bytes - nullifier set root
+
+    // Number of Orchard actions processed
+    uint64 num_actions = 7;
+
+    // Proof metadata
+    uint32 proof_log_size = 8;       // for verifier config selection
+}
+
+// Query for commitment inclusion proof
+message CommitmentQuery {
+    bytes cmx = 1;              // 32-byte note commitment to prove
+    uint32 at_height = 2;       // 0 = current height
+}
+
+// NOMT inclusion proof for commitment tree
+message CommitmentProof {
+    bytes cmx = 1;              // the commitment
+    uint64 position = 2;        // position in tree
+    bytes tree_root = 3;        // tree root this proves against
+    uint32 height = 4;          // block height of tree root
+
+    // NOMT merkle proof path
+    repeated bytes proof_path = 5;      // sibling hashes
+    repeated bool proof_indices = 6;    // left/right indicators
+
+    // Whether commitment exists in tree
+    bool exists = 7;
+}
+
+// Query for nullifier proof
+message NullifierQuery {
+    bytes nullifier = 1;        // 32-byte nullifier to check
+    uint32 at_height = 2;       // 0 = current height
+}
+
+// NOMT proof for nullifier set membership
+message NullifierProof {
+    bytes nullifier = 1;            // the nullifier
+    bytes nullifier_root = 2;       // nullifier set root
+    uint32 height = 3;              // block height
+
+    // NOMT sparse merkle proof
+    repeated bytes proof_path = 4;
+    repeated bool proof_indices = 5;
+
+    // Whether nullifier is spent
+    bool is_spent = 6;
+}
+
+// Verified compact block with integrity proof
+message VerifiedBlock {
+    // Standard compact block data
+    uint32 height = 1;
+    bytes hash = 2;
+    repeated CompactAction actions = 3;
+
+    // Integrity binding - proves actions derive from block
+    bytes actions_root = 4;         // merkle root of actions
+    repeated bytes merkle_path = 5; // path to header merkle root
+
+    // Optional: state after this block
+    bytes tree_root_after = 6;      // commitment tree root after block
+    bytes nullifier_root_after = 7; // nullifier set root after block
 }

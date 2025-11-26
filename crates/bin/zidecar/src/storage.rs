@@ -202,6 +202,169 @@ impl Storage {
 
         Ok(root)
     }
+
+    // ===== CHECKPOINT STORAGE =====
+
+    /// store FROST checkpoint
+    pub fn store_checkpoint(&self, epoch: u64, checkpoint_bytes: &[u8]) -> Result<()> {
+        let mut key = Vec::with_capacity(9);
+        key.push(b'c'); // checkpoint prefix
+        key.extend_from_slice(&epoch.to_le_bytes());
+        self.sled
+            .insert(key, checkpoint_bytes)
+            .map_err(|e| ZidecarError::Storage(format!("sled: {}", e)))?;
+        Ok(())
+    }
+
+    /// get FROST checkpoint by epoch
+    pub fn get_checkpoint(&self, epoch: u64) -> Result<Option<Vec<u8>>> {
+        let mut key = Vec::with_capacity(9);
+        key.push(b'c');
+        key.extend_from_slice(&epoch.to_le_bytes());
+        self.sled
+            .get(key)
+            .map(|v| v.map(|iv| iv.to_vec()))
+            .map_err(|e| ZidecarError::Storage(format!("sled: {}", e)))
+    }
+
+    /// get latest checkpoint epoch
+    pub fn get_latest_checkpoint_epoch(&self) -> Result<Option<u64>> {
+        // scan checkpoints in reverse to find latest
+        let prefix = vec![b'c'];
+        for item in self.sled.scan_prefix(&prefix).rev() {
+            if let Ok((key, _)) = item {
+                if key.len() == 9 {
+                    let epoch = u64::from_le_bytes([
+                        key[1], key[2], key[3], key[4],
+                        key[5], key[6], key[7], key[8],
+                    ]);
+                    return Ok(Some(epoch));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    // ===== STATE ROOT TRACKING =====
+
+    /// store state roots at height
+    pub fn store_state_roots(
+        &self,
+        height: u32,
+        tree_root: &[u8; 32],
+        nullifier_root: &[u8; 32],
+    ) -> Result<()> {
+        let mut key = Vec::with_capacity(5);
+        key.push(b'r'); // roots prefix
+        key.extend_from_slice(&height.to_le_bytes());
+
+        let mut value = Vec::with_capacity(64);
+        value.extend_from_slice(tree_root);
+        value.extend_from_slice(nullifier_root);
+
+        self.sled
+            .insert(key, value)
+            .map_err(|e| ZidecarError::Storage(format!("sled: {}", e)))?;
+        Ok(())
+    }
+
+    /// get state roots at height
+    pub fn get_state_roots(&self, height: u32) -> Result<Option<([u8; 32], [u8; 32])>> {
+        let mut key = Vec::with_capacity(5);
+        key.push(b'r');
+        key.extend_from_slice(&height.to_le_bytes());
+
+        match self.sled.get(key) {
+            Ok(Some(bytes)) if bytes.len() == 64 => {
+                let mut tree_root = [0u8; 32];
+                let mut nullifier_root = [0u8; 32];
+                tree_root.copy_from_slice(&bytes[..32]);
+                nullifier_root.copy_from_slice(&bytes[32..]);
+                Ok(Some((tree_root, nullifier_root)))
+            }
+            Ok(_) => Ok(None),
+            Err(e) => Err(ZidecarError::Storage(format!("sled: {}", e))),
+        }
+    }
+
+    /// get highest height with stored state roots
+    pub fn get_latest_state_height(&self) -> Result<Option<u32>> {
+        let prefix = vec![b'r'];
+        for item in self.sled.scan_prefix(&prefix).rev() {
+            if let Ok((key, _)) = item {
+                if key.len() == 5 {
+                    let height = u32::from_le_bytes([key[1], key[2], key[3], key[4]]);
+                    return Ok(Some(height));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    // ===== PROOF GENERATION (NOMT) =====
+
+    /// generate nullifier proof (membership or non-membership)
+    pub fn generate_nullifier_proof(&self, nullifier: &[u8; 32]) -> Result<NomtProof> {
+        let session = self.nomt.begin_session(SessionParams::default());
+        let key = key_for_nullifier(nullifier);
+
+        // read value to check existence
+        let exists = session
+            .read(key)
+            .map_err(|e| ZidecarError::Storage(format!("nomt read: {}", e)))?
+            .is_some();
+
+        // get root
+        let root = self.nomt.root();
+
+        // for now, return simplified proof
+        // real implementation would extract merkle path from nomt
+        Ok(NomtProof {
+            key,
+            root: root_to_bytes(&root),
+            exists,
+            path: Vec::new(),      // TODO: extract actual merkle path
+            indices: Vec::new(),   // TODO: extract path indices
+        })
+    }
+
+    /// generate commitment proof (note in tree)
+    pub fn generate_commitment_proof(&self, cmx: &[u8; 32]) -> Result<NomtProof> {
+        let session = self.nomt.begin_session(SessionParams::default());
+        let key = key_for_note(cmx);
+
+        let exists = session
+            .read(key)
+            .map_err(|e| ZidecarError::Storage(format!("nomt read: {}", e)))?
+            .is_some();
+
+        let root = self.nomt.root();
+
+        Ok(NomtProof {
+            key,
+            root: root_to_bytes(&root),
+            exists,
+            path: Vec::new(),
+            indices: Vec::new(),
+        })
+    }
+}
+
+/// NOMT sparse merkle proof
+#[derive(Debug, Clone)]
+pub struct NomtProof {
+    pub key: [u8; 32],
+    pub root: [u8; 32],
+    pub exists: bool,
+    pub path: Vec<[u8; 32]>,
+    pub indices: Vec<bool>,
+}
+
+/// convert nomt Root to bytes
+fn root_to_bytes(root: &Root) -> [u8; 32] {
+    let mut bytes = [0u8; 32];
+    bytes.copy_from_slice(root.as_ref());
+    bytes
 }
 
 /// proof cache key

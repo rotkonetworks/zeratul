@@ -10,6 +10,9 @@ pub enum ZyncError {
     #[error("verification failed: {0}")]
     VerificationFailed(String),
 
+    #[error("trustless verification error: {0}")]
+    Verification(String),
+
     #[error("state mismatch: {0}")]
     StateMismatch(String),
 

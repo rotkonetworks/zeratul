@@ -13,6 +13,11 @@ mod compact;
 mod error;
 mod epoch;
 
+// trustless v2 modules
+mod checkpoint;
+mod state_transition;
+mod p2p;
+
 use crate::{grpc_service::ZidecarService, epoch::EpochManager};
 use std::sync::Arc;
 
@@ -100,6 +105,12 @@ async fn main() -> Result<()> {
     let epoch_manager_bg = epoch_manager.clone();
     tokio::spawn(async move {
         epoch_manager_bg.run_background_prover().await;
+    });
+
+    // start background state root tracker (for trustless proofs)
+    let epoch_manager_state = epoch_manager.clone();
+    tokio::spawn(async move {
+        epoch_manager_state.run_background_state_tracker().await;
     });
 
     // generate initial gigaproof if needed

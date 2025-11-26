@@ -26,8 +26,15 @@ use tokio::net::TcpStream;
 
 pub mod primitives;
 pub mod trace;
+pub mod substrate_types;
+
+#[cfg(feature = "smoldot")]
+pub mod smoldot;
 
 pub use primitives::*;
+#[cfg(feature = "smoldot")]
+pub use smoldot::{SmoldotVerifier, SmoldotVerification, P2pComparison};
+pub use substrate_types::{ProbeReport, ExtendedReport, ReportSubmission, MeasurementResult};
 use tokio::sync::RwLock;
 use tokio::time::timeout;
 use tokio_tungstenite::{connect_async, tungstenite::Message};

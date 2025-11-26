@@ -15,10 +15,8 @@ use binary_fields::BinaryFieldElement;
 use merkle_tree::MerkleRoot;
 use sha2::{Sha256, Digest};
 
-#[cfg(feature = "prover")]
-use rand::{Rng, SeedableRng};
-#[cfg(feature = "prover")]
-use rand::rngs::StdRng;
+// Note: rand imports removed - using deterministic hash-based expansion for
+// cross-platform compatibility (native, WASM, etc.)
 
 /// Trait for Fiat-Shamir transcripts (std version with Send + Sync)
 #[cfg(feature = "std")]
@@ -229,6 +227,9 @@ impl Transcript for MerlinTranscript {
 }
 
 /// SHA256-based Fiat-Shamir transcript (Julia-compatible mode)
+///
+/// Uses deterministic hash-based expansion for all random values.
+/// This ensures identical behavior across native, WASM, and all platforms.
 pub struct Sha256Transcript {
     hasher: Sha256,
     counter: u32,
@@ -254,19 +255,9 @@ impl Sha256Transcript {
         transcript
     }
 
-    #[cfg(feature = "prover")]
-    fn squeeze_rng(&mut self) -> StdRng {
-        self.hasher.update(&self.counter.to_le_bytes());
-        self.counter += 1;
-
-        let digest = self.hasher.clone().finalize();
-        let mut seed = [0u8; 32];
-        seed.copy_from_slice(&digest[..32]);
-        StdRng::from_seed(seed)
-    }
-
-    /// Get random bytes without using the rand crate (for verifier-only builds)
-    #[allow(dead_code)]
+    /// Squeeze deterministic bytes from the transcript.
+    /// Uses pure SHA256 expansion - no external RNG dependencies.
+    /// This ensures identical output on native, WASM, and all platforms.
     fn squeeze_bytes(&mut self, count: usize) -> Vec<u8> {
         self.hasher.update(&self.counter.to_le_bytes());
         self.counter += 1;
@@ -321,186 +312,88 @@ impl Transcript for Sha256Transcript {
     }
 
     fn get_challenge<F: BinaryFieldElement>(&mut self) -> F {
-        #[cfg(feature = "prover")]
-        {
-            let mut rng = self.squeeze_rng();
+        // Use deterministic squeeze_bytes for cross-platform compatibility
+        // This ensures identical challenges on native, WASM, and all platforms
+        let bytes = self.squeeze_bytes(core::mem::size_of::<F>());
 
-            // Generate random bytes and convert to field element
-            match core::mem::size_of::<F>() {
-                4 => {
-                    // BinaryElem32
-                    let value: u32 = rng.gen();
-                    F::from_bits(value as u64)
-                }
-                16 => {
-                    // BinaryElem128
-                    // Generate 128 bits of randomness
-                    let low: u64 = rng.gen();
-                    let high: u64 = rng.gen();
+        match core::mem::size_of::<F>() {
+            2 => {
+                // BinaryElem16
+                let value = u16::from_le_bytes([bytes[0], bytes[1]]);
+                F::from_bits(value as u64)
+            }
+            4 => {
+                // BinaryElem32
+                let value = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                F::from_bits(value as u64)
+            }
+            16 => {
+                // BinaryElem128 - construct from bytes
+                let mut low_bytes = [0u8; 8];
+                let mut high_bytes = [0u8; 8];
+                low_bytes.copy_from_slice(&bytes[0..8]);
+                high_bytes.copy_from_slice(&bytes[8..16]);
 
-                    // For BinaryElem128, we need to properly construct the field element
-                    // The from_bits might only use the lower 64 bits, so we need a different approach
-                    let mut result = F::zero();
+                let low = u64::from_le_bytes(low_bytes);
+                let high = u64::from_le_bytes(high_bytes);
 
-                    // Set bits 0-63
-                    for i in 0..64 {
-                        if (low >> i) & 1 == 1 {
-                            let bit_value = F::from_bits(1u64 << i);
-                            result = result.add(&bit_value);
-                        }
-                    }
+                // Build field element bit by bit
+                let mut result = F::zero();
 
-                    // Set bits 64-127
-                    // Pre-compute 2^64 once
-                    let mut power_of_2_64 = F::from_bits(1u64 << 63);
-                    power_of_2_64 = power_of_2_64.add(&power_of_2_64); // 2^64
-
-                    // Build up powers incrementally
-                    let mut current_power = power_of_2_64;
-                    for i in 0..64 {
-                        if (high >> i) & 1 == 1 {
-                            result = result.add(&current_power);
-                        }
-                        if i < 63 {
-                            current_power = current_power.add(&current_power); // Double for next bit
-                        }
-                    }
-
-                    result
-                }
-                _ => {
-                    // Generic fallback for other sizes
-                    let mut result = F::zero();
-                let num_bits = core::mem::size_of::<F>() * 8;
-
-                // Handle first 64 bits
-                for i in 0..num_bits.min(64) {
-                    if rng.gen_bool(0.5) {
+                // Set bits 0-63
+                for i in 0..64 {
+                    if (low >> i) & 1 == 1 {
                         let bit_value = F::from_bits(1u64 << i);
                         result = result.add(&bit_value);
                     }
                 }
 
-                // Handle bits beyond 64 if needed
-                if num_bits > 64 {
-                    // Pre-compute 2^64
-                    let mut power_of_2_64 = F::from_bits(1u64 << 63);
-                    power_of_2_64 = power_of_2_64.add(&power_of_2_64);
+                // Set bits 64-127
+                let mut power_of_2_64 = F::from_bits(1u64 << 63);
+                power_of_2_64 = power_of_2_64.add(&power_of_2_64); // 2^64
 
-                    // Build up powers incrementally
-                    let mut current_power = power_of_2_64;
-                    for i in 64..num_bits {
-                        if rng.gen_bool(0.5) {
-                            result = result.add(&current_power);
-                        }
-                        if i < num_bits - 1 {
-                            current_power = current_power.add(&current_power);
-                        }
+                let mut current_power = power_of_2_64;
+                for i in 0..64 {
+                    if (high >> i) & 1 == 1 {
+                        result = result.add(&current_power);
+                    }
+                    if i < 63 {
+                        current_power = current_power.add(&current_power);
                     }
                 }
 
                 result
             }
-        }
-        }
-
-        #[cfg(not(feature = "prover"))]
-        {
-            // Verifier version: use squeeze_bytes instead of squeeze_rng
-            let bytes = self.squeeze_bytes(core::mem::size_of::<F>());
-
-            match core::mem::size_of::<F>() {
-                2 => {
-                    // BinaryElem16
-                    let value = u16::from_le_bytes([bytes[0], bytes[1]]);
-                    F::from_bits(value as u64)
-                }
-                4 => {
-                    // BinaryElem32
-                    let value = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
-                    F::from_bits(value as u64)
-                }
-                16 => {
-                    // BinaryElem128 - construct from bytes
-                    let mut low_bytes = [0u8; 8];
-                    let mut high_bytes = [0u8; 8];
-                    low_bytes.copy_from_slice(&bytes[0..8]);
-                    high_bytes.copy_from_slice(&bytes[8..16]);
-
-                    let low = u64::from_le_bytes(low_bytes);
-                    let high = u64::from_le_bytes(high_bytes);
-
-                    // Build field element bit by bit
-                    let mut result = F::zero();
-
-                    // Set bits 0-63
-                    for i in 0..64 {
-                        if (low >> i) & 1 == 1 {
-                            let bit_value = F::from_bits(1u64 << i);
-                            result = result.add(&bit_value);
-                        }
-                    }
-
-                    // Set bits 64-127
-                    let mut power_of_2_64 = F::from_bits(1u64 << 63);
-                    power_of_2_64 = power_of_2_64.add(&power_of_2_64); // 2^64
-
-                    let mut current_power = power_of_2_64;
-                    for i in 0..64 {
-                        if (high >> i) & 1 == 1 {
-                            result = result.add(&current_power);
-                        }
-                        if i < 63 {
-                            current_power = current_power.add(&current_power);
-                        }
-                    }
-
-                    result
-                }
-                _ => {
-                    // Generic fallback
-                    let mut result = F::zero();
-                    for (byte_idx, &byte) in bytes.iter().enumerate() {
-                        for bit_idx in 0..8 {
-                            if (byte >> bit_idx) & 1 == 1 {
-                                let global_bit = byte_idx * 8 + bit_idx;
-                                if global_bit < 64 {
-                                    result = result.add(&F::from_bits(1u64 << global_bit));
-                                }
+            _ => {
+                // Generic fallback
+                let mut result = F::zero();
+                for (byte_idx, &byte) in bytes.iter().enumerate() {
+                    for bit_idx in 0..8 {
+                        if (byte >> bit_idx) & 1 == 1 {
+                            let global_bit = byte_idx * 8 + bit_idx;
+                            if global_bit < 64 {
+                                result = result.add(&F::from_bits(1u64 << global_bit));
                             }
                         }
                     }
-                    result
                 }
+                result
             }
         }
     }
 
     fn get_query(&mut self, max: usize) -> usize {
-        #[cfg(feature = "prover")]
-        {
-            let mut rng = self.squeeze_rng();
-            if self.julia_compatible {
-                rng.gen_range(1..=max) - 1  // Generate 1-based, return 0-based
-            } else {
-                rng.gen_range(0..max)  // Direct 0-based
-            }
-        }
+        // Use deterministic squeeze_bytes for cross-platform compatibility
+        let bytes = self.squeeze_bytes(8);
+        let value = u64::from_le_bytes([
+            bytes[0], bytes[1], bytes[2], bytes[3],
+            bytes[4], bytes[5], bytes[6], bytes[7],
+        ]);
 
-        #[cfg(not(feature = "prover"))]
-        {
-            // Verifier version: use squeeze_bytes to generate query
-            let bytes = self.squeeze_bytes(8);
-            let value = u64::from_le_bytes([
-                bytes[0], bytes[1], bytes[2], bytes[3],
-                bytes[4], bytes[5], bytes[6], bytes[7],
-            ]);
-
-            if self.julia_compatible {
-                ((value as usize) % max + 1) - 1 // 1-based generation, 0-based return
-            } else {
-                (value as usize) % max  // Direct 0-based
-            }
+        if self.julia_compatible {
+            ((value as usize) % max + 1) - 1 // 1-based generation, 0-based return
+        } else {
+            (value as usize) % max  // Direct 0-based
         }
     }
 

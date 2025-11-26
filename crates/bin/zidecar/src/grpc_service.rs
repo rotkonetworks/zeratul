@@ -6,12 +6,17 @@ use crate::{
     error::{Result, ZidecarError},
     storage::Storage,
     zebrad::ZebradClient,
+    checkpoint::EpochCheckpoint,
     zidecar::{
         self, zidecar_server::Zidecar, BlockHeader as ProtoBlockHeader, BlockId, BlockRange,
         CompactAction as ProtoCompactAction, CompactBlock as ProtoCompactBlock, Empty,
         HeaderProof, ProofRequest, SyncStatus, RawTransaction, SendResponse, TxFilter, TreeState,
         TransparentAddressFilter, UtxoList, Utxo, TxidList,
         sync_status::GigaproofStatus,
+        // trustless v2 types
+        TrustlessStateProof, FrostCheckpoint as ProtoFrostCheckpoint,
+        FrostSignature as ProtoFrostSignature, EpochRequest, CommitmentQuery, CommitmentProof,
+        NullifierQuery, NullifierProof, VerifiedBlock,
     },
 };
 use std::sync::Arc;
@@ -508,4 +513,273 @@ impl Zidecar for ZidecarService {
             }
         }
     }
+
+    // ===== TRUSTLESS STATE PROOFS (v2) =====
+
+    async fn get_trustless_state_proof(
+        &self,
+        _request: Request<ProofRequest>,
+    ) -> std::result::Result<Response<TrustlessStateProof>, Status> {
+        info!("trustless state proof request");
+
+        // get latest checkpoint
+        let checkpoint_epoch = self.storage.get_latest_checkpoint_epoch()
+            .map_err(|e| Status::internal(e.to_string()))?
+            .unwrap_or(0);
+
+        let checkpoint_bytes = self.storage.get_checkpoint(checkpoint_epoch)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let checkpoint = if let Some(bytes) = checkpoint_bytes {
+            EpochCheckpoint::from_bytes(&bytes)
+                .map_err(|e| Status::internal(e.to_string()))?
+        } else {
+            // use genesis checkpoint if none stored
+            crate::checkpoint::mainnet_genesis_checkpoint()
+        };
+
+        // get gigaproof + tip proof (state transition proof)
+        let (gigaproof, _tip_proof) = match self.epoch_manager.get_proofs().await {
+            Ok(p) => p,
+            Err(e) => {
+                error!("failed to get proofs: {}", e);
+                return Err(Status::internal(e.to_string()));
+            }
+        };
+
+        // get current state
+        let tip_info = self.zebrad.get_blockchain_info().await
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let current_hash = hex::decode(&tip_info.bestblockhash)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        // get state roots (from storage or compute)
+        let (tree_root, nullifier_root) = self.storage
+            .get_state_roots(tip_info.blocks)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .unwrap_or(([0u8; 32], [0u8; 32]));
+
+        info!(
+            "serving trustless proof: checkpoint epoch {} -> height {}",
+            checkpoint.epoch_index, tip_info.blocks
+        );
+
+        Ok(Response::new(TrustlessStateProof {
+            checkpoint: Some(checkpoint_to_proto(&checkpoint)),
+            state_transition_proof: gigaproof,
+            current_height: tip_info.blocks,
+            current_hash,
+            tree_root: tree_root.to_vec(),
+            nullifier_root: nullifier_root.to_vec(),
+            num_actions: 0,  // TODO: track action count
+            proof_log_size: 20,  // 2^20 default
+        }))
+    }
+
+    async fn get_commitment_proof(
+        &self,
+        request: Request<CommitmentQuery>,
+    ) -> std::result::Result<Response<CommitmentProof>, Status> {
+        let query = request.into_inner();
+
+        if query.cmx.len() != 32 {
+            return Err(Status::invalid_argument("cmx must be 32 bytes"));
+        }
+
+        let mut cmx = [0u8; 32];
+        cmx.copy_from_slice(&query.cmx);
+
+        info!("commitment proof request: {}", hex::encode(&cmx[..8]));
+
+        let proof = self.storage.generate_commitment_proof(&cmx)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let height = query.at_height.max(
+            self.storage.get_latest_state_height()
+                .map_err(|e| Status::internal(e.to_string()))?
+                .unwrap_or(0)
+        );
+
+        Ok(Response::new(CommitmentProof {
+            cmx: cmx.to_vec(),
+            position: 0,  // TODO: track position
+            tree_root: proof.root.to_vec(),
+            height,
+            proof_path: proof.path.iter().map(|p| p.to_vec()).collect(),
+            proof_indices: proof.indices,
+            exists: proof.exists,
+        }))
+    }
+
+    async fn get_nullifier_proof(
+        &self,
+        request: Request<NullifierQuery>,
+    ) -> std::result::Result<Response<NullifierProof>, Status> {
+        let query = request.into_inner();
+
+        if query.nullifier.len() != 32 {
+            return Err(Status::invalid_argument("nullifier must be 32 bytes"));
+        }
+
+        let mut nullifier = [0u8; 32];
+        nullifier.copy_from_slice(&query.nullifier);
+
+        info!("nullifier proof request: {}", hex::encode(&nullifier[..8]));
+
+        let proof = self.storage.generate_nullifier_proof(&nullifier)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let height = query.at_height.max(
+            self.storage.get_latest_state_height()
+                .map_err(|e| Status::internal(e.to_string()))?
+                .unwrap_or(0)
+        );
+
+        Ok(Response::new(NullifierProof {
+            nullifier: nullifier.to_vec(),
+            nullifier_root: proof.root.to_vec(),
+            height,
+            proof_path: proof.path.iter().map(|p| p.to_vec()).collect(),
+            proof_indices: proof.indices,
+            is_spent: proof.exists,
+        }))
+    }
+
+    type GetVerifiedBlocksStream = ReceiverStream<std::result::Result<VerifiedBlock, Status>>;
+
+    async fn get_verified_blocks(
+        &self,
+        request: Request<BlockRange>,
+    ) -> std::result::Result<Response<Self::GetVerifiedBlocksStream>, Status> {
+        let range = request.into_inner();
+
+        info!(
+            "verified blocks request: {}..{}",
+            range.start_height, range.end_height
+        );
+
+        let (tx, rx) = tokio::sync::mpsc::channel(128);
+
+        let zebrad = self.zebrad.clone();
+        let storage = self.storage.clone();
+        let start = range.start_height;
+        let end = range.end_height;
+
+        tokio::spawn(async move {
+            for height in start..=end {
+                match InternalCompactBlock::from_zebrad(&zebrad, height).await {
+                    Ok(block) => {
+                        // compute actions merkle root
+                        let actions_root = compute_actions_root(&block.actions);
+
+                        // get state roots after this block (if available)
+                        let (tree_root_after, nullifier_root_after) = storage
+                            .get_state_roots(height)
+                            .unwrap_or(None)
+                            .unwrap_or(([0u8; 32], [0u8; 32]));
+
+                        let verified_block = VerifiedBlock {
+                            height: block.height,
+                            hash: block.hash,
+                            actions: block
+                                .actions
+                                .into_iter()
+                                .map(|a| ProtoCompactAction {
+                                    cmx: a.cmx,
+                                    ephemeral_key: a.ephemeral_key,
+                                    ciphertext: a.ciphertext,
+                                    nullifier: a.nullifier,
+                                })
+                                .collect(),
+                            actions_root: actions_root.to_vec(),
+                            merkle_path: vec![], // TODO: compute merkle path to header
+                            tree_root_after: tree_root_after.to_vec(),
+                            nullifier_root_after: nullifier_root_after.to_vec(),
+                        };
+
+                        if tx.send(Ok(verified_block)).await.is_err() {
+                            warn!("client disconnected during stream");
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        error!("failed to fetch block {}: {}", height, e);
+                        let _ = tx.send(Err(Status::internal(e.to_string()))).await;
+                        break;
+                    }
+                }
+            }
+        });
+
+        Ok(Response::new(ReceiverStream::new(rx)))
+    }
+
+    async fn get_checkpoint(
+        &self,
+        request: Request<EpochRequest>,
+    ) -> std::result::Result<Response<ProtoFrostCheckpoint>, Status> {
+        let req = request.into_inner();
+
+        let epoch = if req.epoch_index == 0 {
+            // get latest
+            self.storage.get_latest_checkpoint_epoch()
+                .map_err(|e| Status::internal(e.to_string()))?
+                .unwrap_or(0)
+        } else {
+            req.epoch_index
+        };
+
+        info!("checkpoint request for epoch {}", epoch);
+
+        let checkpoint_bytes = self.storage.get_checkpoint(epoch)
+            .map_err(|e| Status::internal(e.to_string()))?;
+
+        let checkpoint = if let Some(bytes) = checkpoint_bytes {
+            EpochCheckpoint::from_bytes(&bytes)
+                .map_err(|e| Status::internal(e.to_string()))?
+        } else if epoch == 0 {
+            crate::checkpoint::mainnet_genesis_checkpoint()
+        } else {
+            return Err(Status::not_found(format!("checkpoint {} not found", epoch)));
+        };
+
+        Ok(Response::new(checkpoint_to_proto(&checkpoint)))
+    }
+}
+
+// helper: convert EpochCheckpoint to proto
+fn checkpoint_to_proto(cp: &EpochCheckpoint) -> ProtoFrostCheckpoint {
+    ProtoFrostCheckpoint {
+        epoch_index: cp.epoch_index,
+        height: cp.height,
+        block_hash: cp.block_hash.to_vec(),
+        tree_root: cp.tree_root.to_vec(),
+        nullifier_root: cp.nullifier_root.to_vec(),
+        timestamp: cp.timestamp,
+        signature: Some(ProtoFrostSignature {
+            r: cp.signature.r.to_vec(),
+            s: cp.signature.s.to_vec(),
+        }),
+        signer_set_id: cp.signer_set_id.to_vec(),
+    }
+}
+
+// helper: compute merkle root of compact actions
+fn compute_actions_root(actions: &[crate::compact::CompactAction]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    if actions.is_empty() {
+        return [0u8; 32];
+    }
+
+    // simple: hash all actions together
+    // production would use proper merkle tree
+    let mut hasher = Sha256::new();
+    hasher.update(b"ZIDECAR_ACTIONS_ROOT");
+    for action in actions {
+        hasher.update(&action.cmx);
+        hasher.update(&action.nullifier);
+    }
+    hasher.finalize().into()
 }

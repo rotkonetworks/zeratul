@@ -13,9 +13,10 @@ default = ["client"]
 client = ["tonic", "prost", "tokio", "tokio-stream", "tracing"]
 
 [dependencies]
-ligerito = "0.1.5"
-ligerito-binary-fields = "0.1"
-ligerito-merkle = "0.1"
+# local workspace ligerito (has transcript-blake2b feature)
+ligerito = { path = "../ligerito", features = ["transcript-blake2b"] }
+ligerito-binary-fields = { path = "../ligerito-binary-fields" }
+ligerito-merkle = { path = "../ligerito-merkle" }
 
 blake2 = "0.10"
 sha2 = "0.10"
