@@ -1,3 +1,6 @@
+#[cfg(not(feature = "std"))]
+use alloc::vec::Vec;
+
 use binary_fields::BinaryFieldElement;
 use merkle_tree::{CompleteMerkleTree, MerkleRoot, BatchedMerkleProof};
 use serde::{Serialize, Deserialize};
@@ -87,7 +90,7 @@ pub struct RecursiveLigeroProof<T: BinaryFieldElement> {
 impl<T: BinaryFieldElement> RecursiveLigeroProof<T> {
     pub fn size_of(&self) -> usize {
         self.opened_rows.iter()
-            .map(|row| row.len() * std::mem::size_of::<T>())
+            .map(|row| row.len() * core::mem::size_of::<T>())
             .sum::<usize>()
             + self.merkle_proof.size_of()
     }
@@ -103,9 +106,9 @@ pub struct FinalLigeroProof<T: BinaryFieldElement> {
 
 impl<T: BinaryFieldElement> FinalLigeroProof<T> {
     pub fn size_of(&self) -> usize {
-        self.yr.len() * std::mem::size_of::<T>()
+        self.yr.len() * core::mem::size_of::<T>()
             + self.opened_rows.iter()
-                .map(|row| row.len() * std::mem::size_of::<T>())
+                .map(|row| row.len() * core::mem::size_of::<T>())
                 .sum::<usize>()
             + self.merkle_proof.size_of()
     }
@@ -119,7 +122,7 @@ pub struct SumcheckTranscript<T: BinaryFieldElement> {
 
 impl<T: BinaryFieldElement> SumcheckTranscript<T> {
     pub fn size_of(&self) -> usize {
-        self.transcript.len() * 3 * std::mem::size_of::<T>()
+        self.transcript.len() * 3 * core::mem::size_of::<T>()
     }
 }
 
