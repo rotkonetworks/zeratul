@@ -2,7 +2,7 @@
 
 polynomial commitment scheme over binary extension fields.
 
-> **⚠️ IMPORTANT:** For optimal performance (5-6x speedup), install with native CPU optimizations:
+> **⚠️ IMPORTANT:** For optimal performance (3x speedup), install with native CPU optimizations:
 > ```bash
 > RUSTFLAGS="-C target-cpu=native" cargo install ligerito
 > ```
@@ -11,7 +11,8 @@ polynomial commitment scheme over binary extension fields.
 ## what it's good for
 
 - committing to large polynomials with small proofs (~150 KB for 2^20 polynomial)
-- fast proving on modern cpus with simd (300-600ms for 1M elements)
+- fast proving on modern cpus with simd (**50ms for 1M elements** on AVX-512, SMT off)
+- tiered simd: AVX-512 → AVX2 → SSE → scalar fallback
 - verifier-only builds for constrained environments (polkavm, wasm, embedded)
 - transparent setup (no trusted setup required)
 - enabling verifiable light client p2p networks
@@ -28,7 +29,7 @@ polynomial commitment scheme over binary extension fields.
 **add to Cargo.toml:**
 ```toml
 [dependencies]
-ligerito = "0.1.5"
+ligerito = "0.2.3"
 ```
 
 **⚠️ for development:** clone the workspace to get automatic native optimizations:
@@ -121,13 +122,17 @@ cd zeratul
 cargo install --path crates/ligerito
 ```
 
-the workspace config automatically enables native cpu optimizations (SIMD/PCLMULQDQ) for 5-6x speedup.
+the workspace config automatically enables native cpu optimizations.
 
-**performance impact:**
+**performance by simd tier (8 cores, SMT off):**
 ```
-WITH native optimizations:    300-600ms for 2^20 prove
-WITHOUT native optimizations: 2000-3000ms for 2^20 prove (5-6x slower!)
+AVX-512 + VPCLMULQDQ:  ~50ms for 2^20 prove (fastest)
+AVX2 + VPCLMULQDQ:     ~65ms for 2^20 prove
+SSE + PCLMULQDQ:       ~95ms for 2^20 prove
+No SIMD (scalar):      ~220ms for 2^20 prove
 ```
+
+**important:** disable SMT (hyperthreading) for accurate benchmarks - it causes cache contention.
 
 **without optimizations (not recommended):**
 ```bash
@@ -136,7 +141,7 @@ cargo install ligerito  # will show build warning about missing SIMD
 
 **check your build:**
 ```bash
-ligerito --version  # should show v0.1.5 or later
+ligerito --version  # should show v0.2.3 or later
 ligerito generate --size 20 | ligerito prove --size 20 2>&1 | grep "SIMD"
 # output should show: [release SIMD] for optimal performance
 ```
@@ -218,6 +223,25 @@ cat test.bin | ligerito prove --size 12 | ligerito verify --size 12
 - `transcript-sha256`: sha256 transcript (always available)
 - `transcript-merlin`: merlin transcript (requires std)
 - `cli`: command-line binary
+- `wasm`: browser support with wasm-bindgen
+- `wasm-parallel`: multi-threaded WASM via Web Workers (requires SharedArrayBuffer)
+
+## wasm usage
+
+```bash
+# build WASM with SIMD128 (recommended)
+RUSTFLAGS='-C target-feature=+simd128' \
+  cargo build --target wasm32-unknown-unknown --features wasm --no-default-features
+
+# with parallel support (requires SharedArrayBuffer + CORS headers)
+RUSTFLAGS='-C target-feature=+simd128,+atomics,+bulk-memory,+mutable-globals' \
+  cargo build --target wasm32-unknown-unknown --features wasm-parallel --no-default-features
+```
+
+wasm simd128 optimizations:
+- `i8x16_swizzle` for parallel 16-way table lookups
+- `v128_xor` for SIMD GF(2) additions
+- 4-bit lookup table with Karatsuba decomposition
 
 ## supported sizes
 
@@ -230,13 +254,33 @@ cat test.bin | ligerito prove --size 12 | ligerito verify --size 12
 
 ## performance
 
-benchmarked on amd ryzen 9 7945hx (8 cores, smt disabled):
+benchmarked on amd ryzen 9 7945hx (8 physical cores, SMT off, turbo off):
 
-| size | elements | proving | verification |
-|------|----------|---------|--------------|
-| 2^20 | 1.05m | 68ms | 22ms |
-| 2^24 | 16.8m | 1.24s | 470ms |
-| 2^28 | 268.4m | 25.1s | 8.5s |
+| size | elements | proving | proof size |
+|------|----------|---------|------------|
+| 2^20 | 1.05m | **50ms** | 149 KB |
+| 2^24 | 16.8m | 650ms | 2.4 MB |
+| 2^28 | 268.4m | 10s | 38 MB |
+
+**simd tier comparison (fft butterfly, 2^20 elements):**
+
+| tier | elements/iter | time | speedup |
+|------|---------------|------|---------|
+| AVX-512 | 8 | 0.96ms | 1.9x |
+| AVX2 | 4 | 1.25ms | 1.5x |
+| SSE | 2 | 1.86ms | baseline |
+
+**benchmarking setup:**
+```bash
+# disable SMT (hyperthreading causes cache contention)
+echo "off" | sudo tee /sys/devices/system/cpu/smt/control
+
+# run benchmark
+RAYON_NUM_THREADS=8 taskset -c 0-7 cargo run --release --example quick_bench
+
+# restore SMT
+echo "on" | sudo tee /sys/devices/system/cpu/smt/control
+```
 
 ## reference
 

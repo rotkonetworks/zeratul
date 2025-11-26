@@ -1,0 +1,324 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<title>ligerito raw WASM | prover/verifier</title>
+<link rel="stylesheet" href="/style.css">
+<link rel="icon" type="image/x-icon" href="/favicon.ico">
+</head>
+<body>
+<div class="terminal">
+<div class="header">ligerito raw WASM v0.2.3 | polynomial commitment prover/verifier</div>
+<div class="status" id="status">initializing raw wasm module...</div>
+
+<div class="section">
+<div class="section-title">configuration</div>
+<div class="section-content">
+  <label>polynomial size:
+    <select id="config-size">
+      <option value="12" selected>2^12 (4,096 elements | 16 KB)</option>
+      <option value="20">2^20 (1,048,576 elements | 4 MB)</option>
+      <option value="24">2^24 (16,777,216 elements | 64 MB)</option>
+      <option value="28">2^28 (268,435,456 elements | 1 GB)</option>
+      <option value="30">2^30 (1,073,741,824 elements | 4 GB)</option>
+    </select>
+  </label>
+</div>
+</div>
+
+<div class="section">
+<div class="section-title">1. data input</div>
+<div class="section-content">
+  <button id="gen-btn" class="btn" disabled>generate random polynomial</button>
+  <button id="download-poly-btn" class="btn" disabled style="margin-left: 10px;">download polynomial</button>
+  <span style="margin: 0 10px; color: #0ff;">or</span>
+  <label for="file-upload" class="btn" style="display: inline-block; cursor: pointer;">
+    upload binary data (.bin)
+  </label>
+  <input type="file" id="file-upload" accept=".bin,application/octet-stream" style="display: none;">
+  <div id="gen-output" class="output"></div>
+</div>
+</div>
+
+<div class="section">
+<div class="section-title">2. prove (generate commitment proof)</div>
+<div class="section-content">
+  <button id="prove-btn" class="btn" disabled>generate proof</button>
+  <button id="download-proof-btn" class="btn" disabled style="margin-left: 10px;">download proof</button>
+  <div id="prove-output" class="output"></div>
+</div>
+</div>
+
+<div class="section">
+<div class="section-title">3. verify proof</div>
+<div class="section-content">
+  <button id="verify-btn" class="btn" disabled>verify proof</button>
+  <span style="margin: 0 10px; color: #0ff;">or</span>
+  <label for="proof-upload" class="btn" style="display: inline-block; cursor: pointer;">
+    upload proof (.proof)
+  </label>
+  <input type="file" id="proof-upload" accept=".proof,application/octet-stream" style="display: none;">
+  <div id="verify-output" class="output"></div>
+</div>
+</div>
+
+<div class="footer">
+  powered by ligerito | pure raw WASM (no wasm-bindgen) | <a href="https://angeris.github.io/papers/ligerito.pdf">paper</a>
+</div>
+</div>
+
+<script type="module">
+import { init, prove, verify, get_polynomial_size } from './ligerito_raw.js';
+
+let polynomial = null;
+let proof = null;
+let configSize = 12;
+
+// Initialize WASM
+try {
+  await init('./ligerito_raw.wasm');
+  document.getElementById('status').innerHTML = '<span class="ok">ready (raw WASM - SIMD enabled)</span>';
+  document.getElementById('gen-btn').disabled = false;
+} catch (e) {
+  console.error('WASM initialization error:', e);
+  document.getElementById('status').innerHTML = '<span class="err">failed to load wasm: ' + e + '</span>';
+}
+
+// Config size change
+document.getElementById('config-size').addEventListener('change', (e) => {
+  configSize = parseInt(e.target.value);
+  polynomial = null;
+  proof = null;
+  document.getElementById('prove-btn').disabled = true;
+  document.getElementById('verify-btn').disabled = true;
+  document.getElementById('download-poly-btn').disabled = true;
+  document.getElementById('download-proof-btn').disabled = true;
+  document.getElementById('gen-output').textContent = '';
+  document.getElementById('prove-output').textContent = '';
+  document.getElementById('verify-output').textContent = '';
+});
+
+// File upload handler
+document.getElementById('file-upload').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(arrayBuffer);
+
+    const expectedSize = get_polynomial_size(configSize);
+    const expectedBytes = expectedSize * 4;
+
+    if (bytes.length !== expectedBytes) {
+      document.getElementById('gen-output').innerHTML = `
+<span class="err">invalid file size</span>
+expected: ${expectedBytes.toLocaleString()} bytes (${expectedSize.toLocaleString()} u32 elements)
+got:      ${bytes.length.toLocaleString()} bytes
+      `.trim();
+      return;
+    }
+
+    // Convert bytes to u32 array (little-endian)
+    polynomial = new Uint32Array(expectedSize);
+    for (let i = 0; i < expectedSize; i++) {
+      const offset = i * 4;
+      polynomial[i] = bytes[offset] |
+                     (bytes[offset + 1] << 8) |
+                     (bytes[offset + 2] << 16) |
+                     (bytes[offset + 3] << 24);
+    }
+
+    const sizeKB = (expectedBytes / 1024).toFixed(2);
+    const preview = Array.from(polynomial.slice(0, 4))
+      .map(x => '0x' + x.toString(16).padStart(8, '0'))
+      .join(' ');
+
+    document.getElementById('gen-output').innerHTML = `
+<span class="ok">loaded from file: ${file.name}</span>
+size:    ${expectedSize.toLocaleString()} elements (${sizeKB} KB)
+preview: ${preview}...
+    `.trim();
+
+    document.getElementById('prove-btn').disabled = false;
+    document.getElementById('download-poly-btn').disabled = false;
+    proof = null;
+    document.getElementById('verify-btn').disabled = true;
+    document.getElementById('download-proof-btn').disabled = true;
+    document.getElementById('prove-output').textContent = '';
+    document.getElementById('verify-output').textContent = '';
+  } catch (err) {
+    document.getElementById('gen-output').innerHTML = `<span class="err">failed to load file: ${err.message}</span>`;
+  }
+
+  e.target.value = '';
+});
+
+// Proof upload handler
+document.getElementById('proof-upload').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+
+  try {
+    const arrayBuffer = await file.arrayBuffer();
+    proof = new Uint8Array(arrayBuffer);
+
+    const proofKB = (proof.length / 1024).toFixed(2);
+
+    document.getElementById('verify-output').innerHTML = `
+<span class="ok">loaded proof from file: ${file.name}</span>
+size: ${proof.length.toLocaleString()} bytes (${proofKB} KB)
+
+click 'verify proof' to check validity
+    `.trim();
+
+    document.getElementById('verify-btn').disabled = false;
+  } catch (err) {
+    document.getElementById('verify-output').innerHTML = `<span class="err">failed to load proof: ${err.message}</span>`;
+  }
+
+  e.target.value = '';
+});
+
+// Download proof button
+document.getElementById('download-proof-btn').addEventListener('click', () => {
+  if (!proof) return;
+
+  const blob = new Blob([proof], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `ligerito-proof-2^${configSize}.proof`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+
+// Download polynomial button
+document.getElementById('download-poly-btn').addEventListener('click', () => {
+  if (!polynomial) return;
+
+  // Convert Uint32Array to bytes (little-endian)
+  const bytes = new Uint8Array(polynomial.length * 4);
+  for (let i = 0; i < polynomial.length; i++) {
+    const val = polynomial[i];
+    const offset = i * 4;
+    bytes[offset] = val & 0xFF;
+    bytes[offset + 1] = (val >> 8) & 0xFF;
+    bytes[offset + 2] = (val >> 16) & 0xFF;
+    bytes[offset + 3] = (val >> 24) & 0xFF;
+  }
+
+  const blob = new Blob([bytes], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `ligerito-polynomial-2^${configSize}.bin`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+});
+
+// Generate polynomial
+document.getElementById('gen-btn').addEventListener('click', () => {
+  const size = get_polynomial_size(configSize);
+  polynomial = new Uint32Array(size);
+
+  for (let i = 0; i < size; i++) {
+    polynomial[i] = Math.floor(Math.random() * 0xFFFFFFFF);
+  }
+
+  const sizeKB = (size * 4 / 1024).toFixed(2);
+  const preview = Array.from(polynomial.slice(0, 4))
+    .map(x => '0x' + x.toString(16).padStart(8, '0'))
+    .join(' ');
+
+  document.getElementById('gen-output').innerHTML = `
+<span class="ok">generated polynomial</span>
+size:    ${size.toLocaleString()} elements (${sizeKB} KB)
+preview: ${preview}...
+  `.trim();
+
+  document.getElementById('prove-btn').disabled = false;
+  document.getElementById('download-poly-btn').disabled = false;
+  proof = null;
+  document.getElementById('verify-btn').disabled = true;
+  document.getElementById('download-proof-btn').disabled = true;
+  document.getElementById('prove-output').textContent = '';
+  document.getElementById('verify-output').textContent = '';
+});
+
+// Prove
+document.getElementById('prove-btn').addEventListener('click', async () => {
+  if (!polynomial) return;
+
+  document.getElementById('prove-output').innerHTML = '<span class="warn">proving...</span>';
+  document.getElementById('prove-btn').disabled = true;
+
+  await new Promise(r => setTimeout(r, 10));
+
+  const start = performance.now();
+
+  try {
+    proof = prove(polynomial, configSize);
+    const elapsed = performance.now() - start;
+
+    const proofKB = (proof.length / 1024).toFixed(2);
+    const polyKB = (polynomial.length * 4 / 1024).toFixed(2);
+    const compression = (polynomial.length * 4 / proof.length).toFixed(2);
+
+    document.getElementById('prove-output').innerHTML = `
+<span class="ok">proof generated</span>
+time:        ${elapsed.toFixed(2)} ms
+proof size:  ${proof.length.toLocaleString()} bytes (${proofKB} KB)
+input size:  ${polyKB} KB
+compression: ${compression}x
+    `.trim();
+
+    document.getElementById('verify-btn').disabled = false;
+    document.getElementById('prove-btn').disabled = false;
+    document.getElementById('download-proof-btn').disabled = false;
+  } catch (e) {
+    document.getElementById('prove-output').innerHTML = `<span class="err">proving failed: ${e}</span>`;
+    document.getElementById('prove-btn').disabled = false;
+  }
+});
+
+// Verify
+document.getElementById('verify-btn').addEventListener('click', async () => {
+  if (!proof) return;
+
+  document.getElementById('verify-output').innerHTML = '<span class="warn">verifying...</span>';
+  document.getElementById('verify-btn').disabled = true;
+
+  await new Promise(r => setTimeout(r, 10));
+
+  const start = performance.now();
+
+  try {
+    const isValid = verify(proof, configSize);
+    const elapsed = performance.now() - start;
+
+    if (isValid) {
+      document.getElementById('verify-output').innerHTML = `
+<span class="ok">PROOF IS VALID</span>
+time: ${elapsed.toFixed(2)} ms
+      `.trim();
+    } else {
+      document.getElementById('verify-output').innerHTML = `
+<span class="err">PROOF IS INVALID</span>
+time: ${elapsed.toFixed(2)} ms
+      `.trim();
+    }
+
+    document.getElementById('verify-btn').disabled = false;
+  } catch (e) {
+    document.getElementById('verify-output').innerHTML = `<span class="err">verification failed: ${e}</span>`;
+    document.getElementById('verify-btn').disabled = false;
+  }
+});
+</script>
+</body>
+</html>

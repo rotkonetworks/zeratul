@@ -111,7 +111,7 @@ fn field_to_index<F: BinaryFieldElement>(elem: F) -> usize {
 }
 
 /// Evaluate scaled basis - creates a delta function at the query point
-/// Uses parallel search for better performance
+/// Optimized: directly extracts index from field element instead of searching
 pub fn evaluate_scaled_basis_inplace<F: BinaryFieldElement, U: BinaryFieldElement>(
     sks_x: &mut [F],
     basis: &mut [U],
@@ -124,51 +124,18 @@ pub fn evaluate_scaled_basis_inplace<F: BinaryFieldElement, U: BinaryFieldElemen
     let n = basis.len();
     let num_subspaces = n.trailing_zeros() as usize;
 
-    // Clear the basis
-    #[cfg(feature = "parallel")]
-    {
-        use rayon::prelude::*;
-        basis.par_iter_mut().for_each(|b| *b = U::zero());
+    // Clear the basis - use memset-style clear for speed
+    // Safety: U is a field element that supports zero initialization
+    for b in basis.iter_mut() {
+        *b = U::zero();
     }
 
-    #[cfg(not(feature = "parallel"))]
-    {
-        basis.iter_mut().for_each(|b| *b = U::zero());
-    }
-
-    // Find the matching index
-    #[cfg(feature = "parallel")]
-    {
-        use rayon::prelude::*;
-        if n > 256 {
-            // For large n, use parallel search
-            let found_idx = (0..n)
-                .into_par_iter()
-                .find_first(|&i| F::from_bits(i as u64) == qf);
-
-            if let Some(idx) = found_idx {
-                basis[idx] = scale;
-            }
-        } else {
-            // Sequential search for small n
-            for i in 0..n {
-                if F::from_bits(i as u64) == qf {
-                    basis[i] = scale;
-                    break;
-                }
-            }
-        }
-    }
-
-    #[cfg(not(feature = "parallel"))]
-    {
-        // Sequential search when parallel not enabled
-        for i in 0..n {
-            if F::from_bits(i as u64) == qf {
-                basis[i] = scale;
-                break;
-            }
-        }
+    // Direct index extraction: qf was created via F::from_bits(query_mod as u64)
+    // where query_mod = query % (1 << n), so the underlying value IS the index
+    // Extract the raw bits directly instead of searching
+    let idx = extract_index_from_field(&qf, n);
+    if idx < n {
+        basis[idx] = scale;
     }
 
     // Fill sks_x if provided (for compatibility with the multilinear extension)
@@ -180,6 +147,30 @@ pub fn evaluate_scaled_basis_inplace<F: BinaryFieldElement, U: BinaryFieldElemen
             sks_x[i] = s_prev.mul(&s_prev).add(&s_prev_at_root.mul(&s_prev));
         }
     }
+}
+
+/// Extract index from field element by reading its raw bits
+/// This is O(1) instead of O(n) search
+#[inline(always)]
+fn extract_index_from_field<F: BinaryFieldElement>(elem: &F, max_n: usize) -> usize {
+    // For binary field elements, from_bits(i) creates an element whose
+    // polynomial representation has value i. Extract that value directly.
+    let elem_bytes = unsafe {
+        core::slice::from_raw_parts(
+            elem as *const F as *const u8,
+            core::mem::size_of::<F>()
+        )
+    };
+
+    // Read as little-endian usize (first 8 bytes max)
+    let mut idx = 0usize;
+    let bytes_to_read = core::cmp::min(elem_bytes.len(), core::mem::size_of::<usize>());
+    for i in 0..bytes_to_read {
+        idx |= (elem_bytes[i] as usize) << (i * 8);
+    }
+
+    // Mask to valid range
+    idx & (max_n - 1)
 }
 
 /// Alternative implementation using proper multilinear extension formula

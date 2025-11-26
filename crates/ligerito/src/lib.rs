@@ -115,9 +115,17 @@ pub mod prover;
 #[cfg(feature = "prover")]
 pub mod backend;
 
-// WASM bindings
+// WASM bindings (full - with serde/bincode)
 #[cfg(feature = "wasm")]
 pub mod wasm;
+
+// WASM bindings (lite - no serde)
+#[cfg(all(feature = "wasm-lite", not(feature = "wasm")))]
+pub mod wasm_lite;
+
+// Raw WASM exports (no wasm-bindgen, pure extern "C" ABI)
+#[cfg(feature = "wasm-raw")]
+pub mod wasm_raw;
 
 // WebGPU acceleration (optional)
 #[cfg(feature = "webgpu")]

@@ -114,6 +114,7 @@ pub fn encode_cols<F: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static
 }
 
 /// Hash a row of field elements with deterministic serialization
+/// Optimized: hashes entire row at once instead of element-by-element
 #[inline(always)]
 pub fn hash_row<F: BinaryFieldElement>(row: &[F]) -> Hash {
     let mut hasher = Sha256::new();
@@ -121,18 +122,15 @@ pub fn hash_row<F: BinaryFieldElement>(row: &[F]) -> Hash {
     // Hash row length for domain separation
     hasher.update(&(row.len() as u32).to_le_bytes());
 
-    // Hash each element using bytemuck for safe serialization
-    let elem_size = core::mem::size_of::<F>();
-    for elem in row.iter() {
-        // Use bytemuck to get raw bytes safely
-        let bytes = unsafe {
-            core::slice::from_raw_parts(
-                elem as *const F as *const u8,
-                elem_size
-            )
-        };
-        hasher.update(bytes);
-    }
+    // Hash entire row at once using bytemuck for zero-copy byte slice
+    // This is much faster than per-element hashing
+    let row_bytes = unsafe {
+        core::slice::from_raw_parts(
+            row.as_ptr() as *const u8,
+            row.len() * core::mem::size_of::<F>()
+        )
+    };
+    hasher.update(row_bytes);
 
     hasher.finalize().into()
 }

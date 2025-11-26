@@ -3,6 +3,8 @@ use alloc::vec::Vec;
 
 use binary_fields::BinaryFieldElement;
 use merkle_tree::{CompleteMerkleTree, MerkleRoot, BatchedMerkleProof};
+
+#[cfg(feature = "serde")]
 use serde::{Serialize, Deserialize};
 
 #[cfg(feature = "prover")]
@@ -41,9 +43,12 @@ impl<T: BinaryFieldElement, U: BinaryFieldElement> ProverConfig<T, U> {
     /// Validate configuration parameters
     pub fn validate(&self) -> crate::Result<()> {
         if self.num_queries < 148 {
+            #[cfg(feature = "std")]
             return Err(crate::LigeritoError::InvalidConfig(
                 format!("num_queries must be >= 148 for 100-bit security, got {}", self.num_queries)
             ));
+            #[cfg(not(feature = "std"))]
+            return Err(crate::LigeritoError::InvalidConfig);
         }
         Ok(())
     }
@@ -69,7 +74,8 @@ pub struct RecursiveLigeroWitness<T: BinaryFieldElement> {
 }
 
 /// Recursive Ligero commitment
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct RecursiveLigeroCommitment {
     pub root: MerkleRoot,
 }
@@ -81,7 +87,8 @@ impl RecursiveLigeroCommitment {
 }
 
 /// Recursive Ligero proof
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct RecursiveLigeroProof<T: BinaryFieldElement> {
     pub opened_rows: Vec<Vec<T>>,
     pub merkle_proof: BatchedMerkleProof,
@@ -97,7 +104,8 @@ impl<T: BinaryFieldElement> RecursiveLigeroProof<T> {
 }
 
 /// Final Ligero proof
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct FinalLigeroProof<T: BinaryFieldElement> {
     pub yr: Vec<T>,
     pub opened_rows: Vec<Vec<T>>,
@@ -115,7 +123,8 @@ impl<T: BinaryFieldElement> FinalLigeroProof<T> {
 }
 
 /// Sumcheck transcript
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct SumcheckTranscript<T: BinaryFieldElement> {
     pub transcript: Vec<(T, T, T)>,  // Quadratic polynomial coefficients
 }
@@ -150,7 +159,8 @@ impl<T: BinaryFieldElement, U: BinaryFieldElement> LigeritoProof<T, U> {
 }
 
 /// Finalized Ligerito proof
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
 pub struct FinalizedLigeritoProof<T: BinaryFieldElement, U: BinaryFieldElement> {
     pub initial_ligero_cm: RecursiveLigeroCommitment,
     pub initial_ligero_proof: RecursiveLigeroProof<T>,

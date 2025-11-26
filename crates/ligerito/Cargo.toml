@@ -24,11 +24,20 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = ["std", "prover", "parallel", "hardware-accel", "cli"]
 
+# Serialization support (optional - not needed for wasm-lite)
+serde = [
+    "dep:serde",
+    "ligerito-binary-fields/serde",
+    "ligerito-merkle/serde",
+]
+
 # Environment: std or no_std
 std = [
     "ligerito-binary-fields/std",
     "ligerito-merkle/std",
-    "serde/std",
+    "ligerito-reed-solomon?/std",
+    "serde",
+    "serde?/std",
     "thiserror",
 ]
 
@@ -37,7 +46,7 @@ prover = ["ligerito-reed-solomon", "rand", "rand_chacha"]
 verifier-only = []
 
 # Performance optimizations
-parallel = ["rayon"]
+parallel = ["rayon", "ligerito-reed-solomon?/parallel"]
 hardware-accel = ["ligerito-binary-fields/hardware-accel"]
 
 # Transcript implementations
@@ -49,11 +58,11 @@ transcript-blake2b = ["blake2"]  # BLAKE2b transcript (optimized for Substrate)
 # Substrate runtime support - uses BLAKE2b with sp_io host functions
 substrate = ["transcript-blake2b", "sp-io"]
 
-# WASM support
+# WASM support (full - includes serde/bincode for proof serialization)
 wasm = [
     "std",                          # Need std for WASM
     "prover",                       # Include prover in WASM
-    "parallel",                     # Include parallel (rayon will fall back to single-threaded in WASM)
+    "hardware-accel",               # Enable SIMD (wasm simd128)
     "transcript-sha256",            # Use SHA256 (works in WASM)
     "getrandom/js",                 # Enable WASM-compatible RNG
     "wasm-bindgen",                 # WASM bindings
@@ -63,11 +72,36 @@ wasm = [
     "js-sys",                       # JavaScript types
 ]
 
+# Minimal WASM (no serde - prove/verify only, no proof serialization to JS)
+# Note: still uses std (WASM has std support), just avoids heavy serde dependency
+wasm-lite = [
+    "ligerito-binary-fields/std",
+    "ligerito-merkle/std",
+    "thiserror",
+    "prover",
+    "transcript-sha256",
+    "getrandom/js",
+    "wasm-bindgen",
+    "console_error_panic_hook",
+]
+
 # Multi-threaded WASM (requires SharedArrayBuffer + CORS headers)
 wasm-parallel = [
     "wasm",
     "wasm-bindgen-rayon",       # Enable rayon in WASM via Web Workers
     "js-sys",                   # JavaScript Promise types
+]
+
+# Raw WASM - no wasm-bindgen, just extern "C" exports
+# Use this for manual multi-instance parallelism or minimal bindings
+# Note: Uses custom random seeding from JS instead of getrandom
+wasm-raw = [
+    "std",
+    "prover",
+    "hardware-accel",           # Enable SIMD (wasm simd128)
+    "transcript-sha256",
+    "bincode",                  # For proof serialization
+    "getrandom/custom",         # Custom random provider (seeded from JS)
 ]
 
 # WebGPU acceleration (optional, falls back to WASM if unavailable)
@@ -109,9 +143,9 @@ cli = [
 
 [dependencies]
 # Core dependencies (always needed)
-ligerito-binary-fields = { version = "0.2.3", path = "../ligerito-binary-fields", default-features = false, features = ["serde"] }
-ligerito-merkle = { version = "0.2.3", path = "../ligerito-merkle", path = "../ligerito-merkle", default-features = false, features = ["serde"] }
-serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
+ligerito-binary-fields = { version = "0.2.3", path = "../ligerito-binary-fields", default-features = false }
+ligerito-merkle = { version = "0.2.3", path = "../ligerito-merkle", default-features = false }
+serde = { workspace = true, default-features = false, features = ["derive", "alloc"], optional = true }
 bytemuck = { workspace = true }
 
 # Crypto (sha256 always available for no_std)
@@ -123,7 +157,7 @@ blake2 = { version = "0.10", default-features = false, optional = true }
 sp-io = { version = "38.0.0", default-features = false, optional = true }
 
 # Prover-only dependencies
-ligerito-reed-solomon = { version = "0.2.3", path = "../ligerito-reed-solomon", path = "../ligerito-reed-solomon", optional = true }
+ligerito-reed-solomon = { version = "0.2.3", path = "../ligerito-reed-solomon", optional = true, default-features = false }
 rand = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
 
@@ -164,7 +198,6 @@ futures = { version = "0.3", optional = true }
 [dependencies.hashbrown]
 version = "0.14"
 default-features = false
-features = ["serde"]
 
 [dev-dependencies]
 criterion = { workspace = true }

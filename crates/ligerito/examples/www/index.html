@@ -48,7 +48,7 @@
 </div>
 
 <div class="section">
-<div class="section-title">╔═══ 2. prove (generate zk proof) ════════════════════════════════════════════════════╗</div>
+<div class="section-title">╔═══ 2. prove (generate commitment proof) ════════════════════════════════════════════╗</div>
 <div class="section-content">
   <button id="prove-btn" class="btn" disabled>generate proof</button>
   <button id="download-proof-btn" class="btn" disabled style="margin-left: 10px;">download proof</button>
@@ -77,13 +77,12 @@
 </div>
 
 <script type="module">
-import init, { get_polynomial_size, initThreadPool } from './ligerito.js';
+import init, { get_polynomial_size, prove, verify, initThreadPool } from './ligerito.js';
 
 let polynomial = null;
 let proof = null;
 let configSize = 12;
-let proveWorker = null;
-let verifyWorker = null;
+let numThreads = navigator.hardwareConcurrency || 4;
 
 // Check GPU availability (for future WebGPU acceleration)
 async function checkGPUSupport() {
@@ -116,15 +115,18 @@ async function checkGPUSupport() {
   }
 }
 
-// Initialize WASM for main thread (just for get_polynomial_size helper)
+// Initialize WASM and thread pool for parallel proving
 try {
   await init();
+
+  // Initialize rayon thread pool for parallel proving
+  await initThreadPool(numThreads);
+  console.log(`Thread pool initialized with ${numThreads} threads`);
 
   // Check GPU availability (informational only - not used yet)
   await checkGPUSupport();
 
-  // Note: Currently using CPU/WASM. WebGPU acceleration coming in future release.
-  document.getElementById('status').innerHTML = '<span class="ok">✓ ready (CPU mode - WASM)</span>';
+  document.getElementById('status').innerHTML = `<span class="ok">✓ ready (${numThreads} threads - WASM SIMD)</span>`;
   document.getElementById('gen-btn').disabled = false;
 } catch (e) {
   console.error('WASM initialization error:', e);
@@ -299,127 +301,81 @@ preview: ${preview}...
   document.getElementById('verify-output').textContent = '';
 });
 
-// Prove (using Web Worker to avoid blocking UI)
+// Prove (using rayon thread pool for parallel proving)
 document.getElementById('prove-btn').addEventListener('click', async () => {
   if (!polynomial) return;
 
-  document.getElementById('prove-output').innerHTML = '<span class="warn">proving... (running in background worker)</span>';
+  document.getElementById('prove-output').innerHTML = `<span class="warn">proving... (${numThreads} threads)</span>`;
   document.getElementById('prove-btn').disabled = true;
 
-  // Spawn worker for this proof task (Penumbra pattern - module worker)
-  proveWorker = new Worker('./worker.js', { type: 'module' });
+  // Let UI update before blocking
+  await new Promise(r => setTimeout(r, 10));
 
   const start = performance.now();
 
-  proveWorker.onmessage = (e) => {
+  try {
+    proof = prove(polynomial, configSize);
     const elapsed = performance.now() - start;
 
-    if (e.data.type === 'success') {
-      proof = e.data.proof;
+    const proofKB = (proof.length / 1024).toFixed(2);
+    const polyKB = (polynomial.length * 4 / 1024).toFixed(2);
+    const compression = (polynomial.length * 4 / proof.length).toFixed(2);
 
-      const proofKB = (proof.length / 1024).toFixed(2);
-      const polyKB = (polynomial.length * 4 / 1024).toFixed(2);
-      const compression = (polynomial.length * 4 / proof.length).toFixed(2);
-
-      document.getElementById('prove-output').innerHTML = `
-<span class="ok">✓ proof generated (in worker)</span>
+    document.getElementById('prove-output').innerHTML = `
+<span class="ok">✓ proof generated (${numThreads} threads)</span>
 time:        ${elapsed.toFixed(2)} ms
 proof size:  ${proof.length.toLocaleString()} bytes (${proofKB} KB)
 input size:  ${polyKB} KB
 compression: ${compression}x
-      `.trim();
+    `.trim();
 
-      document.getElementById('verify-btn').disabled = false;
-      document.getElementById('prove-btn').disabled = false;
-      document.getElementById('download-proof-btn').disabled = false;
-
-      // Cleanup worker (Penumbra pattern)
-      proveWorker.terminate();
-      proveWorker = null;
-    } else if (e.data.type === 'error') {
-      document.getElementById('prove-output').innerHTML = `<span class="err">✗ proving failed: ${e.data.error}</span>`;
-      document.getElementById('prove-btn').disabled = false;
-      proveWorker.terminate();
-      proveWorker = null;
-    }
-  };
-
-  proveWorker.onerror = (e) => {
-    document.getElementById('prove-output').innerHTML = `<span class="err">✗ worker error: ${e.message}</span>`;
+    document.getElementById('verify-btn').disabled = false;
     document.getElementById('prove-btn').disabled = false;
-    proveWorker.terminate();
-    proveWorker = null;
-  };
-
-  // Send work to worker (non-blocking!)
-  proveWorker.postMessage({
-    type: 'prove',
-    polynomial: polynomial,
-    configSize: configSize
-  });
+    document.getElementById('download-proof-btn').disabled = false;
+  } catch (e) {
+    document.getElementById('prove-output').innerHTML = `<span class="err">✗ proving failed: ${e}</span>`;
+    document.getElementById('prove-btn').disabled = false;
+  }
 });
 
-// Verify (using Web Worker to avoid blocking UI)
+// Verify (direct call - verification is fast)
 document.getElementById('verify-btn').addEventListener('click', async () => {
   if (!proof) return;
 
-  document.getElementById('verify-output').innerHTML = '<span class="warn">verifying... (running in background worker)</span>';
+  document.getElementById('verify-output').innerHTML = '<span class="warn">verifying...</span>';
   document.getElementById('verify-btn').disabled = true;
 
-  // Spawn worker for verification (Penumbra pattern - module worker)
-  verifyWorker = new Worker('./worker.js', { type: 'module' });
+  // Let UI update
+  await new Promise(r => setTimeout(r, 10));
 
   const start = performance.now();
 
-  verifyWorker.onmessage = (e) => {
+  try {
+    const isValid = verify(proof, configSize);
     const elapsed = performance.now() - start;
 
-    if (e.data.type === 'success') {
-      const isValid = e.data.isValid;
-
-      if (isValid) {
-        document.getElementById('verify-output').innerHTML = `
-<span class="ok">✓ PROOF IS VALID (verified in worker)</span>
+    if (isValid) {
+      document.getElementById('verify-output').innerHTML = `
+<span class="ok">✓ PROOF IS VALID</span>
 time: ${elapsed.toFixed(2)} ms
 
 the proof cryptographically verifies:
   - polynomial was correctly encoded
   - commitment is valid
   - sumcheck protocol passes
-        `.trim();
-      } else {
-        document.getElementById('verify-output').innerHTML = `
+      `.trim();
+    } else {
+      document.getElementById('verify-output').innerHTML = `
 <span class="err">✗ PROOF IS INVALID</span>
 time: ${elapsed.toFixed(2)} ms
-        `.trim();
-      }
-
-      document.getElementById('verify-btn').disabled = false;
-
-      // Cleanup worker
-      verifyWorker.terminate();
-      verifyWorker = null;
-    } else if (e.data.type === 'error') {
-      document.getElementById('verify-output').innerHTML = `<span class="err">✗ verification failed: ${e.data.error}</span>`;
-      document.getElementById('verify-btn').disabled = false;
-      verifyWorker.terminate();
-      verifyWorker = null;
+      `.trim();
     }
-  };
 
-  verifyWorker.onerror = (e) => {
-    document.getElementById('verify-output').innerHTML = `<span class="err">✗ worker error: ${e.message}</span>`;
     document.getElementById('verify-btn').disabled = false;
-    verifyWorker.terminate();
-    verifyWorker = null;
-  };
-
-  // Send work to worker (non-blocking!)
-  verifyWorker.postMessage({
-    type: 'verify',
-    proof: proof,
-    configSize: configSize
-  });
+  } catch (e) {
+    document.getElementById('verify-output').innerHTML = `<span class="err">✗ verification failed: ${e}</span>`;
+    document.getElementById('verify-btn').disabled = false;
+  }
 });
 </script>
 </body>

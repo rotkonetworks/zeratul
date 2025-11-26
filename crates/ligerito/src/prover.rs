@@ -4,10 +4,48 @@ use crate::{
     RecursiveLigeroProof, FinalLigeroProof, SumcheckTranscript,
     transcript::{FiatShamir, Transcript},
     ligero::ligero_commit,
-    sumcheck_polys::{induce_sumcheck_poly, induce_sumcheck_poly_parallel},
+    sumcheck_polys::induce_sumcheck_poly,
     utils::{eval_sk_at_vks, partial_eval_multilinear},
     data_structures::finalize,
 };
+
+#[cfg(feature = "parallel")]
+use crate::sumcheck_polys::induce_sumcheck_poly_parallel;
+
+/// Helper to choose between parallel and sequential sumcheck poly induction
+#[cfg(feature = "parallel")]
+#[inline(always)]
+fn induce_sumcheck_poly_auto<T, U>(
+    n: usize,
+    sks_vks: &[U],
+    opened_rows: &[Vec<U>],
+    v_challenges: &[U],
+    sorted_queries: &[usize],
+    alpha: U,
+) -> (Vec<U>, U)
+where
+    T: BinaryFieldElement + Send + Sync,
+    U: BinaryFieldElement + Send + Sync + From<T>,
+{
+    induce_sumcheck_poly_parallel(n, sks_vks, opened_rows, v_challenges, sorted_queries, alpha)
+}
+
+#[cfg(not(feature = "parallel"))]
+#[inline(always)]
+fn induce_sumcheck_poly_auto<T, U>(
+    n: usize,
+    sks_vks: &[U],
+    opened_rows: &[Vec<U>],
+    v_challenges: &[U],
+    sorted_queries: &[usize],
+    alpha: U,
+) -> (Vec<U>, U)
+where
+    T: BinaryFieldElement,
+    U: BinaryFieldElement + From<T>,
+{
+    induce_sumcheck_poly(n, sks_vks, opened_rows, v_challenges, sorted_queries, alpha)
+}
 
 // Removed: S is now config.num_queries
 
@@ -174,8 +212,8 @@ where
         let n = current_poly.len().trailing_zeros() as usize;
         let sks_vks: Vec<U> = eval_sk_at_vks(1 << n);
 
-        // Use parallel version for performance
-        let (basis_poly, enforced_sum) = induce_sumcheck_poly_parallel(
+        // Use parallel version when available for performance
+        let (basis_poly, enforced_sum) = induce_sumcheck_poly_auto::<U, U>(
             n,
             &sks_vks,
             &opened_rows,

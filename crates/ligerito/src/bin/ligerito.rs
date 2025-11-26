@@ -26,7 +26,7 @@ use ligerito::{
     hardcoded_config_30, hardcoded_config_30_verifier,
     VerifierConfig, FinalizedLigeritoProof,
 };
-use ligerito::transcript::{Sha256Transcript, MerlinTranscript};
+use ligerito::transcript::{Sha256Transcript, MerlinTranscript, FiatShamir};
 use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
@@ -217,7 +217,8 @@ fn prove_command(size: Option<usize>, config_path: Option<String>, format: &str,
         ($config:expr, $transcript_type:expr) => {
             match $transcript_type {
                 "sha256" => {
-                    let transcript = Sha256Transcript::new(0);
+                    // Use FiatShamir wrapper for consistency with library defaults
+                    let transcript = FiatShamir::new_sha256(0);
                     prove_with_transcript(&$config, &poly, transcript)
                 }
                 "merlin" => {
@@ -344,7 +345,8 @@ fn verify_command(size: Option<usize>, config_path: Option<String>, format: &str
         ($config:expr, $proof:expr, $transcript_type:expr) => {
             match $transcript_type {
                 "sha256" => {
-                    let transcript = Sha256Transcript::new(0);
+                    // Use FiatShamir wrapper for consistency with library defaults
+                    let transcript = FiatShamir::new_sha256(0);
                     verify_with_transcript(&$config, &$proof, transcript)
                 }
                 "merlin" => {
