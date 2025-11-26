@@ -533,8 +533,10 @@ impl Blake2bTranscript {
     pub fn new(domain: &[u8]) -> Self {
         #[cfg(feature = "std")]
         let state = {
-            use blake2::digest::Digest;
-            let hash = blake2::Blake2b256::digest(domain);
+            use blake2::{Blake2b, Digest};
+            use blake2::digest::consts::U32;
+            type Blake2b256 = Blake2b<U32>;
+            let hash = Blake2b256::digest(domain);
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&hash);
             arr
@@ -550,8 +552,10 @@ impl Blake2bTranscript {
     fn hash(data: &[u8]) -> [u8; 32] {
         #[cfg(feature = "std")]
         {
-            use blake2::digest::Digest;
-            let hash = blake2::Blake2b256::digest(data);
+            use blake2::{Blake2b, Digest};
+            use blake2::digest::consts::U32;
+            type Blake2b256 = Blake2b<U32>;
+            let hash = Blake2b256::digest(data);
             let mut arr = [0u8; 32];
             arr.copy_from_slice(&hash);
             arr
@@ -565,7 +569,7 @@ impl Blake2bTranscript {
 
     /// Absorb data into the transcript state
     fn absorb(&mut self, label: &[u8], data: &[u8]) {
-        let mut input = alloc::vec::Vec::with_capacity(
+        let mut input = Vec::with_capacity(
             self.state.len() + label.len() + 8 + data.len()
         );
         input.extend_from_slice(&self.state);
@@ -577,7 +581,7 @@ impl Blake2bTranscript {
 
     /// Squeeze challenge bytes from the transcript
     fn squeeze(&mut self, label: &[u8]) -> [u8; 32] {
-        let mut input = alloc::vec::Vec::with_capacity(
+        let mut input = Vec::with_capacity(
             self.state.len() + 9 + label.len() + 4
         );
         input.extend_from_slice(&self.state);

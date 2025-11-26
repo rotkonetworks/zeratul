@@ -109,8 +109,8 @@ cli = [
 
 [dependencies]
 # Core dependencies (always needed)
-ligerito-binary-fields = { version = "0.2.0", path = "../ligerito-binary-fields", default-features = false, features = ["serde"] }
-ligerito-merkle = { version = "0.2.0", path = "../ligerito-merkle", default-features = false, features = ["serde"] }
+ligerito-binary-fields = { version = "0.2.0", default-features = false, features = ["serde"] }
+ligerito-merkle = { version = "0.2.0", default-features = false, features = ["serde"] }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }
 bytemuck = { workspace = true }
 
@@ -123,7 +123,7 @@ blake2 = { version = "0.10", default-features = false, optional = true }
 sp-io = { version = "38.0.0", default-features = false, optional = true }
 
 # Prover-only dependencies
-ligerito-reed-solomon = { version = "0.2.0", path = "../ligerito-reed-solomon", optional = true }
+ligerito-reed-solomon = { version = "0.2.0", optional = true }
 rand = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
 

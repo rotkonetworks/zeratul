@@ -233,6 +233,23 @@ where
     prove_with_transcript(config, poly, fs)
 }
 
+/// Prover function using BLAKE2b transcript (for Substrate runtime compatibility)
+///
+/// Proofs generated with this function must be verified using `verify_blake2b()`
+/// or `verify_complete_blake2b()`.
+#[cfg(feature = "transcript-blake2b")]
+pub fn prove_blake2b<T, U>(
+    config: &ProverConfig<T, U>,
+    poly: &[T],
+) -> crate::Result<FinalizedLigeritoProof<T, U>>
+where
+    T: BinaryFieldElement + Send + Sync + bytemuck::Pod + 'static,
+    U: BinaryFieldElement + Send + Sync + From<T> + bytemuck::Pod + 'static,
+{
+    let fs = FiatShamir::new_blake2b();
+    prove_with_transcript(config, poly, fs)
+}
+
 /// Debug version of prove with detailed logging
 pub fn prove_debug<T, U>(
     config: &ProverConfig<T, U>,

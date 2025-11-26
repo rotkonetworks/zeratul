@@ -1094,6 +1094,37 @@ where
     verify_complete_with_transcript(config, proof, fs)
 }
 
+/// complete verifier with BLAKE2b transcript (optimized for Substrate runtimes)
+///
+/// Uses `sp_io::hashing::blake2_256` in no_std for efficient host function calls.
+/// Proofs must be generated with `prove_blake2b()` to be compatible.
+#[cfg(feature = "transcript-blake2b")]
+pub fn verify_blake2b<T, U>(
+    config: &VerifierConfig,
+    proof: &FinalizedLigeritoProof<T, U>,
+) -> crate::Result<bool>
+where
+    T: BinaryFieldElement + Send + Sync,
+    U: BinaryFieldElement + Send + Sync + From<T>,
+{
+    let fs = FiatShamir::new_blake2b();
+    verify_with_transcript(config, proof, fs)
+}
+
+/// complete verifier with BLAKE2b transcript
+#[cfg(feature = "transcript-blake2b")]
+pub fn verify_complete_blake2b<T, U>(
+    config: &VerifierConfig,
+    proof: &FinalizedLigeritoProof<T, U>,
+) -> crate::Result<bool>
+where
+    T: BinaryFieldElement + Send + Sync,
+    U: BinaryFieldElement + Send + Sync + From<T>,
+{
+    let fs = FiatShamir::new_blake2b();
+    verify_complete_with_transcript(config, proof, fs)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1201,5 +1232,68 @@ mod tests {
         let glued = glue_sums(sum_f, sum_g, beta);
         let expected = sum_f.add(&beta.mul(&sum_g));
         assert_eq!(glued, expected);
+    }
+
+    #[test]
+    #[cfg(feature = "transcript-blake2b")]
+    fn test_blake2b_transcript_compatibility() {
+        use crate::prover::prove_blake2b;
+
+        let prover_config = hardcoded_config_12(
+            PhantomData::<BinaryElem32>,
+            PhantomData::<BinaryElem128>,
+        );
+        let verifier_config = hardcoded_config_12_verifier();
+
+        // Test with patterned polynomial
+        let poly: Vec<BinaryElem32> = (0..(1 << 12))
+            .map(|i| BinaryElem32::from((i * 7 + 13) as u32))
+            .collect();
+
+        // Prove with Blake2b
+        let proof = prove_blake2b(&prover_config, &poly)
+            .expect("Blake2b proof generation failed");
+
+        // Verify with Blake2b
+        let result = verify_blake2b(&verifier_config, &proof)
+            .expect("Blake2b verification failed");
+
+        assert!(result, "Blake2b verification should succeed for valid proof");
+
+        // Also test complete verifier
+        let proof2 = prove_blake2b(&prover_config, &poly)
+            .expect("Blake2b proof generation failed");
+        let result2 = verify_complete_blake2b(&verifier_config, &proof2)
+            .expect("Blake2b complete verification failed");
+
+        assert!(result2, "Blake2b complete verification should succeed");
+    }
+
+    #[test]
+    #[cfg(feature = "transcript-blake2b")]
+    fn test_sha256_transcript_compatibility() {
+        // This test verifies that SHA256 proofs cannot be verified with Blake2b
+        // (and vice versa) - they are NOT compatible
+        use crate::prover::prove_sha256;
+
+        let prover_config = hardcoded_config_12(
+            PhantomData::<BinaryElem32>,
+            PhantomData::<BinaryElem128>,
+        );
+        let verifier_config = hardcoded_config_12_verifier();
+
+        let poly: Vec<BinaryElem32> = (0..(1 << 12))
+            .map(|i| BinaryElem32::from((i * 7 + 13) as u32))
+            .collect();
+
+        // Prove with SHA256
+        let sha_proof = prove_sha256(&prover_config, &poly)
+            .expect("SHA256 proof generation failed");
+
+        // Trying to verify SHA256 proof with Blake2b should fail
+        let result = verify_blake2b(&verifier_config, &sha_proof)
+            .expect("Verification call should not panic");
+
+        assert!(!result, "SHA256 proof should NOT verify with Blake2b transcript");
     }
 }
