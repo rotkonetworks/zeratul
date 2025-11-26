@@ -17,7 +17,7 @@ extern crate alloc as alloc_crate;
 pub mod batch;
 pub use batch::{BatchedMerkleProof, prove_batch, verify_batch};
 
-use sha2::{Sha256, Digest};
+use blake3::Hasher;
 use bytemuck::Pod;
 
 #[cfg(feature = "parallel")]
@@ -47,16 +47,16 @@ pub fn is_power_of_two(n: usize) -> bool {
 
 pub fn hash_leaf<T: Pod>(leaf: &T) -> Hash {
     let bytes = bytemuck::bytes_of(leaf);
-    let mut hasher = Sha256::new();
+    let mut hasher = Hasher::new();
     hasher.update(bytes);
-    hasher.finalize().into()
+    *hasher.finalize().as_bytes()
 }
 
 pub fn hash_siblings(left: &Hash, right: &Hash) -> Hash {
-    let mut hasher = Sha256::new();
+    let mut hasher = Hasher::new();
     hasher.update(left);
     hasher.update(right);
-    hasher.finalize().into()
+    *hasher.finalize().as_bytes()
 }
 
 pub fn build_merkle_tree<T: Pod + Send + Sync>(leaves: &[T]) -> CompleteMerkleTree {
