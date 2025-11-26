@@ -16,8 +16,20 @@ reqwest = { version = "0.11", features = ["json"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
+# Substrate encoding
+parity-scale-codec = { version = "3", features = ["derive"] }
+scale-info = { version = "2", features = ["derive"] }
+
+# Crypto
+sha2 = "0.10"
+
 # Substrate/Polkadot light client (for relay chain verification)
 subxt = { version = "0.35", optional = true }
+
+# Smoldot light client (for P2P verification)
+# Note: Enable only when building ibp-probe standalone (sqlite conflict with penumbra)
+smoldot-light = { version = "0.18", optional = true }
+smoldot = { version = "0.18", optional = true, default-features = false }
 
 # Tracing
 tracing = "0.1"
@@ -37,3 +49,4 @@ futures-util = "0.3"
 [features]
 default = []
 relay-verification = ["subxt"]
+smoldot = ["dep:smoldot-light", "dep:smoldot"]

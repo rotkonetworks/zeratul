@@ -137,6 +137,53 @@ enum Commands {
         #[arg(short, long, default_value = "json")]
         output: String,
     },
+
+    /// Prepare submission data for pallet-sla-monitor
+    PrepareSubmit {
+        /// Endpoint to check
+        #[arg(short, long)]
+        endpoint: String,
+
+        /// Network name
+        #[arg(short, long, default_value = "polkadot")]
+        network: String,
+
+        /// Relay chain RPC endpoint
+        #[arg(long, default_value = "wss://rpc.polkadot.io")]
+        relay_rpc: String,
+
+        /// Include extended data (larger payload, stored on IPFS)
+        #[arg(long)]
+        include_extended: bool,
+
+        /// Output format: json, hex, or call (encoded extrinsic)
+        #[arg(short, long, default_value = "json")]
+        output: String,
+    },
+
+    /// Verify RPC endpoint against P2P network using smoldot light client
+    #[cfg(feature = "smoldot")]
+    VerifyP2p {
+        /// Endpoint URL to verify
+        #[arg(short, long)]
+        endpoint: String,
+
+        /// Network name (polkadot, kusama, westend)
+        #[arg(short, long, default_value = "polkadot")]
+        network: String,
+
+        /// Path to chain spec file (fetched automatically if not provided)
+        #[arg(long)]
+        chain_spec: Option<String>,
+
+        /// Timeout for P2P sync (seconds)
+        #[arg(long, default_value = "30")]
+        timeout: u64,
+
+        /// Output format (json, text)
+        #[arg(short, long, default_value = "json")]
+        output: String,
+    },
 }
 
 #[tokio::main]
@@ -188,6 +235,21 @@ async fn main() -> Result<()> {
             ipv6,
             output,
         } => run_domain_check(domain, network, ipv6, output).await,
+        Commands::PrepareSubmit {
+            endpoint,
+            network,
+            relay_rpc,
+            include_extended,
+            output,
+        } => run_prepare_submit(endpoint, network, relay_rpc, include_extended, output).await,
+        #[cfg(feature = "smoldot")]
+        Commands::VerifyP2p {
+            endpoint,
+            network,
+            chain_spec,
+            timeout,
+            output,
+        } => run_verify_p2p(endpoint, network, chain_spec, timeout, output).await,
     }
 }
 
@@ -563,6 +625,260 @@ async fn run_domain_check(
     } else {
         println!("Domain: {} Network: {}", domain, network);
         println!("Healthy: {}", result.healthy);
+    }
+
+    Ok(())
+}
+
+async fn run_prepare_submit(
+    endpoint: String,
+    network: String,
+    relay_rpc: String,
+    include_extended: bool,
+    output_format: String,
+) -> Result<()> {
+    use ibp_probe_host::substrate_types::{
+        self, ProbeReport, ExtendedReport, node_id_from_endpoint, hash_extended_report,
+    };
+    use parity_scale_codec::Encode;
+
+    info!("Running check and preparing submission for: {}", endpoint);
+
+    let host = IbpHost::new(&relay_rpc);
+
+    // Determine service type from URL
+    let service_type = if endpoint.starts_with("wss://") || endpoint.starts_with("ws://") {
+        ServiceType::WssRpc
+    } else {
+        ServiceType::Rpc
+    };
+
+    let config = CheckConfig {
+        target: CheckTarget::Endpoint {
+            url: endpoint.clone(),
+            service_type,
+            ipv6: false,
+        },
+        params: CheckParams {
+            check_sync: true,
+            verify_finalized: true,
+            ..Default::default()
+        },
+        timeout_ms: 30000,
+    };
+
+    // Run the check
+    let result = run_endpoint_check(&host, &config).await;
+
+    // Convert to pallet types
+    let node_id = node_id_from_endpoint(&endpoint);
+    let probe_report = ProbeReport::from(&result);
+    let extended_report = ExtendedReport::from(&result);
+    let extended_hash = hash_extended_report(&extended_report);
+
+    // Prepare submission data
+    let submission = serde_json::json!({
+        "node_id": hex::encode(node_id),
+        "result": format!("{:?}", probe_report.result),
+        "latency_ms": probe_report.latency_ms,
+        "extended_hash": hex::encode(extended_hash),
+        "extended_data_hex": if include_extended {
+            Some(hex::encode(extended_report.encode()))
+        } else {
+            None
+        },
+        // For manual submission via polkadot.js or subxt
+        "call_params": {
+            "pallet": "SlaMonitor",
+            "call": "submit_ibp_report",
+            "args": {
+                "node_id": format!("0x{}", hex::encode(node_id)),
+                "result": probe_report.result as u8,
+                "latency_ms": probe_report.latency_ms,
+                "extended_hash": format!("0x{}", hex::encode(extended_hash)),
+                "extended_data": if include_extended {
+                    Some(format!("0x{}", hex::encode(extended_report.encode())))
+                } else {
+                    None::<String>
+                },
+                "proof": None::<String>,
+            }
+        },
+        "check_result": {
+            "healthy": result.healthy,
+            "checks": result.checks.iter().map(|c| serde_json::json!({
+                "name": c.name,
+                "passed": c.passed,
+                "latency_ms": c.latency_ms,
+            })).collect::<Vec<_>>(),
+        }
+    });
+
+    match output_format.as_str() {
+        "json" => {
+            println!("{}", serde_json::to_string_pretty(&submission)?);
+        }
+        "hex" => {
+            // Output just the encoded call data
+            // Format: node_id (32) + result (1) + latency (4) + hash (32) + extended_data (optional)
+            let mut call_data = Vec::new();
+            call_data.extend_from_slice(&node_id);
+            call_data.push(probe_report.result as u8);
+            call_data.extend_from_slice(&probe_report.latency_ms.to_le_bytes());
+            call_data.extend_from_slice(&extended_hash);
+
+            if include_extended {
+                let extended_encoded = extended_report.encode();
+                // Length prefix for Option<Vec>
+                call_data.push(1); // Some variant
+                call_data.extend_from_slice(&(extended_encoded.len() as u32).to_le_bytes());
+                call_data.extend_from_slice(&extended_encoded);
+            } else {
+                call_data.push(0); // None variant
+            }
+
+            // No proof
+            call_data.push(0); // None variant
+
+            println!("0x{}", hex::encode(call_data));
+        }
+        _ => {
+            println!("{}", serde_json::to_string_pretty(&submission)?);
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(feature = "smoldot")]
+async fn run_verify_p2p(
+    endpoint: String,
+    network: String,
+    chain_spec_path: Option<String>,
+    timeout_secs: u64,
+    output_format: String,
+) -> Result<()> {
+    use ibp_probe_host::{SmoldotVerifier, IbpHost};
+    use std::time::Instant;
+
+    info!("Verifying {} endpoint against P2P network ({})", endpoint, network);
+
+    // Create smoldot verifier
+    let verifier = if let Some(spec_path) = chain_spec_path {
+        let spec_content = std::fs::read_to_string(&spec_path)?;
+        SmoldotVerifier::new(spec_content, &network, timeout_secs)
+    } else {
+        info!("Fetching chain spec for {}...", network);
+        SmoldotVerifier::from_network(&network, timeout_secs)
+            .await
+            .map_err(|e| anyhow::anyhow!(e))?
+    };
+
+    // Get RPC result first (fast)
+    let rpc_start = Instant::now();
+    let rpc_url = endpoint
+        .replace("wss://", "https://")
+        .replace("ws://", "http://");
+
+    let host = IbpHost::new(&rpc_url);
+    let rpc_result = host.rpc_call(&rpc_url, "chain_getFinalizedHead", &[]).await;
+
+    let (rpc_block, rpc_hash, rpc_latency) = match rpc_result {
+        Ok(hash_val) => {
+            let hash_hex = hash_val.as_str().unwrap_or("");
+            let header = host.rpc_call(&rpc_url, "chain_getHeader", &[hash_val.clone()]).await;
+
+            let block_num = header.ok()
+                .and_then(|h| h.get("number").and_then(|n| n.as_str()).map(|s| s.to_string()))
+                .and_then(|s| u32::from_str_radix(s.trim_start_matches("0x"), 16).ok())
+                .unwrap_or(0);
+
+            let mut hash_bytes = [0u8; 32];
+            if let Ok(bytes) = hex::decode(hash_hex.trim_start_matches("0x")) {
+                if bytes.len() >= 32 {
+                    hash_bytes.copy_from_slice(&bytes[..32]);
+                }
+            }
+
+            (block_num, hash_bytes, rpc_start.elapsed().as_millis() as u32)
+        }
+        Err(e) => {
+            anyhow::bail!("RPC call failed: {}", e);
+        }
+    };
+
+    info!("RPC returned block #{} in {}ms", rpc_block, rpc_latency);
+    info!("Starting P2P sync via smoldot (timeout: {}s)...", timeout_secs);
+
+    // Get P2P result (slow - needs sync)
+    let p2p_result = verifier.get_finalized_block().await;
+
+    if !p2p_result.success {
+        anyhow::bail!("P2P sync failed: {:?}", p2p_result.error);
+    }
+
+    // Compare results
+    let comparison = verifier.compare_with_rpc(
+        &p2p_result,
+        rpc_block,
+        &rpc_hash,
+        rpc_latency,
+    );
+
+    // Build output
+    let output = serde_json::json!({
+        "endpoint": endpoint,
+        "network": network,
+        "verification": {
+            "rpc_valid": comparison.rpc_valid,
+            "hashes_match": comparison.hashes_match,
+            "block_diff": comparison.block_diff,
+        },
+        "rpc": {
+            "finalized_block": rpc_block,
+            "finalized_hash": hex::encode(rpc_hash),
+            "latency_ms": rpc_latency,
+        },
+        "p2p": {
+            "finalized_block": p2p_result.p2p_finalized_block,
+            "finalized_hash": hex::encode(p2p_result.p2p_finalized_hash),
+            "sync_time_ms": p2p_result.p2p_sync_time_ms,
+            "peers_discovered": p2p_result.peers_discovered,
+            "is_syncing": p2p_result.is_syncing,
+        },
+        "comparison": {
+            "rpc_speedup": format!("{:.1}x", comparison.rpc_speedup),
+            "rpc_faster_by_ms": p2p_result.p2p_sync_time_ms.saturating_sub(rpc_latency as u64),
+        }
+    });
+
+    if output_format == "json" {
+        println!("{}", serde_json::to_string_pretty(&output)?);
+    } else {
+        println!("=== P2P Verification Results ===");
+        println!("Endpoint: {}", endpoint);
+        println!("Network: {}", network);
+        println!();
+        println!("RPC Result:");
+        println!("  Block: #{}", rpc_block);
+        println!("  Hash: 0x{}", hex::encode(rpc_hash));
+        println!("  Latency: {}ms", rpc_latency);
+        println!();
+        println!("P2P Result:");
+        println!("  Block: #{}", p2p_result.p2p_finalized_block);
+        println!("  Hash: 0x{}", hex::encode(p2p_result.p2p_finalized_hash));
+        println!("  Sync Time: {}ms", p2p_result.p2p_sync_time_ms);
+        println!("  Peers: {}", p2p_result.peers_discovered);
+        println!();
+        println!("Verification:");
+        println!("  RPC Valid: {}", if comparison.rpc_valid { "✓ YES" } else { "✗ NO" });
+        println!("  Hashes Match: {}", if comparison.hashes_match { "✓ YES" } else { "✗ NO" });
+        println!("  Block Diff: {}", comparison.block_diff);
+        println!("  RPC Speedup: {:.1}x faster than P2P", comparison.rpc_speedup);
+    }
+
+    if !comparison.rpc_valid {
+        std::process::exit(1);
     }
 
     Ok(())

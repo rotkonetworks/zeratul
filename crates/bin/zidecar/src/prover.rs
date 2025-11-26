@@ -1,8 +1,12 @@
 //! ligerito prover integration
+//!
+//! Uses BLAKE2b transcript for Substrate/Polkadot parachain compatibility.
+//! The transcript choice affects proof verification - verifier must use same transcript.
 
 use crate::error::{Result, ZidecarError};
 use crate::header_chain::HeaderChainTrace;
-use ligerito::{prove, ProverConfig, data_structures::FinalizedLigeritoProof};
+use ligerito::{prove_with_transcript, ProverConfig, data_structures::FinalizedLigeritoProof};
+use ligerito::transcript::FiatShamir;
 use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 use tracing::{info, debug};
 use std::time::Instant;
@@ -20,19 +24,23 @@ pub struct HeaderChainProof {
 
 impl HeaderChainProof {
     /// generate proof from trace (with explicit config)
+    /// Uses BLAKE2b transcript for Substrate/Polkadot compatibility
     pub fn prove(
         config: &ProverConfig<BinaryElem32, BinaryElem128>,
         trace: &HeaderChainTrace,
     ) -> Result<Self> {
         info!(
-            "generating ligerito proof for {} headers",
+            "generating ligerito proof for {} headers (BLAKE2b transcript)",
             trace.num_headers
         );
 
         let start = Instant::now();
 
-        // prove with ligerito
-        let proof = prove(config, &trace.trace)
+        // use BLAKE2b transcript for Substrate/Polkadot on-chain verification
+        let transcript = FiatShamir::new_blake2b();
+
+        // prove with ligerito using BLAKE2b transcript
+        let proof = prove_with_transcript(config, &trace.trace, transcript)
             .map_err(|e| ZidecarError::ProofGeneration(format!("{:?}", e)))?;
 
         let elapsed = start.elapsed();

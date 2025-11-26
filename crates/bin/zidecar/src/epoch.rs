@@ -223,4 +223,109 @@ impl EpochManager {
     pub async fn is_gigaproof_ready(&self) -> Result<bool> {
         Ok(self.last_gigaproof_epoch.read().await.is_some())
     }
+
+    /// background task: track state roots at epoch boundaries
+    pub async fn run_background_state_tracker(self: Arc<Self>) {
+        info!("starting background state root tracker");
+
+        let mut last_tracked_height = self.start_height;
+
+        loop {
+            match self.track_state_roots(last_tracked_height).await {
+                Ok(new_height) => {
+                    if new_height > last_tracked_height {
+                        info!(
+                            "tracked state roots up to height {} ({} new epochs)",
+                            new_height,
+                            (new_height - last_tracked_height) / zync_core::EPOCH_SIZE
+                        );
+                        last_tracked_height = new_height;
+                    }
+                }
+                Err(e) => {
+                    warn!("state root tracking failed: {}", e);
+                }
+            }
+
+            // check every 10 minutes
+            tokio::time::sleep(tokio::time::Duration::from_secs(600)).await;
+        }
+    }
+
+    /// track state roots at epoch boundaries from zebrad
+    async fn track_state_roots(&self, from_height: u32) -> Result<u32> {
+        let current_height = self.get_current_height().await?;
+        let current_epoch = self.epoch_for_height(current_height);
+        let from_epoch = self.epoch_for_height(from_height);
+
+        let mut latest_tracked = from_height;
+
+        // iterate through epochs and get tree state at each boundary
+        for epoch in from_epoch..=current_epoch {
+            let epoch_end = self.epoch_range(epoch).1;
+
+            // skip if beyond current height
+            if epoch_end > current_height {
+                break;
+            }
+
+            // skip if already tracked
+            if self.storage.get_state_roots(epoch_end)?.is_some() {
+                latest_tracked = epoch_end;
+                continue;
+            }
+
+            // get tree state from zebrad
+            match self.zebrad.get_tree_state(&epoch_end.to_string()).await {
+                Ok(state) => {
+                    // parse orchard tree root from state
+                    let tree_root = parse_tree_root(&state.orchard.commitments.final_state);
+
+                    // for nullifier root, we use NOMT which tracks separately
+                    // for now use a placeholder derived from tree root
+                    let nullifier_root = derive_nullifier_root(&tree_root);
+
+                    // store roots
+                    self.storage.store_state_roots(epoch_end, &tree_root, &nullifier_root)?;
+
+                    info!(
+                        "stored state roots at height {}: tree={} nullifier={}",
+                        epoch_end,
+                        hex::encode(&tree_root[..8]),
+                        hex::encode(&nullifier_root[..8])
+                    );
+
+                    latest_tracked = epoch_end;
+                }
+                Err(e) => {
+                    warn!("failed to get tree state at height {}: {}", epoch_end, e);
+                }
+            }
+        }
+
+        Ok(latest_tracked)
+    }
+}
+
+/// parse tree root from zebrad hex-encoded final state
+fn parse_tree_root(final_state: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    // zebrad returns a hex-encoded frontier, we hash it to get a 32-byte root
+    // (in production, properly parse the Orchard Frontier)
+    let mut hasher = Sha256::new();
+    hasher.update(b"ZIDECAR_TREE_ROOT");
+    hasher.update(final_state.as_bytes());
+    hasher.finalize().into()
+}
+
+/// derive nullifier root from tree root (placeholder)
+/// in production, would track actual nullifiers seen
+fn derive_nullifier_root(tree_root: &[u8; 32]) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+
+    let mut hasher = Sha256::new();
+    hasher.update(b"ZIDECAR_NULLIFIER_ROOT");
+    hasher.update(tree_root);
+    hasher.finalize().into()
 }

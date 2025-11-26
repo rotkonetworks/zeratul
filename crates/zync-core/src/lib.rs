@@ -13,6 +13,7 @@ pub mod state;
 pub mod error;
 pub mod app;
 pub mod verifier;
+pub mod trustless;
 
 #[cfg(feature = "client")]
 pub mod client;
