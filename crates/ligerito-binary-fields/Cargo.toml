@@ -38,3 +38,7 @@ hardware-accel = []
 # [[bench]]
 # name = "field_ops"
 # harness = false
+
+[[example]]
+name = "simd_compare"
+required-features = ["hardware-accel"]

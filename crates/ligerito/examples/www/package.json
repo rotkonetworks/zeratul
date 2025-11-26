@@ -1,0 +1,30 @@
+{
+  "name": "ligerito",
+  "type": "module",
+  "collaborators": [
+    "rotko <hq@rotko.net>"
+  ],
+  "description": "Ligerito polynomial commitment scheme over binary extension fields",
+  "version": "0.2.3",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/rotkonetworks/zeratul"
+  },
+  "files": [
+    "ligerito_bg.wasm",
+    "ligerito.js",
+    "ligerito.d.ts"
+  ],
+  "main": "ligerito.js",
+  "types": "ligerito.d.ts",
+  "sideEffects": [
+    "./snippets/*"
+  ],
+  "keywords": [
+    "cryptography",
+    "commitment",
+    "zero-knowledge",
+    "binary-fields"
+  ]
+}

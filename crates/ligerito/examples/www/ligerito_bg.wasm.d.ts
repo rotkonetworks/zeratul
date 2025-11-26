@@ -1,0 +1,31 @@
+/* tslint:disable */
+/* eslint-disable */
+export const memory: WebAssembly.Memory;
+export const __wbg_benchconfig_free: (a: number, b: number) => void;
+export const __wbg_benchresult_free: (a: number, b: number) => void;
+export const __wbg_get_benchconfig_k: (a: number) => number;
+export const __wbg_get_benchconfig_n: (a: number) => number;
+export const __wbg_get_benchconfig_q: (a: number) => number;
+export const __wbg_set_benchconfig_k: (a: number, b: number) => void;
+export const __wbg_set_benchconfig_n: (a: number, b: number) => void;
+export const __wbg_set_benchconfig_q: (a: number, b: number) => void;
+export const bench_cpu_sumcheck: (a: number) => any;
+export const benchconfig_new: (a: number, b: number, c: number) => number;
+export const benchresult_error: (a: number) => [number, number];
+export const benchresult_success: (a: number) => number;
+export const benchresult_time_ms: (a: number) => number;
+export const get_polynomial_size: (a: number) => [number, number, number];
+export const init: () => void;
+export const prove: (a: number, b: number, c: number) => [number, number, number, number];
+export const verify: (a: number, b: number, c: number) => [number, number, number];
+export const wasm_bindgen__convert__closures_____invoke__h30798bf95155ee56: (a: number, b: number, c: any) => void;
+export const wasm_bindgen__closure__destroy__h8ae63efacf7f2d66: (a: number, b: number) => void;
+export const wasm_bindgen__convert__closures_____invoke__h3ec4ffbd0f0ebb1a: (a: number, b: number, c: any, d: any) => void;
+export const __wbindgen_exn_store: (a: number) => void;
+export const __externref_table_alloc: () => number;
+export const __wbindgen_externrefs: WebAssembly.Table;
+export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __wbindgen_malloc: (a: number, b: number) => number;
+export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
+export const __externref_table_dealloc: (a: number) => void;
+export const __wbindgen_start: () => void;

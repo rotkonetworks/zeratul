@@ -2,7 +2,7 @@
 // Offloads proving computation from main thread
 // Uses ES modules like Penumbra does
 
-import init, { prove, verify, initThreadPool } from './ligerito.js';
+import init, { prove, verify } from './ligerito.js';
 
 let wasmInitialized = false;
 
@@ -12,9 +12,7 @@ self.onmessage = async function(e) {
     // Must explicitly pass WASM path for workers
     if (!wasmInitialized) {
       await init(new URL('./ligerito_bg.wasm', import.meta.url));
-
-      // Rayon will use available parallelism automatically
-      console.log('[Worker] WASM initialized - Rayon parallel execution enabled');
+      console.log('[Worker] WASM initialized (SIMD enabled)');
       wasmInitialized = true;
     }
 

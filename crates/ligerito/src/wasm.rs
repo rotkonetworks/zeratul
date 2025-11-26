@@ -226,11 +226,8 @@ pub fn init() {
 // These functions expose GPU-accelerated sumcheck for benchmarking in the browser
 //
 
-#[cfg(feature = "webgpu")]
-use wasm_bindgen_futures::JsFuture;
-
-#[cfg(feature = "webgpu")]
 use js_sys::Promise;
+use wasm_bindgen_futures::JsFuture;
 
 /// Benchmark configuration for sumcheck tests
 #[wasm_bindgen]
