@@ -33,9 +33,9 @@ polkavm-integration = [
 
 [dependencies]
 # Ligerito proving library (with prover feature for ProverConfig)
-ligerito = { version = "0.2.0", path = "../ligerito", default-features = false, features = ["prover", "parallel"] }
-ligerito-binary-fields = { version = "0.2.0", path = "../ligerito-binary-fields", default-features = false, features = ["serde"] }
-ligerito-merkle = { version = "0.2.0", path = "../ligerito-merkle", default-features = false, features = ["serde"] }
+ligerito = { version = "0.3.0", path = "../ligerito", default-features = false, features = ["prover", "parallel"] }
+ligerito-binary-fields = { version = "0.3.0", path = "../ligerito-binary-fields", default-features = false, features = ["serde"] }
+ligerito-merkle = { version = "0.3.0", path = "../ligerito-merkle", default-features = false, features = ["serde"] }
 
 # Core dependencies
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"] }

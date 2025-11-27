@@ -378,7 +378,7 @@ mod tests {
 
     #[test]
     fn test_create_wallet() {
-        let app = AppTester::<ZafuCore, _>::default();
+        let app = AppTester::<ZafuCore>::default();
         let mut model = Model::default();
 
         let event = Event::CreateWallet {
@@ -394,7 +394,7 @@ mod tests {
 
     #[test]
     fn test_restore_wallet_invalid() {
-        let app = AppTester::<ZafuCore, _>::default();
+        let app = AppTester::<ZafuCore>::default();
         let mut model = Model::default();
 
         let event = Event::RestoreWallet {

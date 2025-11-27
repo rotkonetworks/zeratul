@@ -101,7 +101,15 @@ async fn main() -> Result<()> {
         args.start_height,
     ));
 
-    // start background gigaproof generator
+    // generate initial gigaproof synchronously before starting background tasks
+    // this ensures we have a proof ready before accepting gRPC requests
+    info!("checking for existing gigaproof...");
+    match epoch_manager.generate_gigaproof().await {
+        Ok(_) => info!("gigaproof ready"),
+        Err(e) => warn!("initial gigaproof generation failed: {}", e),
+    }
+
+    // start background gigaproof generator (regenerates hourly when epochs complete)
     let epoch_manager_bg = epoch_manager.clone();
     tokio::spawn(async move {
         epoch_manager_bg.run_background_prover().await;
@@ -113,13 +121,6 @@ async fn main() -> Result<()> {
         epoch_manager_state.run_background_state_tracker().await;
     });
 
-    // generate initial gigaproof if needed
-    info!("checking for existing gigaproof...");
-    match epoch_manager.generate_gigaproof().await {
-        Ok(_) => info!("gigaproof ready"),
-        Err(e) => warn!("initial gigaproof generation failed: {}", e),
-    }
-
     // create gRPC service
     let service = ZidecarService::new(
         zebrad,
@@ -129,12 +130,18 @@ async fn main() -> Result<()> {
     );
 
     info!("starting gRPC server on {}", args.listen);
+    info!("gRPC-web enabled for browser clients");
 
-    // build and start server
-    let service = zidecar::zidecar_server::ZidecarServer::new(service);
+    // build gRPC service
+    let grpc_service = zidecar::zidecar_server::ZidecarServer::new(service);
+
+    // wrap with gRPC-web support for browser clients
+    // this enables HTTP/1.1 + gRPC-web protocol
+    let grpc_web_service = tonic_web::enable(grpc_service);
 
     Server::builder()
-        .add_service(service)
+        .accept_http1(true) // required for gRPC-web
+        .add_service(grpc_web_service)
         .serve(args.listen)
         .await?;
 
