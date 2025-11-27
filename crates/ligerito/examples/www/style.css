@@ -280,17 +280,6 @@ label {
   font-size: 11px;
 }
 
-/* GPU status panel */
-#gpu-status {
-  background: var(--bg-dark) !important;
-  border: 1px solid var(--border-secondary) !important;
-  border-left: 3px solid var(--text-accent) !important;
-  border-radius: 0 !important;
-  margin: 0 16px 16px 16px !important;
-  padding: 12px !important;
-  font-size: 12px;
-}
-
 /* Responsive adjustments */
 @media (max-width: 600px) {
   body {

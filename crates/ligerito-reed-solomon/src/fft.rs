@@ -70,7 +70,7 @@ pub fn compute_twiddles<F: BinaryFieldElement>(log_n: usize, beta: F) -> Vec<F> 
 fn fft_mul<F: BinaryFieldElement>(v: &mut [F], lambda: F) {
     let (u, w) = v.split_at_mut(v.len() / 2);
 
-    // use SIMD-optimized version for BinaryElem32 when available
+    // use SIMD-optimized version for BinaryElem32 when available (x86_64)
     #[cfg(all(feature = "hardware-accel", target_arch = "x86_64", target_feature = "pclmulqdq"))]
     {
         use ligerito_binary_fields::BinaryElem32;
@@ -82,6 +82,24 @@ fn fft_mul<F: BinaryFieldElement>(v: &mut [F], lambda: F) {
             let u_ref = unsafe { std::mem::transmute::<&mut [F], &mut [BinaryElem32]>(u) };
             let w_ref = unsafe { std::mem::transmute::<&mut [F], &mut [BinaryElem32]>(w) };
             let lambda_ref = unsafe { std::mem::transmute::<&F, &BinaryElem32>(&lambda) };
+
+            ligerito_binary_fields::simd::fft_butterfly_gf32(u_ref, w_ref, *lambda_ref);
+            return;
+        }
+    }
+
+    // use SIMD-optimized version for BinaryElem32 when available (WASM SIMD128)
+    #[cfg(all(feature = "hardware-accel", target_arch = "wasm32", target_feature = "simd128"))]
+    {
+        use ligerito_binary_fields::BinaryElem32;
+        use core::any::TypeId;
+
+        // type check for BinaryElem32 - if match, use SIMD path
+        if TypeId::of::<F>() == TypeId::of::<BinaryElem32>() {
+            // safe: we just checked the type
+            let u_ref = unsafe { core::mem::transmute::<&mut [F], &mut [BinaryElem32]>(u) };
+            let w_ref = unsafe { core::mem::transmute::<&mut [F], &mut [BinaryElem32]>(w) };
+            let lambda_ref = unsafe { core::mem::transmute::<&F, &BinaryElem32>(&lambda) };
 
             ligerito_binary_fields::simd::fft_butterfly_gf32(u_ref, w_ref, *lambda_ref);
             return;

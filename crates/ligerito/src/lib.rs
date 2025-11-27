@@ -116,15 +116,12 @@ pub mod prover;
 #[cfg(feature = "prover")]
 pub mod backend;
 
-// WASM bindings (full - with serde/bincode)
+// WASM bindings (full - with serde/bincode for proof serialization)
 #[cfg(feature = "wasm")]
 pub mod wasm;
 
-// WASM bindings (lite - no serde)
-#[cfg(all(feature = "wasm-lite", not(feature = "wasm")))]
-pub mod wasm_lite;
-
 // Raw WASM exports (no wasm-bindgen, pure extern "C" ABI)
+// Use for multi-instance parallelism without SharedArrayBuffer
 #[cfg(feature = "wasm-raw")]
 pub mod wasm_raw;
 
