@@ -47,7 +47,7 @@ verifier-only = []
 
 # Performance optimizations
 parallel = ["rayon", "ligerito-reed-solomon?/parallel"]
-hardware-accel = ["ligerito-binary-fields/hardware-accel"]
+hardware-accel = ["ligerito-binary-fields/hardware-accel", "ligerito-reed-solomon?/hardware-accel"]
 
 # Transcript implementations
 # SHA256 is always available (default) - no extra dependencies, works in no_std
@@ -70,19 +70,6 @@ wasm = [
     "console_error_panic_hook",     # Better error messages in browser console
     "bincode",                      # For serialization
     "js-sys",                       # JavaScript types
-]
-
-# Minimal WASM (no serde - prove/verify only, no proof serialization to JS)
-# Note: still uses std (WASM has std support), just avoids heavy serde dependency
-wasm-lite = [
-    "ligerito-binary-fields/std",
-    "ligerito-merkle/std",
-    "thiserror",
-    "prover",
-    "transcript-sha256",
-    "getrandom/js",
-    "wasm-bindgen",
-    "console_error_panic_hook",
 ]
 
 # Multi-threaded WASM (requires SharedArrayBuffer + CORS headers)

@@ -12,11 +12,8 @@
 </head>
 <body>
 <div class="terminal">
-<div class="header">ligerito-wasm v0.2.5 | polynomial commitment prover/verifier</div>
+<div class="header">ligerito-wasm v0.3.1 | polynomial commitment prover/verifier</div>
 <div class="status" id="status">initializing wasm module...</div>
-<div id="gpu-status">
-  <span style="color: var(--text-accent);">[gpu]</span> <span id="gpu-info"></span>
-</div>
 <div id="perf-tips">
   <details>
     <summary>[?] performance tips & cli compatibility</summary>
@@ -106,7 +103,7 @@ ligerito verify --size 20 --transcript sha256 < proof.bin</pre>
 </div>
 
 <div class="footer">
-  powered by ligerito v0.2.5 | rust + wasm |
+  powered by ligerito v0.3.1 | rust + wasm |
   <a href="https://angeris.github.io/papers/ligerito.pdf">paper</a> |
   <a href="https://github.com/rotkonetworks/zeratul">github</a> |
   <a href="https://crates.io/crates/ligerito">crates.io</a> |
@@ -123,37 +120,6 @@ let configSize = 20;
 let transcript = 'sha256';
 let numThreads = navigator.hardwareConcurrency || 4;
 
-// Check GPU availability (for future WebGPU acceleration)
-async function checkGPUSupport() {
-  const gpuStatus = document.getElementById('gpu-status');
-  const gpuInfo = document.getElementById('gpu-info');
-
-  if (!navigator.gpu) {
-    gpuInfo.innerHTML = '<span class="warn">WebGPU not available (CPU-only mode)</span>';
-    gpuStatus.style.display = 'block';
-    return null;
-  }
-
-  try {
-    const adapter = await navigator.gpu.requestAdapter();
-    if (adapter) {
-      const info = await adapter.requestAdapterInfo?.();
-      gpuInfo.innerHTML = `<span class="ok">WebGPU available</span> ${info ? `(${info.vendor} ${info.architecture || ''})` : ''}`;
-      gpuInfo.innerHTML += '<br><span style="font-size: 0.9em; color: var(--text-secondary);">note: currently using CPU, WebGPU acceleration coming soon</span>';
-      gpuStatus.style.display = 'block';
-      return adapter;
-    } else {
-      gpuInfo.innerHTML = '<span class="warn">WebGPU adapter not available (CPU-only mode)</span>';
-      gpuStatus.style.display = 'block';
-      return null;
-    }
-  } catch (e) {
-    gpuInfo.innerHTML = '<span class="warn">WebGPU error (CPU-only mode)</span>';
-    gpuStatus.style.display = 'block';
-    return null;
-  }
-}
-
 // Initialize WASM and thread pool for parallel proving
 try {
   await init();
@@ -161,9 +127,6 @@ try {
   // Initialize rayon thread pool for parallel proving
   await initThreadPool(numThreads);
   console.log(`Thread pool initialized with ${numThreads} threads`);
-
-  // Check GPU availability (informational only - not used yet)
-  await checkGPUSupport();
 
   document.getElementById('status').innerHTML = `<span class="ok">✓ ready (${numThreads} threads - WASM SIMD)</span>`;
   document.getElementById('gen-btn').disabled = false;
