@@ -1414,7 +1414,7 @@ dependencies = [
  "bitflags 2.10.0",
  "cexpr",
  "clang-sys",
- "itertools 0.10.5",
+ "itertools 0.13.0",
  "proc-macro2 1.0.103",
  "quote",
  "regex",
@@ -3106,9 +3106,9 @@ dependencies = [
 
 [[package]]
 name = "crypto-common"
-version = "0.1.6"
+version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bfb12502f3fc46cca1bb51ac28df9d618d813cdc3d2f25b9fe775a34af26bb3"
+checksum = "78c8292055d1c1df0cce5d180393dc8cce0abec0a7102adb6c7b1eef6016d60a"
 dependencies = [
  "generic-array",
  "rand_core 0.6.4",
@@ -4916,9 +4916,9 @@ dependencies = [
 
 [[package]]
 name = "generic-array"
-version = "0.14.9"
+version = "0.14.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4bb6743198531e02858aeaea5398fcc883e71851fcbcb5a2f773e2fb6cb1edf2"
+checksum = "85649ca51fd72272d7821adaf274ad91c288277713d9c18820d8499a7ff69e9a"
 dependencies = [
  "typenum",
  "version_check",
@@ -7140,7 +7140,7 @@ dependencies = [
 
 [[package]]
 name = "ligerito"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "anyhow",
  "bincode",
@@ -7155,9 +7155,9 @@ dependencies = [
  "hashbrown 0.14.5",
  "hex",
  "js-sys",
- "ligerito-binary-fields 0.2.4",
- "ligerito-merkle 0.2.4",
- "ligerito-reed-solomon 0.2.4",
+ "ligerito-binary-fields 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "ligerito-merkle 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
+ "ligerito-reed-solomon 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "merlin",
  "pollster",
  "rand 0.8.5",
@@ -7189,11 +7189,23 @@ dependencies = [
 
 [[package]]
 name = "ligerito-binary-fields"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "bytemuck",
  "criterion 0.5.1",
  "proptest",
+ "rand 0.8.5",
+ "serde",
+ "wide",
+]
+
+[[package]]
+name = "ligerito-binary-fields"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8cc5809d0982cca0fa57e751504d94056e86447b950e7089b55e67bf875396c4"
+dependencies = [
+ "bytemuck",
  "rand 0.8.5",
  "serde",
  "wide",
@@ -7214,12 +7226,24 @@ dependencies = [
 
 [[package]]
 name = "ligerito-merkle"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "blake3",
  "bytemuck",
  "rand 0.8.5",
  "rayon",
+ "serde",
+]
+
+[[package]]
+name = "ligerito-merkle"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b74ce8044aac1d4d59d8f85928bf8eac26bbe731b13372f4d2fe4648c3a57d30"
+dependencies = [
+ "blake3",
+ "bytemuck",
+ "rand 0.8.5",
  "serde",
 ]
 
@@ -7235,11 +7259,21 @@ dependencies = [
 
 [[package]]
 name = "ligerito-reed-solomon"
-version = "0.2.4"
+version = "0.2.5"
 dependencies = [
  "criterion 0.5.1",
- "ligerito-binary-fields 0.2.4",
+ "ligerito-binary-fields 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "rand 0.8.5",
+ "rayon",
+]
+
+[[package]]
+name = "ligerito-reed-solomon"
+version = "0.2.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe1d3816a6933da4f58aed57eb345b1ed0b41bcd4374b231377d0f06b2956840"
+dependencies = [
+ "ligerito-binary-fields 0.2.5 (registry+https://github.com/rust-lang/crates.io-index)",
  "rayon",
 ]
 
@@ -10105,9 +10139,9 @@ name = "polkavm-pcvm"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "ligerito 0.2.4",
- "ligerito-binary-fields 0.2.4",
- "ligerito-merkle 0.2.4",
+ "ligerito 0.2.5",
+ "ligerito-binary-fields 0.2.5",
+ "ligerito-merkle 0.2.5",
  "polkavm",
  "polkavm-assembler",
  "polkavm-common 0.30.0",
@@ -10511,7 +10545,7 @@ checksum = "22505a5c94da8e3b7c2996394d1c933236c4d743e81a410bcca4e6989fc066a4"
 dependencies = [
  "bytes",
  "heck 0.5.0",
- "itertools 0.10.5",
+ "itertools 0.12.1",
  "log",
  "multimap",
  "once_cell",
@@ -10531,7 +10565,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "be769465445e8c1474e9c5dac2018218498557af32d9ed057325ec9a41ae81bf"
 dependencies = [
  "heck 0.5.0",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "log",
  "multimap",
  "once_cell",
@@ -10551,7 +10585,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "81bddcdb20abf9501610992b6759a4c888aef7d1a7247ef75e2404275ac24af1"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.12.1",
  "proc-macro2 1.0.103",
  "quote",
  "syn 2.0.111",
@@ -10564,7 +10598,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a56d757972c98b346a9b766e3f02746cde6dd1cd1d1d563472929fdd74bec4d"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2 1.0.103",
  "quote",
  "syn 2.0.111",
@@ -10577,7 +10611,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9120690fafc389a67ba3803df527d0ec9cbbc9cc45e4cc20b332996dfb672425"
 dependencies = [
  "anyhow",
- "itertools 0.10.5",
+ "itertools 0.14.0",
  "proc-macro2 1.0.103",
  "quote",
  "syn 2.0.111",
@@ -13813,8 +13847,8 @@ name = "test-ligerito-integration"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ligerito 0.2.4",
- "ligerito-binary-fields 0.2.4",
+ "ligerito 0.2.5",
+ "ligerito-binary-fields 0.2.5",
  "sha2 0.10.9",
 ]
 
@@ -17020,8 +17054,8 @@ dependencies = [
  "golden-rs",
  "governor 0.6.3",
  "hex",
- "ligerito 0.2.4",
- "ligerito-binary-fields 0.2.4",
+ "ligerito 0.2.5",
+ "ligerito-binary-fields 0.2.5",
  "litep2p",
  "multiaddr 0.18.2",
  "nomt 1.0.2 (git+https://github.com/thrumdev/nomt)",
@@ -17057,8 +17091,8 @@ dependencies = [
  "criterion 0.5.1",
  "halo2_proofs 0.3.1 (git+https://github.com/zcash/halo2)",
  "hex",
- "ligerito 0.2.4",
- "ligerito-binary-fields 0.2.4",
+ "ligerito 0.2.5",
+ "ligerito-binary-fields 0.2.5",
  "pasta_curves",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -17228,8 +17262,8 @@ dependencies = [
  "blake2",
  "clap",
  "hex",
- "ligerito 0.2.4",
- "ligerito-binary-fields 0.2.4",
+ "ligerito 0.2.5",
+ "ligerito-binary-fields 0.2.5",
  "nomt 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "prost 0.12.6",
  "prost-types 0.12.6",
@@ -17340,9 +17374,9 @@ dependencies = [
  "chacha20poly1305 0.10.1",
  "crux_core",
  "hex",
- "ligerito 0.2.4",
- "ligerito-binary-fields 0.2.4",
- "ligerito-merkle 0.2.4",
+ "ligerito 0.2.5",
+ "ligerito-binary-fields 0.2.5",
+ "ligerito-merkle 0.2.5",
  "orchard",
  "pasta_curves",
  "prost 0.12.6",
