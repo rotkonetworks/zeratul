@@ -12,67 +12,105 @@
 </head>
 <body>
 <div class="terminal">
-<div class="header">ligerito-wasm v0.1.0 | polynomial commitment prover/verifier</div>
+<div class="header">ligerito-wasm v0.2.5 | polynomial commitment prover/verifier</div>
 <div class="status" id="status">initializing wasm module...</div>
-<div id="gpu-status" style="display: none; padding: 10px; margin: 10px 0; background: #1a1a2e; border: 1px solid #0ff; border-radius: 4px;">
-  <span style="color: #0ff;">ℹ GPU Status:</span> <span id="gpu-info"></span>
+<div id="gpu-status">
+  <span style="color: var(--text-accent);">[gpu]</span> <span id="gpu-info"></span>
+</div>
+<div id="perf-tips">
+  <details>
+    <summary>[?] performance tips & cli compatibility</summary>
+    <div>
+      <p><strong>WASM Performance (this demo):</strong></p>
+      <ul>
+        <li>Uses WASM SIMD128 for ~2x speedup over scalar</li>
+        <li>Multi-threaded via Web Workers (requires SharedArrayBuffer)</li>
+        <li>2^20 proof: ~1-2s (vs ~50ms native with AVX-512)</li>
+        <li>Best in Chrome/Edge with hardware acceleration enabled</li>
+      </ul>
+      <p><strong>Native CLI (3-10x faster):</strong></p>
+      <pre>
+# Install with native CPU optimizations
+RUSTFLAGS="-C target-cpu=native" cargo install ligerito
+
+# Generate polynomial and prove
+ligerito generate --size 20 > poly.bin
+ligerito prove --size 20 --transcript sha256 < poly.bin > proof.bin
+
+# Verify (works with proofs from this demo!)
+ligerito verify --size 20 --transcript sha256 < proof.bin</pre>
+      <p><strong>Transcript Compatibility:</strong></p>
+      <ul>
+        <li>This demo uses <code>sha256</code> transcript (default)</li>
+        <li>CLI default is also <code>sha256</code> - proofs are compatible!</li>
+        <li>Use <code>--transcript sha256</code> explicitly for clarity</li>
+      </ul>
+    </div>
+  </details>
 </div>
 
 <div class="section">
-<div class="section-title">╔═══ configuration ═══════════════════════════════════════════════════════════════════╗</div>
+<div class="section-title">╔═ configuration ═╗</div>
 <div class="section-content">
   <label>polynomial size:
     <select id="config-size">
-      <option value="12" selected>2^12 (4,096 elements | 16 KB)</option>
-      <option value="20">2^20 (1,048,576 elements | 4 MB)</option>
-      <option value="24">2^24 (16,777,216 elements | 64 MB)</option>
+      <option value="12">2^12 (4K elements | 16 KB)</option>
+      <option value="16">2^16 (65K elements | 256 KB)</option>
+      <option value="20" selected>2^20 (1M elements | 4 MB)</option>
+      <option value="24">2^24 (16M elements | 64 MB)</option>
+      <option value="28">2^28 (268M elements | 1 GB) - verify only</option>
+    </select>
+  </label>
+  <label style="margin-left: 20px;">transcript:
+    <select id="config-transcript">
+      <option value="sha256" selected>SHA256 (default, CLI compatible)</option>
     </select>
   </label>
 </div>
-<div class="section-footer">╚═════════════════════════════════════════════════════════════════════════════════════╝</div>
 </div>
 
 <div class="section">
-<div class="section-title">╔═══ 1. data input ═══════════════════════════════════════════════════════════════════╗</div>
+<div class="section-title">╔═ 1. data input ═╗</div>
 <div class="section-content">
   <button id="gen-btn" class="btn">generate random polynomial</button>
   <button id="download-poly-btn" class="btn" disabled style="margin-left: 10px;">download polynomial</button>
-  <span style="margin: 0 10px; color: #0ff;">or</span>
+  <span style="margin: 0 10px; color: var(--text-accent);">or</span>
   <label for="file-upload" class="btn" style="display: inline-block; cursor: pointer;">
     upload binary data (.bin)
   </label>
   <input type="file" id="file-upload" accept=".bin,application/octet-stream" style="display: none;">
   <div id="gen-output" class="output"></div>
 </div>
-<div class="section-footer">╚═════════════════════════════════════════════════════════════════════════════════════╝</div>
 </div>
 
 <div class="section">
-<div class="section-title">╔═══ 2. prove (generate commitment proof) ════════════════════════════════════════════╗</div>
+<div class="section-title">╔═ 2. prove ═╗</div>
 <div class="section-content">
   <button id="prove-btn" class="btn" disabled>generate proof</button>
   <button id="download-proof-btn" class="btn" disabled style="margin-left: 10px;">download proof</button>
   <div id="prove-output" class="output"></div>
 </div>
-<div class="section-footer">╚═════════════════════════════════════════════════════════════════════════════════════╝</div>
 </div>
 
 <div class="section">
-<div class="section-title">╔═══ 3. verify proof ═════════════════════════════════════════════════════════════════╗</div>
+<div class="section-title">╔═ 3. verify ═╗</div>
 <div class="section-content">
   <button id="verify-btn" class="btn" disabled>verify proof</button>
-  <span style="margin: 0 10px; color: #0ff;">or</span>
+  <span style="margin: 0 10px; color: var(--text-accent);">or</span>
   <label for="proof-upload" class="btn" style="display: inline-block; cursor: pointer;">
     upload proof (.proof)
   </label>
   <input type="file" id="proof-upload" accept=".proof,application/octet-stream" style="display: none;">
   <div id="verify-output" class="output"></div>
 </div>
-<div class="section-footer">╚═════════════════════════════════════════════════════════════════════════════════════╝</div>
 </div>
 
 <div class="footer">
-  powered by ligerito | rust + wasm | <a href="https://angeris.github.io/papers/ligerito.pdf">paper</a>
+  powered by ligerito v0.2.5 | rust + wasm |
+  <a href="https://angeris.github.io/papers/ligerito.pdf">paper</a> |
+  <a href="https://github.com/rotkonetworks/zeratul">github</a> |
+  <a href="https://crates.io/crates/ligerito">crates.io</a> |
+  <a href="https://github.com/bcc-research/Ligerito.jl">Ligerito.jl</a>
 </div>
 </div>
 
@@ -81,7 +119,8 @@ import init, { get_polynomial_size, prove, verify, initThreadPool } from './lige
 
 let polynomial = null;
 let proof = null;
-let configSize = 12;
+let configSize = 20;
+let transcript = 'sha256';
 let numThreads = navigator.hardwareConcurrency || 4;
 
 // Check GPU availability (for future WebGPU acceleration)
@@ -90,7 +129,7 @@ async function checkGPUSupport() {
   const gpuInfo = document.getElementById('gpu-info');
 
   if (!navigator.gpu) {
-    gpuInfo.innerHTML = '<span style="color: #ff0;">WebGPU not available (CPU-only mode)</span>';
+    gpuInfo.innerHTML = '<span class="warn">WebGPU not available (CPU-only mode)</span>';
     gpuStatus.style.display = 'block';
     return null;
   }
@@ -99,17 +138,17 @@ async function checkGPUSupport() {
     const adapter = await navigator.gpu.requestAdapter();
     if (adapter) {
       const info = await adapter.requestAdapterInfo?.();
-      gpuInfo.innerHTML = `<span style="color: #0f0;">WebGPU available</span> ${info ? `(${info.vendor} ${info.architecture || ''})` : ''}`;
-      gpuInfo.innerHTML += '<br><span style="color: #888; font-size: 0.9em;">Note: Currently using CPU. WebGPU acceleration coming soon!</span>';
+      gpuInfo.innerHTML = `<span class="ok">WebGPU available</span> ${info ? `(${info.vendor} ${info.architecture || ''})` : ''}`;
+      gpuInfo.innerHTML += '<br><span style="font-size: 0.9em; color: var(--text-secondary);">note: currently using CPU, WebGPU acceleration coming soon</span>';
       gpuStatus.style.display = 'block';
       return adapter;
     } else {
-      gpuInfo.innerHTML = '<span style="color: #ff0;">WebGPU adapter not available (CPU-only mode)</span>';
+      gpuInfo.innerHTML = '<span class="warn">WebGPU adapter not available (CPU-only mode)</span>';
       gpuStatus.style.display = 'block';
       return null;
     }
   } catch (e) {
-    gpuInfo.innerHTML = '<span style="color: #ff0;">WebGPU error (CPU-only mode)</span>';
+    gpuInfo.innerHTML = '<span class="warn">WebGPU error (CPU-only mode)</span>';
     gpuStatus.style.display = 'block';
     return null;
   }
@@ -142,6 +181,23 @@ document.getElementById('config-size').addEventListener('change', (e) => {
   document.getElementById('verify-btn').disabled = true;
   document.getElementById('download-proof-btn').disabled = true;
   document.getElementById('gen-output').textContent = '';
+  document.getElementById('prove-output').textContent = '';
+  document.getElementById('verify-output').textContent = '';
+
+  // 2^28 exceeds WASM proving limits - verify only
+  if (configSize >= 28) {
+    document.getElementById('gen-btn').disabled = true;
+    document.getElementById('gen-output').innerHTML = '<span class="warn">2^28 proving exceeds WASM limits - use CLI to generate, upload proof here to verify</span>';
+  }
+});
+
+// Transcript change
+document.getElementById('config-transcript').addEventListener('change', (e) => {
+  transcript = e.target.value;
+  // Proofs are transcript-specific, so clear proof when transcript changes
+  proof = null;
+  document.getElementById('verify-btn').disabled = true;
+  document.getElementById('download-proof-btn').disabled = true;
   document.getElementById('prove-output').textContent = '';
   document.getElementById('verify-output').textContent = '';
 });
@@ -272,26 +328,54 @@ document.getElementById('download-poly-btn').addEventListener('click', () => {
   URL.revokeObjectURL(url);
 });
 
-// Generate polynomial
-document.getElementById('gen-btn').addEventListener('click', () => {
+// Generate polynomial (chunked to keep UI responsive for large sizes)
+document.getElementById('gen-btn').addEventListener('click', async () => {
   const size = get_polynomial_size(configSize);
-  polynomial = new Uint32Array(size);
 
-  for (let i = 0; i < size; i++) {
-    polynomial[i] = Math.floor(Math.random() * 0xFFFFFFFF);
+  document.getElementById('gen-btn').disabled = true;
+  document.getElementById('gen-output').innerHTML = `<span class="warn">allocating ${(size * 4 / 1024 / 1024).toFixed(0)} MB...</span>`;
+
+  await new Promise(r => setTimeout(r, 10));
+
+  try {
+    polynomial = new Uint32Array(size);
+  } catch (e) {
+    document.getElementById('gen-output').innerHTML = `<span class="err">✗ failed to allocate memory: ${e.message}</span>`;
+    document.getElementById('gen-btn').disabled = false;
+    return;
+  }
+
+  // Generate in chunks to keep UI responsive
+  const chunkSize = 1024 * 1024; // 1M elements per chunk
+  let generated = 0;
+
+  while (generated < size) {
+    const end = Math.min(generated + chunkSize, size);
+    for (let i = generated; i < end; i++) {
+      polynomial[i] = Math.floor(Math.random() * 0xFFFFFFFF);
+    }
+    generated = end;
+
+    if (size > chunkSize) {
+      const pct = ((generated / size) * 100).toFixed(0);
+      document.getElementById('gen-output').innerHTML = `<span class="warn">generating... ${pct}%</span>`;
+      await new Promise(r => setTimeout(r, 0));
+    }
   }
 
   const sizeKB = (size * 4 / 1024).toFixed(2);
+  const sizeMB = (size * 4 / 1024 / 1024).toFixed(2);
   const preview = Array.from(polynomial.slice(0, 8))
     .map(x => '0x' + x.toString(16).padStart(8, '0'))
     .join(' ');
 
   document.getElementById('gen-output').innerHTML = `
 <span class="ok">✓ generated polynomial</span>
-size:    ${size.toLocaleString()} elements (${sizeKB} KB)
+size:    ${size.toLocaleString()} elements (${size > 1024*1024 ? sizeMB + ' MB' : sizeKB + ' KB'})
 preview: ${preview}...
   `.trim();
 
+  document.getElementById('gen-btn').disabled = false;
   document.getElementById('prove-btn').disabled = false;
   document.getElementById('download-poly-btn').disabled = false;
   proof = null;
@@ -305,7 +389,7 @@ preview: ${preview}...
 document.getElementById('prove-btn').addEventListener('click', async () => {
   if (!polynomial) return;
 
-  document.getElementById('prove-output').innerHTML = `<span class="warn">proving... (${numThreads} threads)</span>`;
+  document.getElementById('prove-output').innerHTML = `<span class="warn">proving... (${numThreads} threads, ${transcript})</span>`;
   document.getElementById('prove-btn').disabled = true;
 
   // Let UI update before blocking
@@ -314,7 +398,7 @@ document.getElementById('prove-btn').addEventListener('click', async () => {
   const start = performance.now();
 
   try {
-    proof = prove(polynomial, configSize);
+    proof = prove(polynomial, configSize, transcript);
     const elapsed = performance.now() - start;
 
     const proofKB = (proof.length / 1024).toFixed(2);
@@ -322,7 +406,7 @@ document.getElementById('prove-btn').addEventListener('click', async () => {
     const compression = (polynomial.length * 4 / proof.length).toFixed(2);
 
     document.getElementById('prove-output').innerHTML = `
-<span class="ok">✓ proof generated (${numThreads} threads)</span>
+<span class="ok">✓ proof generated (${numThreads} threads, ${transcript})</span>
 time:        ${elapsed.toFixed(2)} ms
 proof size:  ${proof.length.toLocaleString()} bytes (${proofKB} KB)
 input size:  ${polyKB} KB
@@ -342,7 +426,7 @@ compression: ${compression}x
 document.getElementById('verify-btn').addEventListener('click', async () => {
   if (!proof) return;
 
-  document.getElementById('verify-output').innerHTML = '<span class="warn">verifying...</span>';
+  document.getElementById('verify-output').innerHTML = `<span class="warn">verifying... (${transcript})</span>`;
   document.getElementById('verify-btn').disabled = true;
 
   // Let UI update
@@ -351,7 +435,7 @@ document.getElementById('verify-btn').addEventListener('click', async () => {
   const start = performance.now();
 
   try {
-    const isValid = verify(proof, configSize);
+    const isValid = verify(proof, configSize, transcript);
     const elapsed = performance.now() - start;
 
     if (isValid) {
