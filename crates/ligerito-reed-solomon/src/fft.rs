@@ -67,7 +67,7 @@ pub fn compute_twiddles<F: BinaryFieldElement>(log_n: usize, beta: F) -> Vec<F> 
 }
 
 /// FFT butterfly in-place: u' = u + λ*w; w' = w + u' (char 2: + = add)
-fn fft_mul<F: BinaryFieldElement>(v: &mut [F], lambda: F) {
+fn fft_mul<F: BinaryFieldElement + 'static>(v: &mut [F], lambda: F) {
     let (u, w) = v.split_at_mut(v.len() / 2);
 
     // use SIMD-optimized version for BinaryElem32 when available (x86_64)
@@ -115,7 +115,7 @@ fn fft_mul<F: BinaryFieldElement>(v: &mut [F], lambda: F) {
 }
 
 /// In-place recursive FFT step with twiddles, idx starts at 1
-fn fft_twiddles<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], idx: usize) {
+fn fft_twiddles<F: BinaryFieldElement + 'static>(v: &mut [F], twiddles: &[F], idx: usize) {
     if v.len() == 1 {
         return;
     }
@@ -131,7 +131,7 @@ fn fft_twiddles<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], idx: usize) 
 
 /// Parallel in-place recursive FFT step with twiddles, idx starts at 1
 #[cfg(feature = "parallel")]
-fn fft_twiddles_parallel<F: BinaryFieldElement + Send + Sync>(v: &mut [F], twiddles: &[F], idx: usize, thread_depth: usize) {
+fn fft_twiddles_parallel<F: BinaryFieldElement + Send + Sync + 'static>(v: &mut [F], twiddles: &[F], idx: usize, thread_depth: usize) {
     const MIN_PARALLEL_SIZE: usize = 128; // reduce threshold for more parallelism
 
     let len = v.len();
@@ -158,7 +158,7 @@ fn fft_twiddles_parallel<F: BinaryFieldElement + Send + Sync>(v: &mut [F], twidd
 
 /// In-place FFT over binary field
 #[cfg(feature = "parallel")]
-pub fn fft<F: BinaryFieldElement + Send + Sync>(v: &mut [F], twiddles: &[F], parallel: bool) {
+pub fn fft<F: BinaryFieldElement + Send + Sync + 'static>(v: &mut [F], twiddles: &[F], parallel: bool) {
     if v.len() == 1 {
         return;
     }
@@ -176,7 +176,7 @@ pub fn fft<F: BinaryFieldElement + Send + Sync>(v: &mut [F], twiddles: &[F], par
 
 /// In-place FFT over binary field (no_std version without parallel support)
 #[cfg(not(feature = "parallel"))]
-pub fn fft<F: BinaryFieldElement>(v: &mut [F], twiddles: &[F], parallel: bool) {
+pub fn fft<F: BinaryFieldElement + 'static>(v: &mut [F], twiddles: &[F], parallel: bool) {
     if v.len() == 1 {
         return;
     }

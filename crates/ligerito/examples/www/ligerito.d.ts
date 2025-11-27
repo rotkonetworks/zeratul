@@ -1,17 +1,6 @@
 /* tslint:disable */
 /* eslint-disable */
 /**
- * Run CPU sumcheck benchmark
- *
- * # Example (JavaScript)
- * ```javascript
- * const config = new BenchConfig(10, 6, 32);  // n=10, k=6, q=32
- * const result = await benchCpuSumcheck(config);
- * console.log(`CPU time: ${result.time_ms}ms`);
- * ```
- */
-export function bench_cpu_sumcheck(config: BenchConfig): Promise<any>;
-/**
  * Initialize the WASM module (sets up panic hook for better error messages)
  */
 export function init(): void;
@@ -25,24 +14,20 @@ export function init(): void;
  */
 export function get_polynomial_size(config_size: number): number;
 /**
- * Verify a Ligerito proof
+ * Generate random polynomial and prove it entirely within WASM
+ *
+ * This avoids copying large polynomials from JS to WASM, which is crucial
+ * for large sizes like 2^28 (1GB of data).
  *
  * # Arguments
- * * `proof_bytes` - Serialized proof bytes (from `prove()`)
- * * `config_size` - Log2 of polynomial size (12, 20, or 24)
+ * * `config_size` - Log2 of polynomial size (12, 16, 20, 24, 28, 30)
+ * * `seed` - Random seed for reproducibility
  * * `transcript` - Optional transcript type: "sha256" (default), "merlin", or "blake2b"
- *   Must match the transcript used when generating the proof!
  *
  * # Returns
- * true if proof is valid, false otherwise
- *
- * # Example (JavaScript)
- * ```javascript
- * const isValid = verify(proofBytes, 12, "sha256");
- * console.log('Valid:', isValid);
- * ```
+ * Serialized proof bytes
  */
-export function verify(proof_bytes: Uint8Array, config_size: number, transcript?: string | null): boolean;
+export function generate_and_prove(config_size: number, seed: bigint, transcript?: string | null): Uint8Array;
 /**
  * Generate a Ligerito proof from a polynomial
  *
@@ -62,30 +47,27 @@ export function verify(proof_bytes: Uint8Array, config_size: number, transcript?
  * ```
  */
 export function prove(polynomial: Uint32Array, config_size: number, transcript?: string | null): Uint8Array;
-export function initThreadPool(num_threads: number): Promise<any>;
+/**
+ * Verify a Ligerito proof
+ *
+ * # Arguments
+ * * `proof_bytes` - Serialized proof bytes (from `prove()`)
+ * * `config_size` - Log2 of polynomial size (12, 20, or 24)
+ * * `transcript` - Optional transcript type: "sha256" (default), "merlin", or "blake2b"
+ *   Must match the transcript used when generating the proof!
+ *
+ * # Returns
+ * true if proof is valid, false otherwise
+ *
+ * # Example (JavaScript)
+ * ```javascript
+ * const isValid = verify(proofBytes, 12, "sha256");
+ * console.log('Valid:', isValid);
+ * ```
+ */
+export function verify(proof_bytes: Uint8Array, config_size: number, transcript?: string | null): boolean;
 export function wbg_rayon_start_worker(receiver: number): void;
-/**
- * Benchmark configuration for sumcheck tests
- */
-export class BenchConfig {
-  free(): void;
-  [Symbol.dispose](): void;
-  constructor(n: number, k: number, q: number);
-  n: number;
-  k: number;
-  q: number;
-}
-/**
- * Result from a sumcheck benchmark
- */
-export class BenchResult {
-  private constructor();
-  free(): void;
-  [Symbol.dispose](): void;
-  readonly error: string | undefined;
-  readonly success: boolean;
-  readonly time_ms: number;
-}
+export function initThreadPool(num_threads: number): Promise<any>;
 export class wbg_rayon_PoolBuilder {
   private constructor();
   free(): void;
@@ -98,19 +80,8 @@ export class wbg_rayon_PoolBuilder {
 export type InitInput = RequestInfo | URL | Response | BufferSource | WebAssembly.Module;
 
 export interface InitOutput {
-  readonly __wbg_benchconfig_free: (a: number, b: number) => void;
-  readonly __wbg_benchresult_free: (a: number, b: number) => void;
-  readonly __wbg_get_benchconfig_k: (a: number) => number;
-  readonly __wbg_get_benchconfig_n: (a: number) => number;
-  readonly __wbg_get_benchconfig_q: (a: number) => number;
-  readonly __wbg_set_benchconfig_k: (a: number, b: number) => void;
-  readonly __wbg_set_benchconfig_n: (a: number, b: number) => void;
-  readonly __wbg_set_benchconfig_q: (a: number, b: number) => void;
-  readonly bench_cpu_sumcheck: (a: number) => any;
-  readonly benchconfig_new: (a: number, b: number, c: number) => number;
-  readonly benchresult_error: (a: number) => [number, number];
-  readonly benchresult_success: (a: number) => number;
-  readonly benchresult_time_ms: (a: number) => number;
+  readonly main: (a: number, b: number) => number;
+  readonly generate_and_prove: (a: number, b: bigint, c: number, d: number) => [number, number, number, number];
   readonly get_polynomial_size: (a: number) => [number, number, number];
   readonly init: () => void;
   readonly prove: (a: number, b: number, c: number, d: number, e: number) => [number, number, number, number];
@@ -121,9 +92,6 @@ export interface InitOutput {
   readonly wbg_rayon_poolbuilder_numThreads: (a: number) => number;
   readonly wbg_rayon_poolbuilder_receiver: (a: number) => number;
   readonly wbg_rayon_start_worker: (a: number) => void;
-  readonly wasm_bindgen__convert__closures_____invoke__h8608eec756384caf: (a: number, b: number, c: any) => void;
-  readonly wasm_bindgen__closure__destroy__h4b29061b2075bc3f: (a: number, b: number) => void;
-  readonly wasm_bindgen__convert__closures_____invoke__h95106622f2e38ca7: (a: number, b: number, c: any, d: any) => void;
   readonly memory: WebAssembly.Memory;
   readonly __wbindgen_exn_store: (a: number) => void;
   readonly __externref_table_alloc: () => number;
