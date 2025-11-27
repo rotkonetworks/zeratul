@@ -4,15 +4,23 @@ use alloc::vec::Vec;
 use binary_fields::BinaryFieldElement;
 use crate::utils::partial_eval_multilinear;
 
-// Debug printing macros - no-ops in no_std
-#[cfg(feature = "std")]
-macro_rules! debug_eprintln {
-    ($($arg:tt)*) => { std::eprintln!($($arg)*) }
-}
-
-#[cfg(not(feature = "std"))]
-macro_rules! debug_eprintln {
-    ($($arg:tt)*) => { }
+/// Error type for sumcheck verifier operations
+#[derive(Debug, Clone, PartialEq)]
+pub enum SumcheckError {
+    /// Transcript exhausted before verification complete
+    TranscriptExhausted,
+    /// Sumcheck coefficient sum doesn't match expected value
+    SumMismatch,
+    /// Claim verification failed during introduce_new
+    ClaimMismatch,
+    /// Missing running polynomial during glue operation
+    NoRunningPoly,
+    /// Missing polynomial to glue
+    NoPolyToGlue,
+    /// Basis polynomial didn't fully evaluate
+    IncompleteEvaluation,
+    /// Basis polynomial length mismatch during partial evaluation
+    LengthMismatch,
 }
 
 /// linear polynomial structure for binary field sumcheck
@@ -158,28 +166,23 @@ impl<F: BinaryFieldElement> SumcheckVerifierInstance<F> {
     }
 
     /// read next transcript entry
-    fn read_tr(&mut self) -> (F, F, F) {
+    fn read_tr(&mut self) -> Result<(F, F, F), SumcheckError> {
         if self.tr_reader >= self.transcript.len() {
-            panic!("transcript reader out of bounds");
+            return Err(SumcheckError::TranscriptExhausted);
         }
         let (g0, g1, g2) = self.transcript[self.tr_reader];
         self.tr_reader += 1;
-        (g0, g1, g2)
+        Ok((g0, g1, g2))
     }
 
     /// fold the sumcheck with random challenge r
-    pub fn fold(&mut self, r: F) -> (F, F, F) {
+    pub fn fold(&mut self, r: F) -> Result<(F, F, F), SumcheckError> {
         // read transcript entry for this round
-        let (s0, s_total, s2) = self.read_tr();
+        let (s0, s_total, s2) = self.read_tr()?;
 
         // verify the coefficients match current sum claim
         if s_total != self.sum {
-            debug_eprintln!("sumcheck fold verification failed");
-            debug_eprintln!("  expected sum: {:?}", self.sum);
-            debug_eprintln!("  got s_total: {:?}", s_total);
-            debug_eprintln!("  s0: {:?}, s2: {:?}", s0, s2);
-            debug_eprintln!("  s0 + s2 = {:?}", s0.add(&s2));
-            panic!("sumcheck fold verification failed");
+            return Err(SumcheckError::SumMismatch);
         }
 
         // construct linear polynomial from the coefficients
@@ -194,16 +197,16 @@ impl<F: BinaryFieldElement> SumcheckVerifierInstance<F> {
         // store the challenge
         self.ris.push(r);
 
-        (s0, s_total, s2)
+        Ok((s0, s_total, s2))
     }
 
     /// introduce new basis polynomial to be glued
-    pub fn introduce_new(&mut self, bi: Vec<F>, h: F) -> (F, F, F) {
-        let (s0, s_total, s2) = self.read_tr();
+    pub fn introduce_new(&mut self, bi: Vec<F>, h: F) -> Result<(F, F, F), SumcheckError> {
+        let (s0, s_total, s2) = self.read_tr()?;
 
         // verify the new polynomial's claim
         if s_total != h {
-            panic!("introduce_new claim verification failed");
+            return Err(SumcheckError::ClaimMismatch);
         }
 
         self.basis_polys.push(bi);
@@ -211,16 +214,16 @@ impl<F: BinaryFieldElement> SumcheckVerifierInstance<F> {
         // construct linear polynomial from evaluations
         self.to_glue = Some(linear_from_evals(s0, s2));
 
-        (s0, s_total, s2)
+        Ok((s0, s_total, s2))
     }
 
     /// glue the pending polynomial with separation challenge alpha
-    pub fn glue(&mut self, alpha: F) {
+    pub fn glue(&mut self, alpha: F) -> Result<(), SumcheckError> {
         if self.running_poly.is_none() {
-            panic!("no running polynomial to glue");
+            return Err(SumcheckError::NoRunningPoly);
         }
         if self.to_glue.is_none() {
-            panic!("no polynomial to glue");
+            return Err(SumcheckError::NoPolyToGlue);
         }
 
         self.separation_challenges.push(alpha);
@@ -229,11 +232,12 @@ impl<F: BinaryFieldElement> SumcheckVerifierInstance<F> {
         let to_glue = self.to_glue.take().unwrap();
 
         self.running_poly = Some(fold_linear(running, to_glue, alpha));
+        Ok(())
     }
 
     /// evaluate basis polynomials at the current point (after all folds)
     /// this is used for the final check
-    fn evaluate_basis_polys(&mut self, r: F) -> F {
+    fn evaluate_basis_polys(&mut self, r: F) -> Result<F, SumcheckError> {
         self.ris.push(r);
 
         // evaluate first basis polynomial at all ris
@@ -241,7 +245,7 @@ impl<F: BinaryFieldElement> SumcheckVerifierInstance<F> {
         partial_eval_multilinear(&mut b0_copy, &self.ris);
 
         if b0_copy.len() != 1 {
-            panic!("basis polynomial should evaluate to single value");
+            return Err(SumcheckError::IncompleteEvaluation);
         }
         let mut b_eval = b0_copy[0];
 
@@ -261,7 +265,7 @@ impl<F: BinaryFieldElement> SumcheckVerifierInstance<F> {
             partial_eval_multilinear(&mut bi_copy, eval_pts);
 
             if bi_copy.len() != 1 {
-                panic!("basis polynomial {} should evaluate to single value", i);
+                return Err(SumcheckError::IncompleteEvaluation);
             }
             let bi_eval = bi_copy[0];
 
@@ -269,26 +273,26 @@ impl<F: BinaryFieldElement> SumcheckVerifierInstance<F> {
             b_eval = b_eval.add(&self.separation_challenges[i].mul(&bi_eval));
         }
 
-        b_eval
+        Ok(b_eval)
     }
 
     /// final verification check: f(r) * basis(r) == sum
-    pub fn verify(&mut self, r: F, f_eval: F) -> bool {
+    pub fn verify(&mut self, r: F, f_eval: F) -> Result<bool, SumcheckError> {
         if self.running_poly.is_none() {
-            return false;
+            return Ok(false);
         }
 
         let running_poly = self.running_poly.as_ref().unwrap().clone();
         self.sum = running_poly.eval(r);
 
-        let basis_evals = self.evaluate_basis_polys(r);
+        let basis_evals = self.evaluate_basis_polys(r)?;
 
-        f_eval.mul(&basis_evals) == self.sum
+        Ok(f_eval.mul(&basis_evals) == self.sum)
     }
 
     /// evaluate basis polynomials partially (keeping k variables unevaluated)
     /// returns a vector of length 2^k
-    fn evaluate_basis_polys_partially(&mut self, r: F, k: usize) -> Vec<F> {
+    fn evaluate_basis_polys_partially(&mut self, r: F, k: usize) -> Result<Vec<F>, SumcheckError> {
         self.ris.push(r);
 
         // evaluate first basis polynomial
@@ -321,11 +325,7 @@ impl<F: BinaryFieldElement> SumcheckVerifierInstance<F> {
 
             // accumulate: acc[j] += alpha * bi_eval[j]
             if acc.len() != bi_copy.len() {
-                panic!(
-                    "basis polynomial length mismatch: {} vs {}",
-                    acc.len(),
-                    bi_copy.len()
-                );
+                return Err(SumcheckError::LengthMismatch);
             }
 
             for j in 0..acc.len() {
@@ -333,28 +333,28 @@ impl<F: BinaryFieldElement> SumcheckVerifierInstance<F> {
             }
         }
 
-        acc
+        Ok(acc)
     }
 
-    /// final partial verification check: sum(f_partial_eval[i] * basis_evals[i]) == sum
+    /// Final partial verification check: `sum(f_partial_eval\[i\] * basis_evals\[i\]) == sum`
     /// note: in current protocol, verify_ligero provides sufficient verification
     /// this function is kept for completeness but may not be necessary
-    pub fn verify_partial(&mut self, r: F, f_partial_eval: &[F]) -> bool {
+    pub fn verify_partial(&mut self, r: F, f_partial_eval: &[F]) -> Result<bool, SumcheckError> {
         let k = f_partial_eval.len().ilog2() as usize;
 
         if self.running_poly.is_none() {
-            return false;
+            return Ok(false);
         }
 
         // evaluate running polynomial at r
         self.sum = self.running_poly.as_ref().unwrap().eval(r);
 
         // evaluate basis polynomials partially
-        let basis_evals = self.evaluate_basis_polys_partially(r, k);
+        let basis_evals = self.evaluate_basis_polys_partially(r, k)?;
 
         // check lengths match
         if f_partial_eval.len() != basis_evals.len() {
-            return false;
+            return Ok(false);
         }
 
         // compute dot product: sum(f[i] * basis[i])
@@ -365,7 +365,7 @@ impl<F: BinaryFieldElement> SumcheckVerifierInstance<F> {
                 acc.add(&f_i.mul(&b_i))
             });
 
-        dot_product == self.sum
+        Ok(dot_product == self.sum)
     }
 }
 

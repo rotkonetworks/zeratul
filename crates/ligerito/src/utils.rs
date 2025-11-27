@@ -3,7 +3,7 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-use binary_fields::{BinaryFieldElement, BinaryPolynomial};
+use binary_fields::BinaryFieldElement;
 
 /// Evaluate Lagrange basis at given points
 pub fn evaluate_lagrange_basis<F: BinaryFieldElement>(rs: &[F]) -> Vec<F> {
