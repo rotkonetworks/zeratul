@@ -29,6 +29,8 @@
 
 use binary_fields::BinaryFieldElement;
 use crate::reed_solomon::ReedSolomon;
+
+#[cfg(feature = "webgpu")]
 use std::sync::{Arc, Mutex};
 
 #[cfg(feature = "webgpu")]

@@ -1,7 +1,7 @@
 //! Ligerito polynomial commitment scheme implementation
 //!
 //! Based on the paper by Andrija Novakovic and Guillermo Angeris:
-//! https://angeris.github.io/papers/ligerito.pdf
+//! <https://angeris.github.io/papers/ligerito.pdf>
 //!
 //! # Features
 //!
@@ -96,6 +96,7 @@ extern crate ligerito_merkle as merkle_tree;
 #[cfg(feature = "prover")]
 extern crate ligerito_reed_solomon as reed_solomon;
 
+pub mod autosizer;
 pub mod configs;
 pub mod data_structures;
 pub mod transcript;
@@ -167,6 +168,23 @@ pub use configs::{
     hardcoded_config_30,
 };
 
+// Re-export autosizer functions for convenience
+pub use autosizer::{
+    verifier_config_for_size,
+    verifier_config_for_log_size,
+    config_info,
+    config_info_for_log_size,
+    ConfigInfo,
+    MIN_LOG_SIZE,
+    MAX_LOG_SIZE,
+};
+
+#[cfg(feature = "prover")]
+pub use autosizer::{
+    prover_config_for_size,
+    prover_config_for_log_size,
+};
+
 pub use data_structures::*;
 
 // Prover exports (only with prover feature)
@@ -175,6 +193,7 @@ pub use prover::{prove, prove_sha256, prove_with_transcript};
 
 // Verifier exports (always available)
 pub use verifier::{verify, verify_sha256, verify_with_transcript, verify_debug, verify_complete, verify_complete_sha256};
+pub use sumcheck_verifier::SumcheckError;
 pub use transcript::{FiatShamir, TranscriptType, Transcript, Sha256Transcript};
 
 #[cfg(feature = "transcript-merlin")]

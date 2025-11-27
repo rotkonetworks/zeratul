@@ -137,7 +137,7 @@ where
         let mut rs = Vec::new();
 
         // Sumcheck rounds
-        for j in 0..config.ks[i] {
+        for _ in 0..config.ks[i] {
             // Compute coefficients first (before getting challenge)
             let coeffs = compute_sumcheck_coefficients(&current_poly);
             sumcheck_transcript.push(coeffs);
@@ -537,14 +537,8 @@ fn fold_polynomial_with_challenge<F: BinaryFieldElement>(poly: &[F], r: F) -> Ve
     new_poly
 }
 
-fn fold_polynomial<F: BinaryFieldElement>(poly: &[F], r: F) -> (Vec<F>, (F, F, F)) {
-    let coeffs = compute_sumcheck_coefficients(poly);
-    let new_poly = fold_polynomial_with_challenge(poly, r);
-    (new_poly, coeffs)
-}
-
 fn evaluate_quadratic<F: BinaryFieldElement>(coeffs: (F, F, F), x: F) -> F {
-    let (s0, s1, s2) = coeffs;
+    let (s0, s1, _s2) = coeffs;
     // For binary field sumcheck, we need a univariate polynomial where:
     // f(0) = s0 (sum when xi=0)
     // f(1) = s2 (sum when xi=1)
@@ -579,26 +573,6 @@ mod tests {
     use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
     use crate::configs::hardcoded_config_12;
     use std::marker::PhantomData;
-
-    #[test]
-    fn test_fold_polynomial() {
-        // Test with a simple polynomial
-        let poly = vec![
-            BinaryElem32::from(1),
-            BinaryElem32::from(2),
-            BinaryElem32::from(3),
-            BinaryElem32::from(4),
-        ];
-
-        let r = BinaryElem32::from(5);
-        let (new_poly, (s0, _s1, s2)) = fold_polynomial(&poly, r);
-
-        assert_eq!(new_poly.len(), 2);
-
-        // Check sums
-        assert_eq!(s0, BinaryElem32::from(1).add(&BinaryElem32::from(3)));
-        assert_eq!(s2, BinaryElem32::from(2).add(&BinaryElem32::from(4)));
-    }
 
     #[test]
     fn test_evaluate_quadratic() {

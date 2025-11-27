@@ -29,7 +29,7 @@ polynomial commitment scheme over binary extension fields.
 **add to Cargo.toml:**
 ```toml
 [dependencies]
-ligerito = "0.2.3"
+ligerito = "0.3.1"
 ```
 
 **⚠️ for development:** clone the workspace to get automatic native optimizations:
