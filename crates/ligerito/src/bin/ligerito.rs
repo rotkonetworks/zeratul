@@ -26,7 +26,7 @@ use ligerito::{
     hardcoded_config_30, hardcoded_config_30_verifier,
     VerifierConfig, FinalizedLigeritoProof,
 };
-use ligerito::transcript::{Sha256Transcript, MerlinTranscript, FiatShamir};
+use ligerito::transcript::{MerlinTranscript, FiatShamir};
 use ligerito_binary_fields::{BinaryElem32, BinaryElem128};
 use std::io::{self, Read, Write};
 use std::marker::PhantomData;
@@ -125,6 +125,21 @@ enum Commands {
         #[arg(short, long)]
         output: Option<String>,
     },
+
+    /// Benchmark proving performance (no I/O overhead)
+    Bench {
+        /// Log2 of polynomial size (12, 16, 20, 24, 28, or 30)
+        #[arg(short, long)]
+        size: usize,
+
+        /// Number of iterations (default: 3)
+        #[arg(short, long, default_value = "3")]
+        iterations: usize,
+
+        /// Also benchmark verification
+        #[arg(short, long)]
+        verify: bool,
+    },
 }
 
 fn main() -> Result<()> {
@@ -142,6 +157,9 @@ fn main() -> Result<()> {
         }
         Commands::Generate { size, pattern, output } => {
             generate_command(size, &pattern, output)?;
+        }
+        Commands::Bench { size, iterations, verify } => {
+            bench_command(size, iterations, verify)?;
         }
     }
 
@@ -486,4 +504,88 @@ fn generate_command(size: usize, pattern: &str, output: Option<String>) -> Resul
     }
 
     Ok(())
+}
+
+fn bench_command(size: usize, iterations: usize, do_verify: bool) -> Result<()> {
+    use ligerito::prove_sha256;
+
+    eprintln!("Benchmarking 2^{} ({} elements)", size, 1usize << size);
+    eprintln!("Iterations: {}", iterations);
+    eprintln!("Threads: {}", rayon::current_num_threads());
+
+    // Generate polynomial
+    let poly: Vec<BinaryElem32> = (0..(1 << size))
+        .map(|i| BinaryElem32::from(i as u32))
+        .collect();
+
+    // Get config based on size
+    macro_rules! run_bench {
+        ($config_fn:ident, $verifier_config_fn:ident) => {{
+            let config = $config_fn(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>);
+
+            // Warmup
+            eprintln!("Warming up...");
+            let warmup_proof = prove_sha256(&config, &poly).context("Warmup failed")?;
+
+            // Benchmark proving
+            eprintln!("Running prove benchmark...");
+            let mut prove_times = Vec::new();
+            let mut proof = warmup_proof;
+
+            for i in 0..iterations {
+                let start = Instant::now();
+                proof = prove_sha256(&config, &poly).context("Proving failed")?;
+                let elapsed = start.elapsed();
+                prove_times.push(elapsed);
+                eprintln!("  Run {}: {:.2}ms", i + 1, elapsed.as_secs_f64() * 1000.0);
+            }
+
+            let avg_prove = prove_times.iter().map(|d| d.as_millis()).sum::<u128>() / prove_times.len() as u128;
+            let min_prove = prove_times.iter().map(|d| d.as_millis()).min().unwrap();
+            let max_prove = prove_times.iter().map(|d| d.as_millis()).max().unwrap();
+
+            eprintln!("\nProve results:");
+            eprintln!("  Average: {}ms", avg_prove);
+            eprintln!("  Min: {}ms", min_prove);
+            eprintln!("  Max: {}ms", max_prove);
+            eprintln!("  Proof size: {} bytes", proof.size_of());
+
+            // Benchmark verification if requested
+            if do_verify {
+                let verifier_config = $verifier_config_fn();
+
+                eprintln!("\nRunning verify benchmark...");
+                let mut verify_times = Vec::new();
+
+                for i in 0..iterations {
+                    let start = Instant::now();
+                    let valid = ligerito::verify_sha256(&verifier_config, &proof)
+                        .context("Verification failed")?;
+                    let elapsed = start.elapsed();
+                    verify_times.push(elapsed);
+                    eprintln!("  Run {}: {:.2}ms ({})", i + 1, elapsed.as_secs_f64() * 1000.0,
+                        if valid { "VALID" } else { "INVALID" });
+                }
+
+                let avg_verify = verify_times.iter().map(|d| d.as_millis()).sum::<u128>() / verify_times.len() as u128;
+                let min_verify = verify_times.iter().map(|d| d.as_millis()).min().unwrap();
+
+                eprintln!("\nVerify results:");
+                eprintln!("  Average: {}ms", avg_verify);
+                eprintln!("  Min: {}ms", min_verify);
+            }
+
+            Ok(())
+        }};
+    }
+
+    match size {
+        12 => run_bench!(hardcoded_config_12, hardcoded_config_12_verifier),
+        16 => run_bench!(hardcoded_config_16, hardcoded_config_16_verifier),
+        20 => run_bench!(hardcoded_config_20, hardcoded_config_20_verifier),
+        24 => run_bench!(hardcoded_config_24, hardcoded_config_24_verifier),
+        28 => run_bench!(hardcoded_config_28, hardcoded_config_28_verifier),
+        30 => run_bench!(hardcoded_config_30, hardcoded_config_30_verifier),
+        _ => anyhow::bail!("Unsupported size: {}. Must be 12, 16, 20, 24, 28, or 30", size),
+    }
 }

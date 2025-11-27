@@ -1,6 +1,6 @@
 [package]
 name = "ligerito"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 authors.workspace = true
 license.workspace = true
@@ -143,8 +143,8 @@ cli = [
 
 [dependencies]
 # Core dependencies (always needed)
-ligerito-binary-fields = { version = "0.2.3", path = "../ligerito-binary-fields", default-features = false }
-ligerito-merkle = { version = "0.2.3", path = "../ligerito-merkle", default-features = false }
+ligerito-binary-fields = { version = "0.2.4", path = "../ligerito-binary-fields", default-features = false }
+ligerito-merkle = { version = "0.2.4", path = "../ligerito-merkle", default-features = false }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"], optional = true }
 bytemuck = { workspace = true }
 
@@ -157,7 +157,7 @@ blake2 = { version = "0.10", default-features = false, optional = true }
 sp-io = { version = "38.0.0", default-features = false, optional = true }
 
 # Prover-only dependencies
-ligerito-reed-solomon = { version = "0.2.3", path = "../ligerito-reed-solomon", optional = true, default-features = false }
+ligerito-reed-solomon = { version = "0.2.4", path = "../ligerito-reed-solomon", optional = true, default-features = false }
 rand = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
 
