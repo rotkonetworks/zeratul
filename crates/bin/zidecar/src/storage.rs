@@ -203,6 +203,72 @@ impl Storage {
         Ok(root)
     }
 
+    // ===== HEADER CACHE =====
+
+    /// store block header (hash + prev_hash) by height
+    pub fn store_header(&self, height: u32, hash: &str, prev_hash: &str) -> Result<()> {
+        let mut key = Vec::with_capacity(5);
+        key.push(b'h'); // header prefix
+        key.extend_from_slice(&height.to_le_bytes());
+
+        // store as "hash:prev_hash"
+        let value = format!("{}:{}", hash, prev_hash);
+        self.sled
+            .insert(key, value.as_bytes())
+            .map_err(|e| ZidecarError::Storage(format!("sled: {}", e)))?;
+        Ok(())
+    }
+
+    /// get cached header by height
+    pub fn get_header(&self, height: u32) -> Result<Option<(String, String)>> {
+        let mut key = Vec::with_capacity(5);
+        key.push(b'h');
+        key.extend_from_slice(&height.to_le_bytes());
+
+        match self.sled.get(key) {
+            Ok(Some(bytes)) => {
+                let s = String::from_utf8_lossy(&bytes);
+                if let Some((hash, prev_hash)) = s.split_once(':') {
+                    Ok(Some((hash.to_string(), prev_hash.to_string())))
+                } else {
+                    Ok(None)
+                }
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(ZidecarError::Storage(format!("sled: {}", e))),
+        }
+    }
+
+    /// get highest cached header height
+    pub fn get_max_cached_header_height(&self) -> Result<Option<u32>> {
+        let prefix = vec![b'h'];
+        for item in self.sled.scan_prefix(&prefix).rev() {
+            if let Ok((key, _)) = item {
+                if key.len() == 5 {
+                    let height = u32::from_le_bytes([key[1], key[2], key[3], key[4]]);
+                    return Ok(Some(height));
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    /// batch store headers
+    pub fn store_headers_batch(&self, headers: &[(u32, String, String)]) -> Result<()> {
+        let mut batch = sled::Batch::default();
+        for (height, hash, prev_hash) in headers {
+            let mut key = Vec::with_capacity(5);
+            key.push(b'h');
+            key.extend_from_slice(&height.to_le_bytes());
+            let value = format!("{}:{}", hash, prev_hash);
+            batch.insert(key, value.as_bytes());
+        }
+        self.sled
+            .apply_batch(batch)
+            .map_err(|e| ZidecarError::Storage(format!("sled batch: {}", e)))?;
+        Ok(())
+    }
+
     // ===== CHECKPOINT STORAGE =====
 
     /// store FROST checkpoint
@@ -299,6 +365,48 @@ impl Storage {
             }
         }
         Ok(None)
+    }
+
+    // ===== GIGAPROOF METADATA =====
+
+    /// store the epoch that the current gigaproof covers up to
+    pub fn set_gigaproof_epoch(&self, epoch: u32) -> Result<()> {
+        self.sled
+            .insert(b"gigaproof_epoch", &epoch.to_le_bytes())
+            .map_err(|e| ZidecarError::Storage(format!("sled: {}", e)))?;
+        Ok(())
+    }
+
+    /// get the epoch that the current gigaproof covers up to
+    pub fn get_gigaproof_epoch(&self) -> Result<Option<u32>> {
+        match self.sled.get(b"gigaproof_epoch") {
+            Ok(Some(bytes)) if bytes.len() == 4 => {
+                let epoch = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                Ok(Some(epoch))
+            }
+            Ok(_) => Ok(None),
+            Err(e) => Err(ZidecarError::Storage(format!("sled: {}", e))),
+        }
+    }
+
+    /// store the start height for gigaproof
+    pub fn set_gigaproof_start(&self, height: u32) -> Result<()> {
+        self.sled
+            .insert(b"gigaproof_start", &height.to_le_bytes())
+            .map_err(|e| ZidecarError::Storage(format!("sled: {}", e)))?;
+        Ok(())
+    }
+
+    /// get the start height for gigaproof
+    pub fn get_gigaproof_start(&self) -> Result<Option<u32>> {
+        match self.sled.get(b"gigaproof_start") {
+            Ok(Some(bytes)) if bytes.len() == 4 => {
+                let height = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                Ok(Some(height))
+            }
+            Ok(_) => Ok(None),
+            Err(e) => Err(ZidecarError::Storage(format!("sled: {}", e))),
+        }
     }
 
     // ===== PROOF GENERATION (NOMT) =====

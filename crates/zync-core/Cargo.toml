@@ -9,8 +9,24 @@ keywords = ["zcash", "ligerito", "light-client", "zk-proofs"]
 categories = ["cryptography"]
 
 [features]
-default = ["client"]
+default = ["client", "parallel"]
 client = ["tonic", "prost", "tokio", "tokio-stream", "tracing"]
+parallel = ["rayon"]
+
+# WASM support (single-threaded, but with wasm-bindgen for JS interop)
+wasm = [
+    "getrandom/js",                 # WASM-compatible RNG
+    "wasm-bindgen",                 # JS bindings
+    "console_error_panic_hook",     # Better error messages
+]
+
+# Multi-threaded WASM (requires SharedArrayBuffer + CORS headers)
+wasm-parallel = [
+    "wasm",
+    "parallel",                     # Enable rayon parallel iterators
+    "wasm-bindgen-rayon",           # Enable rayon in WASM via Web Workers
+    "js-sys",                       # JavaScript Promise types
+]
 
 [dependencies]
 # local workspace ligerito (has transcript-blake2b feature)
@@ -43,6 +59,7 @@ orchard = "0.7"
 zip32 = "0.1"
 zcash_note_encryption = "0.4"
 pasta_curves = "0.5"
+subtle = "2.5"  # constant-time types (CtOption)
 
 # gRPC client (optional)
 tonic = { version = "0.11", optional = true }
@@ -50,6 +67,16 @@ prost = { version = "0.12", optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 tokio-stream = { version = "0.1", optional = true }
 tracing = { version = "0.1", optional = true }
+
+# parallel scanning (native and WASM with wasm-bindgen-rayon)
+rayon = { version = "1.10", optional = true }
+
+# WASM dependencies
+wasm-bindgen = { version = "0.2", optional = true }
+wasm-bindgen-rayon = { version = "1.2", optional = true }
+console_error_panic_hook = { version = "0.1", optional = true }
+getrandom = { version = "0.2", optional = true }
+js-sys = { version = "0.3", optional = true }
 
 [build-dependencies]
 tonic-build = "0.11"

@@ -1,10 +1,22 @@
 //! header chain trace encoding for ligerito proofs
 
 use crate::error::{Result, ZidecarError};
+use crate::storage::Storage;
 use crate::zebrad::{BlockHeader, ZebradClient};
 use blake2::{Blake2b512, Digest};
+use futures::stream::{self, StreamExt};
 use ligerito_binary_fields::{BinaryElem32, BinaryFieldElement};
-use tracing::{debug, info};
+use std::sync::Arc;
+use tracing::{info, warn};
+
+/// concurrent requests for header fetching (reduced to avoid overwhelming zebrad)
+const CONCURRENT_REQUESTS: usize = 16;
+
+/// max retries for RPC calls
+const MAX_RETRIES: usize = 3;
+
+/// batch size for caching to disk (flush every N headers)
+const CACHE_BATCH_SIZE: usize = 1000;
 
 /// fields encoded per block header in trace
 pub const FIELDS_PER_HEADER: usize = 8;
@@ -26,12 +38,21 @@ pub struct HeaderChainTrace {
     pub start_height: u32,
     /// end height
     pub end_height: u32,
+    /// initial running commitment (for composing proofs)
+    /// - GIGAPROOF starts with all zeros
+    /// - TIP_PROOF starts with GIGAPROOF's final commitment
+    pub initial_commitment: [u8; 32],
+    /// final running commitment (for composing proofs)
+    /// - stored in field 7 of last header
+    /// - used as initial_commitment for the next proof
+    pub final_commitment: [u8; 32],
 }
 
 impl HeaderChainTrace {
-    /// build trace from header range
+    /// build trace from header range using parallel fetching with caching
     pub async fn build(
         zebrad: &ZebradClient,
+        storage: &Arc<Storage>,
         start_height: u32,
         end_height: u32,
     ) -> Result<Self> {
@@ -47,21 +68,111 @@ impl HeaderChainTrace {
             start_height, end_height, num_headers
         );
 
-        // fetch all headers
-        let mut headers = Vec::with_capacity(num_headers);
-        for height in start_height..=end_height {
-            if height % 10000 == 0 {
-                debug!("fetching header {}", height);
+        // check cache for already fetched headers
+        let cached_max = storage.get_max_cached_header_height()?.unwrap_or(0);
+        let fetch_start = if cached_max >= start_height && cached_max < end_height {
+            cached_max + 1
+        } else if cached_max >= end_height {
+            // all cached
+            end_height + 1 // nothing to fetch
+        } else {
+            start_height
+        };
+
+        let to_fetch = if fetch_start <= end_height {
+            (end_height - fetch_start + 1) as usize
+        } else {
+            0
+        };
+
+        info!(
+            "cache status: max_cached={}, need to fetch {} headers ({} -> {})",
+            cached_max, to_fetch, fetch_start, end_height
+        );
+
+        // fetch missing headers in parallel with retry and incremental caching
+        if to_fetch > 0 {
+            let heights: Vec<u32> = (fetch_start..=end_height).collect();
+            let total = heights.len();
+
+            // process in chunks to cache incrementally
+            let mut fetched_count = 0;
+            for chunk in heights.chunks(CACHE_BATCH_SIZE) {
+                let zebrad_clone = zebrad.clone();
+                let chunk_vec: Vec<u32> = chunk.to_vec();
+
+                let fetched: Vec<std::result::Result<(u32, String, String), ZidecarError>> = stream::iter(chunk_vec)
+                    .map(|height| {
+                        let zc = zebrad_clone.clone();
+                        async move {
+                            // retry logic
+                            let mut last_err = None;
+                            for attempt in 0..MAX_RETRIES {
+                                match async {
+                                    let hash = zc.get_block_hash(height).await?;
+                                    let header = zc.get_block_header(&hash).await?;
+                                    Ok::<_, ZidecarError>((height, header.hash, header.prev_hash))
+                                }.await {
+                                    Ok(result) => return Ok(result),
+                                    Err(e) => {
+                                        last_err = Some(e);
+                                        if attempt < MAX_RETRIES - 1 {
+                                            // exponential backoff: 100ms, 200ms, 400ms
+                                            tokio::time::sleep(tokio::time::Duration::from_millis(100 * (1 << attempt))).await;
+                                        }
+                                    }
+                                }
+                            }
+                            Err(last_err.unwrap())
+                        }
+                    })
+                    .buffer_unordered(CONCURRENT_REQUESTS)
+                    .collect()
+                    .await;
+
+                // collect chunk results
+                let mut headers_to_cache: Vec<(u32, String, String)> = Vec::with_capacity(chunk.len());
+                for result in fetched {
+                    let (height, hash, prev_hash) = result?;
+                    headers_to_cache.push((height, hash, prev_hash));
+                }
+
+                // sort by height before caching (buffer_unordered doesn't preserve order)
+                headers_to_cache.sort_by_key(|(h, _, _)| *h);
+
+                // batch store to cache
+                storage.store_headers_batch(&headers_to_cache)?;
+                fetched_count += headers_to_cache.len();
+
+                // progress logging
+                let progress = (fetched_count * 100) / total;
+                info!("fetched {}% ({}/{}) headers", progress, fetched_count, total);
             }
-            let hash = zebrad.get_block_hash(height).await?;
-            let header = zebrad.get_block_header(&hash).await?;
-            headers.push(header);
+            info!("cached all {} headers", fetched_count);
         }
 
-        info!("fetched {} headers, encoding trace", headers.len());
+        // now build trace from cache
+        info!("loading headers from cache...");
+        let mut headers: Vec<BlockHeader> = Vec::with_capacity(num_headers);
+        for height in start_height..=end_height {
+            if let Some((hash, prev_hash)) = storage.get_header(height)? {
+                headers.push(BlockHeader {
+                    height,
+                    hash,
+                    prev_hash,
+                    timestamp: 0, // not needed for trace
+                    merkle_root: String::new(),
+                });
+            } else {
+                return Err(ZidecarError::BlockNotFound(height));
+            }
+        }
 
-        // encode trace
-        let trace = Self::encode_headers(&headers)?;
+        info!("loaded {} headers from cache, encoding trace", headers.len());
+
+        // encode trace with default initial commitment (zeros for GIGAPROOF)
+        let initial_commitment = [0u8; 32];
+        let (trace, final_commitment) = Self::encode_headers_with_commitment(&headers, initial_commitment)?;
 
         info!(
             "encoded trace: {} elements ({} headers × {} fields)",
@@ -75,11 +186,53 @@ impl HeaderChainTrace {
             num_headers,
             start_height,
             end_height,
+            initial_commitment,
+            final_commitment,
         })
     }
 
-    /// encode headers into trace polynomial
-    fn encode_headers(headers: &[BlockHeader]) -> Result<Vec<BinaryElem32>> {
+    /// build trace with a specific initial commitment (for composing proofs)
+    pub async fn build_with_commitment(
+        zebrad: &ZebradClient,
+        storage: &Arc<Storage>,
+        start_height: u32,
+        end_height: u32,
+        initial_commitment: [u8; 32],
+    ) -> Result<Self> {
+        // build normally first, then override the commitment chain
+        let mut trace = Self::build(zebrad, storage, start_height, end_height).await?;
+
+        // if non-zero initial commitment, re-encode with it
+        if initial_commitment != [0u8; 32] {
+            // re-fetch headers from cache (they're already there)
+            let mut headers: Vec<BlockHeader> = Vec::new();
+            for height in start_height..=end_height {
+                if let Some((hash, prev_hash)) = storage.get_header(height)? {
+                    headers.push(BlockHeader {
+                        height,
+                        hash,
+                        prev_hash,
+                        timestamp: 0,
+                        merkle_root: String::new(),
+                    });
+                }
+            }
+
+            let (new_trace, final_commitment) = Self::encode_headers_with_commitment(&headers, initial_commitment)?;
+            trace.trace = new_trace;
+            trace.initial_commitment = initial_commitment;
+            trace.final_commitment = final_commitment;
+        }
+
+        Ok(trace)
+    }
+
+    /// encode headers into trace polynomial with explicit initial commitment
+    /// returns (trace, final_commitment) for proof composition
+    fn encode_headers_with_commitment(
+        headers: &[BlockHeader],
+        initial_commitment: [u8; 32],
+    ) -> Result<(Vec<BinaryElem32>, [u8; 32])> {
         let num_elements = headers.len() * FIELDS_PER_HEADER;
 
         // round up to next power of 2 for ligerito
@@ -87,7 +240,7 @@ impl HeaderChainTrace {
 
         let mut trace = vec![BinaryElem32::zero(); trace_size];
 
-        let mut running_commitment = [0u8; 32];
+        let mut running_commitment = initial_commitment;
 
         for (i, header) in headers.iter().enumerate() {
             let offset = i * FIELDS_PER_HEADER;
@@ -133,7 +286,7 @@ impl HeaderChainTrace {
             trace[offset + 7] = bytes_to_field(&running_commitment[0..4]);
         }
 
-        Ok(trace)
+        Ok((trace, running_commitment))
     }
 
     /// verify trace encodes headers correctly (for testing)
