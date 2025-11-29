@@ -96,6 +96,8 @@ extern crate ligerito_merkle as merkle_tree;
 #[cfg(feature = "prover")]
 extern crate ligerito_reed_solomon as reed_solomon;
 
+// Autosizer requires std for floating point math
+#[cfg(feature = "std")]
 pub mod autosizer;
 pub mod configs;
 pub mod data_structures;
@@ -165,7 +167,8 @@ pub use configs::{
     hardcoded_config_30,
 };
 
-// Re-export autosizer functions for convenience
+// Re-export autosizer functions for convenience (requires std)
+#[cfg(feature = "std")]
 pub use autosizer::{
     verifier_config_for_size,
     verifier_config_for_log_size,
@@ -176,7 +179,7 @@ pub use autosizer::{
     MAX_LOG_SIZE,
 };
 
-#[cfg(feature = "prover")]
+#[cfg(all(feature = "std", feature = "prover"))]
 pub use autosizer::{
     prover_config_for_size,
     prover_config_for_log_size,

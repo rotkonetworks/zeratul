@@ -31,6 +31,7 @@ pub struct CompleteMerkleTree {
 
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "scale", derive(codec::Encode, codec::Decode, scale_info::TypeInfo))]
 pub struct MerkleRoot {
     pub root: Option<Hash>,
 }

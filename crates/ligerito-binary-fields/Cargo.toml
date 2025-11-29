@@ -10,10 +10,14 @@ categories = ["cryptography", "no-std"]
 repository.workspace = true
 
 [dependencies]
-rand = { workspace = true }
+rand = { workspace = true, optional = true }
 wide = { workspace = true }
 bytemuck = { workspace = true }
 serde = { workspace = true, optional = true }
+
+# SCALE codec for Substrate runtime support
+codec = { package = "parity-scale-codec", version = "3.6", default-features = false, features = ["derive"], optional = true }
+scale-info = { version = "2.11", default-features = false, features = ["derive"], optional = true }
 
 # portable simd for prover (requires nightly, not available on crates.io)
 # Users need to enable this manually with git dependency if needed
@@ -27,9 +31,12 @@ criterion = { workspace = true }
 proptest = { workspace = true }
 
 [features]
-default = ["std"]
-std = ["rand/std", "serde?/std"]
+default = ["std", "rand"]
+std = ["rand?/std", "serde?/std", "codec?/std", "scale-info?/std", "wide/std"]
 serde = ["dep:serde"]
+rand = ["dep:rand"]
+# SCALE codec for Substrate runtime (no_std compatible)
+scale = ["dep:codec", "dep:scale-info"]
 # portable simd not available in published crate (requires nightly git dependency)
 # simd = ["portable-simd"]
 # x86-specific hardware acceleration (pclmulqdq, avx512)

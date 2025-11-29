@@ -76,6 +76,7 @@ pub struct RecursiveLigeroWitness<T: BinaryFieldElement> {
 /// Recursive Ligero commitment
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "scale", derive(codec::Encode, codec::Decode, scale_info::TypeInfo))]
 pub struct RecursiveLigeroCommitment {
     pub root: MerkleRoot,
 }
@@ -89,6 +90,7 @@ impl RecursiveLigeroCommitment {
 /// Recursive Ligero proof
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "scale", derive(codec::Encode, codec::Decode, scale_info::TypeInfo))]
 pub struct RecursiveLigeroProof<T: BinaryFieldElement> {
     pub opened_rows: Vec<Vec<T>>,
     pub merkle_proof: BatchedMerkleProof,
@@ -106,6 +108,7 @@ impl<T: BinaryFieldElement> RecursiveLigeroProof<T> {
 /// Final Ligero proof
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "scale", derive(codec::Encode, codec::Decode, scale_info::TypeInfo))]
 pub struct FinalLigeroProof<T: BinaryFieldElement> {
     pub yr: Vec<T>,
     pub opened_rows: Vec<Vec<T>>,
@@ -125,6 +128,7 @@ impl<T: BinaryFieldElement> FinalLigeroProof<T> {
 /// Sumcheck transcript
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "scale", derive(codec::Encode, codec::Decode, scale_info::TypeInfo))]
 pub struct SumcheckTranscript<T: BinaryFieldElement> {
     pub transcript: Vec<(T, T, T)>,  // Quadratic polynomial coefficients
 }
@@ -161,6 +165,7 @@ impl<T: BinaryFieldElement, U: BinaryFieldElement> LigeritoProof<T, U> {
 /// Finalized Ligerito proof
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(Serialize, Deserialize))]
+#[cfg_attr(feature = "scale", derive(codec::Encode, codec::Decode, scale_info::TypeInfo))]
 pub struct FinalizedLigeritoProof<T: BinaryFieldElement, U: BinaryFieldElement> {
     pub initial_ligero_cm: RecursiveLigeroCommitment,
     pub initial_ligero_proof: RecursiveLigeroProof<T>,

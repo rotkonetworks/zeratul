@@ -16,8 +16,11 @@ exclude = [
     ".gitignore",
 ]
 
+# cdylib only needed for standalone WASM builds (wasm-pack)
+# For library use (Substrate runtime), we only need rlib (default)
+# To build WASM: wasm-pack build --features wasm
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 # Default is full-featured std environment with prover + verifier + CLI
 # Uses SHA256 transcript by default (no extra deps, works everywhere)
@@ -31,6 +34,14 @@ serde = [
     "ligerito-merkle/serde",
 ]
 
+# SCALE codec for Substrate runtime (no_std compatible)
+scale = [
+    "dep:codec",
+    "dep:scale-info",
+    "ligerito-binary-fields/scale",
+    "ligerito-merkle/scale",
+]
+
 # Environment: std or no_std
 std = [
     "ligerito-binary-fields/std",
@@ -38,11 +49,13 @@ std = [
     "ligerito-reed-solomon?/std",
     "serde",
     "serde?/std",
+    "codec?/std",
+    "scale-info?/std",
     "thiserror",
 ]
 
 # Functionality: include prover or verifier-only
-prover = ["ligerito-reed-solomon", "rand", "rand_chacha"]
+prover = ["ligerito-reed-solomon", "rand", "rand_chacha", "ligerito-binary-fields/rand", "ligerito-merkle/rand"]
 verifier-only = []
 
 # Performance optimizations
@@ -135,6 +148,10 @@ ligerito-binary-fields = { version = "0.3.0", path = "../ligerito-binary-fields"
 ligerito-merkle = { version = "0.3.0", path = "../ligerito-merkle", default-features = false }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"], optional = true }
 bytemuck = { workspace = true }
+
+# SCALE codec for Substrate runtime support
+codec = { package = "parity-scale-codec", version = "3.6", default-features = false, features = ["derive"], optional = true }
+scale-info = { version = "2.11", default-features = false, features = ["derive"], optional = true }
 
 # Crypto (sha256 always available for no_std)
 sha2 = { workspace = true, default-features = false }

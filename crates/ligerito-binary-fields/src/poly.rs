@@ -7,6 +7,7 @@ macro_rules! impl_binary_poly {
         #[repr(transparent)]
         #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
         #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+        #[cfg_attr(feature = "scale", derive(codec::Encode, codec::Decode, scale_info::TypeInfo))]
         pub struct $name($value_type);
 
         // SAFETY: $name is repr(transparent) over $value_type (a primitive integer type)
@@ -123,6 +124,7 @@ impl_binary_poly!(BinaryPoly32, u32, BinaryPoly64);
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "scale", derive(codec::Encode, codec::Decode, scale_info::TypeInfo))]
 pub struct BinaryPoly64(u64);
 
 // SAFETY: BinaryPoly64 is repr(transparent) over u64 (a primitive)
@@ -219,6 +221,7 @@ impl From<u64> for BinaryPoly64 {
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "scale", derive(codec::Encode, codec::Decode, scale_info::TypeInfo))]
 pub struct BinaryPoly128(u128);
 
 // SAFETY: BinaryPoly128 is repr(transparent) over u128 (a primitive)
@@ -316,6 +319,7 @@ impl From<u128> for BinaryPoly128 {
 // BinaryPoly256 for intermediate calculations
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "scale", derive(codec::Encode, codec::Decode, scale_info::TypeInfo))]
 pub struct BinaryPoly256 {
     hi: u128,
     lo: u128,

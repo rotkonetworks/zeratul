@@ -5,8 +5,8 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
-#[cfg(feature = "transcript-blake2b")]
-use hashbrown::HashSet;
+#[cfg(feature = "std")]
+use std::collections::HashSet;
 
 use binary_fields::BinaryFieldElement;
 use merkle_tree::MerkleRoot;

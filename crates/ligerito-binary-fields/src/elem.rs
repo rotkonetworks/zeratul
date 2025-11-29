@@ -10,6 +10,7 @@ macro_rules! impl_binary_elem {
         #[repr(transparent)]
         #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
         #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+        #[cfg_attr(feature = "scale", derive(codec::Encode, codec::Decode, scale_info::TypeInfo))]
         pub struct $name($poly_type);
 
         // SAFETY: $name is repr(transparent) over $poly_type which wraps $value_type (a primitive)
@@ -137,6 +138,7 @@ macro_rules! impl_binary_elem {
             }
         }
 
+        #[cfg(feature = "rand")]
         impl rand::distributions::Distribution<$name> for rand::distributions::Standard {
             fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> $name {
                 $name::from_value(rng.gen())
@@ -152,6 +154,7 @@ impl_binary_elem!(BinaryElem32, BinaryPoly32, BinaryPoly64, u32, u64, IRREDUCIBL
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "scale", derive(codec::Encode, codec::Decode, scale_info::TypeInfo))]
 pub struct BinaryElem128(BinaryPoly128);
 
 // SAFETY: BinaryElem128 is repr(transparent) over BinaryPoly128 which wraps u128 (a primitive)
@@ -247,6 +250,7 @@ impl From<u128> for BinaryElem128 {
     }
 }
 
+#[cfg(feature = "rand")]
 impl rand::distributions::Distribution<BinaryElem128> for rand::distributions::Standard {
     fn sample<R: rand::Rng + ?Sized>(&self, rng: &mut R) -> BinaryElem128 {
         BinaryElem128::from_value(rng.gen())
@@ -256,6 +260,8 @@ impl rand::distributions::Distribution<BinaryElem128> for rand::distributions::S
 // BinaryElem64 needs special handling
 #[repr(transparent)]
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+#[cfg_attr(feature = "scale", derive(codec::Encode, codec::Decode, scale_info::TypeInfo))]
 pub struct BinaryElem64(BinaryPoly64);
 
 // SAFETY: BinaryElem64 is repr(transparent) over BinaryPoly64 which wraps u64 (a primitive)
