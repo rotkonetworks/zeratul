@@ -59,7 +59,7 @@ blake3 = "1.5"
 blake2 = "0.10"
 
 # Performance
-wide = "0.7"
+wide = { version = "0.7", default-features = false }
 bytemuck = { version = "=1.14.0", default-features = false, features = ["extern_crate_alloc"] }
 
 # zcash

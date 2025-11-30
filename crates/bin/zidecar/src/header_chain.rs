@@ -1,10 +1,27 @@
 //! header chain trace encoding for ligerito proofs
 //!
-//! Trace layout (16 fields per header):
-//! - fields 0-7: header chain (hash linkage + running commitment)
-//! - fields 8-15: state roots at epoch boundaries (TCT/nullifier commitments)
+//! FULL VERIFICATION TRACE LAYOUT (32 fields per header):
 //!
-//! This proves both header chain integrity AND state root chain in one proof.
+//! Header data (fields 0-19):
+//! - field 0: height
+//! - fields 1-8: block_hash (full 32 bytes = 8 x 4-byte fields)
+//! - fields 9-16: prev_hash (full 32 bytes = 8 x 4-byte fields)
+//! - field 17: nBits (compact difficulty target - 4 bytes)
+//! - field 18: cumulative_difficulty (running work sum)
+//! - field 19: header_commitment (running hash chain)
+//!
+//! State roots at epoch boundaries (fields 20-31):
+//! - fields 20-23: sapling_root (16 bytes)
+//! - fields 24-27: orchard_root (16 bytes)
+//! - fields 28-29: nullifier_root (reserved)
+//! - field 30: state_commitment (running state chain)
+//! - field 31: reserved
+//!
+//! This proves:
+//! 1. Hash chain integrity (prev_hash linkage)
+//! 2. Full hash data for client-side PoW verification
+//! 3. Difficulty progression (nBits field)
+//! 4. State root chain for NOMT verification
 
 use crate::error::{Result, ZidecarError};
 use crate::storage::Storage;
@@ -27,20 +44,8 @@ const CACHE_BATCH_SIZE: usize = 1000;
 /// epoch size (blocks per epoch)
 const EPOCH_SIZE: u32 = 1024;
 
-/// fields encoded per block header in trace (16 fields)
-pub const FIELDS_PER_HEADER: usize = 16;
-
-/// trace field layout per header (16 fields):
-/// field 0: height
-/// field 1-2: block_hash (first 8 bytes, split into 2x4)
-/// field 3-4: prev_hash (first 8 bytes, split into 2x4)
-/// field 5-6: block_hash (next 8 bytes, split into 2x4)
-/// field 7: header_commitment (running hash chain)
-/// field 8-9: sapling_root (first 8 bytes) - only at epoch boundaries
-/// field 10-11: orchard_root (first 8 bytes) - only at epoch boundaries
-/// field 12-13: reserved for nullifier_root
-/// field 14: state_commitment (running state chain)
-/// field 15: reserved
+/// fields encoded per block header in trace (32 fields for full verification)
+pub const FIELDS_PER_HEADER: usize = 32;
 
 /// state roots at an epoch boundary (from z_gettreestate)
 #[derive(Clone, Debug, Default)]
@@ -70,7 +75,7 @@ pub struct HeaderChainTrace {
     /// - TIP_PROOF starts with GIGAPROOF's final commitment
     pub initial_commitment: [u8; 32],
     /// final running commitment (for composing proofs)
-    /// - stored in field 7 of last header
+    /// - stored in field 19 of last header
     /// - used as initial_commitment for the next proof
     pub final_commitment: [u8; 32],
     /// whether this trace includes state roots (extended layout)
@@ -79,6 +84,8 @@ pub struct HeaderChainTrace {
     pub initial_state_commitment: [u8; 32],
     /// final state commitment (for extended proofs)
     pub final_state_commitment: [u8; 32],
+    /// cumulative difficulty at end of trace (for chain work verification)
+    pub cumulative_difficulty: u64,
 }
 
 impl HeaderChainTrace {
@@ -134,7 +141,8 @@ impl HeaderChainTrace {
                 let zebrad_clone = zebrad.clone();
                 let chunk_vec: Vec<u32> = chunk.to_vec();
 
-                let fetched: Vec<std::result::Result<(u32, String, String), ZidecarError>> = stream::iter(chunk_vec)
+                // fetch (height, hash, prev_hash, bits) for full PoW verification
+                let fetched: Vec<std::result::Result<(u32, String, String, String), ZidecarError>> = stream::iter(chunk_vec)
                     .map(|height| {
                         let zc = zebrad_clone.clone();
                         async move {
@@ -144,7 +152,7 @@ impl HeaderChainTrace {
                                 match async {
                                     let hash = zc.get_block_hash(height).await?;
                                     let header = zc.get_block_header(&hash).await?;
-                                    Ok::<_, ZidecarError>((height, header.hash, header.prev_hash))
+                                    Ok::<_, ZidecarError>((height, header.hash, header.prev_hash, header.bits))
                                 }.await {
                                     Ok(result) => return Ok(result),
                                     Err(e) => {
@@ -164,14 +172,14 @@ impl HeaderChainTrace {
                     .await;
 
                 // collect chunk results
-                let mut headers_to_cache: Vec<(u32, String, String)> = Vec::with_capacity(chunk.len());
+                let mut headers_to_cache: Vec<(u32, String, String, String)> = Vec::with_capacity(chunk.len());
                 for result in fetched {
-                    let (height, hash, prev_hash) = result?;
-                    headers_to_cache.push((height, hash, prev_hash));
+                    let (height, hash, prev_hash, bits) = result?;
+                    headers_to_cache.push((height, hash, prev_hash, bits));
                 }
 
                 // sort by height before caching (buffer_unordered doesn't preserve order)
-                headers_to_cache.sort_by_key(|(h, _, _)| *h);
+                headers_to_cache.sort_by_key(|(h, _, _, _)| *h);
 
                 // batch store to cache
                 storage.store_headers_batch(&headers_to_cache)?;
@@ -188,13 +196,15 @@ impl HeaderChainTrace {
         info!("loading headers from cache...");
         let mut headers: Vec<BlockHeader> = Vec::with_capacity(num_headers);
         for height in start_height..=end_height {
-            if let Some((hash, prev_hash)) = storage.get_header(height)? {
+            if let Some((hash, prev_hash, bits)) = storage.get_header(height)? {
                 headers.push(BlockHeader {
                     height,
                     hash,
                     prev_hash,
                     timestamp: 0, // not needed for trace
                     merkle_root: String::new(),
+                    bits,
+                    difficulty: 0.0, // computed from bits if needed
                 });
             } else {
                 return Err(ZidecarError::BlockNotFound(height));
@@ -211,14 +221,15 @@ impl HeaderChainTrace {
         let initial_commitment = [0u8; 32];
         let initial_state_commitment = [0u8; 32];
 
-        let (trace, final_commitment, final_state_commitment) =
+        let (trace, final_commitment, final_state_commitment, cumulative_difficulty) =
             Self::encode_trace(&headers, &state_roots, initial_commitment, initial_state_commitment)?;
 
         info!(
-            "encoded trace: {} elements ({} headers x {} fields)",
+            "encoded trace: {} elements ({} headers x {} fields), cumulative difficulty: {}",
             trace.len(),
             num_headers,
-            FIELDS_PER_HEADER
+            FIELDS_PER_HEADER,
+            cumulative_difficulty
         );
 
         Ok(Self {
@@ -231,6 +242,7 @@ impl HeaderChainTrace {
             includes_state_roots: true,
             initial_state_commitment,
             final_state_commitment,
+            cumulative_difficulty,
         })
     }
 
@@ -276,20 +288,21 @@ impl HeaderChainTrace {
         Ok(roots)
     }
 
-    /// encode headers with state roots into trace
-    /// returns (trace, final_header_commitment, final_state_commitment)
+    /// encode headers with state roots into trace (32 fields per header for full verification)
+    /// returns (trace, final_header_commitment, final_state_commitment, cumulative_difficulty)
     fn encode_trace(
         headers: &[BlockHeader],
         state_roots: &[EpochStateRoots],
         initial_commitment: [u8; 32],
         initial_state_commitment: [u8; 32],
-    ) -> Result<(Vec<BinaryElem32>, [u8; 32], [u8; 32])> {
+    ) -> Result<(Vec<BinaryElem32>, [u8; 32], [u8; 32], u64)> {
         let num_elements = headers.len() * FIELDS_PER_HEADER;
         let trace_size = num_elements.next_power_of_two();
         let mut trace = vec![BinaryElem32::zero(); trace_size];
 
         let mut running_commitment = initial_commitment;
         let mut state_commitment = initial_state_commitment;
+        let mut cumulative_difficulty: u64 = 0;
 
         // Build map from height to state roots for quick lookup
         let state_root_map: std::collections::HashMap<u32, &EpochStateRoots> = state_roots
@@ -313,24 +326,46 @@ impl HeaderChainTrace {
                 hex_to_bytes(&header.prev_hash)?
             };
 
-            // Basic fields (0-7) - same as regular trace
-            trace[offset] = BinaryElem32::from(header.height);
-            trace[offset + 1] = bytes_to_field(&block_hash[0..4]);
-            trace[offset + 2] = bytes_to_field(&block_hash[4..8]);
-            trace[offset + 3] = bytes_to_field(&prev_hash[0..4]);
-            trace[offset + 4] = bytes_to_field(&prev_hash[4..8]);
-            trace[offset + 5] = bytes_to_field(&block_hash[8..12]);
-            trace[offset + 6] = bytes_to_field(&block_hash[12..16]);
+            // Parse nBits from hex string
+            let nbits = if header.bits.is_empty() {
+                0u32
+            } else {
+                u32::from_str_radix(&header.bits, 16).unwrap_or(0)
+            };
 
+            // Calculate difficulty from nBits and accumulate
+            let block_difficulty = nbits_to_difficulty(nbits);
+            cumulative_difficulty = cumulative_difficulty.saturating_add(block_difficulty);
+
+            // Field 0: height
+            trace[offset] = BinaryElem32::from(header.height);
+
+            // Fields 1-8: full block_hash (32 bytes = 8 x 4-byte fields)
+            for j in 0..8 {
+                trace[offset + 1 + j] = bytes_to_field(&block_hash[j * 4..(j + 1) * 4]);
+            }
+
+            // Fields 9-16: full prev_hash (32 bytes = 8 x 4-byte fields)
+            for j in 0..8 {
+                trace[offset + 9 + j] = bytes_to_field(&prev_hash[j * 4..(j + 1) * 4]);
+            }
+
+            // Field 17: nBits (difficulty target)
+            trace[offset + 17] = BinaryElem32::from(nbits);
+
+            // Field 18: cumulative difficulty (lower 32 bits)
+            trace[offset + 18] = BinaryElem32::from(cumulative_difficulty as u32);
+
+            // Field 19: running commitment
             running_commitment = update_running_commitment(
                 &running_commitment,
                 &block_hash,
                 &prev_hash,
                 header.height,
             );
-            trace[offset + 7] = bytes_to_field(&running_commitment[0..4]);
+            trace[offset + 19] = bytes_to_field(&running_commitment[0..4]);
 
-            // Extended fields (8-15) - state roots at epoch boundaries
+            // Fields 20-31: state roots at epoch boundaries
             if let Some(roots) = state_root_map.get(&header.height) {
                 // This is an epoch boundary - include state roots
                 let sapling = if roots.sapling_root.is_empty() {
@@ -345,37 +380,38 @@ impl HeaderChainTrace {
                     hex_to_bytes(&roots.orchard_root)?
                 };
 
-                // Sapling root (fields 8-9)
-                trace[offset + 8] = bytes_to_field(&sapling[0..4]);
-                trace[offset + 9] = bytes_to_field(&sapling[4..8]);
+                // Fields 20-23: sapling_root (16 bytes = 4 x 4-byte fields)
+                for j in 0..4 {
+                    trace[offset + 20 + j] = bytes_to_field(&sapling[j * 4..(j + 1) * 4]);
+                }
 
-                // Orchard root (fields 10-11)
-                trace[offset + 10] = bytes_to_field(&orchard[0..4]);
-                trace[offset + 11] = bytes_to_field(&orchard[4..8]);
+                // Fields 24-27: orchard_root (16 bytes = 4 x 4-byte fields)
+                for j in 0..4 {
+                    trace[offset + 24 + j] = bytes_to_field(&orchard[j * 4..(j + 1) * 4]);
+                }
 
-                // Nullifier root placeholder (fields 12-13) - reserved for future
-                trace[offset + 12] = BinaryElem32::zero();
-                trace[offset + 13] = BinaryElem32::zero();
+                // Fields 28-29: nullifier_root (reserved)
+                trace[offset + 28] = BinaryElem32::zero();
+                trace[offset + 29] = BinaryElem32::zero();
 
-                // Update state commitment chain
+                // Field 30: state commitment
                 state_commitment = update_state_commitment(
                     &state_commitment,
                     &sapling,
                     &orchard,
                     header.height,
                 );
-                trace[offset + 14] = bytes_to_field(&state_commitment[0..4]);
+                trace[offset + 30] = bytes_to_field(&state_commitment[0..4]);
 
-                // Reserved field
-                trace[offset + 15] = BinaryElem32::zero();
+                // Field 31: reserved
+                trace[offset + 31] = BinaryElem32::zero();
             } else {
-                // Not an epoch boundary - fields 8-15 are zero
-                // but we still include the previous state commitment
-                trace[offset + 14] = bytes_to_field(&state_commitment[0..4]);
+                // Not an epoch boundary - include previous state commitment
+                trace[offset + 30] = bytes_to_field(&state_commitment[0..4]);
             }
         }
 
-        Ok((trace, running_commitment, state_commitment))
+        Ok((trace, running_commitment, state_commitment, cumulative_difficulty))
     }
 
     /// build trace with specific initial commitments (for composing proofs)
@@ -395,13 +431,15 @@ impl HeaderChainTrace {
             // re-fetch headers from cache (they're already there)
             let mut headers: Vec<BlockHeader> = Vec::new();
             for height in start_height..=end_height {
-                if let Some((hash, prev_hash)) = storage.get_header(height)? {
+                if let Some((hash, prev_hash, bits)) = storage.get_header(height)? {
                     headers.push(BlockHeader {
                         height,
                         hash,
                         prev_hash,
                         timestamp: 0,
                         merkle_root: String::new(),
+                        bits,
+                        difficulty: 0.0,
                     });
                 }
             }
@@ -409,7 +447,7 @@ impl HeaderChainTrace {
             // re-fetch state roots
             let state_roots = Self::fetch_epoch_state_roots(zebrad, start_height, end_height).await?;
 
-            let (new_trace, final_commitment, final_state_commitment) =
+            let (new_trace, final_commitment, final_state_commitment, cumulative_difficulty) =
                 Self::encode_trace(&headers, &state_roots, initial_commitment, initial_state_commitment)?;
 
             trace.trace = new_trace;
@@ -417,6 +455,7 @@ impl HeaderChainTrace {
             trace.final_commitment = final_commitment;
             trace.initial_state_commitment = initial_state_commitment;
             trace.final_state_commitment = final_state_commitment;
+            trace.cumulative_difficulty = cumulative_difficulty;
         }
 
         Ok(trace)
@@ -517,6 +556,42 @@ fn update_state_commitment(
     let mut result = [0u8; 32];
     result.copy_from_slice(&hash[..32]);
     result
+}
+
+/// convert nBits (compact difficulty target) to difficulty value
+/// nBits format: 0xAABBCCDD where AA is exponent, BBCCDD is mantissa
+/// target = mantissa * 256^(exponent-3)
+/// difficulty = max_target / target (simplified as work units)
+fn nbits_to_difficulty(nbits: u32) -> u64 {
+    if nbits == 0 {
+        return 0;
+    }
+
+    let exponent = (nbits >> 24) as u64;
+    let mantissa = (nbits & 0x00FFFFFF) as u64;
+
+    if mantissa == 0 {
+        return 0;
+    }
+
+    // Simplified difficulty calculation
+    // For Zcash Equihash, we use a relative difficulty measure
+    // Higher nBits = easier target = lower difficulty
+    // We want work done, so invert: difficulty ~ 1/target ~ mantissa * 2^(8*(exponent-3))
+
+    // Use a simple approximation: difficulty = 2^256 / target
+    // Simplified to fit in u64: just use the inverse proportion
+    let shift = if exponent >= 3 { exponent - 3 } else { 0 };
+
+    // Each block represents some work; use log scale
+    // difficulty ~ 2^(32 - 8*exponent) / mantissa
+    if shift < 32 {
+        let base_diff = (1u64 << 32) / mantissa;
+        base_diff >> (shift * 8).min(63)
+    } else {
+        // Very low difficulty
+        1
+    }
 }
 
 #[cfg(test)]

@@ -204,6 +204,29 @@ button:disabled { background: var(--border); color: var(--dim); cursor: not-allo
   white-space: nowrap;
 }
 .security-layer.verified .sec-status { color: var(--ok); }
+.proof-details {
+  margin-top: 12px;
+  padding: 10px;
+  background: var(--bg);
+  font-size: 11px;
+}
+.proof-title {
+  color: var(--dim);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+.proof-grid {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 4px 12px;
+}
+.proof-grid .label { color: var(--dim); }
+.proof-grid .value { text-align: right; font-family: monospace; }
+.proof-grid .value.hash { font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
+.proof-grid .value.ok { color: var(--ok); }
+.proof-grid .value.err { color: var(--err); }
 </style>
 </head>
 <body>
@@ -257,30 +280,22 @@ button:disabled { background: var(--border); color: var(--dim); cursor: not-allo
 
 <div class="section hidden" id="security-section">
   <div class="section-title">security layers</div>
-  <div class="security-grid">
+  <div class="security-grid" style="grid-template-columns: 1fr 1fr 1fr;">
     <div class="security-layer" id="sec-ligerito">
       <div class="sec-icon">◈</div>
       <div class="sec-info">
-        <div class="sec-name">Ligerito ZK</div>
-        <div class="sec-desc">header chain proof</div>
+        <div class="sec-name">Ligerito</div>
+        <div class="sec-desc">header chain ZKP</div>
       </div>
       <div class="sec-status" id="sec-ligerito-status">-</div>
     </div>
-    <div class="security-layer" id="sec-frost">
-      <div class="sec-icon">❄</div>
-      <div class="sec-info">
-        <div class="sec-name">FROST</div>
-        <div class="sec-desc">threshold signature</div>
-      </div>
-      <div class="sec-status" id="sec-frost-status">-</div>
-    </div>
-    <div class="security-layer" id="sec-polkadot">
+    <div class="security-layer" id="sec-zanchor">
       <div class="sec-icon">●</div>
       <div class="sec-info">
-        <div class="sec-name">Polkadot</div>
-        <div class="sec-desc">parachain finality</div>
+        <div class="sec-name">Zanchor</div>
+        <div class="sec-desc">polkadot finality</div>
       </div>
-      <div class="sec-status" id="sec-polkadot-status">-</div>
+      <div class="sec-status" id="sec-zanchor-status">-</div>
     </div>
     <div class="security-layer" id="sec-nomt">
       <div class="sec-icon">⌘</div>
@@ -289,6 +304,15 @@ button:disabled { background: var(--border); color: var(--dim); cursor: not-allo
         <div class="sec-desc">state proof</div>
       </div>
       <div class="sec-status" id="sec-nomt-status">-</div>
+    </div>
+  </div>
+  <div class="proof-details hidden" id="proof-details">
+    <div class="proof-title">proof verification</div>
+    <div class="proof-grid">
+      <span class="label">gigaproof</span><span class="value" id="proof-giga-range">-</span>
+      <span class="label">tip_hash</span><span class="value hash" id="proof-tip-hash">-</span>
+      <span class="label">chain work</span><span class="value" id="proof-work">-</span>
+      <span class="label">continuity</span><span class="value" id="proof-continuity">-</span>
     </div>
   </div>
 </div>
@@ -324,8 +348,7 @@ const state = {
   // security layers
   security: {
     ligerito: { status: 'none', detail: '' },
-    frost: { status: 'none', detail: '' },
-    polkadot: { status: 'none', detail: '' },
+    zanchor: { status: 'none', detail: '' },
     nomt: { status: 'none', detail: '' },
   },
 };
@@ -457,50 +480,78 @@ $('sync-btn').onclick = async () => {
   // Show security section and initialize layers
   $('security-section').classList.remove('hidden');
   updateSecurityLayer('ligerito', 'none', 'pending');
-  updateSecurityLayer('frost', 'none', 'checking...');
-  updateSecurityLayer('polkadot', 'none', 'checking...');
+  updateSecurityLayer('zanchor', 'none', 'checking...');
   updateSecurityLayer('nomt', 'none', 'pending');
 
-  // Fetch checkpoint to check FROST/Polkadot status
+  // Fetch checkpoint to check Zanchor (Polkadot) status
   try {
     const checkpoint = await fetchCheckpoint();
-    if (checkpoint) {
-      updateSecurityLayer('frost', 'verified', `epoch ${checkpoint.epoch}`);
-      // Polkadot status depends on whether zanchor is connected
-      updateSecurityLayer('polkadot', 'unavailable', 'not connected');
+    if (checkpoint && checkpoint.epoch > 0) {
+      updateSecurityLayer('zanchor', 'verified', `epoch ${checkpoint.epoch}`);
     } else {
-      updateSecurityLayer('frost', 'unavailable', 'no checkpoint');
-      updateSecurityLayer('polkadot', 'unavailable', 'no checkpoint');
+      // No checkpoint yet - parachain may not be connected
+      updateSecurityLayer('zanchor', 'unavailable', 'awaiting finality');
     }
   } catch (e) {
     console.warn('[checkpoint] fetch error:', e);
-    updateSecurityLayer('frost', 'unavailable', 'error');
-    updateSecurityLayer('polkadot', 'unavailable', 'error');
+    updateSecurityLayer('zanchor', 'unavailable', 'not connected');
   }
 
-  // Verify gigaproof if available (demonstrates ZKP verification)
+  // Verify gigaproof + tip proof if available (demonstrates ZKP verification)
   if (state.gigaproofHeight > start) {
     const provenTo = Math.min(state.gigaproofHeight, end);
-    $('sync-status').textContent = 'verifying gigaproof...';
+    $('sync-status').textContent = 'verifying proofs...';
     updateSecurityLayer('ligerito', 'active', 'verifying...');
 
     try {
-      // Fetch and verify the gigaproof to demonstrate ZKP
-      const gigaproof = await fetchHeaderProof(1, state.gigaproofHeight);
-      if (gigaproof && gigaproof.ligerito_proof && gigaproof.ligerito_proof.length > 0) {
+      // Fetch proofs with public outputs
+      const headerProof = await fetchHeaderProof(1, state.gigaproofHeight);
+      if (headerProof && headerProof.ligerito_proof && headerProof.ligerito_proof.length > 0) {
         const startVerify = performance.now();
-        const ok = await verifyHeaderProof(gigaproof);
+        const ok = await verifyHeaderProof(headerProof);
         const elapsed = ((performance.now() - startVerify) / 1000).toFixed(1);
 
         if (ok) {
           state.verifiedHeight = provenTo;
           const verifiedPct = ((provenTo - start) / total) * 100;
           $('progress-verified').style.width = verifiedPct + '%';
+
+          // Check continuity between gigaproof and tip proof
+          const continuityOk = headerProof.continuity_verified;
+          const hasTip = headerProof.tip_proof_outputs !== null;
+
+          // Log public outputs for verification
+          if (headerProof.gigaproof_outputs) {
+            const go = headerProof.gigaproof_outputs;
+            console.log(`[verify] gigaproof: ${go.start_height} -> ${go.end_height}, ${go.num_headers} headers, work=${go.cumulative_difficulty}`);
+            console.log(`[verify] gigaproof tip_hash: ${bytesToHex(go.tip_hash?.slice(0, 8) || [])}`);
+          }
+          if (headerProof.tip_proof_outputs) {
+            const to = headerProof.tip_proof_outputs;
+            console.log(`[verify] tip_proof: ${to.start_height} -> ${to.end_height}, ${to.num_headers} headers`);
+            console.log(`[verify] tip_proof start_prev_hash: ${bytesToHex(to.start_prev_hash?.slice(0, 8) || [])}`);
+          }
+          console.log(`[verify] continuity_verified: ${continuityOk}`);
+
+          // Show verification status
+          let status = `gigaproof verified (${elapsed}s)`;
+          if (hasTip) {
+            status += continuityOk ? ', tip linked ✓' : ', tip NOT linked ✗';
+          }
           $('verified-count').textContent = `verified to ${provenTo.toLocaleString()}`;
-          $('sync-status').textContent = `gigaproof verified in ${elapsed}s`;
-          console.log(`[verify] gigaproof verified in ${elapsed}s - covers up to height ${provenTo}`);
+          $('sync-status').textContent = status;
+
+          console.log(`[verify] ${status} - covers up to height ${provenTo}`);
           state.proofsVerified++;
-          updateSecurityLayer('ligerito', 'verified', `${elapsed}s`);
+          updateSecurityLayer('ligerito', 'verified', continuityOk ? `${elapsed}s ✓` : `${elapsed}s ⚠`);
+
+          // Update NOMT status based on state commitments
+          if (headerProof.gigaproof_outputs?.final_state_commitment) {
+            updateSecurityLayer('nomt', 'verified', 'state proven');
+          }
+
+          // Show proof details panel
+          showProofDetails(headerProof);
         } else {
           $('verified-count').textContent = 'verification failed';
           console.warn('[verify] gigaproof verification failed');
@@ -661,6 +712,55 @@ function updateSecurityLayer(layer, status, detail) {
   else if (status === 'unavailable') el.classList.add('unavailable');
 
   statusEl.textContent = detail || (status === 'verified' ? '✓' : '-');
+}
+
+function showProofDetails(headerProof) {
+  const detailsEl = $('proof-details');
+  detailsEl.classList.remove('hidden');
+
+  const go = headerProof.gigaproof_outputs;
+  const to = headerProof.tip_proof_outputs;
+
+  // Gigaproof range
+  if (go) {
+    $('proof-giga-range').textContent = `${go.start_height.toLocaleString()} → ${go.end_height.toLocaleString()} (${go.num_headers.toLocaleString()} headers)`;
+  }
+
+  // Tip hash (first 16 chars for display)
+  if (go?.tip_hash) {
+    const tipHashHex = bytesToHex(go.tip_hash);
+    $('proof-tip-hash').textContent = tipHashHex.slice(0, 16) + '...';
+    $('proof-tip-hash').title = tipHashHex;
+  }
+
+  // Chain work (cumulative difficulty)
+  if (go?.cumulative_difficulty) {
+    const work = go.cumulative_difficulty;
+    // Format big number nicely
+    const formatted = work > 1000000000000n
+      ? `${(Number(work) / 1e12).toFixed(2)}T`
+      : work > 1000000000n
+      ? `${(Number(work) / 1e9).toFixed(2)}B`
+      : work.toLocaleString();
+    $('proof-work').textContent = formatted;
+  }
+
+  // Continuity verification
+  const continuityEl = $('proof-continuity');
+  if (to) {
+    // We have a tip proof - check if it links to gigaproof
+    if (headerProof.continuity_verified) {
+      continuityEl.textContent = `✓ giga→tip linked`;
+      continuityEl.className = 'value ok';
+    } else {
+      continuityEl.textContent = `✗ chain break!`;
+      continuityEl.className = 'value err';
+    }
+  } else {
+    // No tip proof - gigaproof covers everything
+    continuityEl.textContent = 'single proof';
+    continuityEl.className = 'value';
+  }
 }
 
 function updateBalance() {
@@ -1052,9 +1152,17 @@ async function fetchHeaderProof(fromHeight, toHeight) {
   }
 }
 
-// Parse HeaderProof protobuf
+// Parse HeaderProof protobuf (updated with public outputs)
 function parseHeaderProof(buf) {
-  const proof = { ligerito_proof: null, from_height: 0, to_height: 0, tip_hash: null };
+  const proof = {
+    ligerito_proof: null,
+    from_height: 0,
+    to_height: 0,
+    tip_hash: null,
+    gigaproof_outputs: null,
+    tip_proof_outputs: null,
+    continuity_verified: false
+  };
   let pos = 0;
 
   while (pos < buf.length) {
@@ -1072,6 +1180,7 @@ function parseHeaderProof(buf) {
       }
       if (field === 2) proof.from_height = v;
       else if (field === 3) proof.to_height = v;
+      else if (field === 8) proof.continuity_verified = (v !== 0);
     } else if (wire === 2) { // length-delimited
       let len = 0, s = 0;
       while (pos < buf.length) {
@@ -1083,6 +1192,8 @@ function parseHeaderProof(buf) {
       const data = buf.slice(pos, pos + len);
       if (field === 1) proof.ligerito_proof = data;
       else if (field === 4) proof.tip_hash = data;
+      else if (field === 6) proof.gigaproof_outputs = parsePublicOutputs(data);
+      else if (field === 7) proof.tip_proof_outputs = parsePublicOutputs(data);
       pos += len;
     } else {
       break; // unknown wire type
@@ -1090,6 +1201,63 @@ function parseHeaderProof(buf) {
   }
 
   return proof;
+}
+
+// Parse ProofPublicOutputs protobuf
+function parsePublicOutputs(buf) {
+  const outputs = {
+    start_height: 0,
+    end_height: 0,
+    start_hash: null,
+    start_prev_hash: null,
+    tip_hash: null,
+    tip_prev_hash: null,
+    cumulative_difficulty: 0n,
+    final_commitment: null,
+    final_state_commitment: null,
+    num_headers: 0
+  };
+  let pos = 0;
+
+  while (pos < buf.length) {
+    const tag = buf[pos++];
+    const field = tag >> 3;
+    const wire = tag & 0x7;
+
+    if (wire === 0) { // varint
+      let v = 0n, s = 0n;
+      while (pos < buf.length) {
+        const b = BigInt(buf[pos++]);
+        v |= (b & 0x7fn) << s;
+        if (!(b & 0x80n)) break;
+        s += 7n;
+      }
+      if (field === 1) outputs.start_height = Number(v);
+      else if (field === 2) outputs.end_height = Number(v);
+      else if (field === 7) outputs.cumulative_difficulty = v;
+      else if (field === 10) outputs.num_headers = Number(v);
+    } else if (wire === 2) { // length-delimited
+      let len = 0, s = 0;
+      while (pos < buf.length) {
+        const b = buf[pos++];
+        len |= (b & 0x7f) << s;
+        if (!(b & 0x80)) break;
+        s += 7;
+      }
+      const data = buf.slice(pos, pos + len);
+      if (field === 3) outputs.start_hash = data;
+      else if (field === 4) outputs.start_prev_hash = data;
+      else if (field === 5) outputs.tip_hash = data;
+      else if (field === 6) outputs.tip_prev_hash = data;
+      else if (field === 8) outputs.final_commitment = data;
+      else if (field === 9) outputs.final_state_commitment = data;
+      pos += len;
+    } else {
+      break;
+    }
+  }
+
+  return outputs;
 }
 
 // Verify header proof using ligerito

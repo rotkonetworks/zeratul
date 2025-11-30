@@ -70,18 +70,58 @@ message ProofRequest {
 
 // Header chain proof with Ligerito
 message HeaderProof {
-    // Ligerito proof bytes (serialized)
+    // Combined gigaproof + tip proof bytes
+    // Format: [gigaproof_size: u32][gigaproof_bytes][tip_bytes]
     bytes ligerito_proof = 1;
 
     // Height range covered
     uint32 from_height = 2;
     uint32 to_height = 3;
 
-    // Chain tip hash
+    // Chain tip hash (for quick verification)
     bytes tip_hash = 4;
 
     // Block headers for verification
     repeated BlockHeader headers = 5;
+
+    // Public outputs from gigaproof - what the proof commits to
+    ProofPublicOutputs gigaproof_outputs = 6;
+
+    // Public outputs from tip proof - what the proof commits to
+    // Empty if gigaproof covers entire range
+    ProofPublicOutputs tip_proof_outputs = 7;
+
+    // Continuity verification status
+    // True if tip_proof.start_prev_hash == gigaproof.tip_hash
+    bool continuity_verified = 8;
+}
+
+// Public outputs that a Ligerito proof commits to
+// These can be verified against external sources (Zanchor checkpoints)
+message ProofPublicOutputs {
+    // Block height range
+    uint32 start_height = 1;
+    uint32 end_height = 2;
+
+    // First block hash (proof input)
+    bytes start_hash = 3;
+    // First block's prev_hash - links to previous proof's tip_hash
+    bytes start_prev_hash = 4;
+
+    // Last block hash (tip) - verify against Zanchor
+    bytes tip_hash = 5;
+    // Last block's prev_hash - for chain linking
+    bytes tip_prev_hash = 6;
+
+    // Total chain work in this range
+    uint64 cumulative_difficulty = 7;
+
+    // Internal consistency commitments
+    bytes final_commitment = 8;          // running hash chain
+    bytes final_state_commitment = 9;    // state root chain
+
+    // Number of headers proven
+    uint32 num_headers = 10;
 }
 
 // Block header metadata

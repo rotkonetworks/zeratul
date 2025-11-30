@@ -4,6 +4,7 @@ use crate::{
     compact::CompactBlock as InternalCompactBlock,
     epoch::EpochManager,
     error::{Result, ZidecarError},
+    prover::HeaderChainProof,
     storage::Storage,
     zebrad::ZebradClient,
     checkpoint::EpochCheckpoint,
@@ -19,6 +20,8 @@ use crate::{
         NullifierQuery, NullifierProof, VerifiedBlock,
         // epoch boundary types
         EpochBoundary as ProtoEpochBoundary, EpochRangeRequest, EpochBoundaryList,
+        // public outputs
+        ProofPublicOutputs as ProtoPublicOutputs,
     },
 };
 use std::sync::Arc;
@@ -84,13 +87,48 @@ impl Zidecar for ZidecarService {
     ) -> std::result::Result<Response<HeaderProof>, Status> {
         info!("header proof request (gigaproof + tip)");
 
-        // get gigaproof + tip proof
+        // get gigaproof + tip proof (both now contain public outputs)
         let (gigaproof, tip_proof) = match self.epoch_manager.get_proofs().await {
             Ok(p) => p,
             Err(e) => {
                 error!("failed to get proofs: {}", e);
                 return Err(Status::internal(e.to_string()));
             }
+        };
+
+        // deserialize public outputs from gigaproof
+        let (giga_outputs, _, _) = HeaderChainProof::deserialize_full(&gigaproof)
+            .map_err(|e| Status::internal(format!("failed to deserialize gigaproof: {}", e)))?;
+
+        // deserialize public outputs from tip proof (if present)
+        let tip_outputs = if !tip_proof.is_empty() {
+            let (outputs, _, _) = HeaderChainProof::deserialize_full(&tip_proof)
+                .map_err(|e| Status::internal(format!("failed to deserialize tip proof: {}", e)))?;
+            Some(outputs)
+        } else {
+            None
+        };
+
+        // verify continuity: tip proof's start_prev_hash == gigaproof's tip_hash
+        let continuity_verified = if let Some(ref tip) = tip_outputs {
+            let is_continuous = tip.start_prev_hash == giga_outputs.tip_hash;
+            if is_continuous {
+                info!(
+                    "✓ continuity verified: gigaproof tip {} -> tip proof start prev {}",
+                    hex::encode(&giga_outputs.tip_hash[..8]),
+                    hex::encode(&tip.start_prev_hash[..8])
+                );
+            } else {
+                error!(
+                    "✗ continuity FAILED: gigaproof tip {} != tip proof start prev {}",
+                    hex::encode(&giga_outputs.tip_hash[..8]),
+                    hex::encode(&tip.start_prev_hash[..8])
+                );
+            }
+            is_continuous
+        } else {
+            // no tip proof, gigaproof covers everything
+            true
         };
 
         // get current tip
@@ -134,11 +172,16 @@ impl Zidecar for ZidecarService {
         combined_proof.extend_from_slice(&tip_proof);
 
         info!(
-            "serving proof: {} KB gigaproof + {} KB tip = {} KB total",
+            "serving proof: {} KB gigaproof + {} KB tip = {} KB total (continuity={})",
             gigaproof_size / 1024,
             tip_size / 1024,
-            combined_proof.len() / 1024
+            combined_proof.len() / 1024,
+            continuity_verified
         );
+
+        // convert public outputs to proto
+        let giga_proto = public_outputs_to_proto(&giga_outputs);
+        let tip_proto = tip_outputs.as_ref().map(public_outputs_to_proto);
 
         Ok(Response::new(HeaderProof {
             ligerito_proof: combined_proof,
@@ -146,6 +189,9 @@ impl Zidecar for ZidecarService {
             to_height: tip_info.blocks,
             tip_hash,
             headers,
+            gigaproof_outputs: Some(giga_proto),
+            tip_proof_outputs: tip_proto,
+            continuity_verified,
         }))
     }
 
@@ -875,4 +921,20 @@ fn compute_actions_root(actions: &[crate::compact::CompactAction]) -> [u8; 32] {
         hasher.update(&action.nullifier);
     }
     hasher.finalize().into()
+}
+
+// helper: convert ProofPublicOutputs to proto
+fn public_outputs_to_proto(outputs: &crate::prover::ProofPublicOutputs) -> ProtoPublicOutputs {
+    ProtoPublicOutputs {
+        start_height: outputs.start_height,
+        end_height: outputs.end_height,
+        start_hash: outputs.start_hash.to_vec(),
+        start_prev_hash: outputs.start_prev_hash.to_vec(),
+        tip_hash: outputs.tip_hash.to_vec(),
+        tip_prev_hash: outputs.tip_prev_hash.to_vec(),
+        cumulative_difficulty: outputs.cumulative_difficulty,
+        final_commitment: outputs.final_commitment.to_vec(),
+        final_state_commitment: outputs.final_state_commitment.to_vec(),
+        num_headers: outputs.num_headers,
+    }
 }

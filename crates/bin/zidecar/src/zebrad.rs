@@ -84,6 +84,8 @@ impl ZebradClient {
             prev_hash: block.previousblockhash.unwrap_or_default(),
             timestamp: block.time,
             merkle_root: block.merkleroot,
+            bits: block.bits,
+            difficulty: block.difficulty,
         })
     }
 
@@ -212,6 +214,10 @@ pub struct BlockHeader {
     pub prev_hash: String,
     pub timestamp: u64,
     pub merkle_root: String,
+    /// nBits - compact difficulty target
+    pub bits: String,
+    /// computed difficulty from bits
+    pub difficulty: f64,
 }
 
 #[derive(Debug, Deserialize)]

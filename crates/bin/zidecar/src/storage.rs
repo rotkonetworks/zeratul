@@ -212,14 +212,14 @@ impl Storage {
 
     // ===== HEADER CACHE =====
 
-    /// store block header (hash + prev_hash) by height
-    pub fn store_header(&self, height: u32, hash: &str, prev_hash: &str) -> Result<()> {
+    /// store block header (hash + prev_hash + bits) by height
+    pub fn store_header(&self, height: u32, hash: &str, prev_hash: &str, bits: &str) -> Result<()> {
         let mut key = Vec::with_capacity(5);
         key.push(b'h'); // header prefix
         key.extend_from_slice(&height.to_le_bytes());
 
-        // store as "hash:prev_hash"
-        let value = format!("{}:{}", hash, prev_hash);
+        // store as "hash:prev_hash:bits"
+        let value = format!("{}:{}:{}", hash, prev_hash, bits);
         self.sled
             .insert(key, value.as_bytes())
             .map_err(|e| ZidecarError::Storage(format!("sled: {}", e)))?;
@@ -227,7 +227,8 @@ impl Storage {
     }
 
     /// get cached header by height
-    pub fn get_header(&self, height: u32) -> Result<Option<(String, String)>> {
+    /// returns (hash, prev_hash, bits) - bits may be empty for old cache entries
+    pub fn get_header(&self, height: u32) -> Result<Option<(String, String, String)>> {
         let mut key = Vec::with_capacity(5);
         key.push(b'h');
         key.extend_from_slice(&height.to_le_bytes());
@@ -235,10 +236,11 @@ impl Storage {
         match self.sled.get(key) {
             Ok(Some(bytes)) => {
                 let s = String::from_utf8_lossy(&bytes);
-                if let Some((hash, prev_hash)) = s.split_once(':') {
-                    Ok(Some((hash.to_string(), prev_hash.to_string())))
-                } else {
-                    Ok(None)
+                let parts: Vec<&str> = s.splitn(3, ':').collect();
+                match parts.len() {
+                    2 => Ok(Some((parts[0].to_string(), parts[1].to_string(), String::new()))),
+                    3 => Ok(Some((parts[0].to_string(), parts[1].to_string(), parts[2].to_string()))),
+                    _ => Ok(None),
                 }
             }
             Ok(None) => Ok(None),
@@ -260,14 +262,14 @@ impl Storage {
         Ok(None)
     }
 
-    /// batch store headers
-    pub fn store_headers_batch(&self, headers: &[(u32, String, String)]) -> Result<()> {
+    /// batch store headers (with bits for PoW verification)
+    pub fn store_headers_batch(&self, headers: &[(u32, String, String, String)]) -> Result<()> {
         let mut batch = sled::Batch::default();
-        for (height, hash, prev_hash) in headers {
+        for (height, hash, prev_hash, bits) in headers {
             let mut key = Vec::with_capacity(5);
             key.push(b'h');
             key.extend_from_slice(&height.to_le_bytes());
-            let value = format!("{}:{}", hash, prev_hash);
+            let value = format!("{}:{}:{}", hash, prev_hash, bits);
             batch.insert(key, value.as_bytes());
         }
         self.sled

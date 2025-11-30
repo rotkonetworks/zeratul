@@ -1,15 +1,16 @@
 [package]
 name = "zafu-wasm"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
-description = "WASM bindings for Zafu Zcash wallet - trial decryption and key derivation"
+description = "WASM bindings for Zafu Zcash wallet - parallel trial decryption with SIMD"
 
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [features]
-default = []
+default = ["parallel"]
+parallel = ["rayon", "wasm-bindgen-rayon"]
 
 [dependencies]
 # crypto primitives (WASM-compatible)
@@ -17,6 +18,13 @@ pasta_curves = "0.5"
 subtle = "2.5"
 ff = "0.13"
 group = "0.13"
+
+# Orchard protocol - real key derivation and note encryption
+orchard = { version = "0.11", default-features = false }
+zcash_keys = { version = "0.5", default-features = false }
+zcash_protocol = { version = "0.4", default-features = false }
+# Must match orchard's zip32 version (0.2.x)
+zip32 = { version = "0.2", default-features = false }
 
 # note encryption (no heavy circuit deps)
 zcash_note_encryption = "0.4"
@@ -36,5 +44,15 @@ getrandom = { version = "0.2", features = ["js"] }
 serde = { version = "1.0", features = ["derive"] }
 serde-wasm-bindgen = "0.6"
 
+# parallel processing (optional, enabled by default)
+rayon = { version = "1.10", optional = true }
+wasm-bindgen-rayon = { version = "1.2", optional = true }
+
 [dev-dependencies]
 wasm-bindgen-test = "0.3"
+criterion = "0.5"
+rand = "0.8"
+
+[[bench]]
+name = "scanning"
+harness = false

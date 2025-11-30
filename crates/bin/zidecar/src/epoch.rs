@@ -143,18 +143,22 @@ impl EpochManager {
         // generate proof (auto-select config based on trace size)
         let proof = HeaderChainProof::prove_auto(&mut trace)?;
 
+        // serialize full proof with public outputs
+        let full_proof = proof.serialize_full()?;
+
         // cache the proof
         self.storage
-            .store_proof(from_height, to_height, &proof.proof_bytes)?;
+            .store_proof(from_height, to_height, &full_proof)?;
 
         // persist gigaproof metadata
         self.storage.set_gigaproof_epoch(last_complete_epoch)?;
         self.storage.set_gigaproof_start(from_height)?;
 
         info!(
-            "GIGAPROOF generated: {} blocks, {} KB",
+            "GIGAPROOF generated: {} blocks, {} KB (tip_hash: {})",
             to_height - from_height + 1,
-            proof.proof_bytes.len() / 1024
+            full_proof.len() / 1024,
+            hex::encode(&proof.public_outputs.tip_hash[..8])
         );
 
         *self.last_gigaproof_epoch.write().await = Some(last_complete_epoch);
@@ -250,10 +254,15 @@ impl EpochManager {
 
         // generate tip proof (auto-select config)
         let tip_proof = HeaderChainProof::prove_auto(&mut tip_trace)?;
+        let tip_proof_bytes = tip_proof.serialize_full()?;
 
-        info!("tip proof generated: {} KB", tip_proof.proof_bytes.len() / 1024);
+        info!(
+            "tip proof generated: {} KB (tip_hash: {})",
+            tip_proof_bytes.len() / 1024,
+            hex::encode(&tip_proof.public_outputs.tip_hash[..8])
+        );
 
-        Ok((gigaproof, tip_proof.proof_bytes))
+        Ok((gigaproof, tip_proof_bytes))
     }
 
     /// get last complete epoch height
@@ -307,13 +316,27 @@ impl EpochManager {
     async fn store_epoch_boundaries(&self, from_epoch: u32, to_epoch: u32) -> Result<()> {
         info!("storing epoch boundary hashes for epochs {} -> {}", from_epoch, to_epoch);
 
-        for epoch in from_epoch..=to_epoch {
+        // Calculate first epoch that we have complete data for
+        // (first epoch may be partial if start_height isn't at epoch boundary)
+        let first_full_epoch = if self.start_height % zync_core::EPOCH_SIZE == 0 {
+            from_epoch
+        } else {
+            from_epoch + 1 // skip partial first epoch
+        };
+
+        for epoch in first_full_epoch..=to_epoch {
             // skip if already stored
             if self.storage.get_epoch_boundary(epoch)?.is_some() {
                 continue;
             }
 
             let (first_height, last_height) = self.epoch_range(epoch);
+
+            // Skip if first block is before our start height (partial epoch)
+            if first_height < self.start_height {
+                info!("skipping partial epoch {} (starts at {} < start {})", epoch, first_height, self.start_height);
+                continue;
+            }
 
             // Get first block of epoch
             let first_header = self.storage.get_header(first_height)?
