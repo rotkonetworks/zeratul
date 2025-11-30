@@ -12,11 +12,17 @@ mod storage;
 mod compact;
 mod error;
 mod epoch;
+mod constants;
+mod witness;
 
 // trustless v2 modules
 mod checkpoint;
 mod state_transition;
 mod p2p;
+mod tct;
+
+// zanchor parachain integration
+mod zanchor;
 
 use crate::{grpc_service::ZidecarService, epoch::EpochManager};
 use std::sync::Arc;
@@ -44,6 +50,18 @@ struct Args {
     /// Enable testnet mode
     #[arg(long)]
     testnet: bool,
+
+    /// Zanchor parachain RPC endpoint (for Polkadot-secured checkpoints)
+    #[arg(long)]
+    zanchor_rpc: Option<String>,
+
+    /// Enable relayer mode (submit attestations to zanchor)
+    #[arg(long)]
+    relayer: bool,
+
+    /// Relayer seed phrase (required if --relayer is set)
+    #[arg(long, env = "ZIDECAR_RELAYER_SEED")]
+    relayer_seed: Option<String>,
 }
 
 #[tokio::main]
@@ -64,6 +82,10 @@ async fn main() -> Result<()> {
     info!("database: {}", args.db_path);
     info!("start height: {}", args.start_height);
     info!("testnet: {}", args.testnet);
+    if let Some(ref rpc) = args.zanchor_rpc {
+        info!("zanchor RPC: {}", rpc);
+    }
+    info!("relayer mode: {}", args.relayer);
 
     // initialize storage
     let storage = storage::Storage::open(&args.db_path)?;
@@ -121,7 +143,69 @@ async fn main() -> Result<()> {
         epoch_manager_state.run_background_state_tracker().await;
     });
 
+    // initialize zanchor client (if configured)
+    let zanchor_client = if args.zanchor_rpc.is_some() || args.relayer {
+        let mut client = zanchor::ZanchorClient::new(args.zanchor_rpc.as_deref());
+
+        if args.relayer {
+            if let Some(seed) = args.relayer_seed {
+                client = client.with_relayer(seed);
+                info!("relayer mode enabled");
+            } else {
+                warn!("--relayer requires --relayer-seed or ZIDECAR_RELAYER_SEED env var");
+            }
+        }
+
+        // Try to connect (non-blocking, will retry in background)
+        match client.connect().await {
+            Ok(_) => {
+                if let Ok(Some(height)) = client.get_latest_finalized_height().await {
+                    info!("zanchor latest finalized zcash height: {}", height);
+                }
+                Some(Arc::new(tokio::sync::RwLock::new(client)))
+            }
+            Err(e) => {
+                warn!("zanchor connection failed (will retry): {}", e);
+                Some(Arc::new(tokio::sync::RwLock::new(client)))
+            }
+        }
+    } else {
+        info!("zanchor integration disabled (use --zanchor-rpc to enable)");
+        None
+    };
+
+    // start background zanchor sync (if enabled)
+    if let Some(ref zanchor) = zanchor_client {
+        let zanchor_bg = zanchor.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+
+                let mut client = zanchor_bg.write().await;
+                if !client.is_connected() {
+                    if let Err(e) = client.connect().await {
+                        warn!("zanchor reconnect failed: {}", e);
+                        continue;
+                    }
+                }
+
+                match client.get_latest_finalized_height().await {
+                    Ok(Some(height)) => {
+                        info!("zanchor finalized height: {}", height);
+                    }
+                    Ok(None) => {}
+                    Err(e) => {
+                        warn!("failed to fetch zanchor state: {}", e);
+                    }
+                }
+            }
+        });
+    }
+
     // create gRPC service
+    // TODO: pass zanchor_client to service for hybrid checkpoint verification
+    let _zanchor_client = zanchor_client;
+
     let service = ZidecarService::new(
         zebrad,
         storage_arc,
@@ -135,8 +219,8 @@ async fn main() -> Result<()> {
     // build gRPC service
     let grpc_service = zidecar::zidecar_server::ZidecarServer::new(service);
 
-    // wrap with gRPC-web support for browser clients
-    // this enables HTTP/1.1 + gRPC-web protocol
+    // wrap with gRPC-web + CORS support for browser clients
+    // tonic_web::enable() handles CORS and protocol translation
     let grpc_web_service = tonic_web::enable(grpc_service);
 
     Server::builder()

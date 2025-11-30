@@ -23,6 +23,9 @@ pub enum ZidecarError {
     #[error("validation error: {0}")]
     Validation(String),
 
+    #[error("network error: {0}")]
+    Network(String),
+
     #[error("zync core error: {0}")]
     ZyncCore(#[from] zync_core::ZyncError),
 }

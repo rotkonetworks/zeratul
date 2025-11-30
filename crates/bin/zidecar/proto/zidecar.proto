@@ -54,6 +54,12 @@ service Zidecar {
 
     // Get FROST checkpoint at epoch boundary
     rpc GetCheckpoint(EpochRequest) returns (FrostCheckpoint);
+
+    // Get epoch boundary hashes for chain continuity verification
+    rpc GetEpochBoundary(EpochRequest) returns (EpochBoundary);
+
+    // Get all epoch boundaries in range (for bulk sync)
+    rpc GetEpochBoundaries(EpochRangeRequest) returns (EpochBoundaryList);
 }
 
 // Request proof for height range
@@ -316,4 +322,32 @@ message VerifiedBlock {
     // Optional: state after this block
     bytes tree_root_after = 6;      // commitment tree root after block
     bytes nullifier_root_after = 7; // nullifier set root after block
+}
+
+// ===== EPOCH BOUNDARY MESSAGES =====
+
+// Epoch boundary hashes for chain continuity verification
+message EpochBoundary {
+    // Epoch index
+    uint32 epoch = 1;
+
+    // First block of epoch
+    uint32 first_height = 2;
+    bytes first_hash = 3;           // 32 bytes
+    bytes first_prev_hash = 4;      // 32 bytes - links to previous epoch
+
+    // Last block of epoch
+    uint32 last_height = 5;
+    bytes last_hash = 6;            // 32 bytes
+}
+
+// Request for epoch range
+message EpochRangeRequest {
+    uint32 from_epoch = 1;
+    uint32 to_epoch = 2;            // 0 = latest
+}
+
+// List of epoch boundaries
+message EpochBoundaryList {
+    repeated EpochBoundary boundaries = 1;
 }

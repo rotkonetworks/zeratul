@@ -48,13 +48,18 @@ sled = "0.34"  # for simple proof cache
 blake2 = "0.10"
 sha2 = "0.10"
 
+# substrate client (for zanchor parachain integration)
+subxt = { version = "0.37", features = ["substrate-compat"] }
+sp-core = { version = "34", default-features = false, features = ["std"] }
+sp-runtime = { version = "39", default-features = false, features = ["std"] }
+
 # utilities
 thiserror = "1.0"
 anyhow = "1.0"
 hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-clap = { version = "4", features = ["derive"] }
+clap = { version = "4", features = ["derive", "env"] }
 serde = { version = "1.0", features = ["derive"] }
 bincode = "1.3"
 

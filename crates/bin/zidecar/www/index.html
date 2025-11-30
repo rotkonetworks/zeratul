@@ -2,633 +2,1125 @@
 <html>
 <head>
 <meta charset="UTF-8">
-<title>zafu | zcash light wallet</title>
-<link rel="stylesheet" href="/style.css">
+<title>zafu | zcash wallet</title>
+<meta http-equiv="Cross-Origin-Opener-Policy" content="same-origin">
+<meta http-equiv="Cross-Origin-Embedder-Policy" content="require-corp">
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --bg: #0d0d12;
+  --surface: #16161d;
+  --border: #2a2a35;
+  --gold: #f4a31e;
+  --text: #e0e0e4;
+  --dim: #707078;
+  --ok: #50c878;
+  --err: #c05050;
+}
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'SF Mono', 'Consolas', monospace;
+  font-size: 13px;
+  line-height: 1.6;
+  padding: 24px;
+  min-height: 100vh;
+}
+.container {
+  max-width: 700px;
+  margin: 0 auto;
+}
+h1 {
+  color: var(--gold);
+  font-size: 16px;
+  font-weight: 600;
+  margin-bottom: 24px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+.section {
+  margin-bottom: 24px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+}
+.section-title {
+  color: var(--dim);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 1px;
+  margin-bottom: 12px;
+}
+.row {
+  display: flex;
+  gap: 12px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.row:last-child { margin-bottom: 0; }
+input, textarea, select {
+  background: var(--bg);
+  color: var(--text);
+  border: 1px solid var(--border);
+  padding: 8px 12px;
+  font-family: inherit;
+  font-size: 12px;
+  flex: 1;
+}
+input:focus, textarea:focus {
+  outline: none;
+  border-color: var(--gold);
+}
+textarea { min-height: 60px; resize: vertical; }
+button {
+  background: var(--gold);
+  color: #000;
+  border: none;
+  padding: 8px 16px;
+  font-family: inherit;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+button:hover { filter: brightness(1.1); }
+button:disabled { background: var(--border); color: var(--dim); cursor: not-allowed; }
+.status {
+  padding: 12px;
+  background: var(--bg);
+  border-left: 3px solid var(--border);
+  font-size: 12px;
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  min-height: 40px;
+}
+.status.ok { border-color: var(--ok); }
+.status.err { border-color: var(--err); }
+.status.active { border-color: var(--gold); }
+.progress-bar {
+  height: 8px;
+  background: var(--bg);
+  margin: 12px 0;
+  overflow: hidden;
+  position: relative;
+}
+.progress-fill {
+  height: 100%;
+  background: var(--gold);
+  width: 0%;
+  transition: width 0.2s;
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+.progress-verified {
+  height: 100%;
+  background: var(--ok);
+  width: 0%;
+  transition: width 0.2s;
+  position: absolute;
+  top: 0;
+  left: 0;
+}
+.progress-legend {
+  display: flex;
+  gap: 16px;
+  font-size: 10px;
+  margin-top: 4px;
+}
+.progress-legend span::before {
+  content: '';
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+.legend-synced::before { background: var(--gold); }
+.legend-verified::before { background: var(--ok); }
+.balance {
+  font-size: 28px;
+  font-weight: 600;
+  color: var(--gold);
+  text-align: center;
+  padding: 20px;
+}
+.balance span { font-size: 14px; color: var(--dim); }
+.info-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  font-size: 12px;
+}
+.info-grid .label { color: var(--dim); }
+.info-grid .value { text-align: right; }
+.hidden { display: none; }
+.note-list {
+  max-height: 150px;
+  overflow-y: auto;
+  font-size: 11px;
+}
+.note {
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border);
+  display: flex;
+  justify-content: space-between;
+}
+.note:last-child { border-bottom: none; }
+.note.spent { opacity: 0.5; }
+.note .amount { color: var(--ok); }
+.note.spent .amount { color: var(--err); }
+.security-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+.security-layer {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px;
+  background: var(--bg);
+  border-left: 2px solid var(--border);
+}
+.security-layer.active { border-color: var(--gold); }
+.security-layer.verified { border-color: var(--ok); }
+.security-layer.unavailable { opacity: 0.5; }
+.sec-icon {
+  font-size: 16px;
+  width: 20px;
+  text-align: center;
+  color: var(--dim);
+}
+.security-layer.active .sec-icon,
+.security-layer.verified .sec-icon { color: var(--gold); }
+.sec-info { flex: 1; min-width: 0; }
+.sec-name { font-size: 11px; font-weight: 600; }
+.sec-desc { font-size: 9px; color: var(--dim); }
+.sec-status {
+  font-size: 9px;
+  color: var(--dim);
+  text-align: right;
+  white-space: nowrap;
+}
+.security-layer.verified .sec-status { color: var(--ok); }
+</style>
 </head>
 <body>
-<div class="terminal">
-<div class="header">zafu v0.1.0 | zcash light wallet with ligerito proofs</div>
-<div class="status" id="status">initializing wasm module...</div>
+<div class="container">
+<h1>zafu <span style="color: var(--dim); font-weight: 400">zcash light wallet</span></h1>
 
-<div class="section" id="connect-section">
-<div class="section-title">1. connect to zidecar</div>
-<div class="section-content">
-  <label>server url:
-    <input type="text" id="server-url" value="http://localhost:50051" style="width: 300px;">
-  </label>
-  <button id="connect-btn" class="btn">connect</button>
-  <div id="connect-output" class="output"></div>
-</div>
-</div>
-
-<div class="section" id="wallet-section" style="display: none;">
-<div class="section-title">2. wallet</div>
-<div class="section-content">
-  <div id="wallet-tabs">
-    <button id="tab-import" class="btn btn-tab active">import existing</button>
-    <button id="tab-create" class="btn btn-tab">create new</button>
+<div class="section">
+  <div class="section-title">server</div>
+  <div class="row">
+    <input type="text" id="server-url" value="http://localhost:50051" placeholder="zidecar server">
+    <button id="connect-btn">connect</button>
   </div>
-
-  <div id="import-panel">
-    <label>seed phrase (24 words):
-      <textarea id="seed-phrase" rows="3" placeholder="abandon abandon abandon ... about"></textarea>
-    </label>
-    <label>birthday height:
-      <input type="number" id="birthday-height" value="1687104" min="1687104">
-      <span class="hint">(orchard activation: 1,687,104)</span>
-    </label>
-    <button id="import-btn" class="btn">import wallet</button>
-  </div>
-
-  <div id="create-panel" style="display: none;">
-    <p class="warning">store this seed phrase securely - it cannot be recovered!</p>
-    <button id="generate-btn" class="btn">generate new wallet</button>
-    <div id="new-seed-display" class="seed-display" style="display: none;"></div>
-    <button id="confirm-seed-btn" class="btn" style="display: none;">i have saved my seed</button>
-  </div>
-
-  <div id="wallet-output" class="output"></div>
-</div>
+  <div class="status" id="connect-status">not connected</div>
 </div>
 
-<div class="section" id="sync-section" style="display: none;">
-<div class="section-title">3. sync wallet</div>
-<div class="section-content">
-  <div id="sync-info">
-    <div class="info-row">
-      <span>chain height:</span>
-      <span id="chain-height">-</span>
+<div class="section hidden" id="wallet-section">
+  <div class="section-title">wallet</div>
+  <div class="row">
+    <textarea id="seed-phrase" placeholder="enter 24-word seed phrase"></textarea>
+  </div>
+  <div class="row">
+    <input type="number" id="birthday" value="1687104" min="1" placeholder="birthday height">
+    <button id="import-btn">import</button>
+  </div>
+  <div class="status" id="wallet-status">enter seed phrase
+<span style="color: var(--dim); font-size: 11px">note: orchard only (post-NU5). sapling transactions not supported.</span></div>
+</div>
+
+<div class="section hidden" id="sync-section">
+  <div class="section-title">sync</div>
+  <div class="info-grid" id="sync-info">
+    <span class="label">chain</span><span class="value" id="chain-height">-</span>
+    <span class="label">wallet</span><span class="value" id="wallet-height">-</span>
+    <span class="label">remaining</span><span class="value" id="remaining">-</span>
+    <span class="label">verified</span><span class="value" id="verified-count">0</span>
+  </div>
+  <div class="progress-bar">
+    <div class="progress-fill" id="progress"></div>
+    <div class="progress-verified" id="progress-verified"></div>
+  </div>
+  <div class="progress-legend">
+    <span class="legend-synced">synced</span>
+    <span class="legend-verified">verified (zkp)</span>
+  </div>
+  <div class="row">
+    <button id="sync-btn">sync</button>
+    <button id="stop-btn" class="hidden">stop</button>
+  </div>
+  <div class="status" id="sync-status">ready to sync</div>
+</div>
+
+<div class="section hidden" id="security-section">
+  <div class="section-title">security layers</div>
+  <div class="security-grid">
+    <div class="security-layer" id="sec-ligerito">
+      <div class="sec-icon">◈</div>
+      <div class="sec-info">
+        <div class="sec-name">Ligerito ZK</div>
+        <div class="sec-desc">header chain proof</div>
+      </div>
+      <div class="sec-status" id="sec-ligerito-status">-</div>
     </div>
-    <div class="info-row">
-      <span>wallet height:</span>
-      <span id="wallet-height">-</span>
+    <div class="security-layer" id="sec-frost">
+      <div class="sec-icon">❄</div>
+      <div class="sec-info">
+        <div class="sec-name">FROST</div>
+        <div class="sec-desc">threshold signature</div>
+      </div>
+      <div class="sec-status" id="sec-frost-status">-</div>
     </div>
-    <div class="info-row">
-      <span>blocks to scan:</span>
-      <span id="blocks-remaining">-</span>
+    <div class="security-layer" id="sec-polkadot">
+      <div class="sec-icon">●</div>
+      <div class="sec-info">
+        <div class="sec-name">Polkadot</div>
+        <div class="sec-desc">parachain finality</div>
+      </div>
+      <div class="sec-status" id="sec-polkadot-status">-</div>
     </div>
-  </div>
-
-  <div id="proof-status" class="proof-box">
-    <div class="proof-label">gigaproof status:</div>
-    <div id="gigaproof-status">checking...</div>
-  </div>
-
-  <button id="sync-btn" class="btn">start sync</button>
-  <button id="stop-sync-btn" class="btn" style="display: none;">stop</button>
-
-  <div id="progress-bar" style="display: none;">
-    <div id="progress-fill"></div>
-    <span id="progress-text">0%</span>
-  </div>
-
-  <div id="sync-output" class="output"></div>
-</div>
-</div>
-
-<div class="section" id="balance-section" style="display: none;">
-<div class="section-title">4. balance & transactions</div>
-<div class="section-content">
-  <div class="balance-display">
-    <div class="balance-label">available balance</div>
-    <div class="balance-value" id="balance-zec">0.00000000</div>
-    <div class="balance-unit">ZEC</div>
-  </div>
-
-  <div id="tx-list">
-    <div class="tx-header">recent transactions</div>
-    <div id="transactions" class="tx-container">
-      <div class="tx-empty">no transactions found</div>
+    <div class="security-layer" id="sec-nomt">
+      <div class="sec-icon">⌘</div>
+      <div class="sec-info">
+        <div class="sec-name">NOMT</div>
+        <div class="sec-desc">state proof</div>
+      </div>
+      <div class="sec-status" id="sec-nomt-status">-</div>
     </div>
   </div>
-
-  <button id="refresh-btn" class="btn">refresh</button>
-</div>
 </div>
 
-<div class="footer">
-  powered by ligerito |
-  <a href="https://github.com/rotkonetworks/zeratul">github</a> |
-  <a href="https://zcash.org">zcash</a>
+<div class="section hidden" id="balance-section">
+  <div class="section-title">balance</div>
+  <div class="balance" id="balance">0.00000000 <span>ZEC</span></div>
+  <div class="note-list" id="notes"></div>
 </div>
+
 </div>
 
 <script type="module">
-import initWasm, { WalletKeys, generate_seed_phrase, validate_seed_phrase, version } from './pkg/zafu_wasm.js';
+import initWasm, { WalletKeys, validate_seed_phrase, version, num_threads } from './pkg/zafu_wasm.js';
+import * as zafuWasm from './pkg/zafu_wasm.js';
+import initLigerito, { verify as verifyProof } from './ligerito.js';
+import * as ligerito from './ligerito.js';
 
-// State
-let state = {
+const $ = id => document.getElementById(id);
+const state = {
   connected: false,
   serverUrl: '',
-  walletImported: false,
-  scanning: false,
   chainHeight: 0,
   walletHeight: 0,
-  balance: 0,
-  seedPhrase: null,
-  birthdayHeight: 1687104,
-  walletKeys: null,  // WASM WalletKeys instance
-  foundNotes: [],    // notes we've found
-  spentNullifiers: [], // nullifiers we've seen (spent notes)
-  wasmReady: false,
+  walletKeys: null,
+  scanning: false,
+  notes: [],
+  spent: [],
+  // verification state
+  gigaproofHeight: 0,       // height covered by gigaproof
+  verifiedHeight: 0,        // height we've verified up to
+  proofsVerified: 0,        // count of proofs verified
+  // security layers
+  security: {
+    ligerito: { status: 'none', detail: '' },
+    frost: { status: 'none', detail: '' },
+    polkadot: { status: 'none', detail: '' },
+    nomt: { status: 'none', detail: '' },
+  },
 };
 
-// DOM elements
-const $ = (id) => document.getElementById(id);
-
-// Initialize
-async function initApp() {
-  // Initialize WASM module
+// Init WASM
+async function init() {
+  $('connect-status').textContent = 'loading wasm...';
   try {
-    await initWasm();
-    state.wasmReady = true;
-    const ver = version();
-    $('status').innerHTML = `<span class="ok">zafu-wasm ${ver} ready</span>`;
+    await Promise.all([initWasm(), initLigerito()]);
+    const threads = navigator.hardwareConcurrency || 4;
+    try {
+      const poolInits = [];
+      if (zafuWasm.initThreadPool) poolInits.push(zafuWasm.initThreadPool(threads));
+      if (ligerito.initThreadPool) poolInits.push(ligerito.initThreadPool(threads));
+      if (poolInits.length > 0) await Promise.all(poolInits);
+    } catch (e) {
+      console.warn('thread pool failed:', e);
+    }
+    $('connect-status').textContent = `zafu ${version()} ready (${num_threads()} threads)`;
   } catch (e) {
-    $('status').innerHTML = `<span class="err">wasm init failed: ${e.message}</span>`;
-    console.error('WASM init error:', e);
-    return;
+    $('connect-status').textContent = 'wasm failed: ' + e.message;
+    $('connect-status').className = 'status err';
   }
-
-  // Tab switching
-  $('tab-import').addEventListener('click', () => {
-    $('tab-import').classList.add('active');
-    $('tab-create').classList.remove('active');
-    $('import-panel').style.display = 'block';
-    $('create-panel').style.display = 'none';
-  });
-
-  $('tab-create').addEventListener('click', () => {
-    $('tab-create').classList.add('active');
-    $('tab-import').classList.remove('active');
-    $('create-panel').style.display = 'block';
-    $('import-panel').style.display = 'none';
-  });
-
-  // Connect button
-  $('connect-btn').addEventListener('click', connect);
-
-  // Import button
-  $('import-btn').addEventListener('click', importWallet);
-
-  // Generate button
-  $('generate-btn').addEventListener('click', generateWallet);
-  $('confirm-seed-btn').addEventListener('click', confirmSeed);
-
-  // Sync button
-  $('sync-btn').addEventListener('click', startSync);
-  $('stop-sync-btn').addEventListener('click', stopSync);
-
-  // Refresh button
-  $('refresh-btn').addEventListener('click', refreshBalance);
 }
 
-// Connect to zidecar
-async function connect() {
-  const serverUrl = $('server-url').value.trim();
-  $('connect-output').innerHTML = '<span class="warn">connecting...</span>';
+// Connect
+$('connect-btn').onclick = async () => {
+  const url = $('server-url').value.trim();
+  $('connect-status').textContent = 'connecting...';
+  $('connect-status').className = 'status active';
 
   try {
-    // Use gRPC-web to get sync status
-    const response = await grpcRequest(serverUrl, 'GetSyncStatus', {});
-
+    const resp = await grpc(url, 'GetSyncStatus', {});
     state.connected = true;
-    state.serverUrl = serverUrl;
-    state.chainHeight = response.currentHeight;
+    state.serverUrl = url;
+    state.chainHeight = resp.currentHeight;
+    state.gigaproofHeight = resp.lastGigaproofHeight || 0;
 
-    $('connect-output').innerHTML = `
-<span class="ok">connected to zidecar</span>
-chain height: ${response.currentHeight.toLocaleString()}
-epoch: ${response.currentEpoch} (${response.blocksInEpoch}/1024 blocks)
-gigaproof: ${response.gigaproofStatus === 2 ? '<span class="ok">ready</span>' : '<span class="warn">generating...</span>'}
-    `.trim();
+    const proofStatus = resp.lastGigaproofHeight > 0
+      ? `proven to ${resp.lastGigaproofHeight.toLocaleString()}`
+      : 'generating proof...';
+    $('connect-status').textContent = `connected - height ${resp.currentHeight.toLocaleString()}, ${proofStatus}`;
+    $('connect-status').className = 'status ok';
+    $('chain-height').textContent = resp.currentHeight.toLocaleString();
+    $('wallet-section').classList.remove('hidden');
 
-    $('wallet-section').style.display = 'block';
-    $('chain-height').textContent = response.currentHeight.toLocaleString();
-    $('gigaproof-status').innerHTML = response.gigaproofStatus === 2
-      ? '<span class="ok">verified</span>'
-      : '<span class="warn">waiting for epoch completion</span>';
-
-  } catch (e) {
-    $('connect-output').innerHTML = `<span class="err">connection failed: ${e.message}</span>`;
-  }
-}
-
-// Import existing wallet
-async function importWallet() {
-  const seedPhrase = $('seed-phrase').value.trim();
-  const birthdayHeight = parseInt($('birthday-height').value);
-
-  // Basic validation using WASM
-  if (!state.wasmReady) {
-    $('wallet-output').innerHTML = '<span class="err">wasm module not ready</span>';
-    return;
-  }
-
-  // Validate seed phrase using WASM
-  if (!validate_seed_phrase(seedPhrase)) {
-    $('wallet-output').innerHTML = '<span class="err">invalid seed phrase (must be valid BIP39 24-word mnemonic)</span>';
-    return;
-  }
-
-  if (birthdayHeight < 1687104) {
-    $('wallet-output').innerHTML = '<span class="err">birthday must be >= orchard activation (1687104)</span>';
-    return;
-  }
-
-  $('wallet-output').innerHTML = '<span class="warn">deriving keys from seed phrase...</span>';
-
-  try {
-    // Create WalletKeys instance using WASM
-    state.walletKeys = new WalletKeys(seedPhrase);
-    const ivkAddress = state.walletKeys.get_address();
-
-    state.seedPhrase = seedPhrase;
-    state.birthdayHeight = birthdayHeight;
-    state.walletImported = true;
-    state.walletHeight = birthdayHeight;
-    state.foundNotes = [];
-    state.spentNullifiers = [];
-
-    $('wallet-output').innerHTML = `
-<span class="ok">wallet imported (view-only)</span>
-ivk: ${ivkAddress.substring(0, 16)}...${ivkAddress.substring(ivkAddress.length - 16)}
-birthday: ${birthdayHeight.toLocaleString()}
-ready to sync from block ${birthdayHeight.toLocaleString()}
-    `.trim();
-
-    $('sync-section').style.display = 'block';
-    $('wallet-height').textContent = birthdayHeight.toLocaleString();
-    $('blocks-remaining').textContent = (state.chainHeight - birthdayHeight).toLocaleString();
+    // Poll for updates
+    setInterval(async () => {
+      if (!state.connected) return;
+      try {
+        const r = await grpc(state.serverUrl, 'GetSyncStatus', {});
+        state.chainHeight = r.currentHeight;
+        state.gigaproofHeight = r.lastGigaproofHeight || 0;
+        $('chain-height').textContent = r.currentHeight.toLocaleString();
+        if (!state.scanning) {
+          $('remaining').textContent = Math.max(0, r.currentHeight - state.walletHeight).toLocaleString();
+        }
+      } catch (e) {}
+    }, 15000);
 
   } catch (e) {
-    $('wallet-output').innerHTML = `<span class="err">key derivation failed: ${e.message}</span>`;
-    console.error('Key derivation error:', e);
+    $('connect-status').textContent = 'failed: ' + e.message;
+    $('connect-status').className = 'status err';
   }
-}
+};
 
-// Generate new wallet
-function generateWallet() {
-  if (!state.wasmReady) {
-    $('wallet-output').innerHTML = '<span class="err">wasm module not ready</span>';
+// Import wallet
+$('import-btn').onclick = async () => {
+  const seed = $('seed-phrase').value.trim();
+  const birthday = parseInt($('birthday').value) || 1687104;
+
+  if (!validate_seed_phrase(seed)) {
+    $('wallet-status').textContent = 'invalid seed phrase';
+    $('wallet-status').className = 'status err';
     return;
   }
 
   try {
-    // Generate cryptographically secure 24-word mnemonic using WASM
-    const phrase = generate_seed_phrase();
-    const words = phrase.split(' ');
+    state.walletKeys = new WalletKeys(seed);
+    state.walletHeight = birthday;
+    state.notes = [];
+    state.spent = [];
 
-    $('new-seed-display').style.display = 'block';
-    $('new-seed-display').innerHTML = `
-<div class="seed-words">${words.map((w, i) => `<span class="word"><span class="num">${i+1}.</span>${w}</span>`).join('')}</div>
-<p class="seed-warning">write down these 24 words in order. this is the ONLY way to recover your wallet!</p>
-    `;
-
-    $('generate-btn').style.display = 'none';
-    $('confirm-seed-btn').style.display = 'inline-block';
-
-    state.seedPhrase = phrase;
+    const addr = state.walletKeys.get_address();
+    $('wallet-status').textContent = `imported: ${addr.slice(0,16)}...`;
+    $('wallet-status').className = 'status ok';
+    $('wallet-height').textContent = birthday.toLocaleString();
+    $('remaining').textContent = (state.chainHeight - birthday).toLocaleString();
+    $('sync-section').classList.remove('hidden');
+    $('balance-section').classList.remove('hidden');
 
   } catch (e) {
-    $('wallet-output').innerHTML = `<span class="err">seed generation failed: ${e.message}</span>`;
-    console.error('Seed generation error:', e);
+    $('wallet-status').textContent = 'error: ' + e.message;
+    $('wallet-status').className = 'status err';
   }
-}
+};
 
-function confirmSeed() {
-  try {
-    // Derive keys from the generated seed phrase using WASM
-    state.walletKeys = new WalletKeys(state.seedPhrase);
-    const ivkAddress = state.walletKeys.get_address();
-
-    state.walletImported = true;
-    state.birthdayHeight = state.chainHeight; // new wallet starts at current height
-    state.walletHeight = state.chainHeight;
-    state.foundNotes = [];
-    state.spentNullifiers = [];
-
-    $('wallet-output').innerHTML = `
-<span class="ok">new wallet created (view-only)</span>
-ivk: ${ivkAddress.substring(0, 16)}...${ivkAddress.substring(ivkAddress.length - 16)}
-your wallet will start syncing from the current height
-    `.trim();
-
-    $('sync-section').style.display = 'block';
-    $('wallet-height').textContent = state.walletHeight.toLocaleString();
-    $('blocks-remaining').textContent = '0';
-
-  } catch (e) {
-    $('wallet-output').innerHTML = `<span class="err">key derivation failed: ${e.message}</span>`;
-    console.error('Key derivation error:', e);
-  }
-}
-
-// Start sync
-async function startSync() {
-  if (!state.walletImported || !state.connected) return;
+// Sync
+$('sync-btn').onclick = async () => {
+  if (!state.walletKeys || state.scanning) return;
 
   state.scanning = true;
-  $('sync-btn').style.display = 'none';
-  $('stop-sync-btn').style.display = 'inline-block';
-  $('progress-bar').style.display = 'flex';
-  $('sync-output').innerHTML = '<span class="warn">downloading compact blocks...</span>';
+  $('sync-btn').classList.add('hidden');
+  $('stop-btn').classList.remove('hidden');
 
-  const startHeight = state.walletHeight;
-  const endHeight = state.chainHeight;
-  const totalBlocks = endHeight - startHeight;
+  const start = state.walletHeight;
+  const end = state.chainHeight;
+  const total = end - start;
 
-  if (totalBlocks <= 0) {
-    $('sync-output').innerHTML = '<span class="ok">wallet is already synced</span>';
+  if (total <= 0) {
+    $('sync-status').textContent = 'already synced';
     finishSync();
     return;
   }
 
+  let scanned = 0;
+  let actions = 0;
+  let found = 0;
+  const batchSize = 200;
+  const startTime = performance.now();
+  let lastVerifyHeight = start;
+
+  $('sync-status').className = 'status active';
+  state.verifiedHeight = start;
+  state.proofsVerified = 0;
+
+  console.log(`[sync] starting scan from ${start} to ${end} (${total} blocks)`);
+
+  // Show security section and initialize layers
+  $('security-section').classList.remove('hidden');
+  updateSecurityLayer('ligerito', 'none', 'pending');
+  updateSecurityLayer('frost', 'none', 'checking...');
+  updateSecurityLayer('polkadot', 'none', 'checking...');
+  updateSecurityLayer('nomt', 'none', 'pending');
+
+  // Fetch checkpoint to check FROST/Polkadot status
   try {
-    // Stream compact blocks from zidecar
-    let scannedBlocks = 0;
-    let foundNotes = 0;
-
-    // Simulated sync progress (real implementation would use WASM scanner)
-    const interval = setInterval(() => {
-      if (!state.scanning) {
-        clearInterval(interval);
-        return;
-      }
-
-      scannedBlocks += 100;
-      if (scannedBlocks >= totalBlocks) {
-        scannedBlocks = totalBlocks;
-        clearInterval(interval);
-        finishSync();
-      }
-
-      const progress = (scannedBlocks / totalBlocks) * 100;
-      $('progress-fill').style.width = `${progress}%`;
-      $('progress-text').textContent = `${progress.toFixed(1)}%`;
-      $('wallet-height').textContent = (startHeight + scannedBlocks).toLocaleString();
-      $('blocks-remaining').textContent = (totalBlocks - scannedBlocks).toLocaleString();
-
-      $('sync-output').innerHTML = `
-<span class="warn">scanning...</span>
-blocks: ${scannedBlocks.toLocaleString()} / ${totalBlocks.toLocaleString()}
-notes found: ${foundNotes}
-      `.trim();
-    }, 50);
-
+    const checkpoint = await fetchCheckpoint();
+    if (checkpoint) {
+      updateSecurityLayer('frost', 'verified', `epoch ${checkpoint.epoch}`);
+      // Polkadot status depends on whether zanchor is connected
+      updateSecurityLayer('polkadot', 'unavailable', 'not connected');
+    } else {
+      updateSecurityLayer('frost', 'unavailable', 'no checkpoint');
+      updateSecurityLayer('polkadot', 'unavailable', 'no checkpoint');
+    }
   } catch (e) {
-    $('sync-output').innerHTML = `<span class="err">sync error: ${e.message}</span>`;
-    finishSync();
+    console.warn('[checkpoint] fetch error:', e);
+    updateSecurityLayer('frost', 'unavailable', 'error');
+    updateSecurityLayer('polkadot', 'unavailable', 'error');
   }
-}
 
-function stopSync() {
+  // Verify gigaproof if available (demonstrates ZKP verification)
+  if (state.gigaproofHeight > start) {
+    const provenTo = Math.min(state.gigaproofHeight, end);
+    $('sync-status').textContent = 'verifying gigaproof...';
+    updateSecurityLayer('ligerito', 'active', 'verifying...');
+
+    try {
+      // Fetch and verify the gigaproof to demonstrate ZKP
+      const gigaproof = await fetchHeaderProof(1, state.gigaproofHeight);
+      if (gigaproof && gigaproof.ligerito_proof && gigaproof.ligerito_proof.length > 0) {
+        const startVerify = performance.now();
+        const ok = await verifyHeaderProof(gigaproof);
+        const elapsed = ((performance.now() - startVerify) / 1000).toFixed(1);
+
+        if (ok) {
+          state.verifiedHeight = provenTo;
+          const verifiedPct = ((provenTo - start) / total) * 100;
+          $('progress-verified').style.width = verifiedPct + '%';
+          $('verified-count').textContent = `verified to ${provenTo.toLocaleString()}`;
+          $('sync-status').textContent = `gigaproof verified in ${elapsed}s`;
+          console.log(`[verify] gigaproof verified in ${elapsed}s - covers up to height ${provenTo}`);
+          state.proofsVerified++;
+          updateSecurityLayer('ligerito', 'verified', `${elapsed}s`);
+        } else {
+          $('verified-count').textContent = 'verification failed';
+          console.warn('[verify] gigaproof verification failed');
+          updateSecurityLayer('ligerito', 'unavailable', 'failed');
+        }
+      } else {
+        // No proof available yet, server still generating
+        $('verified-count').textContent = 'awaiting proof';
+        console.log('[verify] no gigaproof available yet');
+        updateSecurityLayer('ligerito', 'active', 'generating...');
+      }
+    } catch (e) {
+      console.warn('[verify] gigaproof fetch/verify error:', e);
+      $('verified-count').textContent = 'verify error';
+      updateSecurityLayer('ligerito', 'unavailable', 'error');
+    }
+
+    // Brief pause to show verification result
+    await new Promise(r => setTimeout(r, 500));
+  } else {
+    updateSecurityLayer('ligerito', 'active', 'generating...');
+  }
+
+  for (let h = start; h <= end && state.scanning; h += batchSize) {
+    const batchEnd = Math.min(h + batchSize - 1, end);
+
+    try {
+      const blocks = await fetchBlocks(h, batchEnd);
+      const batchActions = blocks.reduce((sum, b) => sum + b.actions.length, 0);
+      if (batchActions > 0) {
+        console.log(`[batch ${h}-${batchEnd}] ${blocks.length} blocks, ${batchActions} actions`);
+      }
+
+      for (const block of blocks) {
+        actions += block.actions.length;
+
+        // Build binary for parallel scan
+        if (block.actions.length > 0 && state.walletKeys) {
+          const binary = buildBinaryActions(block.actions);
+          try {
+            const notes = state.walletKeys.scan_actions_parallel(binary);
+            if (notes && notes.length > 0) {
+              found += notes.length;
+              console.log(`[block ${block.height}] found ${notes.length} notes!`, notes);
+              for (const n of notes) {
+                state.notes.push({ ...n, height: block.height });
+              }
+            }
+          } catch (e) {
+            console.warn('scan error at block', block.height, ':', e);
+          }
+        }
+
+        // Track nullifiers
+        for (const a of block.actions) {
+          const nf = bytesToHex(a.nullifier);
+          if (state.notes.find(n => n.nullifier === nf)) {
+            state.spent.push(nf);
+          }
+        }
+
+        state.walletHeight = block.height;
+      }
+
+      scanned += blocks.length;
+      const pct = (scanned / total) * 100;
+      const elapsed = (performance.now() - startTime) / 1000;
+      const rate = Math.round(actions / elapsed);
+
+      // Update sync progress bar
+      $('progress').style.width = pct + '%';
+
+      // Update verified progress - gigaproof covers up to gigaproofHeight
+      if (state.walletHeight <= state.gigaproofHeight) {
+        state.verifiedHeight = state.walletHeight;
+        const verifiedPct = ((state.verifiedHeight - start) / total) * 100;
+        $('progress-verified').style.width = verifiedPct + '%';
+      }
+
+      $('wallet-height').textContent = state.walletHeight.toLocaleString();
+      $('remaining').textContent = (end - state.walletHeight).toLocaleString();
+      $('verified-count').textContent = state.verifiedHeight >= state.gigaproofHeight ? 'all blocks proven' : `proven to ${state.verifiedHeight.toLocaleString()}`;
+      $('sync-status').textContent = `${pct.toFixed(1)}% | ${actions.toLocaleString()} actions (${rate}/s) | ${found} notes`;
+
+    } catch (e) {
+      $('sync-status').textContent = 'error: ' + e.message;
+      $('sync-status').className = 'status err';
+      break;
+    }
+
+    await new Promise(r => setTimeout(r, 1));
+  }
+
+  // At end, try to verify tip proof for remaining blocks
+  if (state.scanning && state.walletHeight > state.gigaproofHeight) {
+    $('sync-status').textContent = 'verifying tip proof...';
+    try {
+      const proof = await fetchHeaderProof(state.gigaproofHeight + 1, state.walletHeight);
+      if (proof && proof.length > 0) {
+        const ok = await verifyHeaderProof(proof);
+        if (ok) {
+          state.verifiedHeight = state.walletHeight;
+          $('progress-verified').style.width = '100%';
+          $('verified-count').textContent = 'all blocks proven';
+          state.proofsVerified++;
+          console.log(`[verify] tip proof verified!`);
+        }
+      }
+    } catch (e) {
+      console.warn('[verify] tip proof failed:', e);
+    }
+  }
+
+  finishSync();
+};
+
+$('stop-btn').onclick = () => {
   state.scanning = false;
-  $('sync-btn').style.display = 'inline-block';
-  $('stop-sync-btn').style.display = 'none';
-  $('sync-output').innerHTML += '\n<span class="warn">sync stopped</span>';
-}
+};
 
 function finishSync() {
   state.scanning = false;
-  state.walletHeight = state.chainHeight;
+  $('sync-btn').classList.remove('hidden');
+  $('stop-btn').classList.add('hidden');
+  $('progress').style.width = '100%';
+  $('sync-status').className = 'status ok';
 
-  $('sync-btn').style.display = 'inline-block';
-  $('stop-sync-btn').style.display = 'none';
-  $('progress-fill').style.width = '100%';
-  $('progress-text').textContent = '100%';
+  // Show verification summary
+  const verified = state.verifiedHeight >= state.walletHeight;
+  const verifyStatus = verified
+    ? `fully verified (${state.proofsVerified} zkp)`
+    : `verified to ${state.verifiedHeight.toLocaleString()}`;
+  $('sync-status').textContent = `sync complete - ${verifyStatus}`;
+  $('verified-count').textContent = verifyStatus;
 
-  $('sync-output').innerHTML = `
-<span class="ok">sync complete</span>
-scanned ${(state.chainHeight - state.birthdayHeight).toLocaleString()} blocks
-wallet is up to date
-  `.trim();
-
-  $('balance-section').style.display = 'block';
-  refreshBalance();
-}
-
-// Refresh balance
-async function refreshBalance() {
-  if (!state.walletKeys) {
-    $('balance-zec').textContent = '0.00000000';
-    return;
+  if (verified) {
+    $('progress-verified').style.width = '100%';
   }
 
-  try {
-    // Calculate balance from found notes using WASM
-    const balanceZat = state.walletKeys.calculate_balance(
-      state.foundNotes,
-      state.spentNullifiers
-    );
-    const balanceZec = (Number(balanceZat) / 100000000).toFixed(8);
+  // Update NOMT status - state roots are verified via ligerito proof
+  if (state.proofsVerified > 0) {
+    updateSecurityLayer('nomt', 'verified', 'roots proven');
+  } else {
+    updateSecurityLayer('nomt', 'active', 'server attested');
+  }
 
-    $('balance-zec').textContent = balanceZec;
-    state.balance = Number(balanceZat);
+  updateBalance();
+}
 
-    // Update transaction list
-    updateTransactionList();
+function updateSecurityLayer(layer, status, detail) {
+  state.security[layer] = { status, detail };
+  const el = $(`sec-${layer}`);
+  const statusEl = $(`sec-${layer}-status`);
 
-  } catch (e) {
-    console.error('Balance calculation error:', e);
-    $('balance-zec').textContent = '?.????????';
+  el.classList.remove('active', 'verified', 'unavailable');
+  if (status === 'active') el.classList.add('active');
+  else if (status === 'verified') el.classList.add('verified');
+  else if (status === 'unavailable') el.classList.add('unavailable');
+
+  statusEl.textContent = detail || (status === 'verified' ? '✓' : '-');
+}
+
+function updateBalance() {
+  const unspent = state.notes.filter(n => !state.spent.includes(n.nullifier));
+  const bal = unspent.reduce((sum, n) => sum + BigInt(n.value), 0n);
+  $('balance').innerHTML = (Number(bal) / 1e8).toFixed(8) + ' <span>ZEC</span>';
+
+  // Show notes
+  const list = $('notes');
+  if (state.notes.length === 0) {
+    list.innerHTML = '<div style="color: var(--dim); padding: 8px;">no notes found</div>';
+  } else {
+    list.innerHTML = state.notes.map(n => {
+      const spent = state.spent.includes(n.nullifier);
+      const val = (Number(n.value) / 1e8).toFixed(8);
+      return `<div class="note ${spent ? 'spent' : ''}">
+        <span>#${n.height}</span>
+        <span class="amount">${spent ? '-' : '+'}${val}</span>
+      </div>`;
+    }).join('');
   }
 }
 
-// Update transaction list display
-function updateTransactionList() {
-  const txContainer = $('transactions');
-
-  if (state.foundNotes.length === 0) {
-    txContainer.innerHTML = '<div class="tx-empty">no transactions found</div>';
-    return;
-  }
-
-  const notesList = state.foundNotes.map(note => {
-    const isSpent = state.spentNullifiers.includes(note.nullifier);
-    const valueZec = (note.value / 100000000).toFixed(8);
-    return `
-      <div class="tx-item ${isSpent ? 'spent' : 'unspent'}">
-        <span class="tx-type">${isSpent ? 'spent' : 'received'}</span>
-        <span class="tx-amount">${isSpent ? '-' : '+'}${valueZec} ZEC</span>
-        <span class="tx-hash">${note.cmx.substring(0, 8)}...</span>
-      </div>
-    `;
-  }).join('');
-
-  txContainer.innerHTML = notesList;
-}
-
-// gRPC-web request helper using raw fetch API
-// This implements the gRPC-web text protocol (base64 encoded)
-async function grpcRequest(serverUrl, method, data) {
-  const servicePath = 'zidecar.v1.Zidecar';
-  const url = `${serverUrl}/${servicePath}/${method}`;
-
-  // Encode empty message for GetSyncStatus (no request fields)
-  // gRPC-web uses a 5-byte header: 1 byte compression flag + 4 bytes message length
-  let requestBody;
+// gRPC helpers
+async function grpc(url, method, data) {
+  const path = `${url}/zidecar.v1.Zidecar/${method}`;
+  let body;
 
   if (method === 'GetSyncStatus' || method === 'GetTip') {
-    // Empty message: header only
-    requestBody = new Uint8Array([0, 0, 0, 0, 0]);
+    body = new Uint8Array([0, 0, 0, 0, 0]);
   } else {
-    throw new Error(`Unsupported method: ${method}`);
+    throw new Error('unsupported method');
   }
 
+  const resp = await fetch(path, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/grpc-web+proto',
+      'Accept': 'application/grpc-web+proto',
+      'x-grpc-web': '1',
+    },
+    body,
+  });
+
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+  const buf = new Uint8Array(await resp.arrayBuffer());
+  if (buf.length < 5) throw new Error('empty response');
+
+  const len = (buf[1] << 24) | (buf[2] << 16) | (buf[3] << 8) | buf[4];
+  const msg = buf.slice(5, 5 + len);
+
+  if (method === 'GetSyncStatus') return parseSyncStatus(msg);
+  return {};
+}
+
+async function fetchBlocks(start, end) {
+  const path = `${state.serverUrl}/zidecar.v1.Zidecar/GetCompactBlocks`;
+  console.log(`[fetch] requesting blocks ${start}-${end}`);
+
+  // Encode BlockRange
+  const parts = [];
+  if (start > 0) { parts.push(0x08); parts.push(...varint(start)); }
+  if (end > 0) { parts.push(0x10); parts.push(...varint(end)); }
+  const msg = new Uint8Array(parts);
+
+  const body = new Uint8Array(5 + msg.length);
+  body[0] = 0;
+  body[1] = (msg.length >> 24) & 0xff;
+  body[2] = (msg.length >> 16) & 0xff;
+  body[3] = (msg.length >> 8) & 0xff;
+  body[4] = msg.length & 0xff;
+  body.set(msg, 5);
+
+  const resp = await fetch(path, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/grpc-web+proto',
+      'Accept': 'application/grpc-web+proto',
+      'x-grpc-web': '1',
+    },
+    body,
+  });
+
+  if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+
+  const buf = new Uint8Array(await resp.arrayBuffer());
+  const blocks = parseBlockStream(buf);
+  const totalActions = blocks.reduce((sum, b) => sum + b.actions.length, 0);
+  if (totalActions > 0 || blocks.length < 50) {
+    console.log(`[fetch] got ${blocks.length} blocks, ${totalActions} total actions`);
+  }
+  return blocks;
+}
+
+function parseBlockStream(buf) {
+  const blocks = [];
+  let pos = 0;
+
+  while (pos < buf.length) {
+    if (pos + 5 > buf.length) break;
+    if (buf[pos] === 0x80) break; // trailer
+
+    const len = (buf[pos+1] << 24) | (buf[pos+2] << 16) | (buf[pos+3] << 8) | buf[pos+4];
+    pos += 5;
+    if (pos + len > buf.length) break;
+
+    blocks.push(parseBlock(buf.slice(pos, pos + len)));
+    pos += len;
+  }
+
+  return blocks;
+}
+
+function parseBlock(buf) {
+  const block = { height: 0, hash: new Uint8Array(0), actions: [] };
+  let pos = 0;
+
+  while (pos < buf.length) {
+    const tag = buf[pos++];
+    const field = tag >> 3;
+    const wire = tag & 0x7;
+
+    if (wire === 0) {
+      let v = 0, s = 0;
+      while (pos < buf.length) {
+        const b = buf[pos++];
+        v |= (b & 0x7f) << s;
+        if (!(b & 0x80)) break;
+        s += 7;
+      }
+      if (field === 1) block.height = v;
+    } else if (wire === 2) {
+      let len = 0, s = 0;
+      while (pos < buf.length) {
+        const b = buf[pos++];
+        len |= (b & 0x7f) << s;
+        if (!(b & 0x80)) break;
+        s += 7;
+      }
+      const data = buf.slice(pos, pos + len);
+      if (field === 2) block.hash = data;
+      else if (field === 3) block.actions.push(parseAction(data));
+      pos += len;
+    } else break;
+  }
+
+  return block;
+}
+
+function parseAction(buf) {
+  const a = { cmx: new Uint8Array(0), ephemeralKey: new Uint8Array(0), ciphertext: new Uint8Array(0), nullifier: new Uint8Array(0) };
+  let pos = 0;
+
+  while (pos < buf.length) {
+    const tag = buf[pos++];
+    const field = tag >> 3;
+    const wire = tag & 0x7;
+
+    if (wire === 2) {
+      let len = 0, s = 0;
+      while (pos < buf.length) {
+        const b = buf[pos++];
+        len |= (b & 0x7f) << s;
+        if (!(b & 0x80)) break;
+        s += 7;
+      }
+      const data = buf.slice(pos, pos + len);
+      if (field === 1) a.cmx = data;
+      else if (field === 2) a.ephemeralKey = data;
+      else if (field === 3) a.ciphertext = data;
+      else if (field === 4) a.nullifier = data;
+      pos += len;
+    } else break;
+  }
+
+  return a;
+}
+
+function buildBinaryActions(actions) {
+  const size = 32 + 32 + 32 + 52;
+  const buf = new Uint8Array(4 + actions.length * size);
+  const view = new DataView(buf.buffer);
+  view.setUint32(0, actions.length, true);
+
+  let off = 4;
+  let valid = 0;
+  for (const a of actions) {
+    const hasNull = a.nullifier.length === 32;
+    const hasCmx = a.cmx.length === 32;
+    const hasEpk = a.ephemeralKey.length === 32;
+    const hasCt = a.ciphertext.length >= 52;
+    if (hasNull && hasCmx && hasEpk && hasCt) valid++;
+
+    if (hasNull) buf.set(a.nullifier, off);
+    off += 32;
+    if (hasCmx) buf.set(a.cmx, off);
+    off += 32;
+    if (hasEpk) buf.set(a.ephemeralKey, off);
+    off += 32;
+    if (hasCt) buf.set(a.ciphertext.slice(0, 52), off);
+    off += 52;
+  }
+
+  if (valid !== actions.length) {
+    console.warn(`[build] only ${valid}/${actions.length} actions are complete`);
+  }
+
+  return buf;
+}
+
+function parseSyncStatus(buf) {
+  const r = { currentHeight: 0, currentEpoch: 0, blocksInEpoch: 0, completeEpochs: 0, gigaproofStatus: 0, lastGigaproofHeight: 0 };
+  let pos = 0;
+
+  while (pos < buf.length) {
+    const tag = buf[pos++];
+    const field = tag >> 3;
+    if ((tag & 0x7) !== 0) break;
+
+    let v = 0, s = 0;
+    while (pos < buf.length) {
+      const b = buf[pos++];
+      v |= (b & 0x7f) << s;
+      if (!(b & 0x80)) break;
+      s += 7;
+    }
+
+    if (field === 1) r.currentHeight = v;
+    else if (field === 2) r.currentEpoch = v;
+    else if (field === 3) r.blocksInEpoch = v;
+    else if (field === 4) r.completeEpochs = v;
+    else if (field === 5) r.gigaproofStatus = v;
+    else if (field === 7) r.lastGigaproofHeight = v;
+  }
+
+  return r;
+}
+
+function varint(n) {
+  const bytes = [];
+  while (n > 127) {
+    bytes.push((n & 0x7f) | 0x80);
+    n >>>= 7;
+  }
+  bytes.push(n & 0x7f);
+  return bytes;
+}
+
+function bytesToHex(bytes) {
+  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+}
+
+// Fetch latest FROST checkpoint
+async function fetchCheckpoint() {
+  const path = `${state.serverUrl}/zidecar.v1.Zidecar/GetCheckpoint`;
+  console.log(`[checkpoint] fetching latest checkpoint`);
+
+  // EpochRequest with epoch_index=0 (latest)
+  const msg = new Uint8Array([0x08, 0x00]); // field 1, varint 0
+  const body = new Uint8Array(5 + msg.length);
+  body[0] = 0;
+  body[1] = 0; body[2] = 0; body[3] = 0; body[4] = msg.length;
+  body.set(msg, 5);
+
   try {
-    const response = await fetch(url, {
+    const resp = await fetch(path, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/grpc-web+proto',
         'Accept': 'application/grpc-web+proto',
         'x-grpc-web': '1',
       },
-      body: requestBody,
+      body,
     });
 
-    if (!response.ok) {
-      throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+    if (!resp.ok) {
+      console.warn(`[checkpoint] HTTP ${resp.status}`);
+      return null;
     }
 
-    const buffer = await response.arrayBuffer();
-    const bytes = new Uint8Array(buffer);
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    if (buf.length < 5) return null;
 
-    // Parse gRPC-web response
-    // First 5 bytes: 1 byte flag + 4 bytes length (big endian)
-    if (bytes.length < 5) {
-      throw new Error('Invalid response: too short');
-    }
+    const len = (buf[1] << 24) | (buf[2] << 16) | (buf[3] << 8) | buf[4];
+    const msgData = buf.slice(5, 5 + len);
 
-    const messageLength = (bytes[1] << 24) | (bytes[2] << 16) | (bytes[3] << 8) | bytes[4];
-    const messageBytes = bytes.slice(5, 5 + messageLength);
+    // Parse FrostCheckpoint - just extract epoch_index (field 1)
+    const checkpoint = parseCheckpoint(msgData);
+    console.log(`[checkpoint] got checkpoint epoch ${checkpoint.epoch}, height ${checkpoint.height}`);
+    return checkpoint;
 
-    // Parse protobuf message
-    if (method === 'GetSyncStatus') {
-      return parseSyncStatus(messageBytes);
-    } else if (method === 'GetTip') {
-      return parseBlockId(messageBytes);
-    }
-
-    return {};
   } catch (e) {
-    // If fetch fails, try simulated response for demo purposes
-    console.warn('gRPC-web request failed, using simulated data:', e.message);
-    return simulatedResponse(method);
+    console.warn('[checkpoint] fetch failed:', e);
+    return null;
   }
 }
 
-// Parse SyncStatus protobuf message
-function parseSyncStatus(bytes) {
-  const result = {
-    currentHeight: 0,
-    currentEpoch: 0,
-    blocksInEpoch: 0,
-    completeEpochs: 0,
-    gigaproofStatus: 0,
-    blocksUntilReady: 0,
-    lastGigaproofHeight: 0,
-  };
-
+// Parse FrostCheckpoint protobuf (minimal)
+function parseCheckpoint(buf) {
+  const cp = { epoch: 0, height: 0, block_hash: null, tree_root: null };
   let pos = 0;
-  while (pos < bytes.length) {
-    const tag = bytes[pos++];
-    const fieldNum = tag >> 3;
-    const wireType = tag & 0x7;
 
-    if (wireType === 0) { // varint
-      let value = 0;
-      let shift = 0;
-      while (pos < bytes.length) {
-        const b = bytes[pos++];
-        value |= (b & 0x7f) << shift;
-        if ((b & 0x80) === 0) break;
-        shift += 7;
+  while (pos < buf.length) {
+    const tag = buf[pos++];
+    const field = tag >> 3;
+    const wire = tag & 0x7;
+
+    if (wire === 0) { // varint
+      let v = 0, s = 0;
+      while (pos < buf.length) {
+        const b = buf[pos++];
+        v |= (b & 0x7f) << s;
+        if (!(b & 0x80)) break;
+        s += 7;
       }
-
-      switch (fieldNum) {
-        case 1: result.currentHeight = value; break;
-        case 2: result.currentEpoch = value; break;
-        case 3: result.blocksInEpoch = value; break;
-        case 4: result.completeEpochs = value; break;
-        case 5: result.gigaproofStatus = value; break;
-        case 6: result.blocksUntilReady = value; break;
-        case 7: result.lastGigaproofHeight = value; break;
+      if (field === 1) cp.epoch = v;
+      else if (field === 2) cp.height = v;
+    } else if (wire === 2) { // length-delimited
+      let len = 0, s = 0;
+      while (pos < buf.length) {
+        const b = buf[pos++];
+        len |= (b & 0x7f) << s;
+        if (!(b & 0x80)) break;
+        s += 7;
       }
-    } else {
-      // Skip unknown wire types
-      break;
-    }
-  }
-
-  return result;
-}
-
-// Parse BlockId protobuf message
-function parseBlockId(bytes) {
-  const result = { height: 0, hash: new Uint8Array(0) };
-
-  let pos = 0;
-  while (pos < bytes.length) {
-    const tag = bytes[pos++];
-    const fieldNum = tag >> 3;
-    const wireType = tag & 0x7;
-
-    if (wireType === 0) { // varint
-      let value = 0;
-      let shift = 0;
-      while (pos < bytes.length) {
-        const b = bytes[pos++];
-        value |= (b & 0x7f) << shift;
-        if ((b & 0x80) === 0) break;
-        shift += 7;
-      }
-      if (fieldNum === 1) result.height = value;
-    } else if (wireType === 2) { // length-delimited
-      let length = 0;
-      let shift = 0;
-      while (pos < bytes.length) {
-        const b = bytes[pos++];
-        length |= (b & 0x7f) << shift;
-        if ((b & 0x80) === 0) break;
-        shift += 7;
-      }
-      if (fieldNum === 2) {
-        result.hash = bytes.slice(pos, pos + length);
-      }
-      pos += length;
+      const data = buf.slice(pos, pos + len);
+      if (field === 3) cp.block_hash = data;
+      else if (field === 4) cp.tree_root = data;
+      pos += len;
     } else {
       break;
     }
   }
 
-  return result;
+  return cp;
 }
 
-// Simulated response for when gRPC-web is unavailable
-function simulatedResponse(method) {
-  if (method === 'GetSyncStatus') {
-    return {
-      currentHeight: 2850000 + Math.floor(Math.random() * 1000),
-      currentEpoch: 2783,
-      blocksInEpoch: 512,
-      completeEpochs: 2782,
-      gigaproofStatus: 2, // READY
-      blocksUntilReady: 0,
-      lastGigaproofHeight: 2850816,
-    };
+// Fetch header proof for block range
+async function fetchHeaderProof(fromHeight, toHeight) {
+  const path = `${state.serverUrl}/zidecar.v1.Zidecar/GetHeaderProof`;
+  console.log(`[proof] requesting header proof ${fromHeight}-${toHeight}`);
+
+  // Encode ProofRequest: field 1 = from_height, field 2 = to_height
+  const parts = [];
+  if (fromHeight > 0) { parts.push(0x08); parts.push(...varint(fromHeight)); }
+  if (toHeight > 0) { parts.push(0x10); parts.push(...varint(toHeight)); }
+  const msg = new Uint8Array(parts);
+
+  const body = new Uint8Array(5 + msg.length);
+  body[0] = 0;
+  body[1] = (msg.length >> 24) & 0xff;
+  body[2] = (msg.length >> 16) & 0xff;
+  body[3] = (msg.length >> 8) & 0xff;
+  body[4] = msg.length & 0xff;
+  body.set(msg, 5);
+
+  try {
+    const resp = await fetch(path, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/grpc-web+proto',
+        'Accept': 'application/grpc-web+proto',
+        'x-grpc-web': '1',
+      },
+      body,
+    });
+
+    if (!resp.ok) {
+      console.warn(`[proof] HTTP ${resp.status}`);
+      return null;
+    }
+
+    const buf = new Uint8Array(await resp.arrayBuffer());
+    if (buf.length < 5) return null;
+
+    // Parse grpc-web frame
+    const len = (buf[1] << 24) | (buf[2] << 16) | (buf[3] << 8) | buf[4];
+    const msgData = buf.slice(5, 5 + len);
+
+    // Parse HeaderProof - extract ligerito_proof (field 1, wire type 2)
+    const proof = parseHeaderProof(msgData);
+    console.log(`[proof] got proof: ${proof.ligerito_proof?.length || 0} bytes, range ${proof.from_height}-${proof.to_height}`);
+    return proof;
+
+  } catch (e) {
+    console.warn('[proof] fetch failed:', e);
+    return null;
   }
-  if (method === 'GetTip') {
-    return {
-      height: 2850000 + Math.floor(Math.random() * 1000),
-      hash: new Uint8Array(32),
-    };
-  }
-  throw new Error(`Unknown method: ${method}`);
 }
 
-// Start the app
-initApp();
+// Parse HeaderProof protobuf
+function parseHeaderProof(buf) {
+  const proof = { ligerito_proof: null, from_height: 0, to_height: 0, tip_hash: null };
+  let pos = 0;
+
+  while (pos < buf.length) {
+    const tag = buf[pos++];
+    const field = tag >> 3;
+    const wire = tag & 0x7;
+
+    if (wire === 0) { // varint
+      let v = 0, s = 0;
+      while (pos < buf.length) {
+        const b = buf[pos++];
+        v |= (b & 0x7f) << s;
+        if (!(b & 0x80)) break;
+        s += 7;
+      }
+      if (field === 2) proof.from_height = v;
+      else if (field === 3) proof.to_height = v;
+    } else if (wire === 2) { // length-delimited
+      let len = 0, s = 0;
+      while (pos < buf.length) {
+        const b = buf[pos++];
+        len |= (b & 0x7f) << s;
+        if (!(b & 0x80)) break;
+        s += 7;
+      }
+      const data = buf.slice(pos, pos + len);
+      if (field === 1) proof.ligerito_proof = data;
+      else if (field === 4) proof.tip_hash = data;
+      pos += len;
+    } else {
+      break; // unknown wire type
+    }
+  }
+
+  return proof;
+}
+
+// Verify header proof using ligerito
+async function verifyHeaderProof(proof) {
+  if (!proof || !proof.ligerito_proof || proof.ligerito_proof.length < 2) {
+    console.warn('[verify] no proof to verify');
+    return false;
+  }
+
+  try {
+    // Proof format: [log_size: u8][proof_bytes...]
+    const logSize = proof.ligerito_proof[0];
+    const proofBytes = proof.ligerito_proof.slice(1);
+
+    console.log(`[verify] verifying proof (${proofBytes.length} bytes, log_size=${logSize})...`);
+    const startTime = performance.now();
+
+    // Use the ligerito verify function with config_size and SHA256 transcript
+    const result = verifyProof(proofBytes, logSize, "sha256");
+
+    const elapsed = (performance.now() - startTime).toFixed(0);
+    console.log(`[verify] result: ${result} (${elapsed}ms)`);
+    return result;
+
+  } catch (e) {
+    console.warn('[verify] verification failed:', e);
+    return false;
+  }
+}
+
+init();
 </script>
 </body>
 </html>

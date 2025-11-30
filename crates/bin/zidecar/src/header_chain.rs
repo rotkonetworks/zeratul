@@ -1,4 +1,10 @@
 //! header chain trace encoding for ligerito proofs
+//!
+//! Trace layout (16 fields per header):
+//! - fields 0-7: header chain (hash linkage + running commitment)
+//! - fields 8-15: state roots at epoch boundaries (TCT/nullifier commitments)
+//!
+//! This proves both header chain integrity AND state root chain in one proof.
 
 use crate::error::{Result, ZidecarError};
 use crate::storage::Storage;
@@ -18,15 +24,36 @@ const MAX_RETRIES: usize = 3;
 /// batch size for caching to disk (flush every N headers)
 const CACHE_BATCH_SIZE: usize = 1000;
 
-/// fields encoded per block header in trace
-pub const FIELDS_PER_HEADER: usize = 8;
+/// epoch size (blocks per epoch)
+const EPOCH_SIZE: u32 = 1024;
 
-/// trace field layout per header:
+/// fields encoded per block header in trace (16 fields)
+pub const FIELDS_PER_HEADER: usize = 16;
+
+/// trace field layout per header (16 fields):
 /// field 0: height
 /// field 1-2: block_hash (first 8 bytes, split into 2x4)
 /// field 3-4: prev_hash (first 8 bytes, split into 2x4)
 /// field 5-6: block_hash (next 8 bytes, split into 2x4)
-/// field 7: running_commitment (binds all data)
+/// field 7: header_commitment (running hash chain)
+/// field 8-9: sapling_root (first 8 bytes) - only at epoch boundaries
+/// field 10-11: orchard_root (first 8 bytes) - only at epoch boundaries
+/// field 12-13: reserved for nullifier_root
+/// field 14: state_commitment (running state chain)
+/// field 15: reserved
+
+/// state roots at an epoch boundary (from z_gettreestate)
+#[derive(Clone, Debug, Default)]
+pub struct EpochStateRoots {
+    /// epoch number
+    pub epoch: u32,
+    /// height of last block in epoch
+    pub height: u32,
+    /// sapling note commitment tree root (32 bytes hex)
+    pub sapling_root: String,
+    /// orchard note commitment tree root (32 bytes hex)
+    pub orchard_root: String,
+}
 
 /// header chain trace for ligerito proving
 pub struct HeaderChainTrace {
@@ -46,6 +73,12 @@ pub struct HeaderChainTrace {
     /// - stored in field 7 of last header
     /// - used as initial_commitment for the next proof
     pub final_commitment: [u8; 32],
+    /// whether this trace includes state roots (extended layout)
+    pub includes_state_roots: bool,
+    /// initial state commitment (for extended proofs)
+    pub initial_state_commitment: [u8; 32],
+    /// final state commitment (for extended proofs)
+    pub final_state_commitment: [u8; 32],
 }
 
 impl HeaderChainTrace {
@@ -168,14 +201,21 @@ impl HeaderChainTrace {
             }
         }
 
-        info!("loaded {} headers from cache, encoding trace", headers.len());
+        info!("loaded {} headers from cache", headers.len());
 
-        // encode trace with default initial commitment (zeros for GIGAPROOF)
+        // Fetch state roots at epoch boundaries
+        let state_roots = Self::fetch_epoch_state_roots(zebrad, start_height, end_height).await?;
+        info!("fetched {} epoch state roots", state_roots.len());
+
+        // encode trace with state roots (always use extended format)
         let initial_commitment = [0u8; 32];
-        let (trace, final_commitment) = Self::encode_headers_with_commitment(&headers, initial_commitment)?;
+        let initial_state_commitment = [0u8; 32];
+
+        let (trace, final_commitment, final_state_commitment) =
+            Self::encode_trace(&headers, &state_roots, initial_commitment, initial_state_commitment)?;
 
         info!(
-            "encoded trace: {} elements ({} headers × {} fields)",
+            "encoded trace: {} elements ({} headers x {} fields)",
             trace.len(),
             num_headers,
             FIELDS_PER_HEADER
@@ -188,22 +228,170 @@ impl HeaderChainTrace {
             end_height,
             initial_commitment,
             final_commitment,
+            includes_state_roots: true,
+            initial_state_commitment,
+            final_state_commitment,
         })
     }
 
-    /// build trace with a specific initial commitment (for composing proofs)
+    /// fetch state roots at epoch boundaries from zebrad
+    async fn fetch_epoch_state_roots(
+        zebrad: &ZebradClient,
+        start_height: u32,
+        end_height: u32,
+    ) -> Result<Vec<EpochStateRoots>> {
+        let start_epoch = start_height / EPOCH_SIZE;
+        let end_epoch = end_height / EPOCH_SIZE;
+
+        let mut roots = Vec::new();
+
+        for epoch in start_epoch..=end_epoch {
+            let epoch_end_height = (epoch + 1) * EPOCH_SIZE - 1;
+
+            // Only fetch if epoch end is within our range
+            if epoch_end_height <= end_height && epoch_end_height >= start_height {
+                match zebrad.get_tree_state(&epoch_end_height.to_string()).await {
+                    Ok(tree_state) => {
+                        roots.push(EpochStateRoots {
+                            epoch,
+                            height: epoch_end_height,
+                            sapling_root: tree_state.sapling.commitments.final_state.clone(),
+                            orchard_root: tree_state.orchard.commitments.final_state.clone(),
+                        });
+                    }
+                    Err(e) => {
+                        warn!("failed to get tree state for epoch {}: {}", epoch, e);
+                        // Use empty roots if unavailable
+                        roots.push(EpochStateRoots {
+                            epoch,
+                            height: epoch_end_height,
+                            sapling_root: String::new(),
+                            orchard_root: String::new(),
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(roots)
+    }
+
+    /// encode headers with state roots into trace
+    /// returns (trace, final_header_commitment, final_state_commitment)
+    fn encode_trace(
+        headers: &[BlockHeader],
+        state_roots: &[EpochStateRoots],
+        initial_commitment: [u8; 32],
+        initial_state_commitment: [u8; 32],
+    ) -> Result<(Vec<BinaryElem32>, [u8; 32], [u8; 32])> {
+        let num_elements = headers.len() * FIELDS_PER_HEADER;
+        let trace_size = num_elements.next_power_of_two();
+        let mut trace = vec![BinaryElem32::zero(); trace_size];
+
+        let mut running_commitment = initial_commitment;
+        let mut state_commitment = initial_state_commitment;
+
+        // Build map from height to state roots for quick lookup
+        let state_root_map: std::collections::HashMap<u32, &EpochStateRoots> = state_roots
+            .iter()
+            .map(|r| (r.height, r))
+            .collect();
+
+        for (i, header) in headers.iter().enumerate() {
+            let offset = i * FIELDS_PER_HEADER;
+
+            let block_hash = hex_to_bytes(&header.hash)?;
+            let prev_hash = if header.prev_hash.is_empty() {
+                if header.height != 0 {
+                    return Err(ZidecarError::Validation(format!(
+                        "block {} has empty prev_hash (only genesis allowed)",
+                        header.height
+                    )));
+                }
+                vec![0u8; 32]
+            } else {
+                hex_to_bytes(&header.prev_hash)?
+            };
+
+            // Basic fields (0-7) - same as regular trace
+            trace[offset] = BinaryElem32::from(header.height);
+            trace[offset + 1] = bytes_to_field(&block_hash[0..4]);
+            trace[offset + 2] = bytes_to_field(&block_hash[4..8]);
+            trace[offset + 3] = bytes_to_field(&prev_hash[0..4]);
+            trace[offset + 4] = bytes_to_field(&prev_hash[4..8]);
+            trace[offset + 5] = bytes_to_field(&block_hash[8..12]);
+            trace[offset + 6] = bytes_to_field(&block_hash[12..16]);
+
+            running_commitment = update_running_commitment(
+                &running_commitment,
+                &block_hash,
+                &prev_hash,
+                header.height,
+            );
+            trace[offset + 7] = bytes_to_field(&running_commitment[0..4]);
+
+            // Extended fields (8-15) - state roots at epoch boundaries
+            if let Some(roots) = state_root_map.get(&header.height) {
+                // This is an epoch boundary - include state roots
+                let sapling = if roots.sapling_root.is_empty() {
+                    vec![0u8; 32]
+                } else {
+                    hex_to_bytes(&roots.sapling_root)?
+                };
+
+                let orchard = if roots.orchard_root.is_empty() {
+                    vec![0u8; 32]
+                } else {
+                    hex_to_bytes(&roots.orchard_root)?
+                };
+
+                // Sapling root (fields 8-9)
+                trace[offset + 8] = bytes_to_field(&sapling[0..4]);
+                trace[offset + 9] = bytes_to_field(&sapling[4..8]);
+
+                // Orchard root (fields 10-11)
+                trace[offset + 10] = bytes_to_field(&orchard[0..4]);
+                trace[offset + 11] = bytes_to_field(&orchard[4..8]);
+
+                // Nullifier root placeholder (fields 12-13) - reserved for future
+                trace[offset + 12] = BinaryElem32::zero();
+                trace[offset + 13] = BinaryElem32::zero();
+
+                // Update state commitment chain
+                state_commitment = update_state_commitment(
+                    &state_commitment,
+                    &sapling,
+                    &orchard,
+                    header.height,
+                );
+                trace[offset + 14] = bytes_to_field(&state_commitment[0..4]);
+
+                // Reserved field
+                trace[offset + 15] = BinaryElem32::zero();
+            } else {
+                // Not an epoch boundary - fields 8-15 are zero
+                // but we still include the previous state commitment
+                trace[offset + 14] = bytes_to_field(&state_commitment[0..4]);
+            }
+        }
+
+        Ok((trace, running_commitment, state_commitment))
+    }
+
+    /// build trace with specific initial commitments (for composing proofs)
     pub async fn build_with_commitment(
         zebrad: &ZebradClient,
         storage: &Arc<Storage>,
         start_height: u32,
         end_height: u32,
         initial_commitment: [u8; 32],
+        initial_state_commitment: [u8; 32],
     ) -> Result<Self> {
-        // build normally first, then override the commitment chain
+        // build normally first, then override the commitment chains if non-zero
         let mut trace = Self::build(zebrad, storage, start_height, end_height).await?;
 
-        // if non-zero initial commitment, re-encode with it
-        if initial_commitment != [0u8; 32] {
+        // if non-zero initial commitments, re-encode with them
+        if initial_commitment != [0u8; 32] || initial_state_commitment != [0u8; 32] {
             // re-fetch headers from cache (they're already there)
             let mut headers: Vec<BlockHeader> = Vec::new();
             for height in start_height..=end_height {
@@ -218,75 +406,20 @@ impl HeaderChainTrace {
                 }
             }
 
-            let (new_trace, final_commitment) = Self::encode_headers_with_commitment(&headers, initial_commitment)?;
+            // re-fetch state roots
+            let state_roots = Self::fetch_epoch_state_roots(zebrad, start_height, end_height).await?;
+
+            let (new_trace, final_commitment, final_state_commitment) =
+                Self::encode_trace(&headers, &state_roots, initial_commitment, initial_state_commitment)?;
+
             trace.trace = new_trace;
             trace.initial_commitment = initial_commitment;
             trace.final_commitment = final_commitment;
+            trace.initial_state_commitment = initial_state_commitment;
+            trace.final_state_commitment = final_state_commitment;
         }
 
         Ok(trace)
-    }
-
-    /// encode headers into trace polynomial with explicit initial commitment
-    /// returns (trace, final_commitment) for proof composition
-    fn encode_headers_with_commitment(
-        headers: &[BlockHeader],
-        initial_commitment: [u8; 32],
-    ) -> Result<(Vec<BinaryElem32>, [u8; 32])> {
-        let num_elements = headers.len() * FIELDS_PER_HEADER;
-
-        // round up to next power of 2 for ligerito
-        let trace_size = num_elements.next_power_of_two();
-
-        let mut trace = vec![BinaryElem32::zero(); trace_size];
-
-        let mut running_commitment = initial_commitment;
-
-        for (i, header) in headers.iter().enumerate() {
-            let offset = i * FIELDS_PER_HEADER;
-
-            // parse hashes
-            let block_hash = hex_to_bytes(&header.hash)?;
-            let prev_hash = if header.prev_hash.is_empty() {
-                // SECURITY: only genesis block (height 0) can have empty prev_hash
-                if header.height != 0 {
-                    return Err(ZidecarError::Validation(format!(
-                        "block {} has empty prev_hash (only genesis allowed)",
-                        header.height
-                    )));
-                }
-                // genesis block: use zero-filled prev_hash
-                vec![0u8; 32]
-            } else {
-                hex_to_bytes(&header.prev_hash)?
-            };
-
-            // field 0: height
-            trace[offset] = BinaryElem32::from(header.height);
-
-            // field 1-2: first 8 bytes of block_hash
-            trace[offset + 1] = bytes_to_field(&block_hash[0..4]);
-            trace[offset + 2] = bytes_to_field(&block_hash[4..8]);
-
-            // field 3-4: first 8 bytes of prev_hash
-            trace[offset + 3] = bytes_to_field(&prev_hash[0..4]);
-            trace[offset + 4] = bytes_to_field(&prev_hash[4..8]);
-
-            // field 5-6: next 8 bytes of block_hash (more uniqueness)
-            trace[offset + 5] = bytes_to_field(&block_hash[8..12]);
-            trace[offset + 6] = bytes_to_field(&block_hash[12..16]);
-
-            // field 7: running commitment
-            running_commitment = update_running_commitment(
-                &running_commitment,
-                &block_hash,
-                &prev_hash,
-                header.height,
-            );
-            trace[offset + 7] = bytes_to_field(&running_commitment[0..4]);
-        }
-
-        Ok((trace, running_commitment))
     }
 
     /// verify trace encodes headers correctly (for testing)
@@ -365,15 +498,37 @@ fn update_running_commitment(
     result
 }
 
+/// update state commitment with epoch state roots
+/// This creates a verifiable chain of state commitments
+fn update_state_commitment(
+    prev_commitment: &[u8; 32],
+    sapling_root: &[u8],
+    orchard_root: &[u8],
+    height: u32,
+) -> [u8; 32] {
+    let mut hasher = Blake2b512::new();
+    hasher.update(b"ZIDECAR_state_commitment");
+    hasher.update(prev_commitment);
+    hasher.update(sapling_root);
+    hasher.update(orchard_root);
+    hasher.update(&height.to_le_bytes());
+
+    let hash = hasher.finalize();
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&hash[..32]);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn test_bytes_to_field() {
+        use ligerito_binary_fields::BinaryFieldElement;
         let bytes = [0x01, 0x02, 0x03, 0x04];
         let field = bytes_to_field(&bytes);
-        assert_eq!(field.to_u32(), 0x04030201); // little endian
+        assert_eq!(field.poly().value(), 0x04030201); // little endian
     }
 
     #[test]

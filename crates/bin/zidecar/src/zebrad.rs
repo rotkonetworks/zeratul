@@ -124,6 +124,18 @@ impl ZebradClient {
         serde_json::from_value(result)
             .map_err(|e| ZidecarError::ZebradRpc(e.to_string()))
     }
+
+    /// get subtrees by index for sapling/orchard commitment trees
+    /// returns precomputed subtree roots for efficient witness reconstruction
+    pub async fn get_subtrees_by_index(&self, pool: &str, start_index: u32, limit: Option<u32>) -> Result<SubtreeResponse> {
+        let mut params = vec![json!(pool), json!(start_index)];
+        if let Some(l) = limit {
+            params.push(json!(l));
+        }
+        let result = self.call("z_getsubtreesbyindex", params).await?;
+        serde_json::from_value(result)
+            .map_err(|e| ZidecarError::ZebradRpc(e.to_string()))
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -207,6 +219,9 @@ pub struct RawTransaction {
     pub txid: String,
     pub version: u32,
     pub hex: String,
+    /// Block height (only present if confirmed)
+    #[serde(default)]
+    pub height: Option<u32>,
     #[serde(default)]
     pub orchard: Option<OrchardData>,
 }
@@ -279,6 +294,26 @@ pub struct AddressUtxo {
     pub script: String,
     pub satoshis: u64,
     pub height: u32,
+}
+
+/// response from z_getsubtreesbyindex
+#[derive(Debug, Deserialize)]
+pub struct SubtreeResponse {
+    pub pool: String,
+    #[serde(rename = "start_index")]
+    pub start_index: u32,
+    pub subtrees: Vec<Subtree>,
+}
+
+/// individual subtree from z_getsubtreesbyindex
+/// each subtree covers 2^16 = 65536 leaves
+#[derive(Debug, Deserialize, Clone)]
+pub struct Subtree {
+    /// merkle root of this subtree (hex)
+    pub root: String,
+    /// block height where subtree was completed
+    #[serde(rename = "end_height")]
+    pub end_height: u32,
 }
 
 #[cfg(test)]

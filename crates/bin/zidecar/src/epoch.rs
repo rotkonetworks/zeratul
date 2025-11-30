@@ -137,6 +137,9 @@ impl EpochManager {
         // build trace (with caching - headers already fetched won't be refetched)
         let mut trace = HeaderChainTrace::build(&self.zebrad, &self.storage, from_height, to_height).await?;
 
+        // Store epoch boundary hashes for chain continuity verification
+        self.store_epoch_boundaries(start_epoch, last_complete_epoch).await?;
+
         // generate proof (auto-select config based on trace size)
         let proof = HeaderChainProof::prove_auto(&mut trace)?;
 
@@ -300,6 +303,63 @@ impl EpochManager {
         }
     }
 
+    /// store epoch boundary hashes for chain continuity verification
+    async fn store_epoch_boundaries(&self, from_epoch: u32, to_epoch: u32) -> Result<()> {
+        info!("storing epoch boundary hashes for epochs {} -> {}", from_epoch, to_epoch);
+
+        for epoch in from_epoch..=to_epoch {
+            // skip if already stored
+            if self.storage.get_epoch_boundary(epoch)?.is_some() {
+                continue;
+            }
+
+            let (first_height, last_height) = self.epoch_range(epoch);
+
+            // Get first block of epoch
+            let first_header = self.storage.get_header(first_height)?
+                .ok_or_else(|| ZidecarError::BlockNotFound(first_height))?;
+            let first_hash = hex_to_bytes32(&first_header.0)?;
+            let first_prev_hash = if first_header.1.is_empty() {
+                [0u8; 32] // genesis
+            } else {
+                hex_to_bytes32(&first_header.1)?
+            };
+
+            // Get last block of epoch
+            let last_header = self.storage.get_header(last_height)?
+                .ok_or_else(|| ZidecarError::BlockNotFound(last_height))?;
+            let last_hash = hex_to_bytes32(&last_header.0)?;
+
+            // Store boundary
+            self.storage.store_epoch_boundary(
+                epoch,
+                first_height,
+                &first_hash,
+                &first_prev_hash,
+                last_height,
+                &last_hash,
+            )?;
+
+            info!(
+                "epoch {} boundary: first={}@{} last={}@{}",
+                epoch,
+                hex::encode(&first_hash[..4]),
+                first_height,
+                hex::encode(&last_hash[..4]),
+                last_height
+            );
+        }
+
+        // Verify chain continuity between epochs
+        for epoch in (from_epoch + 1)..=to_epoch {
+            if !self.storage.verify_epoch_continuity(epoch)? {
+                warn!("epoch {} continuity check failed!", epoch);
+            }
+        }
+
+        Ok(())
+    }
+
     /// track state roots at epoch boundaries from zebrad
     async fn track_state_roots(&self, from_height: u32) -> Result<u32> {
         let current_height = self.get_current_height().await?;
@@ -353,6 +413,21 @@ impl EpochManager {
 
         Ok(latest_tracked)
     }
+}
+
+/// convert hex string to [u8; 32]
+fn hex_to_bytes32(hex: &str) -> Result<[u8; 32]> {
+    let bytes = hex::decode(hex)
+        .map_err(|e| ZidecarError::Serialization(format!("invalid hex: {}", e)))?;
+    if bytes.len() != 32 {
+        return Err(ZidecarError::Serialization(format!(
+            "expected 32 bytes, got {}",
+            bytes.len()
+        )));
+    }
+    let mut result = [0u8; 32];
+    result.copy_from_slice(&bytes);
+    Ok(result)
 }
 
 /// parse tree root from zebrad hex-encoded final state

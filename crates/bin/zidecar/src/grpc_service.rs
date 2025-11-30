@@ -17,6 +17,8 @@ use crate::{
         TrustlessStateProof, FrostCheckpoint as ProtoFrostCheckpoint,
         FrostSignature as ProtoFrostSignature, EpochRequest, CommitmentQuery, CommitmentProof,
         NullifierQuery, NullifierProof, VerifiedBlock,
+        // epoch boundary types
+        EpochBoundary as ProtoEpochBoundary, EpochRangeRequest, EpochBoundaryList,
     },
 };
 use std::sync::Arc;
@@ -390,7 +392,7 @@ impl Zidecar for ZidecarService {
 
                 Ok(Response::new(RawTransaction {
                     data,
-                    height: 0, // TODO: get block height from tx info
+                    height: tx.height.unwrap_or(0),
                 }))
             }
             Err(e) => {
@@ -565,6 +567,10 @@ impl Zidecar for ZidecarService {
             checkpoint.epoch_index, tip_info.blocks
         );
 
+        // get total action count from storage
+        let num_actions = self.storage.get_action_count()
+            .map_err(|e| Status::internal(e.to_string()))?;
+
         Ok(Response::new(TrustlessStateProof {
             checkpoint: Some(checkpoint_to_proto(&checkpoint)),
             state_transition_proof: gigaproof,
@@ -572,7 +578,7 @@ impl Zidecar for ZidecarService {
             current_hash,
             tree_root: tree_root.to_vec(),
             nullifier_root: nullifier_root.to_vec(),
-            num_actions: 0,  // TODO: track action count
+            num_actions,
             proof_log_size: 20,  // 2^20 default
         }))
     }
@@ -601,9 +607,14 @@ impl Zidecar for ZidecarService {
                 .unwrap_or(0)
         );
 
+        // get commitment position from storage (if tracked)
+        let position = self.storage.get_commitment_position(&cmx)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .unwrap_or(0);
+
         Ok(Response::new(CommitmentProof {
             cmx: cmx.to_vec(),
-            position: 0,  // TODO: track position
+            position,
             tree_root: proof.root.to_vec(),
             height,
             proof_path: proof.path.iter().map(|p| p.to_vec()).collect(),
@@ -679,6 +690,10 @@ impl Zidecar for ZidecarService {
                             .unwrap_or(None)
                             .unwrap_or(([0u8; 32], [0u8; 32]));
 
+                        // Note: merkle_path is empty - computing full merkle path from
+                        // actions to block header requires maintaining the complete block
+                        // merkle tree structure. For now, clients can verify actions_root
+                        // against header.merkle_root directly if needed.
                         let verified_block = VerifiedBlock {
                             height: block.height,
                             hash: block.hash,
@@ -693,7 +708,7 @@ impl Zidecar for ZidecarService {
                                 })
                                 .collect(),
                             actions_root: actions_root.to_vec(),
-                            merkle_path: vec![], // TODO: compute merkle path to header
+                            merkle_path: vec![],
                             tree_root_after: tree_root_after.to_vec(),
                             nullifier_root_after: nullifier_root_after.to_vec(),
                         };
@@ -745,6 +760,84 @@ impl Zidecar for ZidecarService {
         };
 
         Ok(Response::new(checkpoint_to_proto(&checkpoint)))
+    }
+
+    async fn get_epoch_boundary(
+        &self,
+        request: Request<EpochRequest>,
+    ) -> std::result::Result<Response<ProtoEpochBoundary>, Status> {
+        let req = request.into_inner();
+
+        let epoch = if req.epoch_index == 0 {
+            // get latest complete epoch
+            let info = self.zebrad.get_blockchain_info().await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let current_epoch = info.blocks / zync_core::EPOCH_SIZE;
+            if info.blocks % zync_core::EPOCH_SIZE == 0 {
+                current_epoch
+            } else {
+                current_epoch.saturating_sub(1)
+            }
+        } else {
+            req.epoch_index as u32
+        };
+
+        info!("epoch boundary request for epoch {}", epoch);
+
+        let boundary = self.storage.get_epoch_boundary(epoch)
+            .map_err(|e| Status::internal(e.to_string()))?
+            .ok_or_else(|| Status::not_found(format!("epoch {} boundary not found", epoch)))?;
+
+        Ok(Response::new(ProtoEpochBoundary {
+            epoch: boundary.epoch,
+            first_height: boundary.first_height,
+            first_hash: boundary.first_hash.to_vec(),
+            first_prev_hash: boundary.first_prev_hash.to_vec(),
+            last_height: boundary.last_height,
+            last_hash: boundary.last_hash.to_vec(),
+        }))
+    }
+
+    async fn get_epoch_boundaries(
+        &self,
+        request: Request<EpochRangeRequest>,
+    ) -> std::result::Result<Response<EpochBoundaryList>, Status> {
+        let req = request.into_inner();
+
+        let to_epoch = if req.to_epoch == 0 {
+            // get latest complete epoch
+            let info = self.zebrad.get_blockchain_info().await
+                .map_err(|e| Status::internal(e.to_string()))?;
+            let current_epoch = info.blocks / zync_core::EPOCH_SIZE;
+            if info.blocks % zync_core::EPOCH_SIZE == 0 {
+                current_epoch
+            } else {
+                current_epoch.saturating_sub(1)
+            }
+        } else {
+            req.to_epoch
+        };
+
+        info!("epoch boundaries request: epochs {} -> {}", req.from_epoch, to_epoch);
+
+        let mut boundaries = Vec::new();
+
+        for epoch in req.from_epoch..=to_epoch {
+            if let Ok(Some(boundary)) = self.storage.get_epoch_boundary(epoch) {
+                boundaries.push(ProtoEpochBoundary {
+                    epoch: boundary.epoch,
+                    first_height: boundary.first_height,
+                    first_hash: boundary.first_hash.to_vec(),
+                    first_prev_hash: boundary.first_prev_hash.to_vec(),
+                    last_height: boundary.last_height,
+                    last_hash: boundary.last_hash.to_vec(),
+                });
+            }
+        }
+
+        info!("returning {} epoch boundaries", boundaries.len());
+
+        Ok(Response::new(EpochBoundaryList { boundaries }))
     }
 }
 

@@ -1,6 +1,6 @@
 //! ligerito prover integration
 //!
-//! Uses BLAKE2b transcript for Substrate/Polkadot parachain compatibility.
+//! Uses SHA256 transcript for browser WASM verification compatibility.
 //! The transcript choice affects proof verification - verifier must use same transcript.
 
 use crate::error::{Result, ZidecarError};
@@ -24,22 +24,23 @@ pub struct HeaderChainProof {
 
 impl HeaderChainProof {
     /// generate proof from trace (with explicit config)
-    /// Uses BLAKE2b transcript for Substrate/Polkadot compatibility
+    /// Uses SHA256 transcript for browser WASM verification
     pub fn prove(
         config: &ProverConfig<BinaryElem32, BinaryElem128>,
         trace: &HeaderChainTrace,
     ) -> Result<Self> {
         info!(
-            "generating ligerito proof for {} headers (BLAKE2b transcript)",
+            "generating ligerito proof for {} headers (SHA256 transcript)",
             trace.num_headers
         );
 
         let start = Instant::now();
 
-        // use BLAKE2b transcript for Substrate/Polkadot on-chain verification
-        let transcript = FiatShamir::new_blake2b();
+        // use SHA256 transcript for browser WASM verification
+        // (blake2b requires extra WASM feature, sha256 is always available)
+        let transcript = FiatShamir::new_sha256(0);
 
-        // prove with ligerito using BLAKE2b transcript
+        // prove with ligerito using SHA256 transcript
         let proof = prove_with_transcript(config, &trace.trace, transcript)
             .map_err(|e| ZidecarError::ProofGeneration(format!("{:?}", e)))?;
 

@@ -4,6 +4,7 @@ use crate::error::{Result, ZidecarError};
 use nomt::{
     hasher::Blake3Hasher,
     KeyReadWrite, Nomt, Options as NomtOptions, Root, SessionParams,
+    proof::PathProofTerminal,
 };
 use sha2::{Digest, Sha256};
 use tracing::{info, debug};
@@ -23,7 +24,13 @@ impl Storage {
         // open nomt for merkle state
         let mut nomt_opts = NomtOptions::new();
         nomt_opts.path(format!("{}/nomt", path));
-        nomt_opts.commit_concurrency(1);
+        // use 50% of CPU threads for NOMT (leaves room for other ops)
+        let all_threads = std::thread::available_parallelism()
+            .map(|p| p.get())
+            .unwrap_or(8);
+        let nomt_threads = (all_threads / 2).max(4);
+        nomt_opts.commit_concurrency(nomt_threads);
+        info!("nomt commit_concurrency: {} threads (50% of {})", nomt_threads, all_threads);
 
         let nomt = Nomt::<Blake3Hasher>::open(nomt_opts)
             .map_err(|e| ZidecarError::Storage(format!("nomt: {}", e)))?;
@@ -367,6 +374,62 @@ impl Storage {
         Ok(None)
     }
 
+    // ===== ACTION COUNT TRACKING =====
+
+    /// increment total action count and return new total
+    pub fn increment_action_count(&self, count: u64) -> Result<u64> {
+        let current = self.get_action_count()?;
+        let new_total = current + count;
+        self.sled
+            .insert(b"total_actions", &new_total.to_le_bytes())
+            .map_err(|e| ZidecarError::Storage(format!("sled: {}", e)))?;
+        Ok(new_total)
+    }
+
+    /// get total action count
+    pub fn get_action_count(&self) -> Result<u64> {
+        match self.sled.get(b"total_actions") {
+            Ok(Some(bytes)) if bytes.len() == 8 => {
+                Ok(u64::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                    bytes[4], bytes[5], bytes[6], bytes[7],
+                ]))
+            }
+            Ok(_) => Ok(0),
+            Err(e) => Err(ZidecarError::Storage(format!("sled: {}", e))),
+        }
+    }
+
+    // ===== COMMITMENT POSITION TRACKING =====
+
+    /// store commitment position in tree
+    pub fn store_commitment_position(&self, cmx: &[u8; 32], position: u64) -> Result<()> {
+        let mut key = Vec::with_capacity(33);
+        key.push(b'p'); // position prefix
+        key.extend_from_slice(cmx);
+        self.sled
+            .insert(key, &position.to_le_bytes())
+            .map_err(|e| ZidecarError::Storage(format!("sled: {}", e)))?;
+        Ok(())
+    }
+
+    /// get commitment position in tree
+    pub fn get_commitment_position(&self, cmx: &[u8; 32]) -> Result<Option<u64>> {
+        let mut key = Vec::with_capacity(33);
+        key.push(b'p');
+        key.extend_from_slice(cmx);
+        match self.sled.get(key) {
+            Ok(Some(bytes)) if bytes.len() == 8 => {
+                Ok(Some(u64::from_le_bytes([
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                    bytes[4], bytes[5], bytes[6], bytes[7],
+                ])))
+            }
+            Ok(_) => Ok(None),
+            Err(e) => Err(ZidecarError::Storage(format!("sled: {}", e))),
+        }
+    }
+
     // ===== GIGAPROOF METADATA =====
 
     /// store the epoch that the current gigaproof covers up to
@@ -409,6 +472,102 @@ impl Storage {
         }
     }
 
+    // ===== EPOCH BOUNDARY HASHES =====
+    // Critical for proof verification: client must know first/last hash of each epoch
+    // to verify chain continuity between proofs
+
+    /// store epoch boundary hashes (first block hash, last block hash)
+    /// Used to verify:
+    /// 1. Gigaproof starts from known checkpoint
+    /// 2. Each epoch's last_hash.prev = this epoch's content
+    /// 3. Next epoch's first_prev_hash = this epoch's last_hash
+    pub fn store_epoch_boundary(
+        &self,
+        epoch: u32,
+        first_height: u32,
+        first_hash: &[u8; 32],
+        first_prev_hash: &[u8; 32],
+        last_height: u32,
+        last_hash: &[u8; 32],
+    ) -> Result<()> {
+        let mut key = Vec::with_capacity(5);
+        key.push(b'e'); // epoch boundary prefix
+        key.extend_from_slice(&epoch.to_le_bytes());
+
+        // value: first_height(4) + first_hash(32) + first_prev_hash(32) + last_height(4) + last_hash(32) = 104 bytes
+        let mut value = Vec::with_capacity(104);
+        value.extend_from_slice(&first_height.to_le_bytes());
+        value.extend_from_slice(first_hash);
+        value.extend_from_slice(first_prev_hash);
+        value.extend_from_slice(&last_height.to_le_bytes());
+        value.extend_from_slice(last_hash);
+
+        self.sled
+            .insert(key, value)
+            .map_err(|e| ZidecarError::Storage(format!("sled: {}", e)))?;
+
+        debug!(
+            "stored epoch {} boundary: first={}@{} last={}@{}",
+            epoch,
+            hex::encode(&first_hash[..4]),
+            first_height,
+            hex::encode(&last_hash[..4]),
+            last_height
+        );
+
+        Ok(())
+    }
+
+    /// get epoch boundary hashes
+    /// Returns: (first_height, first_hash, first_prev_hash, last_height, last_hash)
+    pub fn get_epoch_boundary(&self, epoch: u32) -> Result<Option<EpochBoundary>> {
+        let mut key = Vec::with_capacity(5);
+        key.push(b'e');
+        key.extend_from_slice(&epoch.to_le_bytes());
+
+        match self.sled.get(key) {
+            Ok(Some(bytes)) if bytes.len() == 104 => {
+                let first_height = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                let mut first_hash = [0u8; 32];
+                first_hash.copy_from_slice(&bytes[4..36]);
+                let mut first_prev_hash = [0u8; 32];
+                first_prev_hash.copy_from_slice(&bytes[36..68]);
+                let last_height = u32::from_le_bytes([bytes[68], bytes[69], bytes[70], bytes[71]]);
+                let mut last_hash = [0u8; 32];
+                last_hash.copy_from_slice(&bytes[72..104]);
+
+                Ok(Some(EpochBoundary {
+                    epoch,
+                    first_height,
+                    first_hash,
+                    first_prev_hash,
+                    last_height,
+                    last_hash,
+                }))
+            }
+            Ok(_) => Ok(None),
+            Err(e) => Err(ZidecarError::Storage(format!("sled: {}", e))),
+        }
+    }
+
+    /// verify epoch chain continuity (prev epoch's last_hash == this epoch's first_prev_hash)
+    pub fn verify_epoch_continuity(&self, epoch: u32) -> Result<bool> {
+        if epoch == 0 {
+            return Ok(true); // genesis epoch has no previous
+        }
+
+        let prev_boundary = self.get_epoch_boundary(epoch - 1)?;
+        let this_boundary = self.get_epoch_boundary(epoch)?;
+
+        match (prev_boundary, this_boundary) {
+            (Some(prev), Some(this)) => {
+                // this epoch's first block must have prev_hash = previous epoch's last block hash
+                Ok(prev.last_hash == this.first_prev_hash)
+            }
+            _ => Ok(false), // missing boundary data
+        }
+    }
+
     // ===== PROOF GENERATION (NOMT) =====
 
     /// generate nullifier proof (membership or non-membership)
@@ -416,23 +575,39 @@ impl Storage {
         let session = self.nomt.begin_session(SessionParams::default());
         let key = key_for_nullifier(nullifier);
 
-        // read value to check existence
-        let exists = session
-            .read(key)
-            .map_err(|e| ZidecarError::Storage(format!("nomt read: {}", e)))?
-            .is_some();
+        // warm up the key for proof generation
+        session.warm_up(key);
+
+        // generate merkle proof using NOMT's prove method
+        let path_proof = session
+            .prove(key)
+            .map_err(|e| ZidecarError::Storage(format!("nomt prove: {}", e)))?;
+
+        // check if value exists (leaf vs terminator)
+        let exists = matches!(&path_proof.terminal, PathProofTerminal::Leaf(leaf) if leaf.key_path == key);
 
         // get root
         let root = self.nomt.root();
 
-        // for now, return simplified proof
-        // real implementation would extract merkle path from nomt
+        // extract sibling hashes from proof
+        let path: Vec<[u8; 32]> = path_proof.siblings.clone();
+
+        // extract path indices from key (bit path through tree)
+        // indices indicate which side (left=false, right=true) the node is on
+        let indices: Vec<bool> = key_to_bits(&key, path_proof.siblings.len());
+
+        debug!(
+            "generated nullifier proof: {} siblings, exists={}",
+            path.len(),
+            exists
+        );
+
         Ok(NomtProof {
             key,
             root: root_to_bytes(&root),
             exists,
-            path: Vec::new(),      // TODO: extract actual merkle path
-            indices: Vec::new(),   // TODO: extract path indices
+            path,
+            indices,
         })
     }
 
@@ -441,21 +616,54 @@ impl Storage {
         let session = self.nomt.begin_session(SessionParams::default());
         let key = key_for_note(cmx);
 
-        let exists = session
-            .read(key)
-            .map_err(|e| ZidecarError::Storage(format!("nomt read: {}", e)))?
-            .is_some();
+        // warm up the key for proof generation
+        session.warm_up(key);
+
+        // generate merkle proof using NOMT's prove method
+        let path_proof = session
+            .prove(key)
+            .map_err(|e| ZidecarError::Storage(format!("nomt prove: {}", e)))?;
+
+        // check if value exists (leaf vs terminator)
+        let exists = matches!(&path_proof.terminal, PathProofTerminal::Leaf(leaf) if leaf.key_path == key);
 
         let root = self.nomt.root();
+
+        // extract sibling hashes from proof
+        let path: Vec<[u8; 32]> = path_proof.siblings.clone();
+
+        // extract path indices from key (bit path through tree)
+        let indices: Vec<bool> = key_to_bits(&key, path_proof.siblings.len());
+
+        debug!(
+            "generated commitment proof: {} siblings, exists={}",
+            path.len(),
+            exists
+        );
 
         Ok(NomtProof {
             key,
             root: root_to_bytes(&root),
             exists,
-            path: Vec::new(),
-            indices: Vec::new(),
+            path,
+            indices,
         })
     }
+}
+
+/// Extract MSB-first bits from a 32-byte key
+fn key_to_bits(key: &[u8; 32], count: usize) -> Vec<bool> {
+    let mut bits = Vec::with_capacity(count);
+    for i in 0..count {
+        let byte_idx = i / 8;
+        let bit_idx = 7 - (i % 8); // MSB first
+        if byte_idx < 32 {
+            bits.push((key[byte_idx] >> bit_idx) & 1 == 1);
+        } else {
+            bits.push(false);
+        }
+    }
+    bits
 }
 
 /// NOMT sparse merkle proof
@@ -466,6 +674,22 @@ pub struct NomtProof {
     pub exists: bool,
     pub path: Vec<[u8; 32]>,
     pub indices: Vec<bool>,
+}
+
+/// Epoch boundary information for chain continuity verification
+#[derive(Debug, Clone)]
+pub struct EpochBoundary {
+    pub epoch: u32,
+    /// First block height in epoch
+    pub first_height: u32,
+    /// First block hash
+    pub first_hash: [u8; 32],
+    /// First block's prev_hash (links to previous epoch)
+    pub first_prev_hash: [u8; 32],
+    /// Last block height in epoch
+    pub last_height: u32,
+    /// Last block hash
+    pub last_hash: [u8; 32],
 }
 
 /// convert nomt Root to bytes
