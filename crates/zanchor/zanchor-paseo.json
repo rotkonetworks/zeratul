@@ -1,0 +1,5 @@
+error: unrecognized subcommand ''
+
+Usage: polkadot-omni-node chain-spec-builder create [OPTIONS] --runtime <RUNTIME> <COMMAND>
+
+For more information, try '--help'.

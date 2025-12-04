@@ -1,0 +1,45 @@
+[package]
+name = "pallet-frost-bridge"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "FROST threshold signature bridge using offchain workers"
+repository = "https://github.com/rotkonetworks/zeratul"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[dependencies]
+codec = { package = "parity-scale-codec", version = "3.6", default-features = false, features = ["derive"] }
+scale-info = { version = "2.11", default-features = false, features = ["derive"] }
+
+frame-support = { version = "37", default-features = false }
+frame-system = { version = "37", default-features = false }
+sp-std = { version = "14", default-features = false }
+sp-runtime = { version = "39", default-features = false }
+sp-core = { version = "34", default-features = false }
+sp-io = { version = "38", default-features = false }
+
+[dev-dependencies]
+sp-io = { version = "38" }
+
+[features]
+default = ["std"]
+std = [
+    "codec/std",
+    "scale-info/std",
+    "frame-support/std",
+    "frame-system/std",
+    "sp-std/std",
+    "sp-runtime/std",
+    "sp-core/std",
+    "sp-io/std",
+]
+runtime-benchmarks = [
+    "frame-support/runtime-benchmarks",
+    "frame-system/runtime-benchmarks",
+]
+try-runtime = [
+    "frame-support/try-runtime",
+    "frame-system/try-runtime",
+]

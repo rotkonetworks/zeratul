@@ -1,0 +1,83 @@
+[workspace]
+resolver = "2"
+members = [
+    "cli",
+    "runtime",
+    "pallets/zcash-light",
+]
+
+[workspace.package]
+version = "0.1.0"
+authors = ["rotko.net"]
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/rotkonetworks/zeratul"
+description = "Zanchor - Zcash trust anchor parachain for Polkadot"
+
+[workspace.dependencies]
+# local pallets
+pallet-zcash-light = { path = "pallets/zcash-light", default-features = false }
+
+# polkadot-sdk (stable2509-2)
+frame-support = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+frame-system = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+frame-executive = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+frame-try-runtime = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+frame-metadata-hash-extension = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+pallet-aura = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+pallet-balances = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+pallet-sudo = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+pallet-timestamp = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+pallet-transaction-payment = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+pallet-transaction-payment-rpc-runtime-api = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+pallet-message-queue = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+
+sp-api = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+sp-block-builder = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+sp-consensus-aura = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+sp-keyring = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+frame-system-rpc-runtime-api = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+sp-core = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+sp-genesis-builder = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+sp-inherents = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+sp-io = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+sp-offchain = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+sp-runtime = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+sp-session = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+sp-storage = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+sp-transaction-pool = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+sp-version = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+
+# cumulus
+cumulus-pallet-aura-ext = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+cumulus-pallet-parachain-system = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+cumulus-pallet-xcm = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+cumulus-primitives-aura = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+cumulus-primitives-core = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+cumulus-primitives-storage-weight-reclaim = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+cumulus-primitives-utility = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+parachain-info = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", package = "staging-parachain-info", default-features = false }
+
+# polkadot/xcm
+pallet-xcm = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+polkadot-parachain-primitives = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+polkadot-runtime-common = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+xcm = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", package = "staging-xcm", default-features = false }
+xcm-builder = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", package = "staging-xcm-builder", default-features = false }
+xcm-executor = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", package = "staging-xcm-executor", default-features = false }
+
+# general
+codec = { version = "3.6.12", package = "parity-scale-codec", default-features = false, features = ["derive"] }
+scale-info = { version = "2.11.3", default-features = false, features = ["derive"] }
+log = { version = "0.4.22", default-features = false }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+
+# crypto
+sha2 = { version = "0.10", default-features = false }
+blake2 = { version = "0.10", default-features = false }
+
+[profile.release]
+panic = "unwind"
+opt-level = 3
+lto = "fat"
+codegen-units = 1

@@ -1,0 +1,34 @@
+[package]
+name = "zanchor-cli"
+version = "0.1.0"
+edition = "2021"
+description = "CLI tool for zanchor parachain management"
+
+[[bin]]
+name = "zanchor"
+path = "src/main.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive", "env"] }
+
+# Substrate interaction
+subxt = { version = "0.38", features = ["substrate-compat"] }
+sp-core = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2" }
+sp-runtime = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2" }
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+hex = "0.4"
+
+# Error handling
+anyhow = "1"
+thiserror = "1"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }

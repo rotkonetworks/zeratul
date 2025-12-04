@@ -1,0 +1,60 @@
+[package]
+name = "pallet-zcash-light"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Zcash light client pallet - trustless header attestations with economic security"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[dependencies]
+codec = { workspace = true }
+scale-info = { workspace = true }
+log = { workspace = true }
+
+frame-support = { workspace = true }
+frame-system = { workspace = true }
+sp-runtime = { workspace = true }
+sp-core = { workspace = true }
+sp-io = { workspace = true }
+
+# crypto for commitment verification
+sha2 = { workspace = true }
+blake2 = { workspace = true }
+
+# Ligerito on-chain verification - uses SCALE codec for WASM compatibility
+ligerito = { path = "../../../ligerito", default-features = false, features = ["verifier-only", "scale"], optional = true }
+ligerito-binary-fields = { path = "../../../ligerito-binary-fields", default-features = false, features = ["scale"], optional = true }
+
+[dev-dependencies]
+sp-io = { workspace = true, default-features = true }
+
+[features]
+default = ["std"]
+std = [
+    "codec/std",
+    "scale-info/std",
+    "log/std",
+    "frame-support/std",
+    "frame-system/std",
+    "sp-runtime/std",
+    "sp-core/std",
+    "sp-io/std",
+    "sha2/std",
+    "blake2/std",
+    "ligerito?/std",
+    "ligerito-binary-fields?/std",
+]
+# Enable on-chain ligerito proof verification (WASM compatible!)
+ligerito-verify = ["ligerito", "ligerito-binary-fields"]
+runtime-benchmarks = [
+    "frame-support/runtime-benchmarks",
+    "frame-system/runtime-benchmarks",
+]
+try-runtime = [
+    "frame-support/try-runtime",
+    "frame-system/try-runtime",
+]

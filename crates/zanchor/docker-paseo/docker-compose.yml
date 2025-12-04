@@ -1,0 +1,41 @@
+services:
+  # Zanchor Collator (ParaId 5082)
+  zanchor-collator:
+    image: parity/polkadot-parachain:stable2509-2
+    container_name: zanchor-collator
+    restart: unless-stopped
+    ports:
+      - "30334:30334"   # P2P parachain
+      - "9945:9945"     # RPC WebSocket parachain
+      - "9616:9616"     # Prometheus metrics
+    volumes:
+      - zanchor-data:/data
+      - ./chainspec:/chainspec:ro
+    command:
+      - --collator
+      - --chain=/chainspec/zanchor-paseo-5082.json
+      - --base-path=/data
+      - --name=zanchor-collator-01
+      - --rpc-external
+      - --rpc-cors=all
+      - --rpc-methods=unsafe
+      - --rpc-port=9945
+      - --prometheus-external
+      - --prometheus-port=9616
+      - --force-authoring
+      - --unsafe-force-node-key-generation
+      - -lparachain=debug,aura=debug,cumulus-collator=debug
+      - --
+      - --chain=paseo
+      - --sync=warp
+      - --blocks-pruning=256
+      - --state-pruning=256
+    logging:
+      driver: json-file
+      options:
+        max-size: "100m"
+        max-file: "3"
+
+volumes:
+  zanchor-data:
+    driver: local
