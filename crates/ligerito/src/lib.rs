@@ -152,6 +152,7 @@ pub use configs::{
     hardcoded_config_16_verifier,
     hardcoded_config_20_verifier,
     hardcoded_config_24_verifier,
+    hardcoded_config_26_verifier,
     hardcoded_config_28_verifier,
     hardcoded_config_30_verifier,
 };
@@ -163,6 +164,7 @@ pub use configs::{
     hardcoded_config_16,
     hardcoded_config_20,
     hardcoded_config_24,
+    hardcoded_config_26,
     hardcoded_config_28,
     hardcoded_config_30,
 };

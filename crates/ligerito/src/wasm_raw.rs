@@ -80,8 +80,8 @@ fn custom_getrandom(dest: &mut [u8]) -> Result<(), getrandom::Error> {
 register_custom_getrandom!(custom_getrandom);
 
 use crate::{prover, verifier};
-use crate::{hardcoded_config_12, hardcoded_config_20, hardcoded_config_24, hardcoded_config_28, hardcoded_config_30};
-use crate::{hardcoded_config_12_verifier, hardcoded_config_20_verifier, hardcoded_config_24_verifier, hardcoded_config_28_verifier, hardcoded_config_30_verifier};
+use crate::{hardcoded_config_12, hardcoded_config_20, hardcoded_config_24, hardcoded_config_26, hardcoded_config_28, hardcoded_config_30};
+use crate::{hardcoded_config_12_verifier, hardcoded_config_20_verifier, hardcoded_config_24_verifier, hardcoded_config_26_verifier, hardcoded_config_28_verifier, hardcoded_config_30_verifier};
 use binary_fields::{BinaryElem32, BinaryElem128};
 use std::marker::PhantomData;
 
@@ -191,6 +191,10 @@ pub extern "C" fn prove_raw(poly_ptr: *const u32, poly_len: u32, config_size: u8
             let config = hardcoded_config_24(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>);
             prover::<BinaryElem32, BinaryElem128>(&config, &poly)
         }
+        26 => {
+            let config = hardcoded_config_26(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>);
+            prover::<BinaryElem32, BinaryElem128>(&config, &poly)
+        }
         28 => {
             let config = hardcoded_config_28(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>);
             prover::<BinaryElem32, BinaryElem128>(&config, &poly)
@@ -252,6 +256,10 @@ pub extern "C" fn verify_raw(proof_ptr: *const u8, proof_len: u32, config_size: 
         }
         24 => {
             let config = hardcoded_config_24_verifier();
+            verifier::<BinaryElem32, BinaryElem128>(&config, &proof)
+        }
+        26 => {
+            let config = hardcoded_config_26_verifier();
             verifier::<BinaryElem32, BinaryElem128>(&config, &proof)
         }
         28 => {

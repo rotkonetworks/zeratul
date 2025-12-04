@@ -301,6 +301,57 @@ pub fn hardcoded_config_24_verifier() -> VerifierConfig {
     }
 }
 
+/// Create configuration for 2^26 polynomial
+#[cfg(feature = "prover")]
+pub fn hardcoded_config_26<T, U>(
+    _t: PhantomData<T>,
+    _u: PhantomData<U>,
+) -> ProverConfig<T, U>
+where
+    T: BinaryFieldElement,
+    U: BinaryFieldElement,
+{
+    let recursive_steps = 3;
+    let inv_rate = 4;
+
+    let initial_dims = (1 << 20, 1 << 6);  // (2^20, 2^6)
+    let dims = vec![
+        (1 << 17, 1 << 3),  // (2^17, 2^3)
+        (1 << 14, 1 << 3),  // (2^14, 2^3)
+        (1 << 11, 1 << 3),  // (2^11, 2^3)
+    ];
+
+    let initial_k = 6;
+    let ks = vec![3, 3, 3];
+
+    let initial_reed_solomon = reed_solomon::<T>(initial_dims.0, initial_dims.0 * inv_rate);
+    let reed_solomon_codes = dims.iter()
+        .map(|&(m, _)| reed_solomon::<U>(m, m * inv_rate))
+        .collect();
+
+    ProverConfig {
+        recursive_steps,
+        initial_dims,
+        dims,
+        initial_k,
+        ks,
+        initial_reed_solomon,
+        reed_solomon_codes,
+        num_queries: 148, // 100-bit security (paper)
+    }
+}
+
+pub fn hardcoded_config_26_verifier() -> VerifierConfig {
+    VerifierConfig {
+        recursive_steps: 3,
+        initial_dim: 20,
+        log_dims: vec![17, 14, 11],
+        initial_k: 6,
+        ks: vec![3, 3, 3],
+        num_queries: 148,
+    }
+}
+
 /// Create configuration for 2^28 polynomial
 #[cfg(feature = "prover")]
 pub fn hardcoded_config_28<T, U>(

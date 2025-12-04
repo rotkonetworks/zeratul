@@ -1,0 +1,40 @@
+[package]
+name = "ligerito-beefy"
+version = "0.1.0"
+edition = "2021"
+description = "ZK BEEFY finality proof verification using Ligerito"
+license = "Apache-2.0"
+
+[features]
+default = ["std"]
+std = ["codec/std", "scale-info/std", "blake2/std"]
+# For PolkaVM guest compilation (no_std)
+guest = []
+# Enable BLS signature verification
+bls = ["ark-bls12-381", "ark-ec", "ark-ff", "ark-serialize"]
+# Enable ligerito proving
+prover = ["ligerito", "ligerito-binary-fields", "bytemuck"]
+
+[dependencies]
+# Encoding
+codec = { package = "parity-scale-codec", version = "3.6", default-features = false, features = ["derive"] }
+scale-info = { version = "2.11", default-features = false, features = ["derive"] }
+
+# Crypto - BLS signatures
+w3f-bls = { version = "0.1.4", default-features = false, optional = true }
+ark-bls12-381 = { version = "0.4", default-features = false, features = ["curve"], optional = true }
+ark-ec = { version = "0.4", default-features = false, optional = true }
+ark-ff = { version = "0.4", default-features = false, optional = true }
+ark-serialize = { version = "0.4", default-features = false, optional = true }
+
+# Hashing
+blake2 = { version = "0.10", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+
+# Ligerito for proving
+ligerito = { path = "../ligerito", default-features = false, features = ["prover", "std"], optional = true }
+ligerito-binary-fields = { path = "../ligerito-binary-fields", default-features = false, optional = true }
+bytemuck = { version = "1.14", optional = true }
+
+[dev-dependencies]
+hex = "0.4"

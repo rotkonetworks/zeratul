@@ -6455,7 +6455,7 @@ dependencies = [
 
 [[package]]
 name = "ligerito"
-version = "0.3.1"
+version = "0.3.2"
 dependencies = [
  "anyhow",
  "bincode",
@@ -6470,9 +6470,9 @@ dependencies = [
  "hashbrown 0.14.5",
  "hex",
  "js-sys",
- "ligerito-binary-fields 0.3.0",
- "ligerito-merkle 0.3.0",
- "ligerito-reed-solomon 0.3.0",
+ "ligerito-binary-fields 0.3.2",
+ "ligerito-merkle 0.3.2",
+ "ligerito-reed-solomon 0.3.2",
  "merlin",
  "parity-scale-codec",
  "pollster",
@@ -6493,6 +6493,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "ligerito-beefy"
+version = "0.1.0"
+dependencies = [
+ "ark-bls12-381 0.4.0",
+ "ark-ec 0.4.2",
+ "ark-ff 0.4.2",
+ "ark-serialize 0.4.2",
+ "blake2",
+ "bytemuck",
+ "hex",
+ "ligerito 0.3.2",
+ "ligerito-binary-fields 0.3.2",
+ "parity-scale-codec",
+ "scale-info",
+ "sha2 0.10.9",
+ "w3f-bls",
+]
+
+[[package]]
 name = "ligerito-binary-fields"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6506,7 +6525,7 @@ dependencies = [
 
 [[package]]
 name = "ligerito-binary-fields"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "bytemuck",
  "criterion 0.5.1",
@@ -6532,7 +6551,7 @@ dependencies = [
 
 [[package]]
 name = "ligerito-merkle"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "blake3",
  "bytemuck",
@@ -6555,10 +6574,10 @@ dependencies = [
 
 [[package]]
 name = "ligerito-reed-solomon"
-version = "0.3.0"
+version = "0.3.2"
 dependencies = [
  "criterion 0.5.1",
- "ligerito-binary-fields 0.3.0",
+ "ligerito-binary-fields 0.3.2",
  "rand 0.8.5",
  "rayon",
 ]
@@ -8502,9 +8521,9 @@ name = "polkavm-pcvm"
 version = "0.1.0"
 dependencies = [
  "bytemuck",
- "ligerito 0.3.1",
- "ligerito-binary-fields 0.3.0",
- "ligerito-merkle 0.3.0",
+ "ligerito 0.3.2",
+ "ligerito-binary-fields 0.3.2",
+ "ligerito-merkle 0.3.2",
  "polkavm",
  "polkavm-assembler",
  "polkavm-common 0.30.0",
@@ -12437,8 +12456,8 @@ name = "test-ligerito-integration"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "ligerito 0.3.1",
- "ligerito-binary-fields 0.3.0",
+ "ligerito 0.3.2",
+ "ligerito-binary-fields 0.3.2",
  "sha2 0.10.9",
 ]
 
@@ -15623,8 +15642,8 @@ dependencies = [
  "golden-rs",
  "governor 0.6.3",
  "hex",
- "ligerito 0.3.1",
- "ligerito-binary-fields 0.3.0",
+ "ligerito 0.3.2",
+ "ligerito-binary-fields 0.3.2",
  "litep2p",
  "multiaddr 0.18.2",
  "nomt 1.0.2 (git+https://github.com/thrumdev/nomt)",
@@ -15660,8 +15679,8 @@ dependencies = [
  "criterion 0.5.1",
  "halo2_proofs 0.3.1 (git+https://github.com/zcash/halo2)",
  "hex",
- "ligerito 0.3.1",
- "ligerito-binary-fields 0.3.0",
+ "ligerito 0.3.2",
+ "ligerito-binary-fields 0.3.2",
  "pasta_curves",
  "rand 0.8.5",
  "rand_chacha 0.3.1",
@@ -15684,6 +15703,30 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber 0.3.20",
+]
+
+[[package]]
+name = "zeratul-mvp"
+version = "0.1.0"
+dependencies = [
+ "bincode",
+ "blake2",
+ "chrono",
+ "clap",
+ "criterion 0.5.1",
+ "futures",
+ "ligerito 0.3.2",
+ "ligerito-binary-fields 0.3.2",
+ "litep2p",
+ "polkavm-pcvm",
+ "serde",
+ "serde-big-array",
+ "serde_bytes",
+ "sha2 0.10.9",
+ "tokio",
+ "tracing",
+ "tracing-subscriber 0.3.20",
+ "zeratul-p2p",
 ]
 
 [[package]]
@@ -15824,7 +15867,7 @@ dependencies = [
 
 [[package]]
 name = "zidecar"
-version = "0.1.0"
+version = "0.2.0"
 dependencies = [
  "anyhow",
  "bincode",
@@ -15832,8 +15875,8 @@ dependencies = [
  "clap",
  "futures",
  "hex",
- "ligerito 0.3.1",
- "ligerito-binary-fields 0.3.0",
+ "ligerito 0.3.2",
+ "ligerito-binary-fields 0.3.2",
  "nomt 1.0.2 (registry+https://github.com/rust-lang/crates.io-index)",
  "prost 0.12.6",
  "prost-types 0.12.6",
@@ -15964,9 +16007,9 @@ dependencies = [
  "getrandom 0.2.16",
  "hex",
  "js-sys",
- "ligerito 0.3.1",
- "ligerito-binary-fields 0.3.0",
- "ligerito-merkle 0.3.0",
+ "ligerito 0.3.2",
+ "ligerito-binary-fields 0.3.2",
+ "ligerito-merkle 0.3.2",
  "orchard 0.7.1",
  "pasta_curves",
  "prost 0.12.6",

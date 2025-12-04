@@ -5,6 +5,7 @@ members = [
     "crates/ligerito-reed-solomon",
     "crates/ligerito-merkle",
     "crates/ligerito",
+    "crates/ligerito-beefy",
     # PolkaVM polynomial commitment verification
     "crates/polkavm-pcvm",
     # IBP monitoring probes
@@ -15,6 +16,7 @@ members = [
     "crates/zeratul-client",
     "crates/zeratul-server",
     "crates/zeratul-p2p",
+    "crates/zeratul-mvp",
     "crates/test-ligerito-integration",
     # Binaries
     "crates/bin/zidecar",

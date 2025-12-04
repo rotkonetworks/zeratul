@@ -31,9 +31,9 @@ use crate::{
     prover::prove_with_transcript,
     verifier::verify_with_transcript,
     hardcoded_config_12, hardcoded_config_16, hardcoded_config_20, hardcoded_config_24,
-    hardcoded_config_28, hardcoded_config_30,
+    hardcoded_config_26, hardcoded_config_28, hardcoded_config_30,
     hardcoded_config_12_verifier, hardcoded_config_16_verifier, hardcoded_config_20_verifier,
-    hardcoded_config_24_verifier, hardcoded_config_28_verifier, hardcoded_config_30_verifier,
+    hardcoded_config_24_verifier, hardcoded_config_26_verifier, hardcoded_config_28_verifier, hardcoded_config_30_verifier,
     FinalizedLigeritoProof,
     transcript::FiatShamir,
 };
@@ -124,11 +124,12 @@ pub fn prove(polynomial: &[u32], config_size: u8, transcript: Option<String>) ->
         16 => prove_with_config!(hardcoded_config_16, 16),
         20 => prove_with_config!(hardcoded_config_20, 20),
         24 => prove_with_config!(hardcoded_config_24, 24),
+        26 => prove_with_config!(hardcoded_config_26, 26),
         28 => prove_with_config!(hardcoded_config_28, 28),
         30 => prove_with_config!(hardcoded_config_30, 30),
         _ => {
             return Err(JsValue::from_str(&format!(
-                "Unsupported config_size: {}. Supported: 12, 16, 20, 24, 28, 30",
+                "Unsupported config_size: {}. Supported: 12, 16, 20, 24, 26, 28, 30",
                 config_size
             )));
         }
@@ -179,11 +180,12 @@ pub fn verify(proof_bytes: &[u8], config_size: u8, transcript: Option<String>) -
         16 => verify_with_config!(hardcoded_config_16_verifier),
         20 => verify_with_config!(hardcoded_config_20_verifier),
         24 => verify_with_config!(hardcoded_config_24_verifier),
+        26 => verify_with_config!(hardcoded_config_26_verifier),
         28 => verify_with_config!(hardcoded_config_28_verifier),
         30 => verify_with_config!(hardcoded_config_30_verifier),
         _ => {
             return Err(JsValue::from_str(&format!(
-                "Unsupported config_size: {}. Supported: 12, 16, 20, 24, 28, 30",
+                "Unsupported config_size: {}. Supported: 12, 16, 20, 24, 26, 28, 30",
                 config_size
             )));
         }
@@ -258,11 +260,12 @@ pub fn generate_and_prove(config_size: u8, seed: u64, transcript: Option<String>
         16 => prove_with_config!(hardcoded_config_16),
         20 => prove_with_config!(hardcoded_config_20),
         24 => prove_with_config!(hardcoded_config_24),
+        26 => prove_with_config!(hardcoded_config_26),
         28 => prove_with_config!(hardcoded_config_28),
         30 => prove_with_config!(hardcoded_config_30),
         _ => {
             return Err(JsValue::from_str(&format!(
-                "Unsupported config_size: {}. Supported: 12, 16, 20, 24, 28, 30",
+                "Unsupported config_size: {}. Supported: 12, 16, 20, 24, 26, 28, 30",
                 config_size
             )));
         }
