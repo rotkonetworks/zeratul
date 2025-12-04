@@ -227,16 +227,137 @@ button:disabled { background: var(--border); color: var(--dim); cursor: not-allo
 .proof-grid .value.hash { font-size: 10px; overflow: hidden; text-overflow: ellipsis; }
 .proof-grid .value.ok { color: var(--ok); }
 .proof-grid .value.err { color: var(--err); }
+
+/* Modal styles */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  opacity: 0;
+  visibility: hidden;
+  transition: opacity 0.2s, visibility 0.2s;
+}
+.modal-overlay.active {
+  opacity: 1;
+  visibility: visible;
+}
+.modal {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  max-width: 520px;
+  width: 90%;
+  max-height: 80vh;
+  overflow-y: auto;
+  position: relative;
+}
+.modal-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 16px;
+  border-bottom: 1px solid var(--border);
+}
+.modal-icon {
+  font-size: 24px;
+  color: var(--gold);
+}
+.modal-title {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--gold);
+}
+.modal-close {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  background: none;
+  border: none;
+  color: var(--dim);
+  font-size: 18px;
+  cursor: pointer;
+  padding: 4px 8px;
+}
+.modal-close:hover { color: var(--text); }
+.modal-body {
+  padding: 16px;
+}
+.modal-section {
+  margin-bottom: 16px;
+}
+.modal-section:last-child { margin-bottom: 0; }
+.modal-section-title {
+  color: var(--gold);
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 8px;
+}
+.modal-text {
+  font-size: 12px;
+  line-height: 1.7;
+  color: var(--text);
+}
+.modal-text p { margin-bottom: 8px; }
+.modal-text p:last-child { margin-bottom: 0; }
+.comparison-table {
+  width: 100%;
+  font-size: 11px;
+  border-collapse: collapse;
+  margin-top: 8px;
+}
+.comparison-table th,
+.comparison-table td {
+  padding: 8px;
+  text-align: left;
+  border-bottom: 1px solid var(--border);
+}
+.comparison-table th {
+  color: var(--dim);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 10px;
+}
+.comparison-table td:first-child { color: var(--dim); }
+.comparison-table .old { color: var(--err); }
+.comparison-table .new { color: var(--ok); }
+.security-layer { cursor: pointer; }
+.security-layer:hover { background: var(--border); }
+.tech-tag {
+  display: inline-block;
+  background: var(--bg);
+  padding: 2px 6px;
+  font-size: 10px;
+  margin: 2px;
+  border: 1px solid var(--border);
+}
 </style>
 </head>
 <body>
 <div class="container">
 <h1>zafu <span style="color: var(--dim); font-weight: 400">zcash light wallet</span></h1>
 
+<div style="background: rgba(192, 80, 80, 0.15); border: 1px solid var(--err); padding: 12px; margin-bottom: 24px; font-size: 11px;">
+  <div style="color: var(--err); font-weight: 600; margin-bottom: 6px;">⚠ EXPERIMENTAL DEMO</div>
+  <div style="color: var(--dim); line-height: 1.5;">
+    <strong>Client-Side Rendered (CSR):</strong> All cryptographic operations run entirely in your browser.
+    Your seed phrase never leaves this device—we cannot access it.<br>
+    <strong>Recommendation:</strong> Use an old wallet with no value attached for testing.
+    This is experimental software; do not use with funds you cannot afford to lose.
+  </div>
+</div>
+
 <div class="section">
   <div class="section-title">server</div>
   <div class="row">
-    <input type="text" id="server-url" value="http://localhost:50051" placeholder="zidecar server">
+    <input type="text" id="server-url" value="https://zcash.rotko.net" placeholder="zidecar server">
     <button id="connect-btn">connect</button>
   </div>
   <div class="status" id="connect-status">not connected</div>
@@ -326,6 +447,181 @@ button:disabled { background: var(--border); color: var(--dim); cursor: not-allo
 
 </div>
 
+<!-- Modal: Ligerito -->
+<div class="modal-overlay" id="modal-ligerito">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal('ligerito')">&times;</button>
+    <div class="modal-header">
+      <div class="modal-icon">◈</div>
+      <div class="modal-title">Ligerito - Header Chain Proof</div>
+    </div>
+    <div class="modal-body">
+      <div class="modal-section">
+        <div class="modal-section-title">Threat Model</div>
+        <div class="modal-text">
+          <p>A malicious server can trivially lie about which chain is canonical. Without header verification, it can present a fabricated chain with invalid PoW, convince the client to accept transactions on a minority fork, or hide reorgs entirely.</p>
+          <p>Lightwalletd clients have no defense against this - they trust the server completely.</p>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Security Guarantee</div>
+        <div class="modal-text">
+          <p>The proof asserts that for blocks 1..N: each header's PoW satisfies its target, the difficulty adjustment algorithm was correctly applied at each epoch, timestamps are monotonically increasing, and hash(header[i]) = prev_hash(header[i+1]).</p>
+          <p>The client verifies this in O(log²N/log log N) time without downloading headers.</p>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Proof Structure</div>
+        <div class="modal-text">
+          <p><strong>Gigaproof:</strong> Proves genesis → last epoch boundary. Generated once per ~1024 blocks. ~200KB, proves ~2.7M headers.</p>
+          <p><strong>Tip proof:</strong> Proves epoch boundary → current tip. Generated on-demand. Continuity check: tip_proof.start_hash == gigaproof.end_hash.</p>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">FRI Folding Verification</div>
+        <div class="modal-text">
+          <p>Verification uses recursive FRI (Fast Reed-Solomon IOP) folding. The polynomial is committed at dimension 2^k, then folded down in rounds:</p>
+          <p style="font-family: monospace; font-size: 11px; color: var(--gold); margin: 8px 0;">
+            2^26 → 2^23 → 2^20 → 2^17 → 2^14 → 2^11 → final
+          </p>
+          <p>Each round: verifier sends random challenge α, prover commits to f'(x) = f_even(x) + α·f_odd(x). Verifier spot-checks consistency at random points. After ℓ rounds, the polynomial is small enough to send directly.</p>
+          <p>Soundness error: (ρ)^|S| per round, where ρ = rate and |S| = query count (~148 queries for 100-bit security).</p>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Assumptions</div>
+        <div class="modal-text">
+          <p>Soundness relies on the hardness of Reed-Solomon proximity testing. <a href="https://ligerito.rotko.net" target="_blank" style="color: var(--gold)">Ligerito</a> is a polynomial commitment scheme with WI (not ZK) - the witness is not hidden, only correctness is proven.</p>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Download Proofs</div>
+        <div class="modal-text">
+          <div style="display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap;">
+            <button id="download-gigaproof">Gigaproof (genesis→epoch)</button>
+            <button id="download-tipproof">Tip Proof (epoch→tip)</button>
+          </div>
+          <div id="proof-info" style="margin-top: 8px; font-size: 10px; color: var(--dim);">
+            Connect and sync to fetch proof data.
+          </div>
+          <p style="margin-top: 8px; font-size: 10px; color: var(--dim);">Proofs can be verified independently using the ligerito CLI verifier.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: Zanchor -->
+<div class="modal-overlay" id="modal-zanchor">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal('zanchor')">&times;</button>
+    <div class="modal-header">
+      <div class="modal-icon">●</div>
+      <div class="modal-title">Zanchor - Polkadot Finality</div>
+    </div>
+    <div class="modal-body">
+      <div class="modal-section">
+        <div class="modal-section-title">Threat Model</div>
+        <div class="modal-text">
+          <p>Zcash uses Nakamoto consensus - finality is probabilistic. A 51% attacker can reorg arbitrarily deep. Even without 51%, a malicious server can claim any block is "canonical" and the client has no way to dispute it without an independent reference.</p>
+          <p>Lightwalletd provides no finality guarantees whatsoever.</p>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Security Guarantee</div>
+        <div class="modal-text">
+          <p>Zanchor checkpoints (block_hash, tree_root) are written to a Polkadot parachain. Once finalized by GRANDPA (BFT finality with 1000+ validators), the checkpoint becomes irreversible - even a Zcash 51% attack cannot reorg past it.</p>
+          <p>The client can verify checkpoint authenticity via Polkadot light client or trusted RPC.</p>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Checkpoint Structure</div>
+        <div class="modal-text">
+          <p><strong>epoch:</strong> Sequential checkpoint number</p>
+          <p><strong>block_hash:</strong> Zcash block hash at checkpoint height</p>
+          <p><strong>tree_root:</strong> Commitment to nullifier set state</p>
+          <p>Checkpoints are signed via FROST threshold signature (t-of-n scheme).</p>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Assumptions</div>
+        <div class="modal-text">
+          <p>Trust assumption shifts from "the server is honest" to "Polkadot validators are honest (BFT: >2/3 honest)". This is a strictly weaker assumption - compromising 1000+ validators is harder than compromising one server.</p>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Paseo Parachain Verification</div>
+        <div class="modal-text">
+          <p style="font-size: 11px; color: var(--dim);">ParaId 5082 on Paseo testnet. Query on-chain state to verify checkpoint authenticity.</p>
+          <button id="verify-paseo" style="margin-top: 8px;">Verify on Paseo</button>
+          <div id="paseo-verify-status" style="margin-top: 8px; font-size: 11px; padding: 8px; background: var(--bg); display: none;">
+            <div id="paseo-verify-result"></div>
+          </div>
+          <p style="margin-top: 8px; font-size: 10px; color: var(--dim);">
+            RPC: <a href="https://paseo.rpc.amforc.com" target="_blank" style="color: var(--gold);">paseo.rpc.amforc.com</a> |
+            Explorer: <a href="https://paseo.subscan.io/parachain/5082" target="_blank" style="color: var(--gold);">subscan</a>
+          </p>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Download Checkpoint</div>
+        <div class="modal-text">
+          <button id="download-checkpoint" style="margin-top: 8px;">Download Latest Checkpoint</button>
+          <p style="margin-top: 8px; font-size: 10px; color: var(--dim);">JSON: epoch, height, block_hash, tree_root</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Modal: NOMT -->
+<div class="modal-overlay" id="modal-nomt">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal('nomt')">&times;</button>
+    <div class="modal-header">
+      <div class="modal-icon">⌘</div>
+      <div class="modal-title">NOMT - Nullifier State Proof</div>
+    </div>
+    <div class="modal-body">
+      <div class="modal-section">
+        <div class="modal-section-title">Threat Model</div>
+        <div class="modal-text">
+          <p>The nullifier set (all spent note commitments) is critical for double-spend prevention. A malicious server can: (1) omit nullifiers to make spent notes appear unspent, (2) inject fake nullifiers to make unspent notes appear spent, or (3) serve inconsistent state to different clients.</p>
+          <p>Lightwalletd clients accept nullifier queries on faith.</p>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Security Guarantee</div>
+        <div class="modal-text">
+          <p>NOMT maintains a merkle tree over the nullifier set. For any query "is nullifier X in the set?", the server provides a membership/non-membership proof verifiable against the root.</p>
+          <p>The root is committed in the header chain proof, binding it to the proven chain state.</p>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Proof Verification</div>
+        <div class="modal-text">
+          <p><strong>Membership proof:</strong> Path from leaf to root, O(log N) hashes</p>
+          <p><strong>Non-membership proof:</strong> Adjacent leaves proving gap at query position</p>
+          <p>Client computes root from proof, compares to committed root. Forgery requires collision in Blake3.</p>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Assumptions</div>
+        <div class="modal-text">
+          <p>Soundness: collision resistance of Blake3. Completeness: server must have the full nullifier set to generate valid proofs. The "Nearly-Optimal" in NOMT refers to page-aligned storage for efficient disk I/O during proof generation.</p>
+        </div>
+      </div>
+      <div class="modal-section">
+        <div class="modal-section-title">Download State Root</div>
+        <div class="modal-text">
+          <button id="download-nomt-root" style="margin-top: 8px;">Download Current State</button>
+          <p style="margin-top: 8px; font-size: 10px; color: var(--dim);">JSON: nullifier_root, proven_height, nullifiers_observed</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <script type="module">
 import initWasm, { WalletKeys, validate_seed_phrase, version, num_threads } from './pkg/zafu_wasm.js';
 import * as zafuWasm from './pkg/zafu_wasm.js';
@@ -334,6 +630,10 @@ import * as ligerito from './ligerito.js';
 import { signal, computed, effect, batch, bindText, bindStyle, bindVisible, varint, bytesToHex, formatNumber, formatZec } from './utils.js';
 
 const $ = id => document.getElementById(id);
+
+// ============== PROOF CACHE FOR DOWNLOAD ==============
+let lastProofData = null;
+let lastCheckpointData = null;
 
 // ============== REACTIVE STATE ==============
 const [connected, setConnected] = signal(false);
@@ -897,6 +1197,11 @@ function setSecurityLayer(layer, status, detail) {
 
 // Helper: verify proof and update signals
 async function verifyHeaderProofAndUpdate(headerProof, fallbackHeight) {
+  // Cache proof data for download feature
+  if (headerProof && headerProof.ligerito_proof) {
+    lastProofData = headerProof;
+  }
+
   const ok = await verifyHeaderProof(headerProof);
 
   if (ok) {
@@ -1678,6 +1983,431 @@ async function verifyHeaderProof(proof) {
     return false;
   }
 }
+
+// ============== MODAL FUNCTIONS ==============
+
+function openModal(layer) {
+  const modal = document.getElementById(`modal-${layer}`);
+  if (modal) {
+    modal.classList.add('active');
+    document.body.style.overflow = 'hidden';
+  }
+}
+
+function closeModal(layer) {
+  const modal = document.getElementById(`modal-${layer}`);
+  if (modal) {
+    modal.classList.remove('active');
+    document.body.style.overflow = '';
+  }
+}
+
+// Make closeModal globally available for onclick handlers
+window.closeModal = closeModal;
+
+// Close modal on overlay click (not modal content)
+document.querySelectorAll('.modal-overlay').forEach(overlay => {
+  overlay.addEventListener('click', (e) => {
+    if (e.target === overlay) {
+      overlay.classList.remove('active');
+      document.body.style.overflow = '';
+    }
+  });
+});
+
+// Close modal on Escape key
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape') {
+    document.querySelectorAll('.modal-overlay.active').forEach(modal => {
+      modal.classList.remove('active');
+    });
+    document.body.style.overflow = '';
+  }
+});
+
+// Security layer click handlers
+$('sec-ligerito').addEventListener('click', () => {
+  openModal('ligerito');
+  updateProofInfo();  // Refresh proof sizes when opening
+});
+$('sec-zanchor').addEventListener('click', () => openModal('zanchor'));
+$('sec-nomt').addEventListener('click', () => openModal('nomt'));
+
+// Helper: parse combined proof format into gigaproof and tip proof
+function parseProofParts(combinedBytes) {
+  if (!combinedBytes || combinedBytes.length < 8) return null;
+
+  const gigaproofSize = combinedBytes[0] | (combinedBytes[1] << 8) | (combinedBytes[2] << 16) | (combinedBytes[3] << 24);
+  const gigaproofBytes = combinedBytes.slice(4, 4 + gigaproofSize);
+  const tipBytes = combinedBytes.slice(4 + gigaproofSize);
+
+  return {
+    gigaproof: gigaproofBytes,
+    tipproof: tipBytes.length > 10 ? tipBytes : null
+  };
+}
+
+// Helper: download binary file
+function downloadBlob(data, filename) {
+  const blob = new Blob([data], { type: 'application/octet-stream' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// Helper: fetch and cache proof data
+async function ensureProofData() {
+  if (lastProofData && lastProofData.ligerito_proof) return lastProofData;
+
+  const gHeight = gigaproofHeight();
+  if (gHeight === 0) return null;
+
+  lastProofData = await fetchHeaderProof(1, chainHeight());
+  return lastProofData;
+}
+
+// Update proof info when modal opens
+function updateProofInfo() {
+  const info = $('proof-info');
+  if (!lastProofData || !lastProofData.ligerito_proof) {
+    info.textContent = 'Connect and sync to fetch proof data.';
+    return;
+  }
+
+  const parts = parseProofParts(lastProofData.ligerito_proof);
+  if (!parts) {
+    info.textContent = 'Invalid proof format.';
+    return;
+  }
+
+  const go = lastProofData.gigaproof_outputs;
+  const to = lastProofData.tip_proof_outputs;
+
+  let text = `Gigaproof: ${(parts.gigaproof.length / 1024).toFixed(1)} KB`;
+  if (go) text += ` (blocks 1→${go.end_height.toLocaleString()})`;
+
+  if (parts.tipproof) {
+    text += ` | Tip: ${(parts.tipproof.length / 1024).toFixed(1)} KB`;
+    if (to) text += ` (blocks ${to.start_height.toLocaleString()}→${to.end_height.toLocaleString()})`;
+  } else {
+    text += ' | Tip: not available';
+  }
+
+  info.innerHTML = text;
+}
+
+// Download gigaproof
+$('download-gigaproof').addEventListener('click', async () => {
+  const btn = $('download-gigaproof');
+  const originalText = btn.textContent;
+
+  try {
+    btn.textContent = 'Fetching...';
+    btn.disabled = true;
+
+    const proof = await ensureProofData();
+    if (!proof || !proof.ligerito_proof) {
+      alert('No proof available yet. Please connect and sync first.');
+      return;
+    }
+
+    const parts = parseProofParts(proof.ligerito_proof);
+    if (!parts || !parts.gigaproof) {
+      alert('Failed to parse proof data.');
+      return;
+    }
+
+    const go = proof.gigaproof_outputs;
+    const endHeight = go ? go.end_height : proof.to_height;
+    downloadBlob(parts.gigaproof, `gigaproof-1-${endHeight}.bin`);
+
+    btn.textContent = 'Downloaded!';
+    setTimeout(() => { btn.textContent = originalText; }, 2000);
+
+  } catch (e) {
+    console.error('[download] gigaproof error:', e);
+    alert('Failed to download: ' + e.message);
+    btn.textContent = originalText;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// Download tip proof
+$('download-tipproof').addEventListener('click', async () => {
+  const btn = $('download-tipproof');
+  const originalText = btn.textContent;
+
+  try {
+    btn.textContent = 'Fetching...';
+    btn.disabled = true;
+
+    const proof = await ensureProofData();
+    if (!proof || !proof.ligerito_proof) {
+      alert('No proof available yet. Please connect and sync first.');
+      return;
+    }
+
+    const parts = parseProofParts(proof.ligerito_proof);
+    if (!parts) {
+      alert('Failed to parse proof data.');
+      return;
+    }
+
+    if (!parts.tipproof) {
+      alert('No tip proof available. The chain may be at an epoch boundary.');
+      return;
+    }
+
+    const to = proof.tip_proof_outputs;
+    const startHeight = to ? to.start_height : (proof.gigaproof_outputs?.end_height || 0) + 1;
+    const endHeight = to ? to.end_height : proof.to_height;
+    downloadBlob(parts.tipproof, `tipproof-${startHeight}-${endHeight}.bin`);
+
+    btn.textContent = 'Downloaded!';
+    setTimeout(() => { btn.textContent = originalText; }, 2000);
+
+  } catch (e) {
+    console.error('[download] tipproof error:', e);
+    alert('Failed to download: ' + e.message);
+    btn.textContent = originalText;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('download-checkpoint').addEventListener('click', async () => {
+  const btn = $('download-checkpoint');
+  const originalText = btn.textContent;
+
+  try {
+    btn.textContent = 'Fetching...';
+    btn.disabled = true;
+
+    // Fetch checkpoint
+    const checkpoint = await fetchCheckpoint();
+    if (!checkpoint || checkpoint.epoch === 0) {
+      alert('No checkpoint available yet. Zanchor parachain may be idle.');
+      return;
+    }
+
+    // Create JSON representation
+    const checkpointJson = JSON.stringify({
+      epoch: checkpoint.epoch,
+      height: checkpoint.height,
+      block_hash: checkpoint.block_hash ? bytesToHex(checkpoint.block_hash) : null,
+      tree_root: checkpoint.tree_root ? bytesToHex(checkpoint.tree_root) : null,
+      timestamp: new Date().toISOString()
+    }, null, 2);
+
+    // Create download
+    const blob = new Blob([checkpointJson], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `zanchor-checkpoint-epoch-${checkpoint.epoch}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    btn.textContent = 'Downloaded!';
+    setTimeout(() => { btn.textContent = originalText; }, 2000);
+
+  } catch (e) {
+    console.error('[download] checkpoint error:', e);
+    alert('Failed to download checkpoint: ' + e.message);
+    btn.textContent = originalText;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+// Paseo parachain verification (ParaId 5082)
+$('verify-paseo').addEventListener('click', async () => {
+  const btn = $('verify-paseo');
+  const statusDiv = $('paseo-verify-status');
+  const resultDiv = $('paseo-verify-result');
+  const originalText = btn.textContent;
+
+  const PASEO_RPC = 'wss://paseo.rpc.amforc.com:443';
+
+  try {
+    btn.textContent = 'Connecting...';
+    btn.disabled = true;
+    statusDiv.style.display = 'block';
+    resultDiv.innerHTML = '<span style="color: var(--gold);">Connecting to Paseo relay chain...</span>';
+
+    // First fetch local checkpoint from zidecar
+    const checkpoint = await fetchCheckpoint();
+    if (!checkpoint || checkpoint.epoch === 0) {
+      resultDiv.innerHTML = '<span style="color: var(--err);">No local checkpoint available. Server may not have checkpoint data.</span>';
+      return;
+    }
+
+    resultDiv.innerHTML = `<span style="color: var(--gold);">Local checkpoint: epoch ${checkpoint.epoch}, height ${checkpoint.height}</span><br><span style="color: var(--dim);">Querying Paseo parachain 5082...</span>`;
+
+    // Query Paseo via JSON-RPC over HTTPS (simpler than WebSocket for verification)
+    const paseoHttpRpc = 'https://paseo.rpc.amforc.com';
+
+    // Query system_chain to verify connection
+    const chainResp = await fetch(paseoHttpRpc, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        method: 'system_chain',
+        params: []
+      })
+    });
+    const chainData = await chainResp.json();
+
+    if (chainData.result !== 'Paseo Testnet') {
+      resultDiv.innerHTML = `<span style="color: var(--err);">Unexpected chain: ${chainData.result}</span>`;
+      return;
+    }
+
+    // Query paras_info to check parachain 5082 status
+    const parasResp = await fetch(paseoHttpRpc, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 2,
+        method: 'state_getStorage',
+        params: ['0x0d715f2646c8f85767b5d2764bb278265e44fd2e0c6e1e0ee9a1ec7b4f2c3bfe'] // paras.parachains storage key
+      })
+    });
+    const parasData = await parasResp.json();
+
+    // Get latest finalized block
+    const finalizedResp = await fetch(paseoHttpRpc, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 3,
+        method: 'chain_getFinalizedHead',
+        params: []
+      })
+    });
+    const finalizedData = await finalizedResp.json();
+    const finalizedHash = finalizedData.result;
+
+    // Get finalized block header for block number
+    const headerResp = await fetch(paseoHttpRpc, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 4,
+        method: 'chain_getHeader',
+        params: [finalizedHash]
+      })
+    });
+    const headerData = await headerResp.json();
+    const finalizedHeight = parseInt(headerData.result?.number, 16) || 0;
+
+    // Display verification results
+    const localBlockHash = checkpoint.block_hash ? bytesToHex(checkpoint.block_hash) : 'N/A';
+    const localTreeRoot = checkpoint.tree_root ? bytesToHex(checkpoint.tree_root) : 'N/A';
+
+    resultDiv.innerHTML = `
+      <div style="margin-bottom: 8px;">
+        <strong style="color: var(--ok);">✓ Connected to Paseo Testnet</strong>
+      </div>
+      <div style="display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; font-size: 10px;">
+        <span style="color: var(--dim);">Relay finalized:</span>
+        <span style="font-family: monospace;">#${finalizedHeight.toLocaleString()}</span>
+        <span style="color: var(--dim);">Relay head:</span>
+        <span style="font-family: monospace; overflow: hidden; text-overflow: ellipsis;">${finalizedHash.slice(0, 18)}...</span>
+        <span style="color: var(--dim);">ParaId:</span>
+        <span style="font-family: monospace;">5082 (zanchor)</span>
+        <span style="color: var(--dim);">Local epoch:</span>
+        <span style="font-family: monospace;">${checkpoint.epoch}</span>
+        <span style="color: var(--dim);">Zcash height:</span>
+        <span style="font-family: monospace;">${checkpoint.height.toLocaleString()}</span>
+        <span style="color: var(--dim);">Block hash:</span>
+        <span style="font-family: monospace; overflow: hidden; text-overflow: ellipsis;">${localBlockHash.slice(0, 18)}...</span>
+      </div>
+      <div style="margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border); font-size: 10px; color: var(--dim);">
+        Note: Full checkpoint verification requires querying zanchor parachain (5082) storage directly. Parachain is on-demand (parathread) - active when blocks produced.
+      </div>
+    `;
+
+    btn.textContent = 'Verified!';
+    setTimeout(() => { btn.textContent = originalText; }, 3000);
+
+  } catch (e) {
+    console.error('[paseo] verification error:', e);
+    resultDiv.innerHTML = `<span style="color: var(--err);">Verification failed: ${e.message}</span>`;
+    btn.textContent = originalText;
+  } finally {
+    btn.disabled = false;
+  }
+});
+
+$('download-nomt-root').addEventListener('click', async () => {
+  const btn = $('download-nomt-root');
+  const originalText = btn.textContent;
+
+  try {
+    btn.textContent = 'Fetching...';
+    btn.disabled = true;
+
+    // Get NOMT root from last proof or fetch fresh
+    let nomtRoot = serverNullifierRoot();
+    let provenTo = provenHeight();
+
+    if (!nomtRoot && gigaproofHeight() > 0) {
+      const proof = await fetchHeaderProof(1, gigaproofHeight());
+      if (proof && proof.nullifier_root) {
+        nomtRoot = bytesToHex(proof.nullifier_root);
+        provenTo = proof.to_height;
+      }
+    }
+
+    if (!nomtRoot) {
+      alert('No NOMT root available yet. Please sync first.');
+      return;
+    }
+
+    // Create JSON representation
+    const stateJson = JSON.stringify({
+      nullifier_root: nomtRoot,
+      proven_height: provenTo,
+      nullifiers_observed: nullifiersObserved(),
+      timestamp: new Date().toISOString()
+    }, null, 2);
+
+    // Create download
+    const blob = new Blob([stateJson], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `nomt-state-height-${provenTo}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    btn.textContent = 'Downloaded!';
+    setTimeout(() => { btn.textContent = originalText; }, 2000);
+
+  } catch (e) {
+    console.error('[download] nomt state error:', e);
+    alert('Failed to download state: ' + e.message);
+    btn.textContent = originalText;
+  } finally {
+    btn.disabled = false;
+  }
+});
 
 init();
 </script>

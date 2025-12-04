@@ -1,6 +1,6 @@
 [package]
 name = "zidecar"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2021"
 license = "MIT"
 description = "Ligerito-powered Zcash light server with real-time header chain proofs"
@@ -13,12 +13,12 @@ name = "zidecar"
 path = "src/main.rs"
 
 [dependencies]
-# local workspace
-zync-core = { path = "../../zync-core" }
+# zync core types
+zync-core = "0.2"
 
-# local workspace ligerito (has transcript-blake2b feature)
-ligerito = { path = "../../ligerito", features = ["transcript-blake2b"] }
-ligerito-binary-fields = { path = "../../ligerito-binary-fields" }
+# ligerito polynomial commitment scheme
+ligerito = { version = "0.3", features = ["transcript-blake2b"] }
+ligerito-binary-fields = "0.3"
 
 # async runtime
 tokio = { version = "1", features = ["full"] }
