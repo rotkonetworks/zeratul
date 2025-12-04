@@ -196,8 +196,32 @@ pub struct BlockWithTxs {
 pub struct TransactionData {
     pub txid: String,
     pub version: u32,
+    #[serde(default, rename = "vShieldedSpend")]
+    pub sapling_spends: Option<Vec<SaplingSpend>>,
     #[serde(default)]
     pub orchard: Option<OrchardBundle>,
+}
+
+/// Sapling shielded spend
+#[derive(Debug, Deserialize, Clone)]
+pub struct SaplingSpend {
+    pub cv: String,
+    pub anchor: String,
+    pub nullifier: String,
+    pub rk: String,
+    #[serde(rename = "proof")]
+    pub zkproof: String,
+    #[serde(rename = "spendAuthSig")]
+    pub spend_auth_sig: String,
+}
+
+impl SaplingSpend {
+    /// Parse nullifier hex string to bytes
+    pub fn nullifier_bytes(&self) -> Option<[u8; 32]> {
+        hex::decode(&self.nullifier)
+            .ok()
+            .and_then(|b| b.try_into().ok())
+    }
 }
 
 /// Orchard bundle from transaction
@@ -228,6 +252,8 @@ pub struct RawTransaction {
     /// Block height (only present if confirmed)
     #[serde(default)]
     pub height: Option<u32>,
+    #[serde(default, rename = "vShieldedSpend")]
+    pub sapling_spends: Option<Vec<SaplingSpend>>,
     #[serde(default)]
     pub orchard: Option<OrchardData>,
 }

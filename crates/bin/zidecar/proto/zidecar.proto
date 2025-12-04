@@ -94,6 +94,10 @@ message HeaderProof {
     // Continuity verification status
     // True if tip_proof.start_prev_hash == gigaproof.tip_hash
     bool continuity_verified = 8;
+
+    // Current nullifier set root from nomt
+    // Used to anchor nullifier proofs
+    bytes nullifier_root = 9;
 }
 
 // Public outputs that a Ligerito proof commits to

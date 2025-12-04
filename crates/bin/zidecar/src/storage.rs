@@ -92,6 +92,67 @@ impl Storage {
         }
     }
 
+    // ===== NULLIFIER SYNC =====
+
+    /// Set nullifier sync progress height
+    pub fn set_nullifier_sync_height(&self, height: u32) -> Result<()> {
+        self.sled
+            .insert(b"nullifier_sync_height", &height.to_le_bytes())
+            .map_err(|e| ZidecarError::Storage(format!("sled: {}", e)))?;
+        Ok(())
+    }
+
+    /// Get nullifier sync progress height
+    pub fn get_nullifier_sync_height(&self) -> Result<Option<u32>> {
+        match self.sled.get(b"nullifier_sync_height") {
+            Ok(Some(bytes)) if bytes.len() == 4 => {
+                let height = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                Ok(Some(height))
+            }
+            Ok(_) => Ok(None),
+            Err(e) => Err(ZidecarError::Storage(format!("sled: {}", e))),
+        }
+    }
+
+    /// Get current nullifier set root from nomt
+    pub fn get_nullifier_root(&self) -> [u8; 32] {
+        root_to_bytes(&self.nomt.root())
+    }
+
+    /// Batch insert nullifiers with block height (for sync)
+    pub fn batch_insert_nullifiers(&self, nullifiers: &[[u8; 32]], block_height: u32) -> Result<Root> {
+        if nullifiers.is_empty() {
+            return Ok(self.nomt.root());
+        }
+
+        let session = self.nomt.begin_session(SessionParams::default());
+
+        let mut ops = Vec::with_capacity(nullifiers.len());
+
+        // Value: block height as 4 bytes (allows lookup of when nullifier was revealed)
+        let height_bytes = block_height.to_le_bytes().to_vec();
+
+        for nullifier in nullifiers {
+            let key = key_for_nullifier(nullifier);
+            session.warm_up(key);
+            ops.push((key, KeyReadWrite::Write(Some(height_bytes.clone()))));
+        }
+
+        // Sort by key (required by nomt)
+        ops.sort_by_key(|(k, _)| *k);
+
+        let finished = session
+            .finish(ops)
+            .map_err(|e| ZidecarError::Storage(format!("nomt finish: {:?}", e)))?;
+
+        let root = finished.root();
+        finished
+            .commit(&self.nomt)
+            .map_err(|e| ZidecarError::Storage(format!("nomt commit: {}", e)))?;
+
+        Ok(root)
+    }
+
     /// insert nullifier into sparse merkle tree
     /// returns new root after insertion
     pub fn insert_nullifier(&self, nullifier: &[u8; 32]) -> Result<Root> {

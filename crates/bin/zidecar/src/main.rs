@@ -1,3 +1,7 @@
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+
 use anyhow::Result;
 use clap::Parser;
 use std::net::SocketAddr;
@@ -110,8 +114,8 @@ async fn main() -> Result<()> {
 
     // initialize prover configs
     info!("initialized ligerito prover configs");
-    info!("  tip proof: 2^24 (~1.3s, max 1024 blocks)");
-    info!("  gigaproof: 2^28 (~25s, multi-epoch)");
+    info!("  tip proof: 2^{} config", zync_core::TIP_TRACE_LOG_SIZE);
+    info!("  gigaproof: 2^{} config", zync_core::GIGAPROOF_TRACE_LOG_SIZE);
 
     // initialize epoch manager
     let storage_arc = Arc::new(storage);
@@ -123,13 +127,27 @@ async fn main() -> Result<()> {
         args.start_height,
     ));
 
+    // check existing proof status
+    let start_epoch = args.start_height / zync_core::EPOCH_SIZE;
+    if let Ok(Some(cached_epoch)) = storage_arc.get_gigaproof_epoch() {
+        let from_height = args.start_height;
+        let to_height = cached_epoch * zync_core::EPOCH_SIZE + zync_core::EPOCH_SIZE - 1;
+        let num_blocks = to_height - from_height + 1;
+        info!("existing gigaproof: epochs {} -> {} ({} blocks, height {} -> {})",
+              start_epoch, cached_epoch, num_blocks, from_height, to_height);
+    } else {
+        info!("no existing gigaproof found, will generate...");
+    }
+
     // generate initial gigaproof synchronously before starting background tasks
     // this ensures we have a proof ready before accepting gRPC requests
-    info!("checking for existing gigaproof...");
     match epoch_manager.generate_gigaproof().await {
-        Ok(_) => info!("gigaproof ready"),
-        Err(e) => warn!("initial gigaproof generation failed: {}", e),
+        Ok(_) => info!("gigaproof: ready"),
+        Err(e) => warn!("gigaproof: generation failed: {}", e),
     }
+
+    // start background tasks
+    info!("starting background tasks...");
 
     // start background gigaproof generator (regenerates hourly when epochs complete)
     let epoch_manager_bg = epoch_manager.clone();
@@ -142,6 +160,23 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         epoch_manager_state.run_background_state_tracker().await;
     });
+
+    // start background tip proof generator (real-time proving)
+    let epoch_manager_tip = epoch_manager.clone();
+    tokio::spawn(async move {
+        epoch_manager_tip.run_background_tip_prover().await;
+    });
+
+    // start background nullifier sync (indexes all shielded spends into nomt)
+    let epoch_manager_nf = epoch_manager.clone();
+    tokio::spawn(async move {
+        epoch_manager_nf.run_background_nullifier_sync().await;
+    });
+
+    info!("  gigaproof generator: running (60s check)");
+    info!("  state root tracker: running");
+    info!("  tip proof generator: running (1s real-time)");
+    info!("  nullifier sync: running (indexes shielded spends)");
 
     // initialize zanchor client (if configured)
     let zanchor_client = if args.zanchor_rpc.is_some() || args.relayer {

@@ -12,7 +12,9 @@
 //! - Ligerito-powered header chain verification
 //! - Epoch-based proof composition
 
-#![allow(dead_code)] // wip
+#![allow(dead_code)]
+#![allow(unused_imports)]
+#![allow(unused_variables)]
 
 pub mod state;
 pub mod error;
@@ -49,11 +51,11 @@ pub const MAX_ACTIONS_PER_BLOCK: usize = 512;
 /// fields encoded per action in trace polynomial
 pub const FIELDS_PER_ACTION: usize = 8;
 
-/// polynomial size exponent for tip proofs (2^24 config)
-pub const TIP_TRACE_LOG_SIZE: usize = 24;
+/// polynomial size exponent for tip proofs (2^20 config, max ~32K headers)
+pub const TIP_TRACE_LOG_SIZE: usize = 20;
 
-/// polynomial size exponent for gigaproofs (2^28 config)
-pub const GIGAPROOF_TRACE_LOG_SIZE: usize = 28;
+/// polynomial size exponent for gigaproofs (2^26 config)
+pub const GIGAPROOF_TRACE_LOG_SIZE: usize = 26;
 
 /// security parameter (bits)
 pub const SECURITY_BITS: usize = 100;
@@ -79,17 +81,17 @@ pub const GENESIS_EPOCH_HASH: [u8; 32] = [0u8; 32];
 /// empty sparse merkle tree root
 pub const EMPTY_SMT_ROOT: [u8; 32] = [0u8; 32]; // todo: compute actual empty root
 
-/// ligerito prover config for tip proofs (2^24, ~1.3s, max 1024 blocks)
+/// ligerito prover config for tip proofs (2^20, ~0.1s, max ~32K blocks)
 pub fn tip_prover_config() -> ProverConfig<BinaryElem32, BinaryElem128> {
-    ligerito::hardcoded_config_24(
+    ligerito::hardcoded_config_20(
         PhantomData::<BinaryElem32>,
         PhantomData::<BinaryElem128>,
     )
 }
 
-/// ligerito prover config for gigaproofs (2^28, ~25s, multi-epoch)
+/// ligerito prover config for gigaproofs (2^26, ~10s, multi-epoch)
 pub fn gigaproof_prover_config() -> ProverConfig<BinaryElem32, BinaryElem128> {
-    ligerito::hardcoded_config_28(
+    ligerito::hardcoded_config_26(
         PhantomData::<BinaryElem32>,
         PhantomData::<BinaryElem128>,
     )
@@ -100,7 +102,7 @@ pub fn gigaproof_prover_config() -> ProverConfig<BinaryElem32, BinaryElem128> {
 pub fn prover_config_for_size(trace_len: usize) -> (ProverConfig<BinaryElem32, BinaryElem128>, usize) {
     let log_size = if trace_len == 0 { 12 } else { (trace_len as f64).log2().ceil() as u32 };
 
-    // available configs: 12, 16, 20, 24, 28, 30
+    // available configs: 12, 16, 20, 24, 26, 28, 30
     let (config_log, config) = if log_size <= 12 {
         (12, ligerito::hardcoded_config_12(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>))
     } else if log_size <= 16 {
@@ -109,6 +111,8 @@ pub fn prover_config_for_size(trace_len: usize) -> (ProverConfig<BinaryElem32, B
         (20, ligerito::hardcoded_config_20(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>))
     } else if log_size <= 24 {
         (24, ligerito::hardcoded_config_24(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>))
+    } else if log_size <= 26 {
+        (26, ligerito::hardcoded_config_26(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>))
     } else if log_size <= 28 {
         (28, ligerito::hardcoded_config_28(PhantomData::<BinaryElem32>, PhantomData::<BinaryElem128>))
     } else {
@@ -128,6 +132,8 @@ pub fn verifier_config_for_log_size(log_size: u32) -> VerifierConfig {
         ligerito::hardcoded_config_20_verifier()
     } else if log_size <= 24 {
         ligerito::hardcoded_config_24_verifier()
+    } else if log_size <= 26 {
+        ligerito::hardcoded_config_26_verifier()
     } else if log_size <= 28 {
         ligerito::hardcoded_config_28_verifier()
     } else {

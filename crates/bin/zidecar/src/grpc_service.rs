@@ -143,23 +143,9 @@ impl Zidecar for ZidecarService {
         let tip_hash = hex::decode(&tip_info.bestblockhash)
             .map_err(|e| Status::internal(e.to_string()))?;
 
-        // fetch headers for verification (just epoch boundaries for now)
-        let last_epoch_height = self
-            .epoch_manager
-            .last_complete_epoch_height()
-            .await
-            .map_err(|e| Status::internal(e.to_string()))?;
-
-        let headers = match self
-            .fetch_headers(self.start_height, last_epoch_height)
-            .await
-        {
-            Ok(h) => h,
-            Err(e) => {
-                error!("failed to fetch headers: {}", e);
-                return Err(Status::internal(e.to_string()));
-            }
-        };
+        // Skip header fetching - proof contains verified data
+        // The public outputs contain the verified tip hash which is sufficient
+        let headers = Vec::new();
 
         // combine gigaproof + tip proof with size prefix
         // format: [gigaproof_size: u32][gigaproof_bytes][tip_bytes]
@@ -183,6 +169,9 @@ impl Zidecar for ZidecarService {
         let giga_proto = public_outputs_to_proto(&giga_outputs);
         let tip_proto = tip_outputs.as_ref().map(public_outputs_to_proto);
 
+        // Get current nullifier root from storage
+        let nullifier_root = self.storage.get_nullifier_root().to_vec();
+
         Ok(Response::new(HeaderProof {
             ligerito_proof: combined_proof,
             from_height: self.start_height,
@@ -192,6 +181,7 @@ impl Zidecar for ZidecarService {
             gigaproof_outputs: Some(giga_proto),
             tip_proof_outputs: tip_proto,
             continuity_verified,
+            nullifier_root,
         }))
     }
 

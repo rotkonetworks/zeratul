@@ -19,6 +19,16 @@ use tracing::{info, warn, error};
 /// We use 200 as a safe threshold (~200K blocks, ~1.3s proof)
 const GIGAPROOF_REGEN_THRESHOLD: u32 = 200;
 
+/// regenerate tip proof every N new blocks
+const TIP_PROOF_REGEN_BLOCKS: u32 = 1; // real-time: regenerate on every new block
+
+/// cached tip proof with its coverage
+struct CachedTipProof {
+    proof: Vec<u8>,
+    from_height: u32,
+    to_height: u32,
+}
+
 /// epoch proof manager
 pub struct EpochManager {
     zebrad: ZebradClient,
@@ -28,6 +38,8 @@ pub struct EpochManager {
     start_height: u32,
     /// last complete epoch that has a gigaproof (in-memory cache)
     last_gigaproof_epoch: Arc<RwLock<Option<u32>>>,
+    /// cached tip proof (pre-generated)
+    cached_tip_proof: Arc<RwLock<Option<CachedTipProof>>>,
 }
 
 impl EpochManager {
@@ -45,6 +57,7 @@ impl EpochManager {
             tip_config,
             start_height,
             last_gigaproof_epoch: Arc::new(RwLock::new(None)),
+            cached_tip_proof: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -140,8 +153,16 @@ impl EpochManager {
         // Store epoch boundary hashes for chain continuity verification
         self.store_epoch_boundaries(start_epoch, last_complete_epoch).await?;
 
-        // generate proof (auto-select config based on trace size)
-        let proof = HeaderChainProof::prove_auto(&mut trace)?;
+        // pad trace to config size (2^26)
+        let required_size = 1 << zync_core::GIGAPROOF_TRACE_LOG_SIZE;
+        if trace.trace.len() < required_size {
+            info!("padding gigaproof trace from {} to {} elements", trace.trace.len(), required_size);
+            use ligerito_binary_fields::BinaryFieldElement;
+            trace.trace.resize(required_size, ligerito_binary_fields::BinaryElem32::zero());
+        }
+
+        // generate proof with explicit gigaproof config (2^26)
+        let proof = HeaderChainProof::prove(&self.gigaproof_config, &trace)?;
 
         // serialize full proof with public outputs
         let full_proof = proof.serialize_full()?;
@@ -171,17 +192,105 @@ impl EpochManager {
         info!("starting background gigaproof generator");
 
         loop {
+            // check every 60 seconds for new complete epochs
+            tokio::time::sleep(tokio::time::Duration::from_secs(60)).await;
+
             match self.generate_gigaproof().await {
-                Ok(_) => {
-                    info!("gigaproof generation complete");
-                }
+                Ok(_) => {}
                 Err(e) => {
                     error!("gigaproof generation failed: {}", e);
                 }
             }
+        }
+    }
 
-            // check every hour
-            tokio::time::sleep(tokio::time::Duration::from_secs(3600)).await;
+    /// background task: keep tip proof up-to-date (real-time proving)
+    pub async fn run_background_tip_prover(self: Arc<Self>) {
+        info!("starting background tip proof generator");
+
+        let mut last_proven_height: u32 = 0;
+
+        loop {
+            // check every second for new blocks (real-time proving)
+            tokio::time::sleep(tokio::time::Duration::from_secs(1)).await;
+
+            let current_height = match self.get_current_height().await {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!("failed to get current height: {}", e);
+                    continue;
+                }
+            };
+
+            // check if we need to regenerate (N new blocks since last proof)
+            let blocks_since = current_height.saturating_sub(last_proven_height);
+            if blocks_since < TIP_PROOF_REGEN_BLOCKS {
+                continue; // not enough new blocks
+            }
+
+            // get gigaproof endpoint
+            let gigaproof_epoch = {
+                let cached = self.last_gigaproof_epoch.read().await;
+                match *cached {
+                    Some(e) => e,
+                    None => match self.storage.get_gigaproof_epoch() {
+                        Ok(Some(e)) => e,
+                        _ => continue, // no gigaproof yet
+                    }
+                }
+            };
+
+            let tip_from = self.epoch_range(gigaproof_epoch).1 + 1;
+            if tip_from > current_height {
+                // gigaproof is fresh, no tip needed
+                last_proven_height = current_height;
+                continue;
+            }
+
+            let blocks_in_tip = current_height - tip_from + 1;
+            info!(
+                "generating tip proof: {} -> {} ({} blocks, {} new since last)",
+                tip_from, current_height, blocks_in_tip, blocks_since
+            );
+
+            // build and generate tip proof
+            match HeaderChainTrace::build(&self.zebrad, &self.storage, tip_from, current_height).await {
+                Ok(mut tip_trace) => {
+                    // pad trace to tip config size (2^20)
+                    let required_size = 1 << zync_core::TIP_TRACE_LOG_SIZE;
+                    if tip_trace.trace.len() < required_size {
+                        use ligerito_binary_fields::BinaryFieldElement;
+                        tip_trace.trace.resize(required_size, ligerito_binary_fields::BinaryElem32::zero());
+                    }
+                    match HeaderChainProof::prove(&self.tip_config, &tip_trace) {
+                        Ok(tip_proof) => {
+                            match tip_proof.serialize_full() {
+                                Ok(tip_proof_bytes) => {
+                                    info!(
+                                        "tip proof ready: {} KB, covers {} -> {} (tip: {})",
+                                        tip_proof_bytes.len() / 1024,
+                                        tip_from,
+                                        current_height,
+                                        hex::encode(&tip_proof.public_outputs.tip_hash[..8])
+                                    );
+
+                                    // cache the tip proof
+                                    *self.cached_tip_proof.write().await = Some(CachedTipProof {
+                                        proof: tip_proof_bytes,
+                                        from_height: tip_from,
+                                        to_height: current_height,
+                                    });
+
+                                    last_proven_height = current_height;
+                                }
+                                Err(e) => error!("tip proof serialization failed: {}", e),
+                            }
+                        }
+                        Err(e) => error!("tip proof generation failed: {}", e),
+                    }
+                }
+                Err(e) => error!("tip trace build failed: {}", e),
+            }
         }
     }
 
@@ -223,7 +332,7 @@ impl EpochManager {
                 ZidecarError::ProofGeneration("gigaproof not found in cache".into())
             })?;
 
-        // generate tip proof (from last gigaproof to current tip)
+        // get tip proof (from last gigaproof to current tip)
         let tip_from = gigaproof_to + 1;
 
         if tip_from > current_height {
@@ -242,8 +351,26 @@ impl EpochManager {
             );
         }
 
+        // try to use cached tip proof first (from background prover)
+        {
+            let cached = self.cached_tip_proof.read().await;
+            if let Some(ref tip) = *cached {
+                // use cached if it starts from the right place and is reasonably fresh
+                // (within TIP_PROOF_REGEN_BLOCKS of current height)
+                if tip.from_height == tip_from &&
+                   current_height.saturating_sub(tip.to_height) < TIP_PROOF_REGEN_BLOCKS * 2 {
+                    info!(
+                        "using cached tip proof: {} -> {} ({} KB)",
+                        tip.from_height, tip.to_height, tip.proof.len() / 1024
+                    );
+                    return Ok((gigaproof, tip.proof.clone()));
+                }
+            }
+        }
+
+        // fallback: generate on-demand (should be rare with background prover)
         info!(
-            "generating tip proof: {} -> {} ({} blocks)",
+            "generating tip proof on-demand: {} -> {} ({} blocks)",
             tip_from,
             current_height,
             blocks_in_tip
@@ -252,8 +379,15 @@ impl EpochManager {
         // build tip trace (with caching)
         let mut tip_trace = HeaderChainTrace::build(&self.zebrad, &self.storage, tip_from, current_height).await?;
 
-        // generate tip proof (auto-select config)
-        let tip_proof = HeaderChainProof::prove_auto(&mut tip_trace)?;
+        // pad trace to tip config size (2^20)
+        let required_size = 1 << zync_core::TIP_TRACE_LOG_SIZE;
+        if tip_trace.trace.len() < required_size {
+            use ligerito_binary_fields::BinaryFieldElement;
+            tip_trace.trace.resize(required_size, ligerito_binary_fields::BinaryElem32::zero());
+        }
+
+        // generate tip proof with explicit config (2^20)
+        let tip_proof = HeaderChainProof::prove(&self.tip_config, &tip_trace)?;
         let tip_proof_bytes = tip_proof.serialize_full()?;
 
         info!(
@@ -261,6 +395,13 @@ impl EpochManager {
             tip_proof_bytes.len() / 1024,
             hex::encode(&tip_proof.public_outputs.tip_hash[..8])
         );
+
+        // cache this proof for future requests
+        *self.cached_tip_proof.write().await = Some(CachedTipProof {
+            proof: tip_proof_bytes.clone(),
+            from_height: tip_from,
+            to_height: current_height,
+        });
 
         Ok((gigaproof, tip_proof_bytes))
     }
@@ -374,7 +515,12 @@ impl EpochManager {
         }
 
         // Verify chain continuity between epochs
+        // Skip start_epoch + 1 since we don't have start_epoch - 1 boundary data
+        let start_epoch = self.epoch_for_height(self.start_height);
         for epoch in (from_epoch + 1)..=to_epoch {
+            if epoch <= start_epoch + 1 {
+                continue; // can't verify - no prior epoch boundary data
+            }
             if !self.storage.verify_epoch_continuity(epoch)? {
                 warn!("epoch {} continuity check failed!", epoch);
             }
@@ -412,9 +558,8 @@ impl EpochManager {
                     // parse orchard tree root from state
                     let tree_root = parse_tree_root(&state.orchard.commitments.final_state);
 
-                    // for nullifier root, we use NOMT which tracks separately
-                    // for now use a placeholder derived from tree root
-                    let nullifier_root = derive_nullifier_root(&tree_root);
+                    // get nullifier root from nomt (populated by nullifier sync)
+                    let nullifier_root = self.storage.get_nullifier_root();
 
                     // store roots
                     self.storage.store_state_roots(epoch_end, &tree_root, &nullifier_root)?;
@@ -465,13 +610,138 @@ fn parse_tree_root(final_state: &str) -> [u8; 32] {
     hasher.finalize().into()
 }
 
-/// derive nullifier root from tree root (placeholder)
-/// in production, would track actual nullifiers seen
-fn derive_nullifier_root(tree_root: &[u8; 32]) -> [u8; 32] {
-    use sha2::{Digest, Sha256};
+/// Nullifier extracted from a shielded spend
+#[derive(Debug, Clone)]
+pub struct ExtractedNullifier {
+    pub nullifier: [u8; 32],
+    pub pool: NullifierPool,
+}
 
-    let mut hasher = Sha256::new();
-    hasher.update(b"ZIDECAR_NULLIFIER_ROOT");
-    hasher.update(tree_root);
-    hasher.finalize().into()
+/// Which shielded pool the nullifier came from
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NullifierPool {
+    Sapling,
+    Orchard,
+}
+
+impl EpochManager {
+    /// Extract all nullifiers from a block
+    pub async fn extract_nullifiers_from_block(&self, height: u32) -> Result<Vec<ExtractedNullifier>> {
+        let hash = self.zebrad.get_block_hash(height).await?;
+        let block = self.zebrad.get_block_with_txs(&hash).await?;
+
+        let mut nullifiers = Vec::new();
+
+        for tx in &block.tx {
+            // Sapling spends
+            if let Some(ref spends) = tx.sapling_spends {
+                for spend in spends {
+                    if let Some(nf) = spend.nullifier_bytes() {
+                        nullifiers.push(ExtractedNullifier {
+                            nullifier: nf,
+                            pool: NullifierPool::Sapling,
+                        });
+                    }
+                }
+            }
+
+            // Orchard actions (each action has a nullifier)
+            if let Some(ref orchard) = tx.orchard {
+                for action in &orchard.actions {
+                    if let Some(nf) = action.nullifier_bytes() {
+                        nullifiers.push(ExtractedNullifier {
+                            nullifier: nf,
+                            pool: NullifierPool::Orchard,
+                        });
+                    }
+                }
+            }
+        }
+
+        Ok(nullifiers)
+    }
+
+    /// Sync nullifiers from a range of blocks into nomt
+    pub async fn sync_nullifiers(&self, from_height: u32, to_height: u32) -> Result<u32> {
+        let mut total_nullifiers = 0u32;
+
+        for height in from_height..=to_height {
+            let nullifiers = self.extract_nullifiers_from_block(height).await?;
+
+            if !nullifiers.is_empty() {
+                // Batch insert into nomt
+                let nf_bytes: Vec<[u8; 32]> = nullifiers.iter().map(|n| n.nullifier).collect();
+                self.storage.batch_insert_nullifiers(&nf_bytes, height)?;
+                total_nullifiers += nullifiers.len() as u32;
+            }
+
+            // Update sync progress
+            self.storage.set_nullifier_sync_height(height)?;
+
+            // Log progress every 1000 blocks
+            if height % 1000 == 0 {
+                info!(
+                    "nullifier sync progress: height {}/{} ({} nullifiers so far)",
+                    height, to_height, total_nullifiers
+                );
+            }
+        }
+
+        Ok(total_nullifiers)
+    }
+
+    /// Background task: sync nullifiers incrementally
+    pub async fn run_background_nullifier_sync(self: Arc<Self>) {
+        info!("starting background nullifier sync");
+
+        // Get current sync progress
+        let mut last_synced = self.storage.get_nullifier_sync_height()
+            .unwrap_or(None)
+            .unwrap_or(self.start_height.saturating_sub(1));
+
+        info!("nullifier sync starting from height {}", last_synced + 1);
+
+        loop {
+            // Get current chain height
+            let current_height = match self.get_current_height().await {
+                Ok(h) => h,
+                Err(e) => {
+                    warn!("failed to get current height for nullifier sync: {}", e);
+                    tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                    continue;
+                }
+            };
+
+            // Sync in batches of 100 blocks
+            if last_synced < current_height {
+                let batch_end = (last_synced + 100).min(current_height);
+
+                match self.sync_nullifiers(last_synced + 1, batch_end).await {
+                    Ok(count) => {
+                        if count > 0 {
+                            info!(
+                                "synced {} nullifiers for blocks {} -> {} (root: {})",
+                                count, last_synced + 1, batch_end,
+                                hex::encode(&self.storage.get_nullifier_root()[..8])
+                            );
+                        }
+                        last_synced = batch_end;
+                    }
+                    Err(e) => {
+                        error!("nullifier sync failed at height {}: {}", last_synced + 1, e);
+                        tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
+                        continue;
+                    }
+                }
+            }
+
+            // Check every 5 seconds for new blocks
+            tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        }
+    }
+
+    /// Get current nullifier root from nomt
+    pub fn get_nullifier_root(&self) -> [u8; 32] {
+        self.storage.get_nullifier_root()
+    }
 }

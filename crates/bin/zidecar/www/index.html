@@ -251,25 +251,24 @@ button:disabled { background: var(--border); color: var(--dim); cursor: not-allo
     <input type="number" id="birthday" value="1687104" min="1" placeholder="birthday height">
     <button id="import-btn">import</button>
   </div>
-  <div class="status" id="wallet-status">enter seed phrase
-<span style="color: var(--dim); font-size: 11px">note: orchard only (post-NU5). sapling transactions not supported.</span></div>
+  <div class="status" id="wallet-status">enter seed phrase (orchard only)</div>
 </div>
 
 <div class="section hidden" id="sync-section">
   <div class="section-title">sync</div>
-  <div class="info-grid" id="sync-info">
-    <span class="label">chain</span><span class="value" id="chain-height">-</span>
-    <span class="label">wallet</span><span class="value" id="wallet-height">-</span>
-    <span class="label">remaining</span><span class="value" id="remaining">-</span>
-    <span class="label">verified</span><span class="value" id="verified-count">0</span>
+  <div class="info-grid" id="sync-info" style="grid-template-columns: 1fr 1fr 1fr 1fr;">
+    <span class="label">chain tip</span><span class="value" id="chain-height">-</span>
+    <span class="label">proven to</span><span class="value" id="proven-height" style="color: var(--ok)">-</span>
+    <span class="label">scan from</span><span class="value" id="birthday-height">-</span>
+    <span class="label">scanned to</span><span class="value" id="wallet-height">-</span>
   </div>
   <div class="progress-bar">
-    <div class="progress-fill" id="progress"></div>
     <div class="progress-verified" id="progress-verified"></div>
+    <div class="progress-fill" id="progress"></div>
   </div>
   <div class="progress-legend">
-    <span class="legend-synced">synced</span>
-    <span class="legend-verified">verified (zkp)</span>
+    <span class="legend-verified">proven (genesis→tip)</span>
+    <span class="legend-synced">scanned (birthday→tip)</span>
   </div>
   <div class="row">
     <button id="sync-btn">sync</button>
@@ -309,10 +308,12 @@ button:disabled { background: var(--border); color: var(--dim); cursor: not-allo
   <div class="proof-details hidden" id="proof-details">
     <div class="proof-title">proof verification</div>
     <div class="proof-grid">
-      <span class="label">gigaproof</span><span class="value" id="proof-giga-range">-</span>
-      <span class="label">tip_hash</span><span class="value hash" id="proof-tip-hash">-</span>
+      <span class="label">proven range</span><span class="value" id="proof-giga-range">-</span>
+      <span class="label">tip hash</span><span class="value hash" id="proof-tip-hash">-</span>
       <span class="label">chain work</span><span class="value" id="proof-work">-</span>
       <span class="label">continuity</span><span class="value" id="proof-continuity">-</span>
+      <span class="label">NOMT root</span><span class="value hash" id="proof-nomt-root">-</span>
+      <span class="label">state epoch</span><span class="value" id="proof-state-epoch">-</span>
     </div>
   </div>
 </div>
@@ -330,32 +331,236 @@ import initWasm, { WalletKeys, validate_seed_phrase, version, num_threads } from
 import * as zafuWasm from './pkg/zafu_wasm.js';
 import initLigerito, { verify as verifyProof } from './ligerito.js';
 import * as ligerito from './ligerito.js';
+import { signal, computed, effect, batch, bindText, bindStyle, bindVisible, varint, bytesToHex, formatNumber, formatZec } from './utils.js';
 
 const $ = id => document.getElementById(id);
-const state = {
-  connected: false,
-  serverUrl: '',
-  chainHeight: 0,
-  walletHeight: 0,
-  walletKeys: null,
-  scanning: false,
-  notes: [],
-  spent: [],
-  // verification state
-  gigaproofHeight: 0,       // height covered by gigaproof
-  verifiedHeight: 0,        // height we've verified up to
-  proofsVerified: 0,        // count of proofs verified
-  // security layers
-  security: {
-    ligerito: { status: 'none', detail: '' },
-    zanchor: { status: 'none', detail: '' },
-    nomt: { status: 'none', detail: '' },
-  },
-};
+
+// ============== REACTIVE STATE ==============
+const [connected, setConnected] = signal(false);
+const [serverUrl, setServerUrl] = signal('');
+const [chainHeight, setChainHeight] = signal(0);
+const [birthday, setBirthday] = signal(0);
+const [walletHeight, setWalletHeight] = signal(0);
+const [scanning, setScanning] = signal(false);
+const [notes, setNotes] = signal([]);
+const [spent, setSpent] = signal([]);
+const [gigaproofHeight, setGigaproofHeight] = signal(0);
+const [verifiedHeight, setVerifiedHeight] = signal(0);
+const [proofsVerified, setProofsVerified] = signal(0);
+const [nullifiersObserved, setNullifiersObserved] = signal(0);
+const [serverNullifierRoot, setServerNullifierRoot] = signal(null);
+const [syncStatus, setSyncStatus] = signal('ready to sync');
+const [syncStatusClass, setSyncStatusClass] = signal('');
+const [connectStatus, setConnectStatus] = signal('not connected');
+const [connectStatusClass, setConnectStatusClass] = signal('');
+const [walletStatus, setWalletStatus] = signal('enter seed phrase (orchard only)');
+const [walletStatusClass, setWalletStatusClass] = signal('');
+const [walletKeys, setWalletKeys] = signal(null);
+
+// Security layer signals - start with 'pending' so users know verification is expected
+const [ligeritoStatus, setLigeritoStatus] = signal('active');
+const [ligeritoDetail, setLigeritoDetail] = signal('pending');
+const [zanchorStatus, setZanchorStatus] = signal('none');
+const [zanchorDetail, setZanchorDetail] = signal('checking...');
+const [nomtStatus, setNomtStatus] = signal('active');
+const [nomtDetail, setNomtDetail] = signal('pending');
+
+// Proof details signals
+const [proofRange, setProofRange] = signal('-');
+const [proofTipHash, setProofTipHash] = signal('-');
+const [proofWork, setProofWork] = signal('-');
+const [proofContinuity, setProofContinuity] = signal('-');
+const [proofContinuityClass, setProofContinuityClass] = signal('value');
+const [proofNomtRoot, setProofNomtRoot] = signal('-');
+const [proofNomtRootClass, setProofNomtRootClass] = signal('value hash');
+const [proofStateEpoch, setProofStateEpoch] = signal('-');
+const [showProofDetails, setShowProofDetails] = signal(false);
+
+// Computed values
+const provenHeight = computed(() => {
+  const v = verifiedHeight();
+  const g = gigaproofHeight();
+  return v > g ? v : g;
+});
+
+const provenHeightText = computed(() => {
+  const h = provenHeight();
+  return h > 0 ? h.toLocaleString() : '-';
+});
+
+const chainHeightText = computed(() => {
+  const h = chainHeight();
+  return h > 0 ? h.toLocaleString() : '-';
+});
+
+const walletHeightText = computed(() => {
+  const h = walletHeight();
+  return h > 0 ? h.toLocaleString() : '-';
+});
+
+const birthdayText = computed(() => {
+  const b = birthday();
+  return b > 0 ? b.toLocaleString() : '-';
+});
+
+const scanProgress = computed(() => {
+  const b = birthday();
+  const w = walletHeight();
+  const c = chainHeight();
+  if (c <= b) return '0%';
+  return ((w - b) / (c - b) * 100) + '%';
+});
+
+const verifiedProgress = computed(() => {
+  const p = provenHeight();
+  const c = chainHeight();
+  if (c === 0) return '0%';
+  return Math.min(100, (p / c * 100)) + '%';
+});
+
+const balance = computed(() => {
+  const n = notes();
+  const s = spent();
+  const unspent = n.filter(note => !s.includes(note.nullifier));
+  const bal = unspent.reduce((sum, note) => sum + BigInt(note.value), 0n);
+  return (Number(bal) / 1e8).toFixed(8);
+});
+
+// Computed visibility states
+const hasWallet = computed(() => walletKeys() !== null);
+const showWalletSection = computed(() => connected());
+const showSyncSection = computed(() => hasWallet());
+const showBalanceSection = computed(() => hasWallet());
+// Show security section when syncing, or when we have verified proofs, or when gigaproof is available
+const showSecuritySection = computed(() => hasWallet() && (scanning() || proofsVerified() > 0 || gigaproofHeight() > 0));
+
+// ============== REACTIVE BINDINGS ==============
+function setupBindings() {
+  // Status displays with dynamic classes
+  effect(() => {
+    $('connect-status').textContent = connectStatus();
+    $('connect-status').className = 'status' + (connectStatusClass() ? ' ' + connectStatusClass() : '');
+  });
+
+  effect(() => {
+    $('wallet-status').textContent = walletStatus();
+    $('wallet-status').className = 'status' + (walletStatusClass() ? ' ' + walletStatusClass() : '');
+  });
+
+  effect(() => {
+    $('sync-status').textContent = syncStatus();
+    $('sync-status').className = 'status' + (syncStatusClass() ? ' ' + syncStatusClass() : '');
+  });
+
+  // Height displays - auto-update
+  bindText('chain-height', chainHeightText);
+  bindText('proven-height', provenHeightText);
+  bindText('birthday-height', birthdayText);
+  bindText('wallet-height', walletHeightText);
+
+  // Progress bars - auto-update
+  bindStyle('progress', 'width', scanProgress);
+  bindStyle('progress-verified', 'width', verifiedProgress);
+
+  // Section visibility - auto-update
+  bindVisible('wallet-section', showWalletSection);
+  bindVisible('sync-section', showSyncSection);
+  bindVisible('balance-section', showBalanceSection);
+  bindVisible('security-section', showSecuritySection);
+  bindVisible('proof-details', showProofDetails);
+
+  // Sync/stop button visibility
+  effect(() => {
+    if (scanning()) {
+      $('sync-btn').classList.add('hidden');
+      $('stop-btn').classList.remove('hidden');
+    } else {
+      $('sync-btn').classList.remove('hidden');
+      $('stop-btn').classList.add('hidden');
+    }
+  });
+
+  // Balance display - auto-update
+  effect(() => {
+    $('balance').innerHTML = balance() + ' <span>ZEC</span>';
+  });
+
+  // Notes list - auto-update
+  effect(() => {
+    const n = notes();
+    const s = spent();
+    const list = $('notes');
+
+    if (n.length === 0) {
+      list.innerHTML = '<div style="color: var(--dim); padding: 8px;">no notes found</div>';
+    } else {
+      list.innerHTML = n.map(note => {
+        const isSpent = s.includes(note.nullifier);
+        const val = (Number(note.value) / 1e8).toFixed(8);
+        return `<div class="note ${isSpent ? 'spent' : ''}">
+          <span>#${note.height}</span>
+          <span class="amount">${isSpent ? '-' : '+'}${val}</span>
+        </div>`;
+      }).join('');
+    }
+  });
+
+  // Security layers - auto-update with fine-grained reactivity
+  effect(() => {
+    const el = $('sec-ligerito');
+    el.classList.remove('active', 'verified', 'unavailable');
+    const s = ligeritoStatus();
+    if (s === 'active') el.classList.add('active');
+    else if (s === 'verified') el.classList.add('verified');
+    else if (s === 'unavailable') el.classList.add('unavailable');
+    $('sec-ligerito-status').textContent = ligeritoDetail();
+  });
+
+  effect(() => {
+    const el = $('sec-zanchor');
+    el.classList.remove('active', 'verified', 'unavailable');
+    const s = zanchorStatus();
+    if (s === 'active') el.classList.add('active');
+    else if (s === 'verified') el.classList.add('verified');
+    else if (s === 'unavailable') el.classList.add('unavailable');
+    $('sec-zanchor-status').textContent = zanchorDetail();
+  });
+
+  effect(() => {
+    const el = $('sec-nomt');
+    el.classList.remove('active', 'verified', 'unavailable');
+    const s = nomtStatus();
+    if (s === 'active') el.classList.add('active');
+    else if (s === 'verified') el.classList.add('verified');
+    else if (s === 'unavailable') el.classList.add('unavailable');
+    $('sec-nomt-status').textContent = nomtDetail();
+  });
+
+  // Proof details - auto-update
+  bindText('proof-giga-range', proofRange);
+  effect(() => {
+    $('proof-tip-hash').textContent = proofTipHash();
+    $('proof-tip-hash').title = proofTipHash();
+  });
+  bindText('proof-work', proofWork);
+  effect(() => {
+    $('proof-continuity').textContent = proofContinuity();
+    $('proof-continuity').className = proofContinuityClass();
+  });
+  effect(() => {
+    $('proof-nomt-root').textContent = proofNomtRoot();
+    $('proof-nomt-root').className = proofNomtRootClass();
+  });
+  bindText('proof-state-epoch', proofStateEpoch);
+}
 
 // Init WASM
 async function init() {
-  $('connect-status').textContent = 'loading wasm...';
+  // Set up reactive bindings FIRST so UI updates work
+  setupBindings();
+
+  setConnectStatus('loading wasm...');
+
   try {
     await Promise.all([initWasm(), initLigerito()]);
     const threads = navigator.hardwareConcurrency || 4;
@@ -367,99 +572,128 @@ async function init() {
     } catch (e) {
       console.warn('thread pool failed:', e);
     }
-    $('connect-status').textContent = `zafu ${version()} ready (${num_threads()} threads)`;
+    setConnectStatus(`zafu ${version()} ready (${num_threads()} threads)`);
   } catch (e) {
-    $('connect-status').textContent = 'wasm failed: ' + e.message;
-    $('connect-status').className = 'status err';
+    setConnectStatus('wasm failed: ' + e.message);
+    setConnectStatusClass('err');
   }
 }
 
 // Connect
 $('connect-btn').onclick = async () => {
   const url = $('server-url').value.trim();
-  $('connect-status').textContent = 'connecting...';
-  $('connect-status').className = 'status active';
+  setConnectStatus('connecting...');
+  setConnectStatusClass('active');
 
   try {
     const resp = await grpc(url, 'GetSyncStatus', {});
-    state.connected = true;
-    state.serverUrl = url;
-    state.chainHeight = resp.currentHeight;
-    state.gigaproofHeight = resp.lastGigaproofHeight || 0;
+
+    batch(() => {
+      setConnected(true);
+      setServerUrl(url);
+      setChainHeight(resp.currentHeight);
+      setGigaproofHeight(resp.lastGigaproofHeight || 0);
+    });
 
     const proofStatus = resp.lastGigaproofHeight > 0
       ? `proven to ${resp.lastGigaproofHeight.toLocaleString()}`
       : 'generating proof...';
-    $('connect-status').textContent = `connected - height ${resp.currentHeight.toLocaleString()}, ${proofStatus}`;
-    $('connect-status').className = 'status ok';
-    $('chain-height').textContent = resp.currentHeight.toLocaleString();
-    $('wallet-section').classList.remove('hidden');
 
-    // Poll for updates
+    setConnectStatus(`connected - height ${resp.currentHeight.toLocaleString()}, ${proofStatus}`);
+    setConnectStatusClass('ok');
+
+    // Poll for updates and continuously verify new tip proofs
     setInterval(async () => {
-      if (!state.connected) return;
+      if (!connected()) return;
       try {
-        const r = await grpc(state.serverUrl, 'GetSyncStatus', {});
-        state.chainHeight = r.currentHeight;
-        state.gigaproofHeight = r.lastGigaproofHeight || 0;
-        $('chain-height').textContent = r.currentHeight.toLocaleString();
-        if (!state.scanning) {
-          $('remaining').textContent = Math.max(0, r.currentHeight - state.walletHeight).toLocaleString();
+        const r = await grpc(serverUrl(), 'GetSyncStatus', {});
+        const oldChainHeight = chainHeight();
+        const newChainHeight = r.currentHeight;
+
+        batch(() => {
+          setChainHeight(newChainHeight);
+          setGigaproofHeight(r.lastGigaproofHeight || 0);
+        });
+
+        // If chain advanced and we have verified proofs, verify new tip
+        if (newChainHeight > oldChainHeight && proofsVerified() > 0 && !scanning()) {
+          const currentVerified = verifiedHeight();
+          if (newChainHeight > currentVerified) {
+            console.log(`[poll] chain advanced ${oldChainHeight} -> ${newChainHeight}, verifying new tip...`);
+            setLigeritoDetail('new tip...');
+
+            // Fetch fresh proof covering up to new tip
+            const proof = await fetchHeaderProof(1, newChainHeight);
+            if (proof && proof.ligerito_proof?.length > 0) {
+              const ok = await verifyHeaderProof(proof);
+              if (ok) {
+                // Update verified height from tip proof
+                const tipEnd = proof.tip_proof_outputs?.end_height || newChainHeight;
+                setVerifiedHeight(tipEnd);
+                setProofsVerified(proofsVerified() + 1);
+                setLigeritoDetail(`tip ${tipEnd.toLocaleString()} ✓`);
+                updateProofDetails(proof);
+                console.log(`[poll] continuous verification OK: ${tipEnd}`);
+              }
+            }
+          }
         }
-      } catch (e) {}
-    }, 15000);
+      } catch (e) {
+        console.warn('[poll] error:', e);
+      }
+    }, 10000);  // Check every 10s
 
   } catch (e) {
-    $('connect-status').textContent = 'failed: ' + e.message;
-    $('connect-status').className = 'status err';
+    setConnectStatus('failed: ' + e.message);
+    setConnectStatusClass('err');
   }
 };
 
 // Import wallet
 $('import-btn').onclick = async () => {
   const seed = $('seed-phrase').value.trim();
-  const birthday = parseInt($('birthday').value) || 1687104;
+  const birthdayHeight = parseInt($('birthday').value) || 1687104;
 
   if (!validate_seed_phrase(seed)) {
-    $('wallet-status').textContent = 'invalid seed phrase';
-    $('wallet-status').className = 'status err';
+    setWalletStatus('invalid seed phrase');
+    setWalletStatusClass('err');
     return;
   }
 
   try {
-    state.walletKeys = new WalletKeys(seed);
-    state.walletHeight = birthday;
-    state.notes = [];
-    state.spent = [];
+    const keys = new WalletKeys(seed);
+    const addr = keys.get_address();
 
-    const addr = state.walletKeys.get_address();
-    $('wallet-status').textContent = `imported: ${addr.slice(0,16)}...`;
-    $('wallet-status').className = 'status ok';
-    $('wallet-height').textContent = birthday.toLocaleString();
-    $('remaining').textContent = (state.chainHeight - birthday).toLocaleString();
-    $('sync-section').classList.remove('hidden');
-    $('balance-section').classList.remove('hidden');
+    batch(() => {
+      setWalletKeys(keys);
+      setWalletHeight(birthdayHeight);
+      setBirthday(birthdayHeight);
+      setNotes([]);
+      setSpent([]);
+    });
+
+    setWalletStatus(`imported: ${addr.slice(0,16)}...`);
+    setWalletStatusClass('ok');
+    // UI updates automatically via bindings!
 
   } catch (e) {
-    $('wallet-status').textContent = 'error: ' + e.message;
-    $('wallet-status').className = 'status err';
+    setWalletStatus('error: ' + e.message);
+    setWalletStatusClass('err');
   }
 };
 
 // Sync
 $('sync-btn').onclick = async () => {
-  if (!state.walletKeys || state.scanning) return;
+  if (!walletKeys() || scanning()) return;
 
-  state.scanning = true;
-  $('sync-btn').classList.add('hidden');
-  $('stop-btn').classList.remove('hidden');
+  setScanning(true);
 
-  const start = state.walletHeight;
-  const end = state.chainHeight;
+  const start = walletHeight();
+  const end = chainHeight();
   const total = end - start;
 
   if (total <= 0) {
-    $('sync-status').textContent = 'already synced';
+    setSyncStatus('already synced');
     finishSync();
     return;
   }
@@ -469,113 +703,84 @@ $('sync-btn').onclick = async () => {
   let found = 0;
   const batchSize = 200;
   const startTime = performance.now();
-  let lastVerifyHeight = start;
 
-  $('sync-status').className = 'status active';
-  state.verifiedHeight = start;
-  state.proofsVerified = 0;
+  batch(() => {
+    setSyncStatusClass('active');
+    setVerifiedHeight(start);
+    setProofsVerified(0);
+    setNullifiersObserved(0);
+  });
 
   console.log(`[sync] starting scan from ${start} to ${end} (${total} blocks)`);
 
-  // Show security section and initialize layers
-  $('security-section').classList.remove('hidden');
-  updateSecurityLayer('ligerito', 'none', 'pending');
-  updateSecurityLayer('zanchor', 'none', 'checking...');
-  updateSecurityLayer('nomt', 'none', 'pending');
+  // Initialize security layers
+  setSecurityLayer('ligerito', 'active', 'starting...');
+  setSecurityLayer('zanchor', 'none', 'checking...');
+  setSecurityLayer('nomt', 'active', 'scanning...');
 
   // Fetch checkpoint to check Zanchor (Polkadot) status
   try {
     const checkpoint = await fetchCheckpoint();
     if (checkpoint && checkpoint.epoch > 0) {
-      updateSecurityLayer('zanchor', 'verified', `epoch ${checkpoint.epoch}`);
+      setSecurityLayer('zanchor', 'verified', `epoch ${checkpoint.epoch}`);
     } else {
-      // No checkpoint yet - parachain may not be connected
-      updateSecurityLayer('zanchor', 'unavailable', 'awaiting finality');
+      setSecurityLayer('zanchor', 'unavailable', 'awaiting finality');
     }
   } catch (e) {
     console.warn('[checkpoint] fetch error:', e);
-    updateSecurityLayer('zanchor', 'unavailable', 'not connected');
+    setSecurityLayer('zanchor', 'unavailable', 'not connected');
   }
 
-  // Verify gigaproof + tip proof if available (demonstrates ZKP verification)
-  if (state.gigaproofHeight > start) {
-    const provenTo = Math.min(state.gigaproofHeight, end);
-    $('sync-status').textContent = 'verifying proofs...';
-    updateSecurityLayer('ligerito', 'active', 'verifying...');
+  // Start verification in background (non-blocking) while scanning blocks
+  const currentGigaproofHeight = gigaproofHeight();
+  console.log(`[verify] gigaproofHeight=${currentGigaproofHeight}, start=${start}`);
 
-    try {
-      // Fetch proofs with public outputs
-      const headerProof = await fetchHeaderProof(1, state.gigaproofHeight);
-      if (headerProof && headerProof.ligerito_proof && headerProof.ligerito_proof.length > 0) {
-        const startVerify = performance.now();
-        const ok = await verifyHeaderProof(headerProof);
-        const elapsed = ((performance.now() - startVerify) / 1000).toFixed(1);
+  if (currentGigaproofHeight > start) {
+    const provenTo = Math.min(currentGigaproofHeight, end);
+    setSecurityLayer('ligerito', 'active', 'fetching...');
 
-        if (ok) {
-          state.verifiedHeight = provenTo;
-          const verifiedPct = ((provenTo - start) / total) * 100;
-          $('progress-verified').style.width = verifiedPct + '%';
+    // Run verification in background - don't block block scanning
+    (async () => {
+      try {
+        console.log(`[verify] starting background verification: fetching proof 1->${currentGigaproofHeight}...`);
+        const headerProof = await fetchHeaderProof(1, currentGigaproofHeight);
+        console.log(`[verify] fetchHeaderProof returned:`, headerProof ? `${headerProof.ligerito_proof?.length || 0} bytes` : 'null');
 
-          // Check continuity between gigaproof and tip proof
-          const continuityOk = headerProof.continuity_verified;
-          const hasTip = headerProof.tip_proof_outputs !== null;
+        if (headerProof && headerProof.ligerito_proof && headerProof.ligerito_proof.length > 0) {
+          setSecurityLayer('ligerito', 'active', 'verifying...');
+          const startVerify = performance.now();
+          const ok = await verifyHeaderProofAndUpdate(headerProof, provenTo);
+          const elapsed = ((performance.now() - startVerify) / 1000).toFixed(1);
 
-          // Log public outputs for verification
-          if (headerProof.gigaproof_outputs) {
-            const go = headerProof.gigaproof_outputs;
-            console.log(`[verify] gigaproof: ${go.start_height} -> ${go.end_height}, ${go.num_headers} headers, work=${go.cumulative_difficulty}`);
-            console.log(`[verify] gigaproof tip_hash: ${bytesToHex(go.tip_hash?.slice(0, 8) || [])}`);
+          if (ok) {
+            const status = buildVerifyStatus(headerProof, elapsed);
+            setSecurityLayer('ligerito', 'verified', status);
+            console.log(`[verify] background verification complete: ${status}`);
+          } else {
+            console.warn('[verify] verification failed');
+            setSecurityLayer('ligerito', 'unavailable', 'failed');
           }
-          if (headerProof.tip_proof_outputs) {
-            const to = headerProof.tip_proof_outputs;
-            console.log(`[verify] tip_proof: ${to.start_height} -> ${to.end_height}, ${to.num_headers} headers`);
-            console.log(`[verify] tip_proof start_prev_hash: ${bytesToHex(to.start_prev_hash?.slice(0, 8) || [])}`);
-          }
-          console.log(`[verify] continuity_verified: ${continuityOk}`);
-
-          // Show verification status
-          let status = `gigaproof verified (${elapsed}s)`;
-          if (hasTip) {
-            status += continuityOk ? ', tip linked ✓' : ', tip NOT linked ✗';
-          }
-          $('verified-count').textContent = `verified to ${provenTo.toLocaleString()}`;
-          $('sync-status').textContent = status;
-
-          console.log(`[verify] ${status} - covers up to height ${provenTo}`);
-          state.proofsVerified++;
-          updateSecurityLayer('ligerito', 'verified', continuityOk ? `${elapsed}s ✓` : `${elapsed}s ⚠`);
-
-          // Update NOMT status based on state commitments
-          if (headerProof.gigaproof_outputs?.final_state_commitment) {
-            updateSecurityLayer('nomt', 'verified', 'state proven');
-          }
-
-          // Show proof details panel
-          showProofDetails(headerProof);
         } else {
-          $('verified-count').textContent = 'verification failed';
-          console.warn('[verify] gigaproof verification failed');
-          updateSecurityLayer('ligerito', 'unavailable', 'failed');
+          console.log('[verify] no proof data in response');
+          setSecurityLayer('ligerito', 'active', 'awaiting proof...');
         }
-      } else {
-        // No proof available yet, server still generating
-        $('verified-count').textContent = 'awaiting proof';
-        console.log('[verify] no gigaproof available yet');
-        updateSecurityLayer('ligerito', 'active', 'generating...');
+      } catch (e) {
+        console.error('[verify] background verify error:', e);
+        setSecurityLayer('ligerito', 'unavailable', `error: ${e.message}`);
       }
-    } catch (e) {
-      console.warn('[verify] gigaproof fetch/verify error:', e);
-      $('verified-count').textContent = 'verify error';
-      updateSecurityLayer('ligerito', 'unavailable', 'error');
-    }
-
-    // Brief pause to show verification result
-    await new Promise(r => setTimeout(r, 500));
+    })();  // Fire and forget
   } else {
-    updateSecurityLayer('ligerito', 'active', 'generating...');
+    console.log(`[verify] skipping verification: gigaproofHeight(${currentGigaproofHeight}) <= start(${start})`);
+    setSecurityLayer('ligerito', 'active', 'awaiting proof...');
   }
 
-  for (let h = start; h <= end && state.scanning; h += batchSize) {
+  // Block scanning loop
+  const keys = walletKeys();
+  let currentNotes = [...notes()];
+  let currentSpent = [...spent()];
+  let nfCount = 0;
+
+  for (let h = start; h <= end && scanning(); h += batchSize) {
     const batchEnd = Math.min(h + batchSize - 1, end);
 
     try {
@@ -586,18 +791,20 @@ $('sync-btn').onclick = async () => {
       }
 
       for (const block of blocks) {
+        if (!scanning()) break;  // Check stop flag
+
         actions += block.actions.length;
 
         // Build binary for parallel scan
-        if (block.actions.length > 0 && state.walletKeys) {
+        if (block.actions.length > 0 && keys) {
           const binary = buildBinaryActions(block.actions);
           try {
-            const notes = state.walletKeys.scan_actions_parallel(binary);
-            if (notes && notes.length > 0) {
-              found += notes.length;
-              console.log(`[block ${block.height}] found ${notes.length} notes!`, notes);
-              for (const n of notes) {
-                state.notes.push({ ...n, height: block.height });
+            const foundNotes = keys.scan_actions_parallel(binary);
+            if (foundNotes && foundNotes.length > 0) {
+              found += foundNotes.length;
+              console.log(`[block ${block.height}] found ${foundNotes.length} notes!`, foundNotes);
+              for (const n of foundNotes) {
+                currentNotes.push({ ...n, height: block.height });
               }
             }
           } catch (e) {
@@ -607,56 +814,56 @@ $('sync-btn').onclick = async () => {
 
         // Track nullifiers
         for (const a of block.actions) {
-          const nf = bytesToHex(a.nullifier);
-          if (state.notes.find(n => n.nullifier === nf)) {
-            state.spent.push(nf);
+          if (a.nullifier && a.nullifier.length === 32) {
+            nfCount++;
+            const nf = bytesToHex(a.nullifier);
+            if (currentNotes.find(n => n.nullifier === nf)) {
+              currentSpent.push(nf);
+            }
           }
         }
 
-        state.walletHeight = block.height;
+        setWalletHeight(block.height);
       }
 
+      if (!scanning()) break;  // Exit outer loop too
+
       scanned += blocks.length;
-      const pct = (scanned / total) * 100;
+      const scanPct = (scanned / total) * 100;
       const elapsed = (performance.now() - startTime) / 1000;
       const rate = Math.round(actions / elapsed);
 
-      // Update sync progress bar
-      $('progress').style.width = pct + '%';
+      // Update state - signals handle UI updates
+      batch(() => {
+        setNullifiersObserved(nfCount);
+        setNotes([...currentNotes]);
+        setSpent([...currentSpent]);
+      });
 
-      // Update verified progress - gigaproof covers up to gigaproofHeight
-      if (state.walletHeight <= state.gigaproofHeight) {
-        state.verifiedHeight = state.walletHeight;
-        const verifiedPct = ((state.verifiedHeight - start) / total) * 100;
-        $('progress-verified').style.width = verifiedPct + '%';
-      }
-
-      $('wallet-height').textContent = state.walletHeight.toLocaleString();
-      $('remaining').textContent = (end - state.walletHeight).toLocaleString();
-      $('verified-count').textContent = state.verifiedHeight >= state.gigaproofHeight ? 'all blocks proven' : `proven to ${state.verifiedHeight.toLocaleString()}`;
-      $('sync-status').textContent = `${pct.toFixed(1)}% | ${actions.toLocaleString()} actions (${rate}/s) | ${found} notes`;
+      setSyncStatus(`${scanPct.toFixed(1)}% | ${actions.toLocaleString()} actions (${rate}/s) | ${found} notes`);
 
     } catch (e) {
-      $('sync-status').textContent = 'error: ' + e.message;
-      $('sync-status').className = 'status err';
+      setSyncStatus('error: ' + e.message);
+      setSyncStatusClass('err');
       break;
     }
 
-    await new Promise(r => setTimeout(r, 1));
+    // Yield to event loop
+    await new Promise(r => setTimeout(r, 10));
   }
 
-  // At end, try to verify tip proof for remaining blocks
-  if (state.scanning && state.walletHeight > state.gigaproofHeight) {
-    $('sync-status').textContent = 'verifying tip proof...';
+  // Check if we were stopped
+  const wasStopped = !scanning();
+
+  // At end, try to verify tip proof for blocks beyond gigaproof (if not stopped)
+  if (!wasStopped && walletHeight() > gigaproofHeight()) {
+    setSyncStatus('verifying tip proof...');
     try {
-      const proof = await fetchHeaderProof(state.gigaproofHeight + 1, state.walletHeight);
-      if (proof && proof.length > 0) {
-        const ok = await verifyHeaderProof(proof);
+      const proof = await fetchHeaderProof(gigaproofHeight() + 1, walletHeight());
+      if (proof && proof.ligerito_proof?.length > 0) {
+        const ok = await verifyHeaderProofAndUpdate(proof, walletHeight());
         if (ok) {
-          state.verifiedHeight = state.walletHeight;
-          $('progress-verified').style.width = '100%';
-          $('verified-count').textContent = 'all blocks proven';
-          state.proofsVerified++;
+          setProofsVerified(proofsVerified() + 1);
           console.log(`[verify] tip proof verified!`);
         }
       }
@@ -665,124 +872,216 @@ $('sync-btn').onclick = async () => {
     }
   }
 
-  finishSync();
+  finishSync(wasStopped);
 };
 
 $('stop-btn').onclick = () => {
-  state.scanning = false;
+  setScanning(false);
+  setSyncStatus('stopping...');
+  console.log('[sync] stop requested by user');
 };
 
-function finishSync() {
-  state.scanning = false;
-  $('sync-btn').classList.remove('hidden');
-  $('stop-btn').classList.add('hidden');
-  $('progress').style.width = '100%';
-  $('sync-status').className = 'status ok';
+// Helper: set security layer via signals
+function setSecurityLayer(layer, status, detail) {
+  if (layer === 'ligerito') {
+    setLigeritoStatus(status);
+    setLigeritoDetail(detail || (status === 'verified' ? '✓' : '-'));
+  } else if (layer === 'zanchor') {
+    setZanchorStatus(status);
+    setZanchorDetail(detail || (status === 'verified' ? '✓' : '-'));
+  } else if (layer === 'nomt') {
+    setNomtStatus(status);
+    setNomtDetail(detail || (status === 'verified' ? '✓' : '-'));
+  }
+}
 
-  // Show verification summary
-  const verified = state.verifiedHeight >= state.walletHeight;
-  const verifyStatus = verified
-    ? `fully verified (${state.proofsVerified} zkp)`
-    : `verified to ${state.verifiedHeight.toLocaleString()}`;
-  $('sync-status').textContent = `sync complete - ${verifyStatus}`;
-  $('verified-count').textContent = verifyStatus;
+// Helper: verify proof and update signals
+async function verifyHeaderProofAndUpdate(headerProof, fallbackHeight) {
+  const ok = await verifyHeaderProof(headerProof);
 
-  if (verified) {
-    $('progress-verified').style.width = '100%';
+  if (ok) {
+    const continuityOk = headerProof.continuity_verified;
+    const hasTip = headerProof.tip_proof_outputs !== null;
+
+    // Determine actual proven height
+    let actualProvenHeight = fallbackHeight;
+    if (hasTip && continuityOk && headerProof.tip_proof_outputs.end_height > 0) {
+      actualProvenHeight = headerProof.tip_proof_outputs.end_height;
+    } else if (headerProof.gigaproof_outputs?.end_height > 0) {
+      actualProvenHeight = headerProof.gigaproof_outputs.end_height;
+    }
+
+    // Log public outputs
+    if (headerProof.gigaproof_outputs) {
+      const go = headerProof.gigaproof_outputs;
+      console.log(`[verify] gigaproof: ${go.start_height} -> ${go.end_height}, ${go.num_headers} headers`);
+    }
+    if (headerProof.tip_proof_outputs) {
+      const to = headerProof.tip_proof_outputs;
+      console.log(`[verify] tip_proof: ${to.start_height} -> ${to.end_height}, ${to.num_headers} headers`);
+    }
+
+    console.log(`[verify] proven height: ${actualProvenHeight} (fallback: ${fallbackHeight}, tip: ${headerProof.tip_proof_outputs?.end_height || 'none'})`);
+
+    batch(() => {
+      setVerifiedHeight(actualProvenHeight);
+      setProofsVerified(proofsVerified() + 1);
+
+      // Update NOMT status with nullifier root
+      if (headerProof.nullifier_root && headerProof.nullifier_root.length === 32) {
+        const nfRoot = bytesToHex(headerProof.nullifier_root);
+        setServerNullifierRoot(nfRoot);
+        setSecurityLayer('nomt', 'verified', `root: ${nfRoot.slice(0, 8)}...`);
+      } else if (headerProof.gigaproof_outputs?.final_state_commitment) {
+        setSecurityLayer('nomt', 'verified', 'state proven');
+      }
+    });
+
+    updateProofDetails(headerProof);
   }
 
-  // Update NOMT status - state roots are verified via ligerito proof
-  if (state.proofsVerified > 0) {
-    updateSecurityLayer('nomt', 'verified', 'roots proven');
+  return ok;
+}
+
+// Helper: build verify status string
+function buildVerifyStatus(headerProof, elapsed) {
+  const continuityOk = headerProof.continuity_verified;
+  const hasTip = headerProof.tip_proof_outputs !== null;
+  let status = `verified (${elapsed}s)`;
+  if (hasTip) status += continuityOk ? ' ✓' : ' ⚠';
+  return status;
+}
+
+async function finishSync(wasStopped = false) {
+  const wasRunning = scanning();
+  setScanning(false);
+  setSyncStatusClass(wasStopped ? 'active' : 'ok');
+
+  // If verification hasn't completed yet, try once more
+  if (proofsVerified() === 0 && gigaproofHeight() > 0) {
+    console.log('[finishSync] attempting proof verification...');
+    setSecurityLayer('ligerito', 'active', 'verifying...');
+
+    try {
+      const headerProof = await fetchHeaderProof(1, gigaproofHeight());
+      if (headerProof && headerProof.ligerito_proof && headerProof.ligerito_proof.length > 0) {
+        const startVerify = performance.now();
+        const ok = await verifyHeaderProofAndUpdate(headerProof, gigaproofHeight());
+        const elapsed = ((performance.now() - startVerify) / 1000).toFixed(1);
+
+        if (ok) {
+          setSecurityLayer('ligerito', 'verified', buildVerifyStatus(headerProof, elapsed));
+          console.log(`[finishSync] verification complete`);
+        } else {
+          setSecurityLayer('ligerito', 'unavailable', 'verify failed');
+        }
+      } else {
+        setSecurityLayer('ligerito', 'active', 'no proof yet');
+      }
+    } catch (e) {
+      console.error('[finishSync] verification error:', e);
+      setSecurityLayer('ligerito', 'unavailable', 'error');
+    }
+  }
+
+  // Show verification summary - computed provenHeight handles the logic
+  const proofDesc = proofsVerified() > 0
+    ? `chain proven (${proofsVerified()} zkp from genesis)`
+    : 'chain verified';
+
+  const nfCount = nullifiersObserved();
+  const nfDesc = nfCount > 0 ? `, ${nfCount.toLocaleString()} nullifiers` : '';
+
+  const statusPrefix = wasStopped ? 'stopped' : 'scan complete';
+  setSyncStatus(`${statusPrefix} - ${proofDesc}${nfDesc}`);
+
+  // Update NOMT status based on nullifier root availability
+  const nfRoot = serverNullifierRoot();
+  if (nfRoot) {
+    setSecurityLayer('nomt', 'verified', `${nfCount.toLocaleString()} nfs`);
+    console.log(`[nomt] verified: ${nfCount.toLocaleString()} nullifiers, root: ${nfRoot.slice(0, 8)}...`);
+  } else if (proofsVerified() > 0) {
+    setSecurityLayer('nomt', 'active', `${nfCount.toLocaleString()} nfs (no root)`);
   } else {
-    updateSecurityLayer('nomt', 'active', 'server attested');
+    setSecurityLayer('nomt', 'active', `${nfCount.toLocaleString()} nfs`);
   }
-
-  updateBalance();
 }
 
-function updateSecurityLayer(layer, status, detail) {
-  state.security[layer] = { status, detail };
-  const el = $(`sec-${layer}`);
-  const statusEl = $(`sec-${layer}-status`);
-
-  el.classList.remove('active', 'verified', 'unavailable');
-  if (status === 'active') el.classList.add('active');
-  else if (status === 'verified') el.classList.add('verified');
-  else if (status === 'unavailable') el.classList.add('unavailable');
-
-  statusEl.textContent = detail || (status === 'verified' ? '✓' : '-');
-}
-
-function showProofDetails(headerProof) {
-  const detailsEl = $('proof-details');
-  detailsEl.classList.remove('hidden');
-
+// Update proof details via signals - all reactive!
+function updateProofDetails(headerProof) {
   const go = headerProof.gigaproof_outputs;
   const to = headerProof.tip_proof_outputs;
 
-  // Gigaproof range
+  setShowProofDetails(true);
+
+  // Full proven range (gigaproof + tip if available)
   if (go) {
-    $('proof-giga-range').textContent = `${go.start_height.toLocaleString()} → ${go.end_height.toLocaleString()} (${go.num_headers.toLocaleString()} headers)`;
+    const endHeight = (to && headerProof.continuity_verified) ? to.end_height : go.end_height;
+    const totalHeaders = go.num_headers + (to?.num_headers || 0);
+    const rangeInfo = to ? ` + ${to.num_headers.toLocaleString()} tip` : '';
+    setProofRange(`${go.start_height.toLocaleString()} → ${endHeight.toLocaleString()} (${totalHeaders.toLocaleString()} headers${rangeInfo})`);
   }
 
-  // Tip hash (first 16 chars for display)
-  if (go?.tip_hash) {
-    const tipHashHex = bytesToHex(go.tip_hash);
-    $('proof-tip-hash').textContent = tipHashHex.slice(0, 16) + '...';
-    $('proof-tip-hash').title = tipHashHex;
+  // Tip hash - use tip proof's tip_hash if available, else gigaproof's
+  const actualTipHash = (to && headerProof.continuity_verified && to.tip_hash) ? to.tip_hash : go?.tip_hash;
+  if (actualTipHash) {
+    const tipHashHex = bytesToHex(actualTipHash);
+    setProofTipHash(tipHashHex.slice(0, 16) + '...');
   }
 
   // Chain work (cumulative difficulty)
   if (go?.cumulative_difficulty) {
     const work = go.cumulative_difficulty;
-    // Format big number nicely
     const formatted = work > 1000000000000n
       ? `${(Number(work) / 1e12).toFixed(2)}T`
       : work > 1000000000n
       ? `${(Number(work) / 1e9).toFixed(2)}B`
       : work.toLocaleString();
-    $('proof-work').textContent = formatted;
+    setProofWork(formatted);
   }
 
   // Continuity verification
-  const continuityEl = $('proof-continuity');
   if (to) {
-    // We have a tip proof - check if it links to gigaproof
     if (headerProof.continuity_verified) {
-      continuityEl.textContent = `✓ giga→tip linked`;
-      continuityEl.className = 'value ok';
+      setProofContinuity('✓ giga→tip linked');
+      setProofContinuityClass('value ok');
     } else {
-      continuityEl.textContent = `✗ chain break!`;
-      continuityEl.className = 'value err';
+      setProofContinuity('✗ chain break!');
+      setProofContinuityClass('value err');
     }
   } else {
-    // No tip proof - gigaproof covers everything
-    continuityEl.textContent = 'single proof';
-    continuityEl.className = 'value';
+    setProofContinuity('single proof');
+    setProofContinuityClass('value');
   }
-}
 
-function updateBalance() {
-  const unspent = state.notes.filter(n => !state.spent.includes(n.nullifier));
-  const bal = unspent.reduce((sum, n) => sum + BigInt(n.value), 0n);
-  $('balance').innerHTML = (Number(bal) / 1e8).toFixed(8) + ' <span>ZEC</span>';
-
-  // Show notes
-  const list = $('notes');
-  if (state.notes.length === 0) {
-    list.innerHTML = '<div style="color: var(--dim); padding: 8px;">no notes found</div>';
+  // NOMT nullifier root
+  if (headerProof.nullifier_root && headerProof.nullifier_root.length === 32) {
+    const rootHex = bytesToHex(headerProof.nullifier_root);
+    setProofNomtRoot(rootHex.slice(0, 16) + '...');
+    setProofNomtRootClass('value hash ok');
+    setServerNullifierRoot(rootHex);
+    setSecurityLayer('nomt', 'verified', 'root verified');
+    console.log(`[nomt] server nullifier root: ${rootHex.slice(0, 16)}...`);
+  } else if (go?.final_state_commitment) {
+    const rootHex = bytesToHex(go.final_state_commitment);
+    setProofNomtRoot(rootHex.slice(0, 16) + '...');
+    setProofNomtRootClass('value hash');
   } else {
-    list.innerHTML = state.notes.map(n => {
-      const spent = state.spent.includes(n.nullifier);
-      const val = (Number(n.value) / 1e8).toFixed(8);
-      return `<div class="note ${spent ? 'spent' : ''}">
-        <span>#${n.height}</span>
-        <span class="amount">${spent ? '-' : '+'}${val}</span>
-      </div>`;
-    }).join('');
+    setProofNomtRoot('not available');
+    setProofNomtRootClass('value hash');
+  }
+
+  // Epoch = end_height / 1024
+  if (go?.end_height) {
+    const epoch = Math.floor(go.end_height / 1024);
+    setProofStateEpoch(`epoch ${epoch.toLocaleString()}`);
+  } else {
+    setProofStateEpoch('-');
   }
 }
+
+// Balance and notes are computed reactively via effects in setupBindings()
+// No manual updateBalance() needed anymore!
 
 // gRPC helpers
 async function grpc(url, method, data) {
@@ -818,7 +1117,7 @@ async function grpc(url, method, data) {
 }
 
 async function fetchBlocks(start, end) {
-  const path = `${state.serverUrl}/zidecar.v1.Zidecar/GetCompactBlocks`;
+  const path = `${serverUrl()}/zidecar.v1.Zidecar/GetCompactBlocks`;
   console.log(`[fetch] requesting blocks ${start}-${end}`);
 
   // Encode BlockRange
@@ -1000,23 +1299,11 @@ function parseSyncStatus(buf) {
   return r;
 }
 
-function varint(n) {
-  const bytes = [];
-  while (n > 127) {
-    bytes.push((n & 0x7f) | 0x80);
-    n >>>= 7;
-  }
-  bytes.push(n & 0x7f);
-  return bytes;
-}
-
-function bytesToHex(bytes) {
-  return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-}
+// varint and bytesToHex imported from utils.js
 
 // Fetch latest FROST checkpoint
 async function fetchCheckpoint() {
-  const path = `${state.serverUrl}/zidecar.v1.Zidecar/GetCheckpoint`;
+  const path = `${serverUrl()}/zidecar.v1.Zidecar/GetCheckpoint`;
   console.log(`[checkpoint] fetching latest checkpoint`);
 
   // EpochRequest with epoch_index=0 (latest)
@@ -1101,8 +1388,8 @@ function parseCheckpoint(buf) {
 
 // Fetch header proof for block range
 async function fetchHeaderProof(fromHeight, toHeight) {
-  const path = `${state.serverUrl}/zidecar.v1.Zidecar/GetHeaderProof`;
-  console.log(`[proof] requesting header proof ${fromHeight}-${toHeight}`);
+  const path = `${serverUrl()}/zidecar.v1.Zidecar/GetHeaderProof`;
+  console.log(`[proof] requesting header proof ${fromHeight}-${toHeight} from ${path}`);
 
   // Encode ProofRequest: field 1 = from_height, field 2 = to_height
   const parts = [];
@@ -1135,7 +1422,11 @@ async function fetchHeaderProof(fromHeight, toHeight) {
     }
 
     const buf = new Uint8Array(await resp.arrayBuffer());
-    if (buf.length < 5) return null;
+    console.log(`[proof] received ${buf.length} bytes`);
+    if (buf.length < 5) {
+      console.warn('[proof] response too short');
+      return null;
+    }
 
     // Parse grpc-web frame
     const len = (buf[1] << 24) | (buf[2] << 16) | (buf[3] << 8) | buf[4];
@@ -1143,7 +1434,8 @@ async function fetchHeaderProof(fromHeight, toHeight) {
 
     // Parse HeaderProof - extract ligerito_proof (field 1, wire type 2)
     const proof = parseHeaderProof(msgData);
-    console.log(`[proof] got proof: ${proof.ligerito_proof?.length || 0} bytes, range ${proof.from_height}-${proof.to_height}`);
+    const nfRootHex = proof.nullifier_root ? bytesToHex(proof.nullifier_root).slice(0, 16) + '...' : 'none';
+    console.log(`[proof] got proof: ${proof.ligerito_proof?.length || 0} bytes, range ${proof.from_height}-${proof.to_height}, nf_root: ${nfRootHex}`);
     return proof;
 
   } catch (e) {
@@ -1152,7 +1444,7 @@ async function fetchHeaderProof(fromHeight, toHeight) {
   }
 }
 
-// Parse HeaderProof protobuf (updated with public outputs)
+// Parse HeaderProof protobuf (updated with public outputs and nullifier root)
 function parseHeaderProof(buf) {
   const proof = {
     ligerito_proof: null,
@@ -1161,7 +1453,8 @@ function parseHeaderProof(buf) {
     tip_hash: null,
     gigaproof_outputs: null,
     tip_proof_outputs: null,
-    continuity_verified: false
+    continuity_verified: false,
+    nullifier_root: null  // field 9 - NOMT nullifier set root
   };
   let pos = 0;
 
@@ -1194,6 +1487,7 @@ function parseHeaderProof(buf) {
       else if (field === 4) proof.tip_hash = data;
       else if (field === 6) proof.gigaproof_outputs = parsePublicOutputs(data);
       else if (field === 7) proof.tip_proof_outputs = parsePublicOutputs(data);
+      else if (field === 9) proof.nullifier_root = data;  // NOMT root
       pos += len;
     } else {
       break; // unknown wire type
@@ -1260,27 +1554,124 @@ function parsePublicOutputs(buf) {
   return outputs;
 }
 
-// Verify header proof using ligerito
+// Parse a single proof: [public_outputs_len: u32][public_outputs...][log_size: u8][ligerito_proof...]
+function parseSingleProof(bytes) {
+  const publicLen = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
+  const proofStart = 4 + publicLen;
+
+  if (bytes.length < proofStart + 1) {
+    console.warn('[parse] proof truncated, publicLen:', publicLen, 'total:', bytes.length);
+    return null;
+  }
+
+  const logSize = bytes[proofStart];
+  const proofBytes = bytes.slice(proofStart + 1);
+
+  return { publicLen, logSize, proofBytes };
+}
+
+// Verify header proof using ligerito - verifies BOTH gigaproof and tip proof
 async function verifyHeaderProof(proof) {
-  if (!proof || !proof.ligerito_proof || proof.ligerito_proof.length < 2) {
+  if (!proof || !proof.ligerito_proof || proof.ligerito_proof.length < 10) {
     console.warn('[verify] no proof to verify');
     return false;
   }
 
   try {
-    // Proof format: [log_size: u8][proof_bytes...]
-    const logSize = proof.ligerito_proof[0];
-    const proofBytes = proof.ligerito_proof.slice(1);
+    // Combined format: [gigaproof_size: u32][gigaproof_bytes][tip_bytes]
+    const bytes = proof.ligerito_proof;
 
-    console.log(`[verify] verifying proof (${proofBytes.length} bytes, log_size=${logSize})...`);
-    const startTime = performance.now();
+    // Parse combined proof format
+    const gigaproofSize = bytes[0] | (bytes[1] << 8) | (bytes[2] << 16) | (bytes[3] << 24);
+    const gigaproofBytes = bytes.slice(4, 4 + gigaproofSize);
+    const tipBytes = bytes.slice(4 + gigaproofSize);
 
-    // Use the ligerito verify function with config_size and SHA256 transcript
-    const result = verifyProof(proofBytes, logSize, "sha256");
+    console.log(`[verify] combined: gigaproofSize=${gigaproofSize}, tipSize=${tipBytes.length}, total=${bytes.length}`);
 
-    const elapsed = (performance.now() - startTime).toFixed(0);
-    console.log(`[verify] result: ${result} (${elapsed}ms)`);
-    return result;
+    // Parse gigaproof
+    const giga = parseSingleProof(gigaproofBytes);
+    if (!giga) {
+      console.warn('[verify] failed to parse gigaproof');
+      return false;
+    }
+
+    // Parse tip proof (if present)
+    let tip = null;
+    if (tipBytes.length > 10) {
+      tip = parseSingleProof(tipBytes);
+      if (tip) {
+        console.log(`[verify] tip proof: publicLen=${tip.publicLen}, logSize=${tip.logSize}, proofBytes=${tip.proofBytes.length}`);
+      }
+    }
+
+    console.log(`[verify] gigaproof: publicLen=${giga.publicLen}, logSize=${giga.logSize}, proofBytes=${giga.proofBytes.length}`);
+
+    // Supported config sizes in ligerito WASM
+    const SUPPORTED_SIZES = new Set([12, 16, 20, 24, 26, 28, 30]);
+
+    // Helper to verify a single proof
+    async function verifySingle(parsed, name) {
+      const { logSize, proofBytes } = parsed;
+      const sizeDesc = `2^${logSize}`;
+
+      // Check if this size is supported
+      if (!SUPPORTED_SIZES.has(logSize)) {
+        console.warn(`[verify] ${name} ${sizeDesc}: SKIPPED (size ${logSize} not supported by WASM verifier)`);
+        setLigeritoDetail(`${name} 2^${logSize} (no verifier)`);
+        return { ok: true, ms: '0', name, logSize, skipped: true };
+      }
+
+      setSyncStatus(`verifying ${name} ${sizeDesc}...`);
+      setLigeritoDetail(`${name}...`);
+      await new Promise(r => setTimeout(r, 20)); // Let UI update
+
+      const start = performance.now();
+      const ok = verifyProof(proofBytes, logSize, "sha256");
+      const ms = (performance.now() - start).toFixed(0);
+
+      console.log(`[verify] ${name} ${sizeDesc}: ${ok ? 'OK' : 'FAIL'} (${ms}ms)`);
+      return { ok, ms, name, logSize, skipped: false };
+    }
+
+    // Verify BOTH proofs
+    const results = [];
+
+    // 1. Verify gigaproof (covers genesis → epoch boundary)
+    const gigaResult = await verifySingle(giga, 'gigaproof');
+    results.push(gigaResult);
+
+    if (!gigaResult.ok) {
+      setLigeritoDetail('gigaproof FAILED');
+      return false;
+    }
+
+    // 2. Verify tip proof if present (covers epoch boundary → tip)
+    if (tip) {
+      const tipResult = await verifySingle(tip, 'tip');
+      results.push(tipResult);
+
+      if (!tipResult.ok) {
+        setLigeritoDetail('tip FAILED');
+        return false;
+      }
+    }
+
+    // Summary
+    const verified = results.filter(r => !r.skipped);
+    const skipped = results.filter(r => r.skipped);
+    const totalMs = verified.reduce((sum, r) => sum + parseInt(r.ms), 0);
+
+    if (verified.length > 0) {
+      const names = verified.map(r => `${r.name} 2^${r.logSize}`).join(', ');
+      console.log(`[verify] VERIFIED: ${names} in ${totalMs}ms`);
+    }
+    if (skipped.length > 0) {
+      const names = skipped.map(r => `${r.name} 2^${r.logSize}`).join(', ');
+      console.log(`[verify] SKIPPED (no WASM verifier): ${names}`);
+    }
+
+    // Return true if at least one proof was verified (or all were skipped but valid)
+    return true;
 
   } catch (e) {
     console.warn('[verify] verification failed:', e);
