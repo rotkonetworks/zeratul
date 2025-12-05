@@ -1,0 +1,61 @@
+[package]
+name = "zeratul-mvp"
+version = "0.1.0"
+edition = "2021"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Zeratul MVP - JAM-lite blockchain with 1s finality and realtime proving"
+
+[[bin]]
+name = "zeratul-mvp"
+path = "src/main.rs"
+
+[features]
+default = ["std"]
+std = ["ligerito/std", "ligerito-binary-fields/std"]
+# Enable PolkaVM proof verification
+polkavm = ["polkavm-pcvm"]
+# Enable P2P networking for multi-node testnet
+networking = ["zeratul-p2p", "litep2p", "futures"]
+# Full testnet feature set
+testnet = ["polkavm", "networking"]
+
+[dependencies]
+# Core proving
+ligerito = { path = "../ligerito", default-features = false, features = ["prover", "parallel"] }
+ligerito-binary-fields = { path = "../ligerito-binary-fields", default-features = false }
+
+# PolkaVM proof verification
+polkavm-pcvm = { path = "../polkavm-pcvm", optional = true }
+
+# P2P networking
+zeratul-p2p = { path = "../zeratul-p2p", optional = true }
+litep2p = { version = "0.8", optional = true }
+futures = { version = "0.3", optional = true }
+
+# Hashing and crypto
+sha2 = { workspace = true }
+blake2 = "0.10"
+
+# Serialization
+serde = { workspace = true, features = ["derive"] }
+serde_bytes = "0.11"
+serde-big-array = "0.5"
+bincode = "1.3"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Time
+chrono = "0.4"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI
+clap = { version = "4", features = ["derive"] }
+
+[dev-dependencies]
+criterion = "0.5"
