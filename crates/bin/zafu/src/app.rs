@@ -8,6 +8,9 @@ use tokio::sync::{mpsc, RwLock};
 /// embedded banana split backup tool (shamir secret sharing)
 const BANANA_SPLIT_HTML: &[u8] = include_bytes!("../bs.html");
 
+/// demo wallet seed phrase for testing/hackathon demos
+const DEMO_SEED_PHRASE: &str = "master bid journey tank since conduct fire picture medal toward dish trend army true cushion ramp yellow high once jealous van occur swamp liberty";
+
 use std::path::PathBuf;
 
 use crate::{
@@ -565,7 +568,14 @@ impl Zafu {
                     .show(ui, |ui| {
                         ui.set_width(ui.available_width());
 
-                        ui.label(RichText::new("seed phrase (12 or 24 words)").size(12.0).color(Color32::from_gray(140)));
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("seed phrase (12 or 24 words)").size(12.0).color(Color32::from_gray(140)));
+                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                if ui.small_button(format!("{} use demo wallet", icons::FLASK)).clicked() {
+                                    self.recovery.seed_phrase = DEMO_SEED_PHRASE.to_string();
+                                }
+                            });
+                        });
                         ui.add_space(6.0);
                         ui.add(TextEdit::multiline(&mut self.recovery.seed_phrase)
                             .desired_width(ui.available_width())

@@ -1,6 +1,6 @@
 [package]
 name = "zync-core"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 license = "MIT"
 description = "Core types and logic for ZYNC - ligerito-powered Zcash light client synchronization"
@@ -29,10 +29,10 @@ wasm-parallel = [
 ]
 
 [dependencies]
-# local workspace ligerito (has transcript-blake2b feature)
-ligerito = { path = "../ligerito", features = ["transcript-blake2b"] }
-ligerito-binary-fields = { path = "../ligerito-binary-fields" }
-ligerito-merkle = { path = "../ligerito-merkle" }
+# ligerito polynomial commitment scheme
+ligerito = { version = "0.3", features = ["transcript-blake2b"] }
+ligerito-binary-fields = "0.3"
+ligerito-merkle = "0.3"
 
 blake2 = "0.10"
 sha2 = "0.10"

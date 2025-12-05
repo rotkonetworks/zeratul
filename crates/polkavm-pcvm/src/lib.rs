@@ -41,6 +41,12 @@ pub mod memory;
 pub mod memory_merkle;
 pub mod integration;
 pub mod host_calls;
+pub mod sumcheck;
+pub mod trace_opening;
+pub mod evaluation_proof;
+
+#[cfg(feature = "polkavm-integration")]
+pub mod sound_prover;
 
 #[cfg(feature = "polkavm-integration")]
 pub mod polkavm_adapter;
