@@ -7,10 +7,12 @@
 mod elem;
 mod poly;
 pub mod simd;
+pub mod fast_inverse;
 
 pub use elem::{BinaryElem16, BinaryElem32, BinaryElem64, BinaryElem128};
 pub use poly::{BinaryPoly16, BinaryPoly32, BinaryPoly64, BinaryPoly128, BinaryPoly256};
 pub use simd::{batch_mul_gf128, batch_add_gf128};
+pub use fast_inverse::{invert_gf128, batch_invert_gf128, batch_invert_gf128_in_place};
 
 // Re-export traits with conditional Send + Sync
 #[cfg(feature = "std")]

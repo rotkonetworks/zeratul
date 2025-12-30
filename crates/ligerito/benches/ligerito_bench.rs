@@ -12,6 +12,7 @@ use ligerito::{
     prove_sha256, verify_sha256,
     hardcoded_config_20, hardcoded_config_20_verifier,
     hardcoded_config_24, hardcoded_config_24_verifier,
+    hardcoded_config_26, hardcoded_config_26_verifier,
 };
 use rand::Rng;
 use std::marker::PhantomData;
@@ -113,9 +114,34 @@ fn bench_verify_24(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_verify_26(c: &mut Criterion) {
+    let mut group = c.benchmark_group("verify");
+    group.sample_size(10);
+
+    let config = hardcoded_config_26(
+        PhantomData::<BinaryElem32>,
+        PhantomData::<BinaryElem128>,
+    );
+    let poly = generate_random_poly(1 << 26);
+    let proof = prove_sha256(&config, &poly).unwrap();
+    let verifier_config = hardcoded_config_26_verifier();
+
+    println!("2^26 proof size: {} bytes ({:.2} KiB)",
+             proof.size_of(), proof.size_of() as f64 / 1024.0);
+
+    group.bench_function(BenchmarkId::new("sha256", "2^26"), |b| {
+        b.iter(|| {
+            let result = verify_sha256(black_box(&verifier_config), black_box(&proof)).unwrap();
+            black_box(result)
+        });
+    });
+
+    group.finish();
+}
+
 criterion_group!(
     name = benches;
     config = Criterion::default().without_plots();
-    targets = bench_prove_20, bench_prove_24, bench_verify_20, bench_verify_24
+    targets = bench_prove_20, bench_prove_24, bench_verify_20, bench_verify_24, bench_verify_26
 );
 criterion_main!(benches);

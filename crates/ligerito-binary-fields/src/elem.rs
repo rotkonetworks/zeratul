@@ -203,25 +203,10 @@ impl BinaryFieldElement for BinaryElem128 {
     fn inv(&self) -> Self {
         assert_ne!(self.0.value(), 0, "Cannot invert zero");
 
-        // For GF(2^128), use Fermat's little theorem
-        // a^(2^128 - 2) = a^(-1)
-        // 2^128 - 2 = 111...110 in binary (127 ones followed by a zero)
-
-        // We can compute this efficiently using the fact that:
-        // 2^128 - 2 = 2 + 4 + 8 + ... + 2^127
-        // So a^(2^128 - 2) = a^2 * a^4 * a^8 * ... * a^(2^127)
-
-        // Start with a^2
-        let mut square = self.mul(self);
-        let mut result = square; // a^2
-
-        // Compute a^4, a^8, ..., a^(2^127) and multiply them all together
-        for _ in 1..127 {
-            square = square.mul(&square); // Square to get next power of 2
-            result = result.mul(&square); // Multiply into result
-        }
-
-        result
+        // Use Itoh-Tsujii fast inversion with precomputed nibble tables
+        // Reduces from ~127 multiplications to ~9
+        let result = crate::fast_inverse::invert_gf128(self.0.value());
+        Self(BinaryPoly128::new(result))
     }
 
     fn pow(&self, mut exp: u64) -> Self {
@@ -241,6 +226,29 @@ impl BinaryFieldElement for BinaryElem128 {
         }
 
         result
+    }
+}
+
+impl BinaryElem128 {
+    /// Multiply by x (field element 2) - very fast special case
+    ///
+    /// In GF(2^128) with irreducible x^128 + x^7 + x^2 + x + 1,
+    /// multiplying by x is just a left shift with conditional reduction.
+    /// This is ~10x faster than general multiplication.
+    #[inline]
+    pub fn mul_by_x(&self) -> Self {
+        let val = self.0.value();
+
+        // Shift left by 1 (multiply by x in polynomial ring)
+        let shifted = val << 1;
+
+        // If bit 128 would be set (overflow), reduce by the irreducible polynomial
+        // x^128 = x^7 + x^2 + x + 1 (mod irreducible)
+        // So we add 0x87 if the high bit was set
+        let overflow = (val >> 127) & 1;
+        let reduced = shifted ^ (overflow * 0x87);
+
+        Self(BinaryPoly128::new(reduced))
     }
 }
 

@@ -1,0 +1,35 @@
+[package]
+name = "ligerito-escrow"
+version = "0.1.0"
+edition = "2021"
+description = "Verifiable secret sharing and 3-party escrow using ZODA/Ligerito"
+license = "MIT OR Apache-2.0"
+authors = ["Rotko Networks"]
+keywords = ["cryptography", "secret-sharing", "escrow", "zoda", "ligerito"]
+categories = ["cryptography"]
+
+[features]
+default = ["std"]
+std = ["ligerito-binary-fields/std", "rand/std", "rand/std_rng"]
+# FROST integration for specific chains
+frost-penumbra = ["decaf377-frost", "decaf377-rdsa", "frost-core", "frost-rerandomized"]
+frost-zcash = ["frost-ristretto255"]
+
+[dependencies]
+ligerito-binary-fields = { path = "../ligerito-binary-fields", default-features = false }
+ligerito-merkle = { path = "../ligerito-merkle", default-features = false }
+rand = { version = "0.8", default-features = false }
+sha2 = { version = "0.10", default-features = false }
+blake2 = { version = "0.10", default-features = false }
+zeroize = { version = "1.7" }
+
+# Optional FROST dependencies (heavy, only include when needed)
+decaf377-frost = { git = "https://github.com/penumbra-zone/penumbra", optional = true }
+decaf377-rdsa = { version = "0.11", optional = true }
+frost-core = { version = "2.0.0-rc.0", optional = true }
+frost-rerandomized = { version = "2.0.0-rc.0", optional = true }
+frost-ristretto255 = { version = "2.0.0-rc.0", optional = true }
+
+[dev-dependencies]
+rand = "0.8"
+hex = "0.4"

@@ -8,13 +8,13 @@ use crate::{
     utils::{eval_sk_at_vks, evaluate_lagrange_basis, verify_ligero, hash_row},
 };
 
-// Debug printing macros - no-ops in no_std
-#[cfg(feature = "std")]
+// Debug printing macros - only enabled in debug builds with std
+#[cfg(all(feature = "std", debug_assertions))]
 macro_rules! debug_println {
     ($($arg:tt)*) => { std::println!($($arg)*) }
 }
 
-#[cfg(not(feature = "std"))]
+#[cfg(not(all(feature = "std", debug_assertions)))]
 macro_rules! debug_println {
     ($($arg:tt)*) => { }
 }
