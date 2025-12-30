@@ -1,7 +1,27 @@
 //! Poseidon hash function over GF(2^32)
 //!
-//! A cryptographically secure hash function designed for SNARKs/STARKs.
-//! This implementation works over binary extension fields.
+//! # ⚠️ DEPRECATED - CRYPTOGRAPHICALLY INSECURE ⚠️
+//!
+//! This module is **deprecated** and should not be used. It has critical security flaws:
+//!
+//! 1. **S-box is not a permutation**: The x^5 S-box is not a permutation in GF(2^32)
+//!    because gcd(5, 2^32 - 1) = 5 ≠ 1. This breaks the security assumptions.
+//!
+//! 2. **32-bit field is too small**: Only provides ~16-bit collision resistance
+//!    (birthday bound), which is trivially breakable.
+//!
+//! 3. **Round constants are insecure**: Made-up constants like 0xDEADBEEF, not
+//!    derived from a secure source.
+//!
+//! ## Use Instead
+//!
+//! Use the [`crate::rescue`] module which provides:
+//! - Proper x^(-1) S-box (proven permutation)
+//! - 128-bit field (64-bit collision resistance)
+//! - SHAKE-256 derived round constants
+//! - Verified MDS matrix
+//!
+//! This module is kept only for backwards compatibility with existing code.
 
 use ligerito_binary_fields::{BinaryElem32, BinaryFieldElement};
 

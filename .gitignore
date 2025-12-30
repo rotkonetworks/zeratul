@@ -2,6 +2,16 @@ target/
 pkg/
 **/.cargo/
 
+# binaries
+polkadot-parachain
+polkadot-omni-node
+
+# node
+node_modules/
+
+# large generated files
+*.explore.html
+
 # databases
 *.db/
 *.db
@@ -22,3 +32,11 @@ benchmarks/ASSEMBLY_ANALYSIS.md
 benchmarks/analyze_asm.jl
 benchmarks/show_julia_asm.jl
 benchmarks/profile_*.jl
+
+# zanchor temp files
+crates/zanchor/*.json
+crates/zanchor/*.mjs
+crates/zanchor/zombienet-*.toml
+
+# local toolchain
+.rustup/

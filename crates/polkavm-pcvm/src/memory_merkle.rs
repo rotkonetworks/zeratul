@@ -1,5 +1,21 @@
 //! Binary Field Merkle Tree for Memory Authentication
 //!
+//! # ⚠️ DEPRECATED - CRYPTOGRAPHICALLY INSECURE ⚠️
+//!
+//! This module uses the insecure [`crate::poseidon`] hash function which has
+//! critical security flaws (see that module's documentation).
+//!
+//! ## Use Instead
+//!
+//! Use [`crate::merkle128`] which provides:
+//! - Rescue-Prime hash with proper x^(-1) S-box
+//! - 128-bit field (64-bit collision resistance)
+//! - Verified MDS matrix
+//!
+//! This module is kept only for backwards compatibility.
+//!
+//! ---
+//!
 //! This module implements a Merkle tree over GF(2^32) for cryptographically
 //! authenticating memory contents in PolkaVM execution traces.
 //!
@@ -11,13 +27,6 @@
 //! 3. **Memory consistency**: state carries between steps
 //!
 //! Merkle trees give us O(log N) proofs instead of O(N) full memory.
-//!
-//! # Binary Field Hashing (The ISIS Approach)
-//!
-//! We use **Poseidon** over GF(2^32) for several paranoid reasons:
-//! 1. Native to binary fields (no conversions)
-//! 2. STARK-friendly (arithmetic circuit)
-//! 3. Collision resistance in small fields
 //! 4. Fast in hardware (CLMUL)
 //!
 //! Unlike SHA-256 (which requires 256-bit fields), Poseidon works

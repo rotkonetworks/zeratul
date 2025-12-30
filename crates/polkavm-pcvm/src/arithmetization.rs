@@ -308,6 +308,8 @@ mod tests {
             imm: 0,
             memory_address: None,
             memory_value: None,
+            instruction_proof_0: None,
+            instruction_proof_1: None,
         };
 
         // ALU constraint should be zero (correct execution)

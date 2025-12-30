@@ -1,6 +1,7 @@
 //! Execution trace for pcVM programs (Phase 1 and Phase 2)
 
 use super::memory::ReadOnlyMemory;
+use super::memory_merkle::MerkleProof;
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
@@ -82,6 +83,13 @@ pub struct RegisterOnlyStep {
 
     /// Value read from memory (Phase 2: Some for LOAD, None otherwise)
     pub memory_value: Option<u32>,
+
+    /// Instruction fetch proof (Phase 3: merkle proof for instruction word 0)
+    /// Proves the first word of instruction is in committed program memory
+    pub instruction_proof_0: Option<MerkleProof>,
+
+    /// Instruction fetch proof for word 1 (instructions are 2 words = 8 bytes)
+    pub instruction_proof_1: Option<MerkleProof>,
 }
 
 impl RegisterOnlyStep {
@@ -210,14 +218,134 @@ impl Instruction {
     pub fn halt() -> Self {
         Self { opcode: Opcode::HALT, rd: 0, rs1: 0, rs2: 0, imm: 0 }
     }
+
+    /// Encode instruction to a u32 word
+    ///
+    /// Format: [opcode:8][rd:4][rs1:4][rs2:4][imm_hi:12] + [imm_lo:32] for instructions with imm
+    /// For simplicity, all instructions are encoded as 8 bytes (2 words)
+    pub fn to_bytes(&self) -> [u8; 8] {
+        let mut bytes = [0u8; 8];
+        bytes[0] = self.opcode as u8;
+        bytes[1] = (self.rd & 0x0F) | ((self.rs1 & 0x0F) << 4);
+        bytes[2] = self.rs2 & 0x0F;
+        bytes[3] = 0; // reserved
+        bytes[4..8].copy_from_slice(&self.imm.to_le_bytes());
+        bytes
+    }
+
+    /// Encode instruction to two u32 words
+    pub fn to_words(&self) -> [u32; 2] {
+        let bytes = self.to_bytes();
+        [
+            u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]),
+            u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]),
+        ]
+    }
+
+    /// Decode instruction from two u32 words
+    pub fn from_words(words: [u32; 2]) -> Option<Self> {
+        let w0_bytes = words[0].to_le_bytes();
+        let opcode = Opcode::from_u8(w0_bytes[0])?;
+        let rd = w0_bytes[1] & 0x0F;
+        let rs1 = (w0_bytes[1] >> 4) & 0x0F;
+        let rs2 = w0_bytes[2] & 0x0F;
+        let imm = words[1];
+        Some(Self { opcode, rd, rs1, rs2, imm })
+    }
 }
 
 /// A simple program is just a list of instructions
 pub type Program = Vec<Instruction>;
 
+/// Encode a program to bytes for loading into UnifiedMemory
+pub fn program_to_bytes(program: &Program) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(program.len() * 8);
+    for instr in program {
+        bytes.extend_from_slice(&instr.to_bytes());
+    }
+    bytes
+}
+
 /// Execute a program and generate a trace (Phase 1: no memory)
 pub fn execute_and_trace(program: &Program, initial_regs: [u32; 13]) -> RegisterOnlyTrace {
     execute_and_trace_with_memory(program, initial_regs, None)
+}
+
+/// Result of executing with instruction proofs
+pub struct ProvenTrace {
+    /// The execution trace with merkle proofs attached
+    pub trace: RegisterOnlyTrace,
+    /// Root of the program memory (commitment to the program)
+    pub program_root: ligerito_binary_fields::BinaryElem32,
+}
+
+/// Execute a program and generate a trace with instruction fetch proofs (Phase 3)
+///
+/// This proves that each instruction executed came from the committed program.
+pub fn execute_and_trace_with_proofs(
+    program: &Program,
+    initial_regs: [u32; 13],
+) -> Result<ProvenTrace, &'static str> {
+    use super::unified_memory::UnifiedMemory;
+
+    // Encode program to bytes and load into unified memory
+    let program_bytes = program_to_bytes(program);
+
+    // Round up memory size to power of 2 (minimum 1024 words)
+    let words_needed = (program_bytes.len() + 3) / 4;
+    let memory_size = (words_needed.max(1024)).next_power_of_two() as u32;
+
+    let mem = UnifiedMemory::with_program(&program_bytes, memory_size)?;
+    let program_root = mem.root();
+
+    let mut trace = RegisterOnlyTrace::new();
+    let mut regs = initial_regs;
+
+    for (pc, instr) in program.iter().enumerate() {
+        // Byte address = instruction index * 8 (each instruction is 8 bytes)
+        let byte_pc = (pc * 8) as u32;
+        let word_addr_0 = byte_pc / 4;
+        let word_addr_1 = word_addr_0 + 1;
+
+        // Get merkle proofs for both instruction words
+        let proof_0 = mem.tree().prove_read(word_addr_0)?;
+        let proof_1 = mem.tree().prove_read(word_addr_1)?;
+
+        // Handle memory access for LOAD instruction
+        let (memory_address, memory_value) = if instr.opcode == Opcode::LOAD {
+            let addr = regs[instr.rs1 as usize].wrapping_add(instr.imm);
+            // Note: data memory would need separate handling in a full implementation
+            (Some(addr), Some(0))
+        } else {
+            (None, None)
+        };
+
+        let step = RegisterOnlyStep {
+            pc: pc as u32,
+            regs,
+            opcode: instr.opcode,
+            rd: instr.rd,
+            rs1: instr.rs1,
+            rs2: instr.rs2,
+            imm: instr.imm,
+            memory_address,
+            memory_value,
+            instruction_proof_0: Some(proof_0),
+            instruction_proof_1: Some(proof_1),
+        };
+
+        // Execute and update registers
+        regs = step.execute();
+
+        trace.push(step);
+
+        // Stop at HALT
+        if instr.opcode == Opcode::HALT {
+            break;
+        }
+    }
+
+    Ok(ProvenTrace { trace, program_root })
 }
 
 /// Execute a program with optional memory and generate a trace (Phase 2)
@@ -249,6 +377,8 @@ pub fn execute_and_trace_with_memory(
             imm: instr.imm,
             memory_address,
             memory_value,
+            instruction_proof_0: None, // filled by execute_and_trace_with_proofs
+            instruction_proof_1: None,
         };
 
         // Execute and update registers
@@ -309,5 +439,110 @@ mod tests {
         assert_eq!(trace.steps.len(), 3);
         assert_eq!(trace.final_state().unwrap()[0], 16); // (5+3)*2 = 16
         assert!(trace.validate().is_ok());
+    }
+
+    #[test]
+    fn test_instruction_encoding_roundtrip() {
+        let instructions = vec![
+            Instruction::new_rrr(Opcode::ADD, 0, 1, 2),
+            Instruction::new_rrr(Opcode::SUB, 5, 6, 7),
+            Instruction::new_imm(3, 0xDEADBEEF),
+            Instruction::new_load(8, 9, 100),
+            Instruction::halt(),
+        ];
+
+        for instr in &instructions {
+            let words = instr.to_words();
+            let decoded = Instruction::from_words(words).expect("decode failed");
+            assert_eq!(decoded.opcode, instr.opcode);
+            assert_eq!(decoded.rd, instr.rd);
+            assert_eq!(decoded.rs1, instr.rs1);
+            assert_eq!(decoded.rs2, instr.rs2);
+            assert_eq!(decoded.imm, instr.imm);
+        }
+    }
+
+    #[test]
+    fn test_program_to_bytes() {
+        let program = vec![
+            Instruction::new_rrr(Opcode::ADD, 0, 1, 2),
+            Instruction::new_imm(3, 42),
+            Instruction::halt(),
+        ];
+
+        let bytes = program_to_bytes(&program);
+        assert_eq!(bytes.len(), 24); // 3 instructions * 8 bytes each
+
+        // Verify first instruction encodes correctly
+        assert_eq!(bytes[0], Opcode::ADD as u8);
+    }
+
+    #[test]
+    fn test_proven_trace() {
+        // Simple program with instruction fetch proofs
+        let program = vec![
+            Instruction::new_rrr(Opcode::ADD, 0, 1, 2),
+            Instruction::new_rrr(Opcode::MUL, 0, 0, 3),
+            Instruction::halt(),
+        ];
+
+        let mut initial = [0u32; 13];
+        initial[1] = 5;
+        initial[2] = 3;
+        initial[3] = 2;
+
+        let proven = execute_and_trace_with_proofs(&program, initial)
+            .expect("failed to generate proven trace");
+
+        // Same result as regular execution
+        assert_eq!(proven.trace.steps.len(), 3);
+        assert_eq!(proven.trace.final_state().unwrap()[0], 16);
+
+        // Each step should have instruction proofs
+        for step in &proven.trace.steps {
+            assert!(step.instruction_proof_0.is_some(), "missing proof 0");
+            assert!(step.instruction_proof_1.is_some(), "missing proof 1");
+
+            // Proofs should verify against program root
+            let proof_0 = step.instruction_proof_0.as_ref().unwrap();
+            let proof_1 = step.instruction_proof_1.as_ref().unwrap();
+
+            assert!(proof_0.verify(), "proof 0 failed to verify");
+            assert!(proof_1.verify(), "proof 1 failed to verify");
+
+            assert_eq!(proof_0.root, proven.program_root, "proof 0 wrong root");
+            assert_eq!(proof_1.root, proven.program_root, "proof 1 wrong root");
+        }
+    }
+
+    #[test]
+    fn test_proven_trace_decode_matches() {
+        // Verify that decoded instruction matches what's in the trace
+        let program = vec![
+            Instruction::new_imm(5, 0xCAFEBABE),  // a5 = 0xCAFEBABE
+            Instruction::halt(),
+        ];
+
+        let initial = [0u32; 13];
+
+        let proven = execute_and_trace_with_proofs(&program, initial)
+            .expect("failed to generate proven trace");
+
+        let step = &proven.trace.steps[0];
+
+        // Get the two instruction words from the merkle proofs
+        let word_0 = step.instruction_proof_0.as_ref().unwrap().value;
+        let word_1 = step.instruction_proof_1.as_ref().unwrap().value;
+
+        // Decode instruction from the proven words
+        let decoded = Instruction::from_words([word_0, word_1])
+            .expect("failed to decode instruction from proof");
+
+        // Verify the decoded instruction matches what we executed
+        assert_eq!(decoded.opcode, step.opcode);
+        assert_eq!(decoded.rd, step.rd);
+        assert_eq!(decoded.rs1, step.rs1);
+        assert_eq!(decoded.rs2, step.rs2);
+        assert_eq!(decoded.imm, step.imm);
     }
 }

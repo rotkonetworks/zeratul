@@ -1,42 +1,30 @@
-//! Sound PolkaVM Prover
+//! PolkaVM Prover
 //!
-//! This is the CORRECT prover that doesn't trust constraint_accumulator.
+//! Generates cryptographic proofs of PolkaVM execution using sumcheck + ligerito.
 //!
-//! # The Old (Broken) Flow
-//!
-//! ```text
-//! Prover                          Verifier
-//! ------                          --------
-//! compute trace T
-//! compute C(x) = constraints(T)
-//! compute acc = ∑C(x)
-//! Ligerito.commit(T) → comm_T
-//! send (comm_T, acc)              check acc == 0  ← UNSOUND: acc not verified!
-//! ```
-//!
-//! # The New (Sound) Flow
+//! # Protocol
 //!
 //! ```text
 //! Prover                          Verifier
 //! ------                          --------
-//! compute trace T
-//! Ligerito.commit(T) → comm_T
+//! execute PVM, get trace T
+//! commit to T via ligerito
 //! send comm_T                     receive comm_T
 //!
-//! [Sumcheck Protocol]
+//! [Sumcheck - k rounds]
 //! for i in 1..k:
 //!   send gᵢ(X)                    check gᵢ(0) + gᵢ(1) = prev_claim
 //!                                 sample rᵢ ← transcript
 //!   receive rᵢ
 //!
-//! [Final Check]
-//! open T at query points          verify Ligerito openings
-//!                                 compute C(r₁,...,rₖ) from T openings
+//! [Final verification]
+//! open T at random point r        verify ligerito opening
+//!                                 compute C(r) from opened T values
 //!                                 check C(r) == sumcheck final value
 //! ```
 //!
-//! The verifier COMPUTES C(r) themselves from the opened T values.
-//! No trusting prover's claim about constraints.
+//! The verifier computes C(r) themselves from the opened trace values.
+//! Soundness follows from sumcheck + binding commitment.
 
 use crate::sumcheck::{SumcheckProof, SumcheckProver, verify_sumcheck, SumcheckError};
 use crate::trace_opening::{TraceOpenings, verify_constraint_at_point, ConstraintVerificationError};

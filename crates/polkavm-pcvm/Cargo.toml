@@ -43,6 +43,7 @@ bytemuck = { workspace = true }
 
 # Crypto (sha256 always available for no_std)
 sha2 = { workspace = true, default-features = false }
+sha3 = { version = "0.10", default-features = false }
 
 # PolkaVM integration (optional)
 polkavm = { git = "https://github.com/paritytech/polkavm", optional = true }
@@ -53,3 +54,8 @@ thiserror = { workspace = true, optional = true }
 
 [dev-dependencies]
 polkavm-assembler = { git = "https://github.com/paritytech/polkavm" }
+criterion = { workspace = true }
+
+[[bench]]
+name = "crypto_comparison"
+harness = false
