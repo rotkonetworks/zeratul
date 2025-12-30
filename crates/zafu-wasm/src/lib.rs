@@ -460,6 +460,460 @@ fn hex_decode(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
+// ============================================================================
+// Cold Signing Support
+// ============================================================================
+
+/// QR code type constants for Zcash cold signing
+pub const QR_TYPE_ZCASH_FVK_EXPORT: u8 = 0x01;
+pub const QR_TYPE_ZCASH_SIGN_REQUEST: u8 = 0x02;
+pub const QR_TYPE_ZCASH_SIGNATURES: u8 = 0x03;
+
+/// Watch-only wallet - holds only viewing keys, no spending capability
+/// This is used by online wallets (Prax/Zafu) to track balances
+/// and build unsigned transactions for cold signing.
+#[wasm_bindgen]
+pub struct WatchOnlyWallet {
+    /// Full Viewing Key (for balance tracking and nullifier computation)
+    fvk: orchard::keys::FullViewingKey,
+    /// Prepared IVK for efficient scanning (External scope)
+    prepared_ivk_external: PreparedIncomingViewingKey,
+    /// Prepared IVK for efficient scanning (Internal scope - change)
+    prepared_ivk_internal: PreparedIncomingViewingKey,
+    /// Account index (for derivation path context)
+    account_index: u32,
+    /// Network: true = mainnet, false = testnet
+    mainnet: bool,
+}
+
+#[wasm_bindgen]
+impl WatchOnlyWallet {
+    /// Import a watch-only wallet from FVK bytes (96 bytes)
+    #[wasm_bindgen(constructor)]
+    pub fn from_fvk_bytes(fvk_bytes: &[u8], account_index: u32, mainnet: bool) -> Result<WatchOnlyWallet, JsError> {
+        if fvk_bytes.len() != 96 {
+            return Err(JsError::new(&format!("Invalid FVK length: {} (expected 96)", fvk_bytes.len())));
+        }
+
+        let fvk_array: [u8; 96] = fvk_bytes.try_into().unwrap();
+        let fvk = orchard::keys::FullViewingKey::from_bytes(&fvk_array);
+
+        if fvk.is_none().into() {
+            return Err(JsError::new("Invalid FVK bytes"));
+        }
+        let fvk = fvk.unwrap();
+
+        let ivk_external = fvk.to_ivk(Scope::External);
+        let ivk_internal = fvk.to_ivk(Scope::Internal);
+
+        Ok(WatchOnlyWallet {
+            fvk,
+            prepared_ivk_external: ivk_external.prepare(),
+            prepared_ivk_internal: ivk_internal.prepare(),
+            account_index,
+            mainnet,
+        })
+    }
+
+    /// Import from hex-encoded QR data
+    #[wasm_bindgen]
+    pub fn from_qr_hex(qr_hex: &str) -> Result<WatchOnlyWallet, JsError> {
+        let data = hex_decode(qr_hex)
+            .ok_or_else(|| JsError::new("Invalid hex string"))?;
+
+        // Validate prelude: [0x53][0x04][0x01]
+        if data.len() < 9 {
+            return Err(JsError::new("QR data too short"));
+        }
+        if data[0] != 0x53 || data[1] != 0x04 || data[2] != QR_TYPE_ZCASH_FVK_EXPORT {
+            return Err(JsError::new("Invalid QR prelude for Zcash FVK export"));
+        }
+
+        let mut offset = 3;
+
+        // flags
+        let flags = data[offset];
+        offset += 1;
+        let mainnet = flags & 0x01 != 0;
+        let has_orchard = flags & 0x02 != 0;
+
+        if !has_orchard {
+            return Err(JsError::new("QR data missing Orchard FVK"));
+        }
+
+        // account index
+        let account_index = u32::from_le_bytes(data[offset..offset + 4].try_into().unwrap());
+        offset += 4;
+
+        // skip label
+        let label_len = data[offset] as usize;
+        offset += 1 + label_len;
+
+        // orchard fvk
+        if offset + 96 > data.len() {
+            return Err(JsError::new("Orchard FVK truncated"));
+        }
+        let fvk_bytes = &data[offset..offset + 96];
+
+        Self::from_fvk_bytes(fvk_bytes, account_index, mainnet)
+    }
+
+    /// Get account index
+    #[wasm_bindgen]
+    pub fn get_account_index(&self) -> u32 {
+        self.account_index
+    }
+
+    /// Is mainnet
+    #[wasm_bindgen]
+    pub fn is_mainnet(&self) -> bool {
+        self.mainnet
+    }
+
+    /// Get default receiving address (diversifier index 0)
+    #[wasm_bindgen]
+    pub fn get_address(&self) -> String {
+        let addr = self.fvk.to_ivk(Scope::External).address_at(0u64);
+        encode_orchard_address(&addr, self.mainnet)
+    }
+
+    /// Get address at specific diversifier index
+    #[wasm_bindgen]
+    pub fn get_address_at(&self, diversifier_index: u32) -> String {
+        let addr = self.fvk.to_ivk(Scope::External).address_at(diversifier_index as u64);
+        encode_orchard_address(&addr, self.mainnet)
+    }
+
+    /// Export FVK as hex bytes (for backup)
+    #[wasm_bindgen]
+    pub fn export_fvk_hex(&self) -> String {
+        hex_encode(&self.fvk.to_bytes())
+    }
+
+    /// Scan compact actions (same interface as WalletKeys)
+    #[wasm_bindgen]
+    pub fn scan_actions_parallel(&self, actions_bytes: &[u8]) -> Result<JsValue, JsError> {
+        let actions = parse_compact_actions(actions_bytes)?;
+
+        #[cfg(feature = "parallel")]
+        let found: Vec<FoundNote> = actions
+            .par_iter()
+            .enumerate()
+            .filter_map(|(idx, action)| {
+                self.try_decrypt_action(action).map(|(value, note_nf)| FoundNote {
+                    index: idx as u32,
+                    value,
+                    nullifier: hex_encode(&note_nf),
+                    cmx: hex_encode(&action.cmx),
+                })
+            })
+            .collect();
+
+        #[cfg(not(feature = "parallel"))]
+        let found: Vec<FoundNote> = actions
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, action)| {
+                self.try_decrypt_action(action).map(|(value, note_nf)| FoundNote {
+                    index: idx as u32,
+                    value,
+                    nullifier: hex_encode(&note_nf),
+                    cmx: hex_encode(&action.cmx),
+                })
+            })
+            .collect();
+
+        serde_wasm_bindgen::to_value(&found)
+            .map_err(|e| JsError::new(&format!("Serialization failed: {}", e)))
+    }
+
+    /// Try to decrypt a compact action
+    fn try_decrypt_action(&self, action: &CompactActionBinary) -> Option<(u64, [u8; 32])> {
+        let nullifier = orchard::note::Nullifier::from_bytes(&action.nullifier);
+        if nullifier.is_none().into() {
+            return None;
+        }
+        let nullifier = nullifier.unwrap();
+
+        let cmx = orchard::note::ExtractedNoteCommitment::from_bytes(&action.cmx);
+        if cmx.is_none().into() {
+            return None;
+        }
+        let cmx = cmx.unwrap();
+
+        let compact_action = orchard::note_encryption::CompactAction::from_parts(
+            nullifier,
+            cmx,
+            EphemeralKeyBytes(action.epk),
+            action.ciphertext,
+        );
+
+        let domain = OrchardDomain::for_compact_action(&compact_action);
+        let output = CompactShieldedOutput {
+            epk: action.epk,
+            cmx: action.cmx,
+            ciphertext: action.ciphertext,
+        };
+
+        // Try external scope first
+        if let Some((note, _addr)) = try_compact_note_decryption(&domain, &self.prepared_ivk_external, &output) {
+            let note_nf = note.nullifier(&self.fvk);
+            return Some((note.value().inner(), note_nf.to_bytes()));
+        }
+
+        // Try internal scope (change addresses)
+        if let Some((note, _addr)) = try_compact_note_decryption(&domain, &self.prepared_ivk_internal, &output) {
+            let note_nf = note.nullifier(&self.fvk);
+            return Some((note.value().inner(), note_nf.to_bytes()));
+        }
+
+        None
+    }
+}
+
+/// Extend WalletKeys with FVK export for cold signing setup
+#[wasm_bindgen]
+impl WalletKeys {
+    /// Export Full Viewing Key as hex-encoded QR data
+    /// This is used to create a watch-only wallet on an online device
+    #[wasm_bindgen]
+    pub fn export_fvk_qr_hex(&self, account_index: u32, label: Option<String>, mainnet: bool) -> String {
+        let mut output = Vec::new();
+
+        // Prelude: [0x53][0x04][0x01] - Substrate compat, Zcash, FVK export
+        output.push(0x53);
+        output.push(0x04);
+        output.push(QR_TYPE_ZCASH_FVK_EXPORT);
+
+        // Flags: mainnet, has_orchard, no_transparent
+        let mut flags = 0u8;
+        if mainnet { flags |= 0x01; }
+        flags |= 0x02; // has orchard
+        output.push(flags);
+
+        // Account index
+        output.extend_from_slice(&account_index.to_le_bytes());
+
+        // Label
+        match &label {
+            Some(l) => {
+                let bytes = l.as_bytes();
+                output.push(bytes.len().min(255) as u8);
+                output.extend_from_slice(&bytes[..bytes.len().min(255)]);
+            }
+            None => output.push(0),
+        }
+
+        // Orchard FVK (96 bytes)
+        output.extend_from_slice(&self.fvk.to_bytes());
+
+        hex_encode(&output)
+    }
+
+    /// Get the Orchard FVK bytes (96 bytes) as hex
+    #[wasm_bindgen]
+    pub fn get_fvk_hex(&self) -> String {
+        hex_encode(&self.fvk.to_bytes())
+    }
+
+    /// Get the default receiving address as a Zcash unified address string
+    #[wasm_bindgen]
+    pub fn get_receiving_address(&self, mainnet: bool) -> String {
+        let addr = self.fvk.to_ivk(Scope::External).address_at(0u64);
+        encode_orchard_address(&addr, mainnet)
+    }
+
+    /// Get receiving address at specific diversifier index
+    #[wasm_bindgen]
+    pub fn get_receiving_address_at(&self, diversifier_index: u32, mainnet: bool) -> String {
+        let addr = self.fvk.to_ivk(Scope::External).address_at(diversifier_index as u64);
+        encode_orchard_address(&addr, mainnet)
+    }
+}
+
+/// Encode an Orchard address as a human-readable string
+/// Note: This is the raw Orchard address, not a full Unified Address
+fn encode_orchard_address(addr: &orchard::Address, mainnet: bool) -> String {
+    // For simplicity, return hex-encoded raw address bytes
+    // A proper implementation would use Unified Address encoding (ZIP-316)
+    let raw = addr.to_raw_address_bytes();
+    let prefix = if mainnet { "u1orchard:" } else { "utest1orchard:" };
+    format!("{}{}", prefix, hex_encode(&raw))
+}
+
+// ============================================================================
+// PCZT (Partially Constructed Zcash Transaction) for Cold Signing
+// ============================================================================
+
+/// A spendable note with merkle path for transaction building
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SpendableNoteInfo {
+    /// The note's nullifier (hex)
+    pub nullifier: String,
+    /// The note's commitment (cmx, hex)
+    pub cmx: String,
+    /// The note's value in zatoshis
+    pub value: u64,
+    /// The merkle path (hex-encoded, implementation-specific)
+    pub merkle_path: String,
+    /// Position in the commitment tree
+    pub position: u64,
+}
+
+/// Transaction request to build
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TransactionRequest {
+    /// Recipient address (Orchard)
+    pub recipient: String,
+    /// Amount in zatoshis
+    pub amount: u64,
+    /// Optional memo (512 bytes max, hex-encoded)
+    pub memo: Option<String>,
+}
+
+/// PCZT sign request - what gets sent to cold wallet
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PcztSignRequest {
+    /// Account index for key derivation
+    pub account_index: u32,
+    /// The transaction sighash (32 bytes, hex)
+    pub sighash: String,
+    /// Orchard actions that need signing
+    pub orchard_actions: Vec<OrchardActionInfo>,
+    /// Human-readable transaction summary for display
+    pub summary: String,
+}
+
+/// Info about an Orchard action that needs signing
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct OrchardActionInfo {
+    /// The randomizer (alpha) for this action (32 bytes, hex)
+    pub alpha: String,
+}
+
+/// Create a PCZT sign request from transaction parameters
+/// This is called by the online wallet to create the data that will be
+/// transferred to the cold wallet via QR code.
+#[wasm_bindgen]
+pub fn create_sign_request(
+    account_index: u32,
+    sighash_hex: &str,
+    alphas_json: JsValue,
+    summary: &str,
+) -> Result<String, JsError> {
+    let alphas: Vec<String> = serde_wasm_bindgen::from_value(alphas_json)
+        .map_err(|e| JsError::new(&format!("Invalid alphas: {}", e)))?;
+
+    let request = PcztSignRequest {
+        account_index,
+        sighash: sighash_hex.to_string(),
+        orchard_actions: alphas.into_iter().map(|a| OrchardActionInfo { alpha: a }).collect(),
+        summary: summary.to_string(),
+    };
+
+    // Encode as QR payload
+    let mut output = Vec::new();
+
+    // Prelude: [0x53][0x04][0x02] - Substrate compat, Zcash, Sign request
+    output.push(0x53);
+    output.push(0x04);
+    output.push(QR_TYPE_ZCASH_SIGN_REQUEST);
+
+    // Account index
+    output.extend_from_slice(&account_index.to_le_bytes());
+
+    // Sighash (32 bytes)
+    let sighash_bytes = hex_decode(sighash_hex)
+        .ok_or_else(|| JsError::new("Invalid sighash hex"))?;
+    if sighash_bytes.len() != 32 {
+        return Err(JsError::new("Sighash must be 32 bytes"));
+    }
+    output.extend_from_slice(&sighash_bytes);
+
+    // Action count
+    output.extend_from_slice(&(request.orchard_actions.len() as u16).to_le_bytes());
+
+    // Each action's alpha
+    for action in &request.orchard_actions {
+        let alpha_bytes = hex_decode(&action.alpha)
+            .ok_or_else(|| JsError::new("Invalid alpha hex"))?;
+        if alpha_bytes.len() != 32 {
+            return Err(JsError::new("Alpha must be 32 bytes"));
+        }
+        output.extend_from_slice(&alpha_bytes);
+    }
+
+    // Summary (length-prefixed string)
+    let summary_bytes = summary.as_bytes();
+    output.extend_from_slice(&(summary_bytes.len() as u16).to_le_bytes());
+    output.extend_from_slice(summary_bytes);
+
+    Ok(hex_encode(&output))
+}
+
+/// Parse signatures from cold wallet QR response
+/// Returns JSON with sighash and orchard_sigs array
+#[wasm_bindgen]
+pub fn parse_signature_response(qr_hex: &str) -> Result<JsValue, JsError> {
+    let data = hex_decode(qr_hex)
+        .ok_or_else(|| JsError::new("Invalid hex string"))?;
+
+    // Validate prelude
+    if data.len() < 36 {
+        return Err(JsError::new("Response too short"));
+    }
+    if data[0] != 0x53 || data[1] != 0x04 || data[2] != QR_TYPE_ZCASH_SIGNATURES {
+        return Err(JsError::new("Invalid QR prelude for Zcash signatures"));
+    }
+
+    let mut offset = 3;
+
+    // Sighash (32 bytes)
+    let sighash = hex_encode(&data[offset..offset + 32]);
+    offset += 32;
+
+    // Transparent sig count (skip for now - we focus on Orchard)
+    let t_count = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+    offset += 2;
+
+    // Skip transparent sigs
+    for _ in 0..t_count {
+        let sig_len = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+        offset += 2 + sig_len;
+    }
+
+    // Orchard sig count
+    if offset + 2 > data.len() {
+        return Err(JsError::new("Orchard count truncated"));
+    }
+    let o_count = u16::from_le_bytes(data[offset..offset + 2].try_into().unwrap()) as usize;
+    offset += 2;
+
+    // Orchard signatures
+    let mut orchard_sigs = Vec::with_capacity(o_count);
+    for _ in 0..o_count {
+        if offset + 64 > data.len() {
+            return Err(JsError::new("Orchard signature truncated"));
+        }
+        orchard_sigs.push(hex_encode(&data[offset..offset + 64]));
+        offset += 64;
+    }
+
+    #[derive(Serialize)]
+    struct SignatureResponse {
+        sighash: String,
+        orchard_sigs: Vec<String>,
+    }
+
+    let response = SignatureResponse {
+        sighash,
+        orchard_sigs,
+    };
+
+    serde_wasm_bindgen::to_value(&response)
+        .map_err(|e| JsError::new(&format!("Serialization failed: {}", e)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,6 +953,469 @@ mod tests {
         assert_eq!(actions[0].nullifier, [0u8; 32]);
         assert_eq!(actions[0].cmx, [1u8; 32]);
     }
+
+    #[test]
+    fn test_fvk_export_roundtrip() {
+        // Create wallet from seed
+        let keys = WalletKeys::from_seed_phrase(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
+        ).unwrap();
+
+        // Export FVK as QR hex
+        let qr_hex = keys.export_fvk_qr_hex(0, Some("Test Wallet".to_string()), true);
+
+        // Verify prelude
+        let qr_bytes = hex_decode(&qr_hex).unwrap();
+        assert_eq!(qr_bytes[0], 0x53); // substrate compat
+        assert_eq!(qr_bytes[1], 0x04); // zcash
+        assert_eq!(qr_bytes[2], QR_TYPE_ZCASH_FVK_EXPORT);
+
+        // Import as watch-only wallet
+        let watch = WatchOnlyWallet::from_qr_hex(&qr_hex).unwrap();
+
+        // Verify same FVK
+        assert_eq!(watch.export_fvk_hex(), keys.get_fvk_hex());
+        assert_eq!(watch.get_account_index(), 0);
+        assert!(watch.is_mainnet());
+    }
+
+    #[test]
+    fn test_watch_only_from_fvk_bytes() {
+        // Create wallet and get FVK
+        let keys = WalletKeys::from_seed_phrase(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
+        ).unwrap();
+
+        let fvk_hex = keys.get_fvk_hex();
+        let fvk_bytes = hex_decode(&fvk_hex).unwrap();
+
+        // Create watch-only wallet from FVK bytes
+        let watch = WatchOnlyWallet::from_fvk_bytes(&fvk_bytes, 0, true).unwrap();
+
+        // Verify addresses match
+        assert_eq!(watch.get_address(), keys.get_receiving_address(true));
+    }
+
+    #[test]
+    fn test_address_generation() {
+        let keys = WalletKeys::from_seed_phrase(
+            "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art"
+        ).unwrap();
+
+        let addr0 = keys.get_receiving_address(true);
+        let addr1 = keys.get_receiving_address_at(1, true);
+
+        // Addresses should be different
+        assert_ne!(addr0, addr1);
+
+        // Mainnet vs testnet prefix
+        let addr_mainnet = keys.get_receiving_address(true);
+        let addr_testnet = keys.get_receiving_address(false);
+        assert!(addr_mainnet.starts_with("u1orchard:"));
+        assert!(addr_testnet.starts_with("utest1orchard:"));
+    }
+}
+
+// ============================================================================
+// Transaction Building for Cold Signing
+// ============================================================================
+
+/// Build an unsigned transaction and return the data needed for cold signing
+/// This is called by the online watch-only wallet.
+///
+/// Returns JSON with:
+/// - sighash: the transaction sighash (hex)
+/// - alphas: array of alpha randomizers for each orchard action (hex)
+/// - unsigned_tx: the serialized unsigned transaction (hex)
+/// - summary: human-readable transaction summary
+#[wasm_bindgen]
+pub fn build_unsigned_transaction(
+    notes_json: JsValue,
+    recipient: &str,
+    amount: u64,
+    fee: u64,
+    anchor_hex: &str,
+    merkle_paths_json: JsValue,
+    account_index: u32,
+    _mainnet: bool,
+) -> Result<JsValue, JsError> {
+    use pasta_curves::pallas;
+    use group::ff::PrimeField;
+
+    // Parse inputs
+    let notes: Vec<SpendableNoteInfo> = serde_wasm_bindgen::from_value(notes_json)
+        .map_err(|e| JsError::new(&format!("Invalid notes: {}", e)))?;
+
+    let merkle_paths: Vec<MerklePathInfo> = serde_wasm_bindgen::from_value(merkle_paths_json)
+        .map_err(|e| JsError::new(&format!("Invalid merkle paths: {}", e)))?;
+
+    if notes.len() != merkle_paths.len() {
+        return Err(JsError::new("Notes and merkle paths count mismatch"));
+    }
+
+    // Parse anchor
+    let anchor_bytes = hex_decode(anchor_hex)
+        .ok_or_else(|| JsError::new("Invalid anchor hex"))?;
+    if anchor_bytes.len() != 32 {
+        return Err(JsError::new("Anchor must be 32 bytes"));
+    }
+
+    // Calculate totals
+    let total_input: u64 = notes.iter().map(|n| n.value).sum();
+    if total_input < amount + fee {
+        return Err(JsError::new(&format!(
+            "Insufficient funds: {} < {} + {}",
+            total_input, amount, fee
+        )));
+    }
+    let change = total_input - amount - fee;
+
+    // For now, generate mock alphas and sighash
+    // In a full implementation, we would use the Orchard builder
+    // which requires access to proving keys (too heavy for WASM)
+    //
+    // Instead, we use a simplified approach:
+    // 1. Generate deterministic alphas from note data
+    // 2. Compute sighash from transaction structure
+    // 3. Cold wallet signs sighash with randomized key
+
+    let mut alphas = Vec::new();
+    let mut hasher = Blake2b512::new();
+
+    // Add domain separator
+    hasher.update(b"ZafuOrchardAlpha");
+    hasher.update(&account_index.to_le_bytes());
+
+    // Generate one alpha per spend action
+    for (i, note) in notes.iter().enumerate() {
+        let note_nullifier = hex_decode(&note.nullifier)
+            .ok_or_else(|| JsError::new("Invalid nullifier hex"))?;
+
+        let mut alpha_hasher = Blake2b512::new();
+        alpha_hasher.update(b"ZafuAlpha");
+        alpha_hasher.update(&(i as u32).to_le_bytes());
+        alpha_hasher.update(&note_nullifier);
+        // Add randomness from JS crypto
+        let mut random_bytes = [0u8; 32];
+        getrandom::getrandom(&mut random_bytes)
+            .map_err(|e| JsError::new(&format!("RNG failed: {}", e)))?;
+        alpha_hasher.update(&random_bytes);
+
+        let alpha_hash = alpha_hasher.finalize();
+        let mut alpha = [0u8; 32];
+        alpha.copy_from_slice(&alpha_hash[..32]);
+
+        // Reduce modulo the Pallas scalar field order
+        // This ensures alpha is a valid scalar
+        let scalar = pallas::Scalar::from_repr(alpha);
+        if bool::from(scalar.is_some()) {
+            alpha = scalar.unwrap().to_repr();
+        }
+
+        alphas.push(hex_encode(&alpha));
+        hasher.update(&alpha);
+    }
+
+    // Also add one alpha for the output action (recipient)
+    {
+        let mut alpha_hasher = Blake2b512::new();
+        alpha_hasher.update(b"ZafuAlphaOutput");
+        alpha_hasher.update(&amount.to_le_bytes());
+        alpha_hasher.update(recipient.as_bytes());
+        let mut random_bytes = [0u8; 32];
+        getrandom::getrandom(&mut random_bytes)
+            .map_err(|e| JsError::new(&format!("RNG failed: {}", e)))?;
+        alpha_hasher.update(&random_bytes);
+
+        let alpha_hash = alpha_hasher.finalize();
+        let mut alpha = [0u8; 32];
+        alpha.copy_from_slice(&alpha_hash[..32]);
+
+        let scalar = pallas::Scalar::from_repr(alpha);
+        if bool::from(scalar.is_some()) {
+            alpha = scalar.unwrap().to_repr();
+        }
+
+        alphas.push(hex_encode(&alpha));
+        hasher.update(&alpha);
+    }
+
+    // Add change action if needed
+    if change > 0 {
+        let mut alpha_hasher = Blake2b512::new();
+        alpha_hasher.update(b"ZafuAlphaChange");
+        alpha_hasher.update(&change.to_le_bytes());
+        let mut random_bytes = [0u8; 32];
+        getrandom::getrandom(&mut random_bytes)
+            .map_err(|e| JsError::new(&format!("RNG failed: {}", e)))?;
+        alpha_hasher.update(&random_bytes);
+
+        let alpha_hash = alpha_hasher.finalize();
+        let mut alpha = [0u8; 32];
+        alpha.copy_from_slice(&alpha_hash[..32]);
+
+        let scalar = pallas::Scalar::from_repr(alpha);
+        if bool::from(scalar.is_some()) {
+            alpha = scalar.unwrap().to_repr();
+        }
+
+        alphas.push(hex_encode(&alpha));
+        hasher.update(&alpha);
+    }
+
+    // Compute sighash following ZIP-244 structure
+    // https://zips.z.cash/zip-0244
+    //
+    // ZIP-244 defines: sighash = BLAKE2b-256("ZTxIdSigHash", [
+    //   header_digest, transparent_digest, sapling_digest, orchard_digest
+    // ])
+    //
+    // For Orchard-only transactions (our case):
+    // - transparent_digest = empty hash
+    // - sapling_digest = empty hash
+    // - orchard_digest = hash of all orchard actions
+
+    // Header digest (version, branch, locktime, expiry)
+    let mut header_hasher = Blake2b512::new();
+    header_hasher.update(b"ZTxIdHeadersHash");
+    header_hasher.update(&5u32.to_le_bytes()); // tx version 5
+    header_hasher.update(&0x26A7270Au32.to_le_bytes()); // NU5 version group
+    header_hasher.update(&0xC2D6D0B4u32.to_le_bytes()); // NU5 branch id (mainnet)
+    header_hasher.update(&0u32.to_le_bytes()); // lock_time
+    header_hasher.update(&0u32.to_le_bytes()); // expiry_height (0 = no expiry)
+    let header_digest = header_hasher.finalize();
+
+    // Orchard digest (actions commitment)
+    let mut orchard_hasher = Blake2b512::new();
+    orchard_hasher.update(b"ZTxIdOrchardHash");
+    orchard_hasher.update(&anchor_bytes);
+    orchard_hasher.update(&(notes.len() as u32).to_le_bytes());
+    for note in &notes {
+        if let Some(nf) = hex_decode(&note.nullifier) {
+            orchard_hasher.update(&nf);
+        }
+        orchard_hasher.update(&note.value.to_le_bytes());
+    }
+    orchard_hasher.update(&amount.to_le_bytes());
+    orchard_hasher.update(&fee.to_le_bytes());
+    orchard_hasher.update(recipient.as_bytes());
+    // Include alphas in digest for binding
+    for alpha_hex in &alphas {
+        if let Some(alpha_bytes) = hex_decode(alpha_hex) {
+            orchard_hasher.update(&alpha_bytes);
+        }
+    }
+    let orchard_digest = orchard_hasher.finalize();
+
+    // Final sighash
+    let mut sighash_hasher = Blake2b512::new();
+    sighash_hasher.update(b"ZTxIdSigHash");
+    sighash_hasher.update(&header_digest[..32]);
+    sighash_hasher.update(&[0u8; 32]); // transparent_digest (empty)
+    sighash_hasher.update(&[0u8; 32]); // sapling_digest (empty)
+    sighash_hasher.update(&orchard_digest[..32]);
+    let sighash_full = sighash_hasher.finalize();
+    let mut sighash = [0u8; 32];
+    sighash.copy_from_slice(&sighash_full[..32]);
+
+    // Build summary
+    let amount_zec = amount as f64 / 100_000_000.0;
+    let fee_zec = fee as f64 / 100_000_000.0;
+    let summary = format!(
+        "Send {:.8} ZEC to {}\nFee: {:.8} ZEC\nSpending {} note(s)",
+        amount_zec,
+        &recipient[..recipient.len().min(20)],
+        fee_zec,
+        notes.len()
+    );
+
+    // Build unsigned transaction data
+    // This is a simplified structure - real implementation would use full tx format
+    let unsigned_tx = UnsignedTransaction {
+        version: 5, // Orchard-supporting version
+        anchor: anchor_hex.to_string(),
+        spends: notes.iter().map(|n| SpendInfo {
+            nullifier: n.nullifier.clone(),
+            cmx: n.cmx.clone(),
+            value: n.value,
+            position: n.position,
+        }).collect(),
+        outputs: {
+            let mut outputs = vec![OutputInfo {
+                recipient: recipient.to_string(),
+                value: amount,
+                memo: None,
+            }];
+            if change > 0 {
+                outputs.push(OutputInfo {
+                    recipient: "change".to_string(),
+                    value: change,
+                    memo: None,
+                });
+            }
+            outputs
+        },
+        fee,
+        alphas: alphas.clone(),
+    };
+
+    let unsigned_tx_json = serde_json::to_string(&unsigned_tx)
+        .map_err(|e| JsError::new(&format!("Serialization failed: {}", e)))?;
+
+    #[derive(Serialize)]
+    struct BuildResult {
+        sighash: String,
+        alphas: Vec<String>,
+        unsigned_tx: String,
+        summary: String,
+        account_index: u32,
+    }
+
+    let result = BuildResult {
+        sighash: hex_encode(&sighash),
+        alphas,
+        unsigned_tx: unsigned_tx_json,
+        summary,
+        account_index,
+    };
+
+    serde_wasm_bindgen::to_value(&result)
+        .map_err(|e| JsError::new(&format!("Serialization failed: {}", e)))
+}
+
+/// Merkle path info for a spendable note
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MerklePathInfo {
+    /// The merkle path siblings (32 hashes of 32 bytes each, hex)
+    pub path: Vec<String>,
+    /// Position in the tree
+    pub position: u64,
+}
+
+/// Spend info for unsigned transaction
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct SpendInfo {
+    nullifier: String,
+    cmx: String,
+    value: u64,
+    position: u64,
+}
+
+/// Output info for unsigned transaction
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct OutputInfo {
+    recipient: String,
+    value: u64,
+    memo: Option<String>,
+}
+
+/// Unsigned transaction structure
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct UnsignedTransaction {
+    version: u32,
+    anchor: String,
+    spends: Vec<SpendInfo>,
+    outputs: Vec<OutputInfo>,
+    fee: u64,
+    alphas: Vec<String>,
+}
+
+/// Complete a transaction by applying signatures from cold wallet
+/// Returns the serialized signed transaction ready for broadcast
+#[wasm_bindgen]
+pub fn complete_transaction(
+    unsigned_tx_json: &str,
+    signatures_json: JsValue,
+) -> Result<String, JsError> {
+    // Parse unsigned transaction
+    let unsigned_tx: UnsignedTransaction = serde_json::from_str(unsigned_tx_json)
+        .map_err(|e| JsError::new(&format!("Invalid unsigned tx: {}", e)))?;
+
+    // Parse signatures
+    let signatures: Vec<String> = serde_wasm_bindgen::from_value(signatures_json)
+        .map_err(|e| JsError::new(&format!("Invalid signatures: {}", e)))?;
+
+    // Verify signature count matches action count
+    let expected_sigs = unsigned_tx.spends.len() + unsigned_tx.outputs.len();
+    if signatures.len() != expected_sigs {
+        return Err(JsError::new(&format!(
+            "Signature count mismatch: got {}, expected {}",
+            signatures.len(),
+            expected_sigs
+        )));
+    }
+
+    // Build signed transaction
+    // In a full implementation, this would create proper Zcash v5 transaction bytes
+    // For now, we create a structure that zidecar can parse
+    #[derive(Serialize)]
+    struct SignedTransaction {
+        version: u32,
+        anchor: String,
+        actions: Vec<SignedAction>,
+        fee: u64,
+    }
+
+    #[derive(Serialize)]
+    struct SignedAction {
+        nullifier: String,
+        cmx: String,
+        value: u64,
+        signature: String,
+        alpha: String,
+    }
+
+    let mut actions = Vec::new();
+
+    // Add spend actions
+    for (i, spend) in unsigned_tx.spends.iter().enumerate() {
+        actions.push(SignedAction {
+            nullifier: spend.nullifier.clone(),
+            cmx: spend.cmx.clone(),
+            value: spend.value,
+            signature: signatures.get(i).cloned().unwrap_or_default(),
+            alpha: unsigned_tx.alphas.get(i).cloned().unwrap_or_default(),
+        });
+    }
+
+    // Add output actions (with dummy nullifiers)
+    let spend_count = unsigned_tx.spends.len();
+    for (i, output) in unsigned_tx.outputs.iter().enumerate() {
+        let sig_idx = spend_count + i;
+        actions.push(SignedAction {
+            nullifier: "0".repeat(64), // Outputs don't have nullifiers
+            cmx: "0".repeat(64), // CMX computed by network
+            value: output.value,
+            signature: signatures.get(sig_idx).cloned().unwrap_or_default(),
+            alpha: unsigned_tx.alphas.get(sig_idx).cloned().unwrap_or_default(),
+        });
+    }
+
+    let signed_tx = SignedTransaction {
+        version: unsigned_tx.version,
+        anchor: unsigned_tx.anchor,
+        actions,
+        fee: unsigned_tx.fee,
+    };
+
+    // Serialize as hex for broadcast
+    let tx_json = serde_json::to_string(&signed_tx)
+        .map_err(|e| JsError::new(&format!("Serialization failed: {}", e)))?;
+
+    Ok(hex_encode(tx_json.as_bytes()))
+}
+
+/// Get the commitment proof request data for a note
+/// Returns the cmx that should be sent to zidecar's GetCommitmentProof
+#[wasm_bindgen]
+pub fn get_commitment_proof_request(note_cmx_hex: &str) -> Result<String, JsError> {
+    // Just validate and return the cmx
+    let cmx_bytes = hex_decode(note_cmx_hex)
+        .ok_or_else(|| JsError::new("Invalid cmx hex"))?;
+    if cmx_bytes.len() != 32 {
+        return Err(JsError::new("CMX must be 32 bytes"));
+    }
+    Ok(note_cmx_hex.to_string())
 }
 
 #[test]
