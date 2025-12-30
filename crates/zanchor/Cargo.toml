@@ -4,6 +4,13 @@ members = [
     "cli",
     "runtime",
     "pallets/zcash-light",
+    "pallets/escrow-arbitration",
+    "pallets/frost-bridge",
+    "pallets/osst-threshold",
+    "pallets/custody",
+    "pallets/shielded-pool",
+    "pallets/penumbra-bridge",
+    "pallets/zcash-frost",
 ]
 
 [workspace.package]
@@ -17,11 +24,22 @@ description = "Zanchor - Zcash trust anchor parachain for Polkadot"
 [workspace.dependencies]
 # local pallets
 pallet-zcash-light = { path = "pallets/zcash-light", default-features = false }
+pallet-escrow-arbitration = { path = "pallets/escrow-arbitration", default-features = false }
+pallet-frost-bridge = { path = "pallets/frost-bridge", default-features = false }
+pallet-osst-threshold = { path = "pallets/osst-threshold", default-features = false }
+pallet-custody = { path = "pallets/custody", default-features = false }
+pallet-shielded-pool = { path = "pallets/shielded-pool", default-features = false }
+pallet-penumbra-bridge = { path = "pallets/penumbra-bridge", default-features = false }
+pallet-zcash-frost = { path = "pallets/zcash-frost", default-features = false }
+
+# osst crate
+osst = { path = "../osst", default-features = false }
 
 # polkadot-sdk (stable2509-2)
 frame-support = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
 frame-system = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
 frame-executive = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+frame-benchmarking = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
 frame-try-runtime = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
 frame-metadata-hash-extension = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
 pallet-aura = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
@@ -31,6 +49,7 @@ pallet-timestamp = { git = "https://github.com/paritytech/polkadot-sdk", tag = "
 pallet-transaction-payment = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
 pallet-transaction-payment-rpc-runtime-api = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
 pallet-message-queue = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+pallet-assets = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
 
 sp-api = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
 sp-block-builder = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
@@ -41,6 +60,7 @@ sp-core = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-
 sp-genesis-builder = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
 sp-inherents = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
 sp-io = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
+sp-std = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
 sp-offchain = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
 sp-runtime = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }
 sp-session = { git = "https://github.com/paritytech/polkadot-sdk", tag = "polkadot-stable2509-2", default-features = false }

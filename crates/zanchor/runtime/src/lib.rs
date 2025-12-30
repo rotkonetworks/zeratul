@@ -14,6 +14,9 @@ use alloc::vec::Vec;
 
 mod genesis_config_presets;
 
+#[cfg(test)]
+mod integration_tests;
+
 use cumulus_pallet_parachain_system::RelayNumberMonotonicallyIncreases;
 use cumulus_primitives_core::AggregateMessageOrigin;
 use frame_support::{
@@ -173,7 +176,7 @@ impl frame_system::Config for Runtime {
 
 impl pallet_timestamp::Config for Runtime {
     type Moment = u64;
-    type OnTimestampSet = Aura;
+    type OnTimestampSet = ();  // Skip Aura's slot assertion check for dev mode
     type MinimumPeriod = ConstU64<3000>;
     type WeightInfo = ();
 }
@@ -182,7 +185,7 @@ impl pallet_aura::Config for Runtime {
     type AuthorityId = AuraId;
     type DisabledValidators = ();
     type MaxAuthorities = ConstU32<100_000>;
-    type AllowMultipleBlocksPerSlot = ConstBool<false>;
+    type AllowMultipleBlocksPerSlot = ConstBool<true>;
     type SlotDuration = ConstU64<6000>;
 }
 
@@ -400,6 +403,167 @@ impl pallet_zcash_light::Config for Runtime {
     type WeightInfo = ();
 }
 
+// OSST Threshold Custody configuration
+// uses strict BFT: t = floor(2n/3) + 1
+// n=4 → t=3 (tolerates 1), n=7 → t=5 (tolerates 2), n=10 → t=7 (tolerates 3)
+parameter_types! {
+    pub const OsstMinCustodians: u32 = 4;  // minimum for 1 failure tolerance
+    pub const OsstMaxCustodians: u32 = 100;
+    pub const OsstThresholdNumerator: u32 = 2;
+    pub const OsstThresholdDenominator: u32 = 3;
+    pub const OsstReshareTimeout: u32 = 100; // ~10 minutes at 6s blocks
+    pub const OsstLivenessValidity: u32 = 1000; // ~100 minutes
+    pub const OsstEpochDuration: u32 = 14400; // ~24 hours at 6s blocks
+}
+
+impl pallet_osst_threshold::Config for Runtime {
+    type MinCustodians = OsstMinCustodians;
+    type MaxCustodians = OsstMaxCustodians;
+    type ThresholdNumerator = OsstThresholdNumerator;
+    type ThresholdDenominator = OsstThresholdDenominator;
+    type ReshareTimeout = OsstReshareTimeout;
+    type LivenessValidity = OsstLivenessValidity;
+    type EpochDuration = OsstEpochDuration;
+}
+
+// pallet-assets configuration for wrapped assets (zBTC, zZEC)
+parameter_types! {
+    pub const AssetDeposit: Balance = 100 * UNIT;
+    pub const AssetAccountDeposit: Balance = EXISTENTIAL_DEPOSIT;
+    pub const ApprovalDeposit: Balance = EXISTENTIAL_DEPOSIT;
+    pub const StringLimit: u32 = 50;
+    pub const MetadataDepositBase: Balance = UNIT;
+    pub const MetadataDepositPerByte: Balance = MICROUNIT;
+}
+
+impl pallet_assets::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type Balance = Balance;
+    type AssetId = u32;
+    type AssetIdParameter = codec::Compact<u32>;
+    type Currency = Balances;
+    type CreateOrigin = frame_support::traits::AsEnsureOriginWithArg<frame_system::EnsureSigned<AccountId>>;
+    type ForceOrigin = EnsureRoot<AccountId>;
+    type AssetDeposit = AssetDeposit;
+    type AssetAccountDeposit = AssetAccountDeposit;
+    type MetadataDepositBase = MetadataDepositBase;
+    type MetadataDepositPerByte = MetadataDepositPerByte;
+    type ApprovalDeposit = ApprovalDeposit;
+    type StringLimit = StringLimit;
+    type Freezer = ();
+    type Extra = ();
+    type CallbackHandle = ();
+    type WeightInfo = ();
+    type RemoveItemsLimit = ConstU32<1000>;
+    type Holder = ();
+    #[cfg(feature = "runtime-benchmarks")]
+    type BenchmarkHelper = ();
+}
+
+// frost-bridge configuration for threshold signatures
+parameter_types! {
+    pub const FrostMinSigners: u16 = 3;
+    pub const FrostMaxSigners: u16 = 100;
+    pub const FrostThreshold: u16 = 2;  // t-of-n threshold
+    pub const FrostDkgTimeout: u32 = 100;  // blocks
+    pub const FrostSigningTimeout: u32 = 50;  // blocks
+    pub const FrostRotationPeriod: u32 = 28800;  // ~48 hours at 6s blocks
+    pub const FrostHeartbeatInterval: u32 = 100;  // blocks
+    pub const FrostOfflineThreshold: u32 = 300;  // ~30 minutes without heartbeat
+    pub const FrostSlashingGracePeriod: u32 = 3;  // 3 consecutive misses before penalty
+    pub const FrostMinParticipationRate: u8 = 80;  // 80% minimum participation
+    pub const FrostCircuitBreakerThreshold: u32 = 5;  // 5 failures triggers circuit breaker
+}
+
+impl pallet_frost_bridge::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type MinSigners = FrostMinSigners;
+    type MaxSigners = FrostMaxSigners;
+    type Threshold = FrostThreshold;
+    type DkgTimeout = FrostDkgTimeout;
+    type SigningTimeout = FrostSigningTimeout;
+    type RotationPeriod = FrostRotationPeriod;
+    type HeartbeatInterval = FrostHeartbeatInterval;
+    type OfflineThreshold = FrostOfflineThreshold;
+    type SlashingGracePeriod = FrostSlashingGracePeriod;
+    type MinParticipationRate = FrostMinParticipationRate;
+    type CircuitBreakerThreshold = FrostCircuitBreakerThreshold;
+}
+
+// custody pallet configuration for btc/zec deposits and withdrawals
+parameter_types! {
+    pub const ZbtcAssetId: u32 = 1;  // asset id for wrapped BTC
+    pub const ZzecAssetId: u32 = 2;  // asset id for wrapped ZEC
+    pub const CustodyMinDepositAmount: Balance = 10_000;  // ~0.0001 BTC in satoshis
+    pub const CustodyMinWithdrawalAmount: Balance = 50_000;  // ~0.0005 BTC
+    pub const CustodyWithdrawalFeeBps: u32 = 30;  // 0.3% fee
+    pub const CustodyDepositExpiry: BlockNumber = 14400;  // ~24 hours
+    pub const CustodyMaxWithdrawalsPerCheckpoint: u32 = 256;
+    pub const CustodyCheckpointInterval: BlockNumber = 100;  // ~10 minutes
+    pub const CustodyRequiredConfirmations: u32 = 6;  // btc confirmations
+}
+
+impl pallet_custody::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type AssetId = u32;
+    type Balance = Balance;
+    type Assets = Assets;
+    type FrostBridge = FrostBridge;
+    type ZbtcAssetId = ZbtcAssetId;
+    type ZzecAssetId = ZzecAssetId;
+    type MinDepositAmount = CustodyMinDepositAmount;
+    type MinWithdrawalAmount = CustodyMinWithdrawalAmount;
+    type WithdrawalFeeBps = CustodyWithdrawalFeeBps;
+    type DepositExpiry = CustodyDepositExpiry;
+    type MaxWithdrawalsPerCheckpoint = CustodyMaxWithdrawalsPerCheckpoint;
+    type CheckpointInterval = CustodyCheckpointInterval;
+    type RequiredConfirmations = CustodyRequiredConfirmations;
+}
+
+// shielded pool config
+parameter_types! {
+    pub const ShieldedMinShieldAmount: u64 = 10_000;  // 0.0001 btc dust limit
+    pub const ShieldedRootHistorySize: u32 = 256;  // keep ~256 historical roots valid
+}
+
+impl pallet_shielded_pool::Config for Runtime {
+    type RuntimeEvent = RuntimeEvent;
+    type AssetId = u32;
+    type Balance = Balance;
+    type Assets = Assets;
+    type ZbtcAssetId = ZbtcAssetId;
+    type ZzecAssetId = ZzecAssetId;
+    type MinShieldAmount = ShieldedMinShieldAmount;
+    type RootHistorySize = ShieldedRootHistorySize;
+}
+
+// Escrow arbitration config (shielded P2P trading)
+parameter_types! {
+    pub const EscrowMinAgentStake: Balance = 100 * UNIT;
+    pub const EscrowMinArbitratorStake: Balance = 500 * UNIT;
+    pub const EscrowDefaultFundingDeadline: u32 = 100;  // ~10 min at 6s blocks
+    pub const EscrowDefaultPaymentTimeout: u32 = 1000;  // ~1.6 hours
+    pub const EscrowDisputeVotingPeriod: u32 = 500;     // ~50 min
+    pub const EscrowMinArbitratorsForDispute: u32 = 3;
+    pub const EscrowMinAgentsPerEscrow: u32 = 1;
+    pub const EscrowSigningTimeout: u32 = 100;          // ~10 min for FROST signing
+    pub const EscrowMinChainServiceDeposit: Balance = UNIT;
+}
+
+impl pallet_escrow_arbitration::Config for Runtime {
+    type Currency = Balances;
+    type MinAgentStake = EscrowMinAgentStake;
+    type MinArbitratorStake = EscrowMinArbitratorStake;
+    type DefaultFundingDeadline = EscrowDefaultFundingDeadline;
+    type DefaultPaymentTimeout = EscrowDefaultPaymentTimeout;
+    type DisputeVotingPeriod = EscrowDisputeVotingPeriod;
+    type MinArbitratorsForDispute = EscrowMinArbitratorsForDispute;
+    type MinAgentsPerEscrow = EscrowMinAgentsPerEscrow;
+    type SigningTimeout = EscrowSigningTimeout;
+    type MinChainServiceDeposit = EscrowMinChainServiceDeposit;
+    type WeightInfo = pallet_escrow_arbitration::weights::SubstrateWeight<Runtime>;
+}
+
 // Construct runtime
 frame_support::construct_runtime!(
     pub enum Runtime {
@@ -429,6 +593,24 @@ frame_support::construct_runtime!(
 
         // Zcash Light Client (the main event!)
         ZcashLight: pallet_zcash_light = 50,
+
+        // OSST Threshold Custody for zZEC
+        OsstThreshold: pallet_osst_threshold = 51,
+
+        // Wrapped assets (zBTC, zZEC)
+        Assets: pallet_assets = 52,
+
+        // FROST threshold signature bridge
+        FrostBridge: pallet_frost_bridge = 53,
+
+        // BTC/ZEC custody and deposit/withdrawal management
+        Custody: pallet_custody = 54,
+
+        // privacy-preserving shielded pool with ligerito proofs
+        ShieldedPool: pallet_shielded_pool = 55,
+
+        // P2P escrow arbitration (shielded LocalCryptos)
+        EscrowArbitration: pallet_escrow_arbitration = 56,
     }
 );
 

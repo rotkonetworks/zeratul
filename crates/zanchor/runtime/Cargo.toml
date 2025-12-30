@@ -22,6 +22,11 @@ hex-literal = "0.4"
 
 # local
 pallet-zcash-light = { workspace = true }
+pallet-osst-threshold = { workspace = true }
+pallet-frost-bridge = { workspace = true }
+pallet-custody = { workspace = true }
+pallet-shielded-pool = { workspace = true }
+pallet-escrow-arbitration = { workspace = true }
 
 # frame
 frame-support = { workspace = true }
@@ -38,6 +43,7 @@ pallet-timestamp = { workspace = true }
 pallet-transaction-payment = { workspace = true }
 pallet-transaction-payment-rpc-runtime-api = { workspace = true }
 pallet-message-queue = { workspace = true }
+pallet-assets = { workspace = true }
 
 # sp
 sp-api = { workspace = true }
@@ -81,6 +87,12 @@ std = [
     "scale-info/std",
     "log/std",
     "pallet-zcash-light/std",
+    "pallet-osst-threshold/std",
+    "pallet-frost-bridge/std",
+    "pallet-custody/std",
+    "pallet-shielded-pool/std",
+    "pallet-escrow-arbitration/std",
+    "pallet-assets/std",
     "frame-support/std",
     "frame-system/std",
     "frame-executive/std",
@@ -131,6 +143,7 @@ runtime-benchmarks = [
     "pallet-timestamp/runtime-benchmarks",
     "pallet-xcm/runtime-benchmarks",
     "pallet-zcash-light/runtime-benchmarks",
+    "pallet-osst-threshold/runtime-benchmarks",
     "sp-runtime/runtime-benchmarks",
     "xcm-builder/runtime-benchmarks",
 ]
@@ -145,6 +158,7 @@ try-runtime = [
     "pallet-transaction-payment/try-runtime",
     "pallet-xcm/try-runtime",
     "pallet-zcash-light/try-runtime",
+    "pallet-osst-threshold/try-runtime",
     "cumulus-pallet-aura-ext/try-runtime",
     "cumulus-pallet-parachain-system/try-runtime",
     "cumulus-pallet-xcm/try-runtime",
