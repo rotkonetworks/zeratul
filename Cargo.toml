@@ -6,6 +6,7 @@ members = [
     "crates/ligerito-merkle",
     "crates/ligerito",
     "crates/ligerito-beefy",
+    "crates/ligerito-escrow",
     # PolkaVM polynomial commitment verification
     "crates/polkavm-pcvm",
     # IBP monitoring probes
@@ -25,6 +26,8 @@ members = [
     # Zync (light client)
     "crates/zync-core",
     "crates/zafu-wasm",
+    # OSST (One-Step Schnorr Threshold)
+    "crates/osst",
 ]
 # Excluded from workspace (different build targets or incomplete)
 exclude = [
