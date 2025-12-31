@@ -1,0 +1,50 @@
+[package]
+name = "osst"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "One-Step Schnorr Threshold Identification (OSST) - from Mergoupis-Anagnou paper"
+repository = "https://github.com/rotkonetworks/zeratul"
+
+[features]
+default = ["std", "ristretto255"]
+std = [
+    "sha2/std",
+    "rand_core/std",
+]
+# Curve backends
+ristretto255 = ["dep:curve25519-dalek"]
+pallas = ["dep:pasta_curves"]
+secp256k1 = ["dep:k256"]
+decaf377 = ["dep:decaf377"]
+
+[dependencies]
+# hashing
+sha2 = { version = "0.10", default-features = false }
+
+# randomness
+rand_core = { version = "0.6", default-features = false }
+
+# Curve backends (optional)
+# ristretto255 - for Polkadot/sr25519 compatibility
+curve25519-dalek = { version = "4.1", default-features = false, features = ["digest", "group", "alloc", "rand_core"], optional = true }
+
+# pallas - for Zcash Orchard compatibility
+pasta_curves = { version = "0.5", default-features = false, features = ["alloc"], optional = true }
+
+# secp256k1 - for Bitcoin compatibility
+k256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa"], optional = true }
+
+# decaf377 - for Penumbra compatibility
+decaf377 = { version = "0.10", default-features = false, optional = true }
+
+# serialization
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"], optional = true }
+
+# substrate compatibility
+codec = { version = "3.6", package = "parity-scale-codec", default-features = false, features = ["derive"], optional = true }
+scale-info = { version = "2.11", default-features = false, features = ["derive"], optional = true }
+
+[dev-dependencies]
+rand = "0.8"
+hex = "0.4"
