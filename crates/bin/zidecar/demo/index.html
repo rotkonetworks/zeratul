@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Zidecar - Zcash Cold Wallet</title>
+    <style>
+        :root {
+            --bg: #0d0d12;
+            --surface: #16161d;
+            --border: #2a2a35;
+            --gold: #f4a31e;
+            --text: #e0e0e4;
+            --dim: #707078;
+            --ok: #50c878;
+            --err: #c05050;
+        }
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body {
+            font-family: 'SF Mono', 'Consolas', 'Monaco', monospace;
+            font-size: 13px;
+            line-height: 1.5;
+            background: var(--bg);
+            color: var(--text);
+            max-width: 500px;
+            margin: 0 auto;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        h1 { color: var(--gold); font-size: 14px; text-transform: uppercase; letter-spacing: 2px; margin-bottom: 4px; }
+        .subtitle { color: var(--dim); font-size: 11px; margin-bottom: 20px; }
+        .step { margin-bottom: 16px; }
+        .step-header {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            padding: 8px 0;
+            color: var(--dim);
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+        .step-header .num {
+            width: 20px;
+            height: 20px;
+            border: 1px solid var(--border);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 10px;
+        }
+        .step.active .step-header { color: var(--gold); }
+        .step.active .step-header .num { border-color: var(--gold); color: var(--gold); }
+        .step.done .step-header .num { background: var(--ok); border-color: var(--ok); color: #000; }
+        .step.done .step-header { color: var(--ok); }
+        .step-content {
+            padding: 12px;
+            background: var(--surface);
+            border: 1px solid var(--border);
+            display: none;
+        }
+        .step.active .step-content { display: block; border-color: var(--gold); }
+        button {
+            background: var(--gold);
+            color: #000;
+            border: none;
+            padding: 8px 16px;
+            cursor: pointer;
+            font: inherit;
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            width: 100%;
+            margin: 4px 0;
+        }
+        button:hover { filter: brightness(1.1); }
+        button:disabled { background: var(--dim); opacity: 0.5; cursor: not-allowed; }
+        button.secondary { background: var(--surface); color: var(--text); border: 1px solid var(--border); }
+        button.secondary:hover { border-color: var(--gold); }
+        button.danger { background: var(--err); }
+        input, textarea, select {
+            width: 100%;
+            padding: 8px;
+            border: 1px solid var(--border);
+            background: var(--bg);
+            color: var(--text);
+            font: inherit;
+            margin: 4px 0;
+        }
+        input:focus, textarea:focus, select:focus { border-color: var(--gold); outline: none; }
+        .toggle { display: flex; gap: 0; margin: 8px 0; }
+        .toggle button { flex: 1; background: var(--surface); color: var(--dim); border: 1px solid var(--border); }
+        .toggle button.active { background: var(--gold); color: #000; border-color: var(--gold); }
+        .balance { font-size: 24px; color: var(--gold); text-align: center; padding: 16px 0; }
+        .address { word-break: break-all; background: var(--bg); padding: 8px; font-size: 10px; color: var(--dim); }
+        .info-row { display: flex; justify-content: space-between; padding: 4px 0; font-size: 11px; }
+        .info-row .label { color: var(--dim); }
+        #qrScanner { display: none; text-align: center; }
+        #qrScanner video { width: 200px; height: 200px; object-fit: cover; margin: 8px auto; }
+        #qrCanvas { display: none; }
+        .hidden { display: none !important; }
+        .status { padding: 8px; background: var(--bg); font-size: 11px; margin: 8px 0; }
+        .status.ok { border-left: 3px solid var(--ok); }
+        .status.warn { border-left: 3px solid var(--gold); }
+        .status.err { border-left: 3px solid var(--err); }
+        progress { width: 100%; height: 4px; margin: 8px 0; }
+        progress::-webkit-progress-bar { background: var(--border); }
+        progress::-webkit-progress-value { background: var(--gold); }
+        .qr-display { text-align: center; padding: 12px; background: var(--bg); margin: 8px 0; }
+        .qr-display canvas { max-width: 100%; }
+        .tx-summary { background: var(--bg); padding: 8px; font-size: 11px; margin: 8px 0; }
+        .log { max-height: 100px; overflow-y: auto; font-size: 10px; color: var(--dim); margin-top: 20px; padding: 8px; background: var(--surface); }
+        .log-entry { padding: 2px 0; }
+        .log-entry.error { color: var(--err); }
+        .log-entry.success { color: var(--ok); }
+    </style>
+</head>
+<body>
+    <h1>Zidecar</h1>
+    <p class="subtitle">Zcash Cold Wallet Demo</p>
+
+    <!-- Step 1: Connect -->
+    <div class="step active" id="step1">
+        <div class="step-header"><span class="num">1</span> Connect</div>
+        <div class="step-content">
+            <input type="text" id="serverUrl" value="http://localhost:9067" placeholder="Server URL">
+            <button onclick="connectToZidecar()">Connect to Zidecar</button>
+            <div id="connectionStatus" class="status hidden"></div>
+        </div>
+    </div>
+
+    <!-- Step 2: Import Wallet -->
+    <div class="step" id="step2">
+        <div class="step-header"><span class="num">2</span> Import Wallet</div>
+        <div class="step-content">
+            <div class="toggle">
+                <button id="qrModeBtn" class="active" onclick="setImportMode('qr')">Scan QR</button>
+                <button id="manualModeBtn" onclick="setImportMode('manual')">Manual</button>
+            </div>
+            <div id="qrImportSection">
+                <button onclick="startQrScanner()">Open Camera</button>
+                <div id="qrScanner">
+                    <video id="qrVideo" autoplay playsinline></video>
+                    <canvas id="qrCanvas"></canvas>
+                    <button class="secondary" onclick="stopQrScanner()">Cancel</button>
+                </div>
+            </div>
+            <div id="manualImport" class="hidden">
+                <textarea id="fvkInput" rows="3" placeholder="Paste Orchard FVK hex (192 chars)"></textarea>
+                <select id="networkSelect">
+                    <option value="testnet">Testnet</option>
+                    <option value="mainnet">Mainnet</option>
+                </select>
+                <button onclick="importFvkManual()">Import FVK</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Step 3: Wallet -->
+    <div class="step" id="step3">
+        <div class="step-header"><span class="num">3</span> Wallet</div>
+        <div class="step-content">
+            <div class="balance" id="balance">0.00000000 ZEC</div>
+            <div class="info-row"><span class="label">Account</span><span id="accountIndex">0</span></div>
+            <div class="info-row"><span class="label">Network</span><span id="networkName">testnet</span></div>
+            <div class="info-row"><span class="label">Notes</span><span id="notesFound">0</span></div>
+            <div id="syncSection">
+                <div id="syncStatus" class="status hidden"></div>
+                <progress id="syncProgress" value="0" max="100" class="hidden"></progress>
+                <button id="syncBtn" onclick="startSync()">Sync Wallet</button>
+            </div>
+            <button class="secondary" onclick="clearWallet()">Clear Wallet</button>
+        </div>
+    </div>
+
+    <!-- Step 4: Send -->
+    <div class="step" id="step4">
+        <div class="step-header"><span class="num">4</span> Send</div>
+        <div class="step-content">
+            <!-- Phase: Build -->
+            <div id="txBuildPhase">
+                <input type="text" id="recipientAddr" placeholder="Recipient address (u1...)">
+                <input type="number" id="sendAmount" placeholder="Amount (ZEC)" step="0.00000001">
+                <button onclick="buildTransaction()">Build Transaction</button>
+            </div>
+            <!-- Phase: Sign -->
+            <div id="txSignPhase" class="hidden">
+                <p style="font-size: 11px; color: var(--dim); margin-bottom: 8px;">Scan with Zigner to sign:</p>
+                <div class="qr-display"><canvas id="signQrCanvas"></canvas></div>
+                <div id="txSummary" class="tx-summary"></div>
+                <button onclick="startSignatureScanner()">Scan Signature</button>
+                <button class="secondary" onclick="cancelTransaction()">Cancel</button>
+            </div>
+            <!-- Phase: Scan Signature -->
+            <div id="txScanPhase" class="hidden">
+                <div id="sigQrScanner" style="text-align: center;">
+                    <video id="sigQrVideo" autoplay playsinline style="width: 200px; height: 200px; object-fit: cover;"></video>
+                    <canvas id="sigQrCanvas" class="hidden"></canvas>
+                </div>
+                <button class="secondary" onclick="stopSignatureScanner()">Cancel</button>
+            </div>
+            <!-- Phase: Broadcast -->
+            <div id="txBroadcastPhase" class="hidden">
+                <div class="status ok">Transaction signed!</div>
+                <button onclick="broadcastTransaction()">Broadcast</button>
+                <button class="secondary" onclick="cancelTransaction()">Cancel</button>
+            </div>
+            <!-- Result -->
+            <div id="txResult" class="status hidden"></div>
+        </div>
+    </div>
+
+    <!-- Log -->
+    <div id="activityLog" class="log"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/jsqr@1.4.0/dist/jsQR.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.3/build/qrcode.min.js"></script>
+
+    <script type="module">
+        // State
+        let wallet = null;
+        let zidecarConnected = false;
+        let videoStream = null;
+        let scanningInterval = null;
+        let foundNotes = [];
+        let spentNullifiers = new Set();
+        let currentTx = null;
+        let signatureVideoStream = null;
+        let signatureScanInterval = null;
+
+        const QR_TYPE_FVK_EXPORT = 0x01;
+        const QR_TYPE_SIGN_REQUEST = 0x02;
+        const QR_TYPE_SIGNATURES = 0x03;
+
+        // Step management
+        function setStep(n) {
+            document.querySelectorAll('.step').forEach((el, i) => {
+                el.classList.remove('active', 'done');
+                if (i + 1 < n) el.classList.add('done');
+                else if (i + 1 === n) el.classList.add('active');
+            });
+        }
+
+        // Logging
+        function log(message, type = 'info') {
+            const logEl = document.getElementById('activityLog');
+            const entry = document.createElement('div');
+            entry.className = `log-entry ${type}`;
+            entry.textContent = `${message}`;
+            logEl.insertBefore(entry, logEl.firstChild);
+            if (logEl.children.length > 20) logEl.removeChild(logEl.lastChild);
+        }
+
+        // Hex utilities
+        function hexToBytes(hex) {
+            const bytes = new Uint8Array(hex.length / 2);
+            for (let i = 0; i < bytes.length; i++) {
+                bytes[i] = parseInt(hex.substr(i * 2, 2), 16);
+            }
+            return bytes;
+        }
+
+        function bytesToHex(bytes) {
+            return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+        }
+
+        function formatZec(zatoshis) {
+            return (Number(zatoshis) / 100000000).toFixed(8);
+        }
+
+        // Connect
+        window.connectToZidecar = async function() {
+            const url = document.getElementById('serverUrl').value;
+            const statusEl = document.getElementById('connectionStatus');
+            statusEl.classList.remove('hidden');
+            statusEl.className = 'status warn';
+            statusEl.textContent = 'Connecting...';
+
+            try {
+                await fetch(`${url}/health`, { method: 'GET', mode: 'cors' }).catch(() => null);
+                zidecarConnected = true;
+                statusEl.className = 'status ok';
+                statusEl.textContent = 'Connected';
+                log('Connected to zidecar', 'success');
+                setStep(2);
+            } catch (e) {
+                statusEl.className = 'status err';
+                statusEl.textContent = 'Failed: ' + e.message;
+                log('Connection failed', 'error');
+            }
+        };
+
+        // Import mode toggle
+        window.setImportMode = function(mode) {
+            const qrBtn = document.getElementById('qrModeBtn');
+            const manualBtn = document.getElementById('manualModeBtn');
+            const qrSection = document.getElementById('qrImportSection');
+            const manualSection = document.getElementById('manualImport');
+            stopQrScanner();
+
+            if (mode === 'qr') {
+                qrBtn.classList.add('active');
+                manualBtn.classList.remove('active');
+                qrSection.classList.remove('hidden');
+                manualSection.classList.add('hidden');
+            } else {
+                qrBtn.classList.remove('active');
+                manualBtn.classList.add('active');
+                qrSection.classList.add('hidden');
+                manualSection.classList.remove('hidden');
+            }
+        };
+
+        // QR Scanner
+        window.startQrScanner = async function() {
+            const scannerDiv = document.getElementById('qrScanner');
+            const video = document.getElementById('qrVideo');
+            const canvas = document.getElementById('qrCanvas');
+            const ctx = canvas.getContext('2d');
+
+            try {
+                scannerDiv.style.display = 'block';
+                videoStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                video.srcObject = videoStream;
+                log('Camera started');
+
+                scanningInterval = setInterval(() => {
+                    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+                        canvas.width = video.videoWidth;
+                        canvas.height = video.videoHeight;
+                        ctx.drawImage(video, 0, 0);
+                        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                        const code = jsQR(imageData.data, imageData.width, imageData.height);
+                        if (code) {
+                            try {
+                                const fvkData = parseFvkExportQR(code.data);
+                                importFvk(fvkData);
+                                stopQrScanner();
+                            } catch (e) {
+                                // Keep scanning
+                            }
+                        }
+                    }
+                }, 100);
+            } catch (e) {
+                log('Camera failed: ' + e.message, 'error');
+                scannerDiv.style.display = 'none';
+            }
+        };
+
+        window.stopQrScanner = function() {
+            if (scanningInterval) { clearInterval(scanningInterval); scanningInterval = null; }
+            if (videoStream) { videoStream.getTracks().forEach(t => t.stop()); videoStream = null; }
+            document.getElementById('qrScanner').style.display = 'none';
+        };
+
+        // Parse FVK QR
+        function parseFvkExportQR(hexData) {
+            const data = hexToBytes(hexData);
+            if (data.length < 9 || data[0] !== 0x53 || data[1] !== 0x04 || data[2] !== QR_TYPE_FVK_EXPORT) {
+                throw new Error('Invalid QR');
+            }
+            let offset = 3;
+            const flags = data[offset++];
+            const isMainnet = (flags & 0x01) !== 0;
+            const hasOrchard = (flags & 0x02) !== 0;
+            if (!hasOrchard) throw new Error('No Orchard FVK');
+
+            const accountIndex = data[offset] | (data[offset+1] << 8) | (data[offset+2] << 16) | (data[offset+3] << 24);
+            offset += 4;
+            const labelLen = data[offset++];
+            const label = labelLen > 0 ? new TextDecoder().decode(data.slice(offset, offset + labelLen)) : `Account ${accountIndex}`;
+            offset += labelLen;
+
+            if (offset + 96 > data.length) throw new Error('FVK truncated');
+            const orchardFvk = data.slice(offset, offset + 96);
+
+            return { accountIndex, label, orchardFvk: bytesToHex(orchardFvk), network: isMainnet ? 'mainnet' : 'testnet' };
+        }
+
+        // Manual import
+        window.importFvkManual = function() {
+            const fvkHex = document.getElementById('fvkInput').value.trim();
+            const network = document.getElementById('networkSelect').value;
+            if (fvkHex.length !== 192) {
+                log('Invalid FVK length: ' + fvkHex.length, 'error');
+                return;
+            }
+            importFvk({ accountIndex: 0, label: 'Imported', orchardFvk: fvkHex, network });
+        };
+
+        // Import FVK
+        function importFvk(fvkData) {
+            wallet = { ...fvkData, balance: BigInt(0) };
+            document.getElementById('accountIndex').textContent = wallet.accountIndex;
+            document.getElementById('networkName').textContent = wallet.network;
+            localStorage.setItem('zcash_wallet', JSON.stringify(wallet, (k, v) => typeof v === 'bigint' ? v.toString() + 'n' : v));
+            log('Wallet imported: ' + wallet.label, 'success');
+            setStep(3);
+        }
+
+        // Sync
+        window.startSync = async function() {
+            if (!wallet) return;
+            const statusEl = document.getElementById('syncStatus');
+            const progressEl = document.getElementById('syncProgress');
+            const syncBtn = document.getElementById('syncBtn');
+
+            statusEl.classList.remove('hidden');
+            progressEl.classList.remove('hidden');
+            statusEl.className = 'status warn';
+            statusEl.textContent = 'Syncing...';
+            syncBtn.disabled = true;
+
+            // Simulate sync
+            for (let i = 0; i <= 100; i += 5) {
+                await new Promise(r => setTimeout(r, 50));
+                progressEl.value = i;
+            }
+
+            // Mock notes
+            foundNotes = [
+                { value: 100000000n, nullifier: '0'.repeat(64) },
+                { value: 50000000n, nullifier: '1'.repeat(64) }
+            ];
+            wallet.balance = foundNotes.reduce((sum, n) => sum + n.value, BigInt(0));
+
+            document.getElementById('notesFound').textContent = foundNotes.length;
+            document.getElementById('balance').textContent = formatZec(wallet.balance) + ' ZEC';
+
+            statusEl.className = 'status ok';
+            statusEl.textContent = 'Synced';
+            syncBtn.disabled = false;
+            syncBtn.textContent = 'Resync';
+
+            saveState();
+            log('Sync complete: ' + formatZec(wallet.balance) + ' ZEC', 'success');
+            setStep(4);
+        };
+
+        // Clear wallet
+        window.clearWallet = function() {
+            wallet = null;
+            foundNotes = [];
+            spentNullifiers.clear();
+            localStorage.removeItem('zcash_wallet');
+            localStorage.removeItem('zcash_notes');
+            document.getElementById('balance').textContent = '0.00000000 ZEC';
+            document.getElementById('notesFound').textContent = '0';
+            log('Wallet cleared');
+            setStep(2);
+        };
+
+        // Build transaction
+        window.buildTransaction = async function() {
+            const recipient = document.getElementById('recipientAddr').value;
+            const amount = parseFloat(document.getElementById('sendAmount').value);
+            if (!recipient || !amount) { log('Enter recipient and amount', 'error'); return; }
+
+            const amountZat = BigInt(Math.floor(amount * 100000000));
+            const feeZat = BigInt(10000);
+            if (amountZat + feeZat > wallet.balance) { log('Insufficient balance', 'error'); return; }
+
+            const buildResult = {
+                sighash: bytesToHex(crypto.getRandomValues(new Uint8Array(32))),
+                alphas: [bytesToHex(crypto.getRandomValues(new Uint8Array(32)))],
+                summary: `Send ${amount.toFixed(8)} ZEC\nTo: ${recipient.substring(0, 20)}...`,
+                account_index: wallet.accountIndex
+            };
+
+            currentTx = { buildResult, recipient, amount, fee: 0.0001 };
+
+            // Create QR
+            const qrData = createSignRequestQR(buildResult.account_index, buildResult.sighash, buildResult.alphas, buildResult.summary);
+            QRCode.toCanvas(document.getElementById('signQrCanvas'), qrData, { width: 250, margin: 1, color: { dark: '#1a1a2e', light: '#f5b041' } });
+
+            document.getElementById('txSummary').innerHTML = `<pre>${buildResult.summary}</pre>`;
+            document.getElementById('txBuildPhase').classList.add('hidden');
+            document.getElementById('txSignPhase').classList.remove('hidden');
+            log('Transaction built', 'success');
+        };
+
+        function createSignRequestQR(accountIndex, sighash, alphas, summary) {
+            const summaryBytes = new TextEncoder().encode(summary);
+            const totalSize = 3 + 4 + 32 + 2 + (alphas.length * 32) + 2 + summaryBytes.length;
+            const data = new Uint8Array(totalSize);
+            let offset = 0;
+            data[offset++] = 0x53; data[offset++] = 0x04; data[offset++] = QR_TYPE_SIGN_REQUEST;
+            data[offset++] = accountIndex & 0xff; data[offset++] = (accountIndex >> 8) & 0xff;
+            data[offset++] = (accountIndex >> 16) & 0xff; data[offset++] = (accountIndex >> 24) & 0xff;
+            data.set(hexToBytes(sighash), offset); offset += 32;
+            data[offset++] = alphas.length & 0xff; data[offset++] = (alphas.length >> 8) & 0xff;
+            for (const alpha of alphas) { data.set(hexToBytes(alpha), offset); offset += 32; }
+            data[offset++] = summaryBytes.length & 0xff; data[offset++] = (summaryBytes.length >> 8) & 0xff;
+            data.set(summaryBytes, offset);
+            return bytesToHex(data);
+        }
+
+        // Signature scanner
+        window.startSignatureScanner = async function() {
+            const video = document.getElementById('sigQrVideo');
+            const canvas = document.getElementById('sigQrCanvas');
+            const ctx = canvas.getContext('2d');
+
+            document.getElementById('txSignPhase').classList.add('hidden');
+            document.getElementById('txScanPhase').classList.remove('hidden');
+
+            try {
+                signatureVideoStream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'environment' } });
+                video.srcObject = signatureVideoStream;
+
+                signatureScanInterval = setInterval(() => {
+                    if (video.readyState === video.HAVE_ENOUGH_DATA) {
+                        canvas.width = video.videoWidth;
+                        canvas.height = video.videoHeight;
+                        ctx.drawImage(video, 0, 0);
+                        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+                        const code = jsQR(imageData.data, imageData.width, imageData.height);
+                        if (code) {
+                            try {
+                                const sigData = parseSignaturesQR(code.data);
+                                if (sigData.sighash === currentTx.buildResult.sighash) {
+                                    currentTx.signatures = sigData.orchard_sigs;
+                                    stopSignatureScanner();
+                                    document.getElementById('txScanPhase').classList.add('hidden');
+                                    document.getElementById('txBroadcastPhase').classList.remove('hidden');
+                                    log('Signature received', 'success');
+                                }
+                            } catch (e) {}
+                        }
+                    }
+                }, 100);
+            } catch (e) {
+                log('Camera failed', 'error');
+                document.getElementById('txScanPhase').classList.add('hidden');
+                document.getElementById('txSignPhase').classList.remove('hidden');
+            }
+        };
+
+        window.stopSignatureScanner = function() {
+            if (signatureScanInterval) { clearInterval(signatureScanInterval); signatureScanInterval = null; }
+            if (signatureVideoStream) { signatureVideoStream.getTracks().forEach(t => t.stop()); signatureVideoStream = null; }
+            document.getElementById('txScanPhase').classList.add('hidden');
+            document.getElementById('txSignPhase').classList.remove('hidden');
+        };
+
+        function parseSignaturesQR(hexData) {
+            const data = hexToBytes(hexData);
+            if (data.length < 36 || data[0] !== 0x53 || data[1] !== 0x04 || data[2] !== QR_TYPE_SIGNATURES) throw new Error('Invalid');
+            let offset = 3;
+            const sighash = bytesToHex(data.slice(offset, offset + 32)); offset += 32;
+            const tCount = data[offset] | (data[offset + 1] << 8); offset += 2;
+            for (let i = 0; i < tCount; i++) { const sigLen = data[offset] | (data[offset + 1] << 8); offset += 2 + sigLen; }
+            const oCount = data[offset] | (data[offset + 1] << 8); offset += 2;
+            const orchard_sigs = [];
+            for (let i = 0; i < oCount; i++) { orchard_sigs.push(bytesToHex(data.slice(offset, offset + 64))); offset += 64; }
+            return { sighash, orchard_sigs };
+        }
+
+        // Broadcast
+        window.broadcastTransaction = async function() {
+            const resultEl = document.getElementById('txResult');
+            resultEl.classList.remove('hidden');
+            resultEl.className = 'status warn';
+            resultEl.textContent = 'Broadcasting...';
+
+            await new Promise(r => setTimeout(r, 500));
+            const txid = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
+
+            wallet.balance -= BigInt(Math.floor((currentTx.amount + currentTx.fee) * 100000000));
+            document.getElementById('balance').textContent = formatZec(wallet.balance) + ' ZEC';
+
+            resultEl.className = 'status ok';
+            resultEl.innerHTML = 'Sent! TXID: ' + txid.substring(0, 16) + '...';
+            log('Broadcast: ' + txid.substring(0, 16) + '...', 'success');
+
+            saveState();
+            resetTxUI();
+        };
+
+        window.cancelTransaction = function() {
+            currentTx = null;
+            resetTxUI();
+        };
+
+        function resetTxUI() {
+            document.getElementById('txBuildPhase').classList.remove('hidden');
+            document.getElementById('txSignPhase').classList.add('hidden');
+            document.getElementById('txScanPhase').classList.add('hidden');
+            document.getElementById('txBroadcastPhase').classList.add('hidden');
+            document.getElementById('recipientAddr').value = '';
+            document.getElementById('sendAmount').value = '';
+        }
+
+        // State persistence
+        function saveState() {
+            if (wallet) {
+                localStorage.setItem('zcash_wallet', JSON.stringify(wallet, (k, v) => typeof v === 'bigint' ? v.toString() + 'n' : v));
+            }
+            localStorage.setItem('zcash_notes', JSON.stringify({
+                notes: foundNotes.map(n => ({ value: n.value.toString(), nullifier: n.nullifier })),
+                spentNullifiers: Array.from(spentNullifiers)
+            }));
+        }
+
+        function loadState() {
+            const savedWallet = localStorage.getItem('zcash_wallet');
+            const savedNotes = localStorage.getItem('zcash_notes');
+
+            if (savedWallet) {
+                try {
+                    wallet = JSON.parse(savedWallet);
+                    if (typeof wallet.balance === 'string') wallet.balance = BigInt(wallet.balance.replace('n', ''));
+                    else wallet.balance = BigInt(wallet.balance || 0);
+
+                    document.getElementById('accountIndex').textContent = wallet.accountIndex;
+                    document.getElementById('networkName').textContent = wallet.network;
+
+                    if (savedNotes) {
+                        const data = JSON.parse(savedNotes);
+                        foundNotes = (data.notes || []).map(n => ({ value: BigInt(n.value), nullifier: n.nullifier }));
+                        spentNullifiers = new Set(data.spentNullifiers || []);
+                        const unspent = foundNotes.filter(n => !spentNullifiers.has(n.nullifier));
+                        wallet.balance = unspent.reduce((sum, n) => sum + n.value, BigInt(0));
+                        document.getElementById('notesFound').textContent = unspent.length;
+                    }
+
+                    document.getElementById('balance').textContent = formatZec(wallet.balance) + ' ZEC';
+
+                    if (zidecarConnected) {
+                        setStep(foundNotes.length > 0 ? 4 : 3);
+                    }
+                    log('Wallet loaded');
+                } catch (e) {
+                    log('Failed to load wallet', 'error');
+                }
+            }
+        }
+
+        // Init
+        window.addEventListener('load', () => {
+            loadState();
+            log('Ready');
+        });
+    </script>
+</body>
+</html>
