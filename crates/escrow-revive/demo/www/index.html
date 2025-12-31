@@ -1,0 +1,1001 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>cobi.one - Trustless Escrow for Everything</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    :root {
+      --primary: #6366f1;
+      --primary-dark: #4f46e5;
+      --accent: #10b981;
+      --danger: #ef4444;
+      --warning: #f59e0b;
+      --bg: #0f0f1a;
+      --bg-card: #1a1a2e;
+      --bg-card-hover: #252542;
+      --text: #e2e8f0;
+      --text-muted: #94a3b8;
+      --border: #2d2d44;
+    }
+    body {
+      font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      min-height: 100vh;
+    }
+
+    /* Header */
+    header {
+      background: linear-gradient(180deg, rgba(99,102,241,0.1) 0%, transparent 100%);
+      border-bottom: 1px solid var(--border);
+    }
+    .header-inner {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 16px 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .logo {
+      font-size: 26px;
+      font-weight: 800;
+      background: linear-gradient(135deg, var(--primary) 0%, var(--accent) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      letter-spacing: -1px;
+    }
+    .logo span { font-weight: 400; opacity: 0.7; }
+    nav { display: flex; gap: 8px; }
+    nav a {
+      color: var(--text-muted);
+      text-decoration: none;
+      padding: 8px 16px;
+      border-radius: 8px;
+      font-size: 14px;
+      transition: all 0.2s;
+    }
+    nav a:hover, nav a.active {
+      color: var(--text);
+      background: var(--bg-card);
+    }
+    .wallet-btn {
+      background: var(--primary);
+      color: white;
+      border: none;
+      padding: 10px 20px;
+      border-radius: 10px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      transition: all 0.2s;
+    }
+    .wallet-btn:hover { background: var(--primary-dark); transform: translateY(-1px); }
+    .wallet-btn.connected { background: var(--accent); }
+
+    /* Hero */
+    .hero {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 60px 20px;
+      text-align: center;
+    }
+    .hero h1 {
+      font-size: 48px;
+      font-weight: 800;
+      margin-bottom: 16px;
+      background: linear-gradient(135deg, #fff 0%, var(--text-muted) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .hero p {
+      font-size: 18px;
+      color: var(--text-muted);
+      max-width: 600px;
+      margin: 0 auto 40px;
+    }
+    .hero-features {
+      display: flex;
+      justify-content: center;
+      gap: 40px;
+      flex-wrap: wrap;
+    }
+    .hero-feature {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-muted);
+      font-size: 14px;
+    }
+    .hero-feature .icon { font-size: 20px; }
+
+    /* Escrow Types Grid */
+    .section {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 40px 20px;
+    }
+    .section-title {
+      font-size: 24px;
+      font-weight: 700;
+      margin-bottom: 24px;
+    }
+    .escrow-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 16px;
+    }
+    .escrow-card {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 24px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .escrow-card:hover {
+      background: var(--bg-card-hover);
+      border-color: var(--primary);
+      transform: translateY(-2px);
+    }
+    .escrow-card .icon {
+      font-size: 40px;
+      margin-bottom: 16px;
+    }
+    .escrow-card h3 {
+      font-size: 18px;
+      margin-bottom: 8px;
+    }
+    .escrow-card p {
+      font-size: 14px;
+      color: var(--text-muted);
+      margin-bottom: 16px;
+    }
+    .escrow-card .tag {
+      display: inline-block;
+      background: rgba(99,102,241,0.2);
+      color: var(--primary);
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 12px;
+      font-weight: 500;
+    }
+
+    /* Live Escrows */
+    .live-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+    }
+    .filter-tabs {
+      display: flex;
+      gap: 8px;
+    }
+    .filter-tab {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      color: var(--text-muted);
+      padding: 8px 16px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 13px;
+      transition: all 0.2s;
+    }
+    .filter-tab:hover, .filter-tab.active {
+      background: var(--primary);
+      border-color: var(--primary);
+      color: white;
+    }
+
+    .escrow-list {
+      display: flex;
+      flex-direction: column;
+      gap: 12px;
+    }
+    .escrow-item {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 20px;
+      display: grid;
+      grid-template-columns: auto 1fr auto auto auto;
+      gap: 20px;
+      align-items: center;
+      transition: all 0.2s;
+    }
+    .escrow-item:hover {
+      border-color: var(--primary);
+      background: var(--bg-card-hover);
+    }
+    .escrow-type-icon {
+      width: 48px;
+      height: 48px;
+      background: rgba(99,102,241,0.1);
+      border-radius: 12px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 24px;
+    }
+    .escrow-info h4 {
+      font-size: 16px;
+      margin-bottom: 4px;
+    }
+    .escrow-info p {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+    .escrow-amount {
+      text-align: right;
+    }
+    .escrow-amount .value {
+      font-size: 18px;
+      font-weight: 700;
+    }
+    .escrow-amount .label {
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .escrow-reputation {
+      text-align: center;
+    }
+    .reputation-score {
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--accent);
+    }
+    .reputation-label {
+      font-size: 11px;
+      color: var(--text-muted);
+    }
+    .escrow-action .btn {
+      background: var(--primary);
+      color: white;
+      border: none;
+      padding: 10px 24px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 14px;
+      transition: all 0.2s;
+    }
+    .escrow-action .btn:hover { background: var(--primary-dark); }
+    .escrow-action .btn.secondary {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+
+    /* Stats */
+    .stats-bar {
+      background: var(--bg-card);
+      border-top: 1px solid var(--border);
+      border-bottom: 1px solid var(--border);
+      padding: 20px;
+    }
+    .stats-inner {
+      max-width: 1200px;
+      margin: 0 auto;
+      display: flex;
+      justify-content: space-around;
+      text-align: center;
+    }
+    .stat-item .value {
+      font-size: 28px;
+      font-weight: 800;
+      background: linear-gradient(135deg, var(--primary) 0%, var(--accent) 100%);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+    }
+    .stat-item .label {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    /* Modal */
+    .modal-overlay {
+      display: none;
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.8);
+      backdrop-filter: blur(4px);
+      z-index: 1000;
+      align-items: center;
+      justify-content: center;
+      padding: 20px;
+    }
+    .modal-overlay.active { display: flex; }
+    .modal {
+      background: var(--bg-card);
+      border: 1px solid var(--border);
+      border-radius: 20px;
+      max-width: 600px;
+      width: 100%;
+      max-height: 90vh;
+      overflow-y: auto;
+    }
+    .modal-header {
+      padding: 24px;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .modal-header h3 {
+      font-size: 20px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .modal-close {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 24px;
+      cursor: pointer;
+      padding: 4px;
+      line-height: 1;
+    }
+    .modal-close:hover { color: var(--text); }
+    .modal-body { padding: 24px; }
+    .modal-footer {
+      padding: 24px;
+      border-top: 1px solid var(--border);
+      display: flex;
+      gap: 12px;
+      justify-content: flex-end;
+    }
+
+    /* Form */
+    .form-group {
+      margin-bottom: 20px;
+    }
+    .form-group label {
+      display: block;
+      font-size: 14px;
+      font-weight: 500;
+      margin-bottom: 8px;
+    }
+    .form-group input, .form-group select, .form-group textarea {
+      width: 100%;
+      padding: 12px 16px;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      color: var(--text);
+      font-size: 15px;
+      transition: border-color 0.2s;
+    }
+    .form-group input:focus, .form-group select:focus, .form-group textarea:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+    .form-group textarea {
+      resize: vertical;
+      min-height: 100px;
+    }
+    .form-hint {
+      font-size: 12px;
+      color: var(--text-muted);
+      margin-top: 6px;
+    }
+    .form-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+    }
+
+    /* Buttons */
+    .btn {
+      padding: 12px 24px;
+      border-radius: 10px;
+      border: none;
+      cursor: pointer;
+      font-weight: 600;
+      font-size: 14px;
+      transition: all 0.2s;
+    }
+    .btn-primary { background: var(--primary); color: white; }
+    .btn-primary:hover { background: var(--primary-dark); }
+    .btn-success { background: var(--accent); color: white; }
+    .btn-danger { background: var(--danger); color: white; }
+    .btn-ghost {
+      background: transparent;
+      border: 1px solid var(--border);
+      color: var(--text);
+    }
+    .btn-ghost:hover { background: var(--bg-card-hover); }
+
+    /* VSS Badge */
+    .vss-badge {
+      background: linear-gradient(135deg, rgba(99,102,241,0.2) 0%, rgba(16,185,129,0.2) 100%);
+      border: 1px solid rgba(99,102,241,0.3);
+      border-radius: 12px;
+      padding: 16px;
+      margin-bottom: 20px;
+    }
+    .vss-badge h4 {
+      font-size: 14px;
+      margin-bottom: 8px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .vss-badge p {
+      font-size: 13px;
+      color: var(--text-muted);
+    }
+
+    /* Reputation */
+    .rep-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background: rgba(16,185,129,0.1);
+      border: 1px solid rgba(16,185,129,0.3);
+      padding: 4px 10px;
+      border-radius: 20px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--accent);
+    }
+    .rep-badge.new {
+      background: rgba(245,158,11,0.1);
+      border-color: rgba(245,158,11,0.3);
+      color: var(--warning);
+    }
+
+    /* Privacy notice */
+    .privacy-notice {
+      background: linear-gradient(135deg, rgba(139,92,246,0.1) 0%, rgba(99,102,241,0.1) 100%);
+      border: 1px solid rgba(139,92,246,0.2);
+      border-radius: 12px;
+      padding: 20px;
+      margin-top: 40px;
+      display: flex;
+      gap: 16px;
+      align-items: flex-start;
+    }
+    .privacy-notice .icon { font-size: 32px; }
+    .privacy-notice h4 { margin-bottom: 8px; }
+    .privacy-notice p {
+      font-size: 14px;
+      color: var(--text-muted);
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      .header-inner { flex-wrap: wrap; gap: 16px; }
+      nav { order: 3; width: 100%; justify-content: center; }
+      .hero h1 { font-size: 32px; }
+      .escrow-item { grid-template-columns: 1fr; text-align: center; }
+      .form-row { grid-template-columns: 1fr; }
+      .stats-inner { flex-wrap: wrap; gap: 20px; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <div class="logo">cobi<span>.one</span></div>
+      <nav>
+        <a href="#" class="active">Explore</a>
+        <a href="#" onclick="showMyEscrows()">My Escrows</a>
+        <a href="#" onclick="showReputation()">Reputation</a>
+        <a href="#">How it Works</a>
+      </nav>
+      <button class="wallet-btn" id="walletBtn" onclick="connectWallet()">
+        <span>🔗</span> Connect Wallet
+      </button>
+    </div>
+  </header>
+
+  <section class="hero">
+    <h1>Trustless Escrow for Everything</h1>
+    <p>P2P bets, trades, services, and private transfers. Protected by verifiable secret sharing - no trust required.</p>
+    <div class="hero-features">
+      <div class="hero-feature"><span class="icon">🔐</span> 2-of-3 VSS Protection</div>
+      <div class="hero-feature"><span class="icon">👥</span> Community Jury</div>
+      <div class="hero-feature"><span class="icon">🌙</span> Private Transfers</div>
+      <div class="hero-feature"><span class="icon">⭐</span> Reputation System</div>
+    </div>
+  </section>
+
+  <div class="stats-bar">
+    <div class="stats-inner">
+      <div class="stat-item">
+        <div class="value">$2.4M</div>
+        <div class="label">Total Volume</div>
+      </div>
+      <div class="stat-item">
+        <div class="value">1,234</div>
+        <div class="label">Completed Escrows</div>
+      </div>
+      <div class="stat-item">
+        <div class="value">99.2%</div>
+        <div class="label">Success Rate</div>
+      </div>
+      <div class="stat-item">
+        <div class="value">847</div>
+        <div class="label">Active Users</div>
+      </div>
+    </div>
+  </div>
+
+  <section class="section">
+    <h2 class="section-title">Create New Escrow</h2>
+    <div class="escrow-grid">
+      <div class="escrow-card" onclick="showCreateModal('bet')">
+        <div class="icon">🎲</div>
+        <h3>P2P Bet</h3>
+        <p>Bet with strangers on anything. Define clear conditions for jury resolution.</p>
+        <span class="tag">Most Popular</span>
+      </div>
+      <div class="escrow-card" onclick="showCreateModal('trade')">
+        <div class="icon">💱</div>
+        <h3>Fiat/Crypto Trade</h3>
+        <p>Buy or sell crypto with fiat. Bank transfer, PayPal, cash - any method.</p>
+        <span class="tag">Private</span>
+      </div>
+      <div class="escrow-card" onclick="showCreateModal('swap')">
+        <div class="icon">🔄</div>
+        <h3>Crypto Swap</h3>
+        <p>Trustless cross-chain swaps. UM, ZEC, ETH, BTC - any pair.</p>
+        <span class="tag">Cross-chain</span>
+      </div>
+      <div class="escrow-card" onclick="showCreateModal('service')">
+        <div class="icon">💼</div>
+        <h3>Service Escrow</h3>
+        <p>Freelance, consulting, any service. Release on delivery.</p>
+        <span class="tag">Milestones</span>
+      </div>
+      <div class="escrow-card" onclick="showCreateModal('goods')">
+        <div class="icon">📦</div>
+        <h3>Goods Sale</h3>
+        <p>Physical items with delivery tracking. Release on receipt.</p>
+        <span class="tag">Tracked</span>
+      </div>
+      <div class="escrow-card" onclick="showCreateModal('custom')">
+        <div class="icon">⚡</div>
+        <h3>Custom Escrow</h3>
+        <p>Define your own terms. Any agreement between parties.</p>
+        <span class="tag">Flexible</span>
+      </div>
+    </div>
+
+    <div class="privacy-notice">
+      <div class="icon">🌙</div>
+      <div>
+        <h4>Private by Default</h4>
+        <p>Powered by Penumbra's shielded transfers. Your trading activity, balances, and counterparties remain private. Only you control who sees your transaction history.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="live-header">
+      <h2 class="section-title">Live Escrows</h2>
+      <div class="filter-tabs">
+        <button class="filter-tab active" onclick="filterEscrows('all')">All</button>
+        <button class="filter-tab" onclick="filterEscrows('bet')">Bets</button>
+        <button class="filter-tab" onclick="filterEscrows('trade')">Trades</button>
+        <button class="filter-tab" onclick="filterEscrows('service')">Services</button>
+      </div>
+    </div>
+
+    <div class="escrow-list" id="escrowList">
+      <!-- Populated by JS -->
+    </div>
+  </section>
+
+  <!-- Create Bet Modal -->
+  <div class="modal-overlay" id="betModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>🎲 Create P2P Bet</h3>
+        <button class="modal-close" onclick="closeModal('betModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="vss-badge">
+          <h4>🔐 VSS Protected</h4>
+          <p>Funds locked with 2-of-3 secret sharing. Jury can resolve disputes without controlling funds directly.</p>
+        </div>
+
+        <div class="form-group">
+          <label>What are you betting on?</label>
+          <input type="text" id="betTitle" placeholder="e.g., Bitcoin will hit $100k by March 2025">
+        </div>
+
+        <div class="form-group">
+          <label>Detailed Conditions (for Jury)</label>
+          <textarea id="betConditions" placeholder="Define exactly what constitutes a win for each side. Be specific about:
+- Data source to verify outcome
+- Exact time/date for resolution
+- Edge cases and how to handle them"></textarea>
+          <div class="form-hint">Clear conditions = faster resolution if disputed</div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Your Side</label>
+            <select id="betSide">
+              <option value="for">FOR (I bet it happens)</option>
+              <option value="against">AGAINST (I bet it doesn't)</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Stake Amount</label>
+            <input type="number" id="betAmount" placeholder="100">
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Currency</label>
+            <select id="betCurrency">
+              <option value="UM">UM (Penumbra)</option>
+              <option value="USDC">USDC</option>
+              <option value="USD">USD equivalent</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Resolution Date</label>
+            <input type="date" id="betResolution">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>Counterparty (optional)</label>
+          <input type="text" id="betCounterparty" placeholder="Leave empty for open bet anyone can join">
+          <div class="form-hint">Paste address or leave empty to create public listing</div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('betModal')">Cancel</button>
+        <button class="btn btn-primary" onclick="createBet()">Create Bet</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Create Trade Modal -->
+  <div class="modal-overlay" id="tradeModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3>💱 Create Trade Offer</h3>
+        <button class="modal-close" onclick="closeModal('tradeModal')">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="vss-badge">
+          <h4>🌙 Private Trading</h4>
+          <p>Trade fiat for crypto with complete privacy. Your counterparty and amounts stay hidden.</p>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>I want to</label>
+            <select id="tradeType">
+              <option value="sell">Sell Crypto</option>
+              <option value="buy">Buy Crypto</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Cryptocurrency</label>
+            <select id="tradeCrypto">
+              <option value="UM">Penumbra (UM)</option>
+              <option value="ZEC">Zcash (ZEC)</option>
+              <option value="ETH">Ethereum (ETH)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="form-row">
+          <div class="form-group">
+            <label>Amount</label>
+            <input type="number" id="tradeAmount" placeholder="100">
+          </div>
+          <div class="form-group">
+            <label>Price per unit (USD)</label>
+            <input type="number" id="tradePrice" placeholder="1.50" step="0.01">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>Payment Methods</label>
+          <div style="display: flex; flex-wrap: wrap; gap: 12px; margin-top: 8px;">
+            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+              <input type="checkbox" value="bank"> Bank Transfer
+            </label>
+            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+              <input type="checkbox" value="paypal"> PayPal
+            </label>
+            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+              <input type="checkbox" value="wise"> Wise
+            </label>
+            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+              <input type="checkbox" value="revolut"> Revolut
+            </label>
+            <label style="display: flex; align-items: center; gap: 6px; cursor: pointer;">
+              <input type="checkbox" value="cash"> Cash
+            </label>
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label>Trade Terms</label>
+          <textarea id="tradeTerms" placeholder="Any requirements for the trade..."></textarea>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('tradeModal')">Cancel</button>
+        <button class="btn btn-primary" onclick="createTrade()">Create Offer</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Join Escrow Modal -->
+  <div class="modal-overlay" id="joinModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 id="joinModalTitle">Join Escrow</h3>
+        <button class="modal-close" onclick="closeModal('joinModal')">&times;</button>
+      </div>
+      <div class="modal-body" id="joinModalBody">
+        <!-- Populated dynamically -->
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal('joinModal')">Cancel</button>
+        <button class="btn btn-primary" onclick="joinEscrow()">Join & Lock Funds</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // Demo data
+    const DEMO_ESCROWS = [
+      {
+        id: 1,
+        type: 'bet',
+        icon: '🎲',
+        title: 'ETH hits $5k before BTC hits $150k',
+        description: 'First to reach target wins',
+        amount: 500,
+        currency: 'USDC',
+        creator: 'anon_whale',
+        reputation: 98,
+        trades: 47,
+        status: 'open'
+      },
+      {
+        id: 2,
+        type: 'trade',
+        icon: '💱',
+        title: 'Selling 1000 UM',
+        description: 'Bank transfer, Wise accepted',
+        amount: 1500,
+        currency: 'USD',
+        creator: 'privacy_max',
+        reputation: 100,
+        trades: 156,
+        status: 'open'
+      },
+      {
+        id: 3,
+        type: 'bet',
+        icon: '🎲',
+        title: 'Lakers win NBA Finals 2025',
+        description: 'ESPN official results',
+        amount: 200,
+        currency: 'UM',
+        creator: 'sports_better',
+        reputation: 92,
+        trades: 23,
+        status: 'open'
+      },
+      {
+        id: 4,
+        type: 'service',
+        icon: '💼',
+        title: 'Smart Contract Audit',
+        description: 'Solidity audit, 1 week delivery',
+        amount: 2000,
+        currency: 'USDC',
+        creator: 'audit_pro',
+        reputation: 100,
+        trades: 89,
+        status: 'open'
+      },
+      {
+        id: 5,
+        type: 'trade',
+        icon: '💱',
+        title: 'Buying ZEC with PayPal',
+        description: 'Quick settlement, verified PayPal',
+        amount: 800,
+        currency: 'USD',
+        creator: 'zec_buyer',
+        reputation: 95,
+        trades: 34,
+        status: 'open'
+      }
+    ];
+
+    let walletConnected = false;
+    let walletAddress = null;
+    let currentFilter = 'all';
+
+    // Initialize
+    document.addEventListener('DOMContentLoaded', () => {
+      renderEscrows(DEMO_ESCROWS);
+    });
+
+    function renderEscrows(escrows) {
+      const list = document.getElementById('escrowList');
+      const filtered = currentFilter === 'all'
+        ? escrows
+        : escrows.filter(e => e.type === currentFilter);
+
+      list.innerHTML = filtered.map(e => `
+        <div class="escrow-item">
+          <div class="escrow-type-icon">${e.icon}</div>
+          <div class="escrow-info">
+            <h4>${e.title}</h4>
+            <p>${e.description} • by <strong>${e.creator}</strong></p>
+          </div>
+          <div class="escrow-amount">
+            <div class="value">${e.amount.toLocaleString()}</div>
+            <div class="label">${e.currency}</div>
+          </div>
+          <div class="escrow-reputation">
+            <div class="reputation-score">${e.reputation}%</div>
+            <div class="reputation-label">${e.trades} trades</div>
+          </div>
+          <div class="escrow-action">
+            <button class="btn" onclick="showJoinModal(${e.id})">
+              ${e.type === 'bet' ? 'Take Bet' : e.type === 'trade' ? 'Trade' : 'Accept'}
+            </button>
+          </div>
+        </div>
+      `).join('');
+    }
+
+    function filterEscrows(filter) {
+      currentFilter = filter;
+      document.querySelectorAll('.filter-tab').forEach(t => t.classList.remove('active'));
+      event.target.classList.add('active');
+      renderEscrows(DEMO_ESCROWS);
+    }
+
+    function connectWallet() {
+      const btn = document.getElementById('walletBtn');
+      if (!walletConnected) {
+        btn.innerHTML = '<span>⏳</span> Connecting...';
+        setTimeout(() => {
+          walletConnected = true;
+          walletAddress = '0x' + Math.random().toString(16).slice(2, 10);
+          btn.innerHTML = `<span>✓</span> ${walletAddress.slice(0, 6)}...${walletAddress.slice(-4)}`;
+          btn.classList.add('connected');
+        }, 1000);
+      }
+    }
+
+    function showCreateModal(type) {
+      if (type === 'bet') {
+        document.getElementById('betModal').classList.add('active');
+      } else if (type === 'trade') {
+        document.getElementById('tradeModal').classList.add('active');
+      } else {
+        alert(`${type} escrow creation coming soon!`);
+      }
+    }
+
+    function closeModal(id) {
+      document.getElementById(id).classList.remove('active');
+    }
+
+    function showJoinModal(id) {
+      const escrow = DEMO_ESCROWS.find(e => e.id === id);
+      if (!escrow) return;
+
+      document.getElementById('joinModalTitle').textContent =
+        escrow.type === 'bet' ? '🎲 Take This Bet' :
+        escrow.type === 'trade' ? '💱 Accept Trade' : 'Join Escrow';
+
+      document.getElementById('joinModalBody').innerHTML = `
+        <div class="vss-badge">
+          <h4>🔐 How VSS Protects You</h4>
+          <p>Your funds will be locked with 2-of-3 secret sharing. Neither party can steal. Disputes go to jury.</p>
+        </div>
+
+        <div style="background: var(--bg); border-radius: 12px; padding: 20px; margin-bottom: 20px;">
+          <h4 style="margin-bottom: 12px;">${escrow.title}</h4>
+          <p style="color: var(--text-muted); font-size: 14px; margin-bottom: 16px;">${escrow.description}</p>
+
+          <div style="display: flex; justify-content: space-between; padding-top: 16px; border-top: 1px solid var(--border);">
+            <div>
+              <div style="font-size: 24px; font-weight: 700;">${escrow.amount.toLocaleString()} ${escrow.currency}</div>
+              <div style="font-size: 12px; color: var(--text-muted);">Stake required</div>
+            </div>
+            <div style="text-align: right;">
+              <div class="rep-badge ${escrow.reputation < 90 ? 'new' : ''}">${escrow.reputation}% rep</div>
+              <div style="font-size: 12px; color: var(--text-muted); margin-top: 4px;">${escrow.trades} trades</div>
+            </div>
+          </div>
+        </div>
+
+        ${escrow.type === 'bet' ? `
+          <div class="form-group">
+            <label>Your Position</label>
+            <select id="joinPosition">
+              <option value="against">AGAINST - I bet this doesn't happen</option>
+            </select>
+            <div class="form-hint">You're taking the opposite side of the creator</div>
+          </div>
+        ` : ''}
+
+        <div class="form-group">
+          <label>Your ${escrow.type === 'bet' ? 'Stake' : 'Amount'}</label>
+          <input type="number" value="${escrow.amount}" id="joinAmount">
+        </div>
+      `;
+
+      document.getElementById('joinModal').classList.add('active');
+    }
+
+    async function createBet() {
+      if (!walletConnected) {
+        alert('Please connect your wallet first');
+        return;
+      }
+
+      const title = document.getElementById('betTitle').value;
+      const conditions = document.getElementById('betConditions').value;
+      const amount = document.getElementById('betAmount').value;
+
+      if (!title || !conditions || !amount) {
+        alert('Please fill in all fields');
+        return;
+      }
+
+      // In production: Generate VSS shares and call contract
+      alert(`Bet created! (Demo)\n\nTitle: ${title}\nStake: ${amount}\n\nIn production, VSS shares would be generated and escrow created on-chain.`);
+      closeModal('betModal');
+    }
+
+    async function createTrade() {
+      if (!walletConnected) {
+        alert('Please connect your wallet first');
+        return;
+      }
+
+      alert('Trade offer created! (Demo)\n\nIn production, this would create an on-chain escrow with VSS protection.');
+      closeModal('tradeModal');
+    }
+
+    async function joinEscrow() {
+      if (!walletConnected) {
+        alert('Please connect your wallet first');
+        return;
+      }
+
+      alert('Escrow joined! (Demo)\n\nIn production:\n1. VSS shares distributed to both parties\n2. Funds locked in escrow contract\n3. Trade/bet begins');
+      closeModal('joinModal');
+    }
+
+    function showMyEscrows() {
+      alert('My Escrows view (Demo)\n\nWould show:\n- Active escrows\n- Pending actions\n- History\n- Disputes');
+    }
+
+    function showReputation() {
+      alert('Reputation System (Demo)\n\nYour reputation is built from:\n- Successful escrows\n- Dispute outcomes\n- Time as member\n- Verified identity (optional)');
+    }
+  </script>
+  <script src="app.js"></script>
+</body>
+</html>

@@ -1,0 +1,22 @@
+[package]
+name = "escrow-revive"
+version = "0.1.0"
+edition = "2021"
+description = "P2P Escrow with VSS verification for Revive/PolkaVM"
+
+[workspace]
+exclude = ["demo"]
+
+[dependencies]
+# Match ink-node v0.47.0 which uses polkavm 0.26
+uapi = { package = "pallet-revive-uapi", version = "0.7", default-features = false }
+polkavm-derive = "0.27.0"
+
+[[bin]]
+name = "escrow"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"
