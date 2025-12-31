@@ -1,0 +1,43 @@
+[package]
+name = "pallet-penumbra-bridge"
+version.workspace = true
+authors.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "penumbra threshold bridge using decaf377-frost"
+
+[package.metadata.docs.rs]
+targets = ["x86_64-unknown-linux-gnu"]
+
+[dependencies]
+codec.workspace = true
+scale-info.workspace = true
+
+frame-support.workspace = true
+frame-system.workspace = true
+sp-runtime.workspace = true
+sp-std.workspace = true
+sp-core.workspace = true
+
+# decaf377 frost - penumbra's threshold signing
+decaf377 = { version = "0.10", default-features = false, optional = true }
+
+[dev-dependencies]
+sp-io.workspace = true
+
+[features]
+default = ["std"]
+std = [
+    "codec/std",
+    "scale-info/std",
+    "frame-support/std",
+    "frame-system/std",
+    "sp-runtime/std",
+    "sp-std/std",
+    "sp-core/std",
+]
+# enable actual frost crypto (std only for now)
+frost-crypto = ["std", "dep:decaf377"]
+runtime-benchmarks = ["frame-support/runtime-benchmarks", "frame-system/runtime-benchmarks"]
+try-runtime = ["frame-support/try-runtime", "frame-system/try-runtime"]
