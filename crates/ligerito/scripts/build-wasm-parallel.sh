@@ -37,10 +37,13 @@ echo
 echo "Step 2: Generating JavaScript bindings..."
 mkdir -p ../pkg/parallel-web
 
-# Note: cargo build from workspace root puts artifacts in ../../target
-WASM_FILE="../../target/wasm32-unknown-unknown/release/ligerito.wasm"
+# Note: cargo build from workspace root puts artifacts in ../../../target
+WASM_FILE="../../../target/wasm32-unknown-unknown/release/ligerito.wasm"
 if [ ! -f "$WASM_FILE" ]; then
-    # Try local target directory as fallback
+    # Try alternative paths
+    WASM_FILE="../../target/wasm32-unknown-unknown/release/ligerito.wasm"
+fi
+if [ ! -f "$WASM_FILE" ]; then
     WASM_FILE="target/wasm32-unknown-unknown/release/ligerito.wasm"
 fi
 
