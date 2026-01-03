@@ -20,9 +20,12 @@ echo
 echo "Step 1: Building WASM with atomics + bulk-memory + SIMD..."
 echo "Note: Enabling WASM SIMD128 for 2-4x speedup in binary field operations"
 echo "Note: Setting max memory to 4GB for large polynomial support (2^28)"
+
+# Build from ligerito manifest with explicit target dir
 RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128 -C link-arg=--max-memory=4294967296' \
 cargo +nightly build \
-    --package ligerito \
+    --manifest-path ../Cargo.toml \
+    --target-dir ../target \
     --lib \
     --release \
     --target wasm32-unknown-unknown \
@@ -38,15 +41,20 @@ echo
 echo "Step 2: Generating JavaScript bindings..."
 mkdir -p ../pkg/parallel-web
 
-# Note: cargo build from workspace root puts artifacts in ../../../target
-WASM_FILE="../../../target/wasm32-unknown-unknown/release/ligerito.wasm"
+# Find the WASM file - check multiple possible locations
+WASM_FILE="../target/wasm32-unknown-unknown/release/ligerito.wasm"
 if [ ! -f "$WASM_FILE" ]; then
-    # Try alternative paths
+    WASM_FILE="../../../target/wasm32-unknown-unknown/release/ligerito.wasm"
+fi
+if [ ! -f "$WASM_FILE" ]; then
     WASM_FILE="../../target/wasm32-unknown-unknown/release/ligerito.wasm"
 fi
 if [ ! -f "$WASM_FILE" ]; then
-    WASM_FILE="target/wasm32-unknown-unknown/release/ligerito.wasm"
+    echo "Error: Could not find ligerito.wasm"
+    echo "Searched: ../target, ../../../target, ../../target"
+    exit 1
 fi
+echo "Found WASM at: $WASM_FILE"
 
 wasm-bindgen \
     "$WASM_FILE" \

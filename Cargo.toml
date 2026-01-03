@@ -7,13 +7,10 @@ members = [
     "crates/ligerito",
     "crates/ligerito-beefy",
     "crates/ligerito-escrow",
-    # PolkaVM polynomial commitment verification
-    "crates/polkavm-pcvm",
     # IBP monitoring probes
     "crates/ibp-probe-host",
     # Zeratul blockchain primitives
     "crates/zeratul-circuit",
-    "crates/zeratul-blockchain",
     "crates/zeratul-client",
     "crates/zeratul-server",
     "crates/zeratul-p2p",
@@ -29,10 +26,20 @@ members = [
     # OSST (One-Step Schnorr Threshold)
     "crates/osst",
 ]
-# Excluded from workspace (different build targets or incomplete)
+# Excluded from workspace (different build targets, incomplete, or uncommitted)
 exclude = [
     "crates/zeratul-guest",  # PolkaVM guest program (requires special build)
     "crates/ibp-probe-guest", # PolkaVM guest program (requires special build)
+    "crates/poker-p2p",       # iroh conflicts with zcash sha2 versions
+    "crates/barnett-smart-card-protocol", # old ark/proof-toolbox deps from private repo
+    "crates/ligerito-shuffle",     # uncommitted
+    "crates/state-channel",        # uncommitted
+    "crates/poker-sdk",            # uncommitted
+    "crates/poker-client",         # uncommitted
+    "crates/chain-client",         # uncommitted
+    "crates/ligerito-shielded-pool", # uncommitted
+    "crates/wim",                  # uncommitted
+    "crates/zeratul-blockchain",   # depends on uncommitted crates
 ]
 resolver = "2"
 
