@@ -1,3 +1,6 @@
 [submodule "benchmarks/Ligerito.jl"]
 	path = benchmarks/Ligerito.jl
 	url = https://github.com/bcc-research/Ligerito.jl
+[submodule "crates/golden-rs"]
+	path = crates/golden-rs
+	url = https://github.com/fedemagnani/golden-rs.git
