@@ -22,6 +22,7 @@ echo "Note: Enabling WASM SIMD128 for 2-4x speedup in binary field operations"
 echo "Note: Setting max memory to 4GB for large polynomial support (2^28)"
 RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128 -C link-arg=--max-memory=4294967296' \
 cargo +nightly build \
+    --package ligerito \
     --lib \
     --release \
     --target wasm32-unknown-unknown \
