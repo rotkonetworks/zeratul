@@ -48,6 +48,7 @@ path = "examples/test_frost_dkg.rs"
 zeratul-circuit = { path = "../zeratul-circuit" }
 ligerito = { path = "../ligerito", features = ["prover"] }
 ligerito-binary-fields = { path = "../ligerito-binary-fields" }
+ligerito-shielded-pool = { path = "../ligerito-shielded-pool" }
 golden-rs = { path = "../golden-rs" }
 
 # Commonware dependencies - blockchain primitives
@@ -94,7 +95,7 @@ litep2p = "0.8"
 multiaddr = "0.18"
 
 # Penumbra FROST for threshold signatures (decaf377 compatible)
-decaf377-frost = { path = "../../../penumbra/crates/crypto/decaf377-frost" }
+decaf377-frost = { git = "https://github.com/penumbra-zone/penumbra" }
 decaf377-rdsa = "0.11.0"
 decaf377 = { version = "0.10.1", default-features = false }
 
