@@ -47,11 +47,6 @@ function handleError(f, args) {
     }
 }
 
-function getArrayU8FromWasm0(ptr, len) {
-    ptr = ptr >>> 0;
-    return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
-}
-
 let WASM_VECTOR_LEN = 0;
 
 const cachedTextEncoder = (typeof TextEncoder !== 'undefined' ? new TextEncoder() : undefined);
@@ -125,59 +120,6 @@ export function init() {
     wasm.init();
 }
 
-function takeFromExternrefTable0(idx) {
-    const value = wasm.__wbindgen_externrefs.get(idx);
-    wasm.__externref_table_dealloc(idx);
-    return value;
-}
-/**
- * Get the expected polynomial size for a given config
- *
- * # Example (JavaScript)
- * ```javascript
- * const size = get_polynomial_size(12); // Returns 4096 (2^12)
- * ```
- * @param {number} config_size
- * @returns {number}
- */
-export function get_polynomial_size(config_size) {
-    const ret = wasm.get_polynomial_size(config_size);
-    if (ret[2]) {
-        throw takeFromExternrefTable0(ret[1]);
-    }
-    return ret[0] >>> 0;
-}
-
-/**
- * Generate random polynomial and prove it entirely within WASM
- *
- * This avoids copying large polynomials from JS to WASM, which is crucial
- * for large sizes like 2^28 (1GB of data).
- *
- * # Arguments
- * * `config_size` - Log2 of polynomial size (12, 16, 20, 24, 28, 30)
- * * `seed` - Random seed for reproducibility
- * * `transcript` - Optional transcript type: "sha256" (default), "merlin", or "blake2b"
- *
- * # Returns
- * Serialized proof bytes
- * @param {number} config_size
- * @param {bigint} seed
- * @param {string | null} [transcript]
- * @returns {Uint8Array}
- */
-export function generate_and_prove(config_size, seed, transcript) {
-    var ptr0 = isLikeNone(transcript) ? 0 : passStringToWasm0(transcript, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-    var len0 = WASM_VECTOR_LEN;
-    const ret = wasm.generate_and_prove(config_size, seed, ptr0, len0);
-    if (ret[3]) {
-        throw takeFromExternrefTable0(ret[2]);
-    }
-    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
-    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
-    return v2;
-}
-
 let cachedUint32ArrayMemory0 = null;
 
 function getUint32ArrayMemory0() {
@@ -192,6 +134,17 @@ function passArray32ToWasm0(arg, malloc) {
     getUint32ArrayMemory0().set(arg, ptr / 4);
     WASM_VECTOR_LEN = arg.length;
     return ptr;
+}
+
+function takeFromExternrefTable0(idx) {
+    const value = wasm.__wbindgen_externrefs.get(idx);
+    wasm.__externref_table_dealloc(idx);
+    return value;
+}
+
+function getArrayU8FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
 }
 /**
  * Generate a Ligerito proof from a polynomial
@@ -267,6 +220,54 @@ export function verify(proof_bytes, config_size, transcript) {
         throw takeFromExternrefTable0(ret[1]);
     }
     return ret[0] !== 0;
+}
+
+/**
+ * Generate random polynomial and prove it entirely within WASM
+ *
+ * This avoids copying large polynomials from JS to WASM, which is crucial
+ * for large sizes like 2^28 (1GB of data).
+ *
+ * # Arguments
+ * * `config_size` - Log2 of polynomial size (12, 16, 20, 24, 28, 30)
+ * * `seed` - Random seed for reproducibility
+ * * `transcript` - Optional transcript type: "sha256" (default), "merlin", or "blake2b"
+ *
+ * # Returns
+ * Serialized proof bytes
+ * @param {number} config_size
+ * @param {bigint} seed
+ * @param {string | null} [transcript]
+ * @returns {Uint8Array}
+ */
+export function generate_and_prove(config_size, seed, transcript) {
+    var ptr0 = isLikeNone(transcript) ? 0 : passStringToWasm0(transcript, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    var len0 = WASM_VECTOR_LEN;
+    const ret = wasm.generate_and_prove(config_size, seed, ptr0, len0);
+    if (ret[3]) {
+        throw takeFromExternrefTable0(ret[2]);
+    }
+    var v2 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+    wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+    return v2;
+}
+
+/**
+ * Get the expected polynomial size for a given config
+ *
+ * # Example (JavaScript)
+ * ```javascript
+ * const size = get_polynomial_size(12); // Returns 4096 (2^12)
+ * ```
+ * @param {number} config_size
+ * @returns {number}
+ */
+export function get_polynomial_size(config_size) {
+    const ret = wasm.get_polynomial_size(config_size);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return ret[0] >>> 0;
 }
 
 /**
@@ -368,19 +369,6 @@ async function __wbg_load(module, imports) {
 function __wbg_get_imports(memory) {
     const imports = {};
     imports.wbg = {};
-    imports.wbg.__wbg___wbindgen_is_function_ee8a6c5833c90377 = function(arg0) {
-        const ret = typeof(arg0) === 'function';
-        return ret;
-    };
-    imports.wbg.__wbg___wbindgen_is_object_c818261d21f283a4 = function(arg0) {
-        const val = arg0;
-        const ret = typeof(val) === 'object' && val !== null;
-        return ret;
-    };
-    imports.wbg.__wbg___wbindgen_is_string_fbb76cb2940daafd = function(arg0) {
-        const ret = typeof(arg0) === 'string';
-        return ret;
-    };
     imports.wbg.__wbg___wbindgen_is_undefined_2d472862bd29a478 = function(arg0) {
         const ret = arg0 === undefined;
         return ret;
@@ -396,18 +384,10 @@ function __wbg_get_imports(memory) {
     imports.wbg.__wbg___wbindgen_throw_b855445ff6a94295 = function(arg0, arg1) {
         throw new Error(getStringFromWasm0(arg0, arg1));
     };
-    imports.wbg.__wbg_call_525440f72fbfc0ea = function() { return handleError(function (arg0, arg1, arg2) {
-        const ret = arg0.call(arg1, arg2);
-        return ret;
-    }, arguments) };
     imports.wbg.__wbg_call_e762c39fa8ea36bf = function() { return handleError(function (arg0, arg1) {
         const ret = arg0.call(arg1);
         return ret;
     }, arguments) };
-    imports.wbg.__wbg_crypto_574e78ad8b13b65f = function(arg0) {
-        const ret = arg0.crypto;
-        return ret;
-    };
     imports.wbg.__wbg_error_7534b8e9a36f1ab4 = function(arg0, arg1) {
         let deferred0_0;
         let deferred0_1;
@@ -419,9 +399,6 @@ function __wbg_get_imports(memory) {
             wasm.__wbindgen_free(deferred0_0, deferred0_1, 1);
         }
     };
-    imports.wbg.__wbg_getRandomValues_b8f5dbd5f3995a9e = function() { return handleError(function (arg0, arg1) {
-        arg0.getRandomValues(arg1);
-    }, arguments) };
     imports.wbg.__wbg_instanceof_Window_4846dbb3de56c84c = function(arg0) {
         let result;
         try {
@@ -432,16 +409,8 @@ function __wbg_get_imports(memory) {
         const ret = result;
         return ret;
     };
-    imports.wbg.__wbg_length_69bca3cb64fc8748 = function(arg0) {
-        const ret = arg0.length;
-        return ret;
-    };
-    imports.wbg.__wbg_log_fee3e59270ccd7e2 = function(arg0, arg1) {
+    imports.wbg.__wbg_log_f0b3504457bf934a = function(arg0, arg1) {
         console.log(getStringFromWasm0(arg0, arg1));
-    };
-    imports.wbg.__wbg_msCrypto_a61aeb35a24c1329 = function(arg0) {
-        const ret = arg0.msCrypto;
-        return ret;
     };
     imports.wbg.__wbg_new_8a6f238a6ece86ea = function() {
         const ret = new Error();
@@ -451,28 +420,6 @@ function __wbg_get_imports(memory) {
         const ret = new Function(getStringFromWasm0(arg0, arg1));
         return ret;
     };
-    imports.wbg.__wbg_new_with_length_01aa0dc35aa13543 = function(arg0) {
-        const ret = new Uint8Array(arg0 >>> 0);
-        return ret;
-    };
-    imports.wbg.__wbg_node_905d3e251edff8a2 = function(arg0) {
-        const ret = arg0.node;
-        return ret;
-    };
-    imports.wbg.__wbg_process_dc0fbacc7c1c06f7 = function(arg0) {
-        const ret = arg0.process;
-        return ret;
-    };
-    imports.wbg.__wbg_prototypesetcall_2a6620b6922694b2 = function(arg0, arg1, arg2) {
-        Uint8Array.prototype.set.call(getArrayU8FromWasm0(arg0, arg1), arg2);
-    };
-    imports.wbg.__wbg_randomFillSync_ac0988aba3254290 = function() { return handleError(function (arg0, arg1) {
-        arg0.randomFillSync(arg1);
-    }, arguments) };
-    imports.wbg.__wbg_require_60cc747a6bc5215a = function() { return handleError(function () {
-        const ret = module.require;
-        return ret;
-    }, arguments) };
     imports.wbg.__wbg_stack_0ed75d68575b0f3c = function(arg0, arg1) {
         const ret = arg1.stack;
         const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -500,22 +447,9 @@ function __wbg_get_imports(memory) {
         const ret = typeof window === 'undefined' ? null : window;
         return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
     };
-    imports.wbg.__wbg_subarray_480600f3d6a9f26c = function(arg0, arg1, arg2) {
-        const ret = arg0.subarray(arg1 >>> 0, arg2 >>> 0);
-        return ret;
-    };
-    imports.wbg.__wbg_versions_c01dfd4722a88165 = function(arg0) {
-        const ret = arg0.versions;
-        return ret;
-    };
     imports.wbg.__wbindgen_cast_2241b6af4c4b2941 = function(arg0, arg1) {
         // Cast intrinsic for `Ref(String) -> Externref`.
         const ret = getStringFromWasm0(arg0, arg1);
-        return ret;
-    };
-    imports.wbg.__wbindgen_cast_cb9088102bce6b30 = function(arg0, arg1) {
-        // Cast intrinsic for `Ref(Slice(U8)) -> NamedExternref("Uint8Array")`.
-        const ret = getArrayU8FromWasm0(arg0, arg1);
         return ret;
     };
     imports.wbg.__wbindgen_init_externref_table = function() {
@@ -528,7 +462,7 @@ function __wbg_get_imports(memory) {
         table.set(offset + 3, false);
         ;
     };
-    imports.wbg.memory = memory || new WebAssembly.Memory({initial:18,maximum:16384,shared:true});
+    imports.wbg.memory = memory || new WebAssembly.Memory({initial:19,maximum:65536,shared:true});
 
     return imports;
 }

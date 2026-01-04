@@ -38,9 +38,11 @@ ligerito prove --size 20 --transcript sha256 < poly.bin > proof.bin
 ligerito verify --size 20 --transcript sha256 < proof.bin</pre>
       <p><strong>Transcript Compatibility:</strong></p>
       <ul>
-        <li>This demo uses <code>sha256</code> transcript (default)</li>
-        <li>CLI default is also <code>sha256</code> - proofs are compatible!</li>
-        <li>Use <code>--transcript sha256</code> explicitly for clarity</li>
+        <li><code>sha256</code> - Default, works everywhere, CLI compatible</li>
+        <li><code>merlin</code> - Zcash/Dalek standard, stronger domain separation</li>
+        <li><code>blake2b</code> - Optimized for Substrate runtimes</li>
+        <li>Use <code>--transcript TYPE</code> in CLI to match this demo</li>
+        <li>Proofs are transcript-specific - prover and verifier must match!</li>
       </ul>
     </div>
   </details>
@@ -61,6 +63,8 @@ ligerito verify --size 20 --transcript sha256 < proof.bin</pre>
   <label style="margin-left: 20px;">transcript:
     <select id="config-transcript">
       <option value="sha256" selected>SHA256 (default, CLI compatible)</option>
+      <option value="merlin">Merlin (Zcash/Dalek standard)</option>
+      <option value="blake2b">BLAKE2b (Substrate optimized)</option>
     </select>
   </label>
 </div>
