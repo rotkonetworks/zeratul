@@ -25,10 +25,6 @@ members = [
     "crates/zafu-wasm",
     # OSST (One-Step Schnorr Threshold)
     "crates/osst",
-    # Mental poker
-    "crates/ligerito-shuffle",
-    # WIM
-    "crates/wim",
 ]
 # Excluded from workspace (different build targets, incomplete, or uncommitted)
 exclude = [
@@ -41,6 +37,8 @@ exclude = [
     "crates/poker-client",         # uncommitted
     "crates/chain-client",         # uncommitted
     "crates/ligerito-shielded-pool", # uncommitted
+    "crates/ligerito-shuffle",     # uncommitted
+    "crates/wim",                  # uncommitted
     "crates/zeratul-blockchain",   # depends on uncommitted crates
 ]
 resolver = "2"
