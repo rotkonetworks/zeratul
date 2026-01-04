@@ -1,6 +1,6 @@
 [package]
 name = "ligerito"
-version = "0.3.2"
+version = "0.4.0"
 edition = "2021"
 authors.workspace = true
 license.workspace = true
@@ -18,9 +18,10 @@ exclude = [
 
 # cdylib only needed for standalone WASM builds (wasm-pack)
 # For library use (Substrate runtime), we only need rlib (default)
-# To build WASM: wasm-pack build --features wasm
+# To build standalone WASM: wasm-pack build --features wasm
+# Note: When used as dependency in Substrate runtime, only rlib is used
 [lib]
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 # Default is full-featured std environment with prover + verifier + CLI
 # Uses SHA256 transcript by default (no extra deps, works everywhere)
@@ -77,6 +78,8 @@ wasm = [
     "prover",                       # Include prover in WASM
     "hardware-accel",               # Enable SIMD (wasm simd128)
     "transcript-sha256",            # Use SHA256 (works in WASM)
+    "transcript-merlin",            # Merlin transcript (Zcash/Dalek standard)
+    "transcript-blake2b",           # BLAKE2b transcript (optimized for Substrate)
     "getrandom/js",                 # Enable WASM-compatible RNG
     "wasm-bindgen",                 # WASM bindings
     "wasm-bindgen-futures",         # Async WASM support
@@ -144,8 +147,8 @@ cli = [
 
 [dependencies]
 # Core dependencies (always needed)
-ligerito-binary-fields = { version = "0.3.2", path = "../ligerito-binary-fields", default-features = false }
-ligerito-merkle = { version = "0.3.2", path = "../ligerito-merkle", default-features = false }
+ligerito-binary-fields = { version = "0.4.0", path = "../ligerito-binary-fields", default-features = false }
+ligerito-merkle = { version = "0.4.0", path = "../ligerito-merkle", default-features = false }
 serde = { workspace = true, default-features = false, features = ["derive", "alloc"], optional = true }
 bytemuck = { workspace = true }
 
@@ -162,7 +165,7 @@ blake2 = { version = "0.10", default-features = false, optional = true }
 sp-io = { version = "38.0.0", default-features = false, optional = true }
 
 # Prover-only dependencies
-ligerito-reed-solomon = { version = "0.3.2", path = "../ligerito-reed-solomon", optional = true, default-features = false }
+ligerito-reed-solomon = { version = "0.4.0", path = "../ligerito-reed-solomon", optional = true, default-features = false }
 rand = { workspace = true, optional = true }
 rand_chacha = { workspace = true, optional = true }
 

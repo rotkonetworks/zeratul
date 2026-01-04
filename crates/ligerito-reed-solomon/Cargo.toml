@@ -1,6 +1,6 @@
 [package]
 name = "ligerito-reed-solomon"
-version = "0.3.2"
+version = "0.4.0"
 authors.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -16,7 +16,7 @@ parallel = ["rayon"]
 hardware-accel = ["ligerito-binary-fields/hardware-accel"]
 
 [dependencies]
-ligerito-binary-fields = { version = "0.3.2", path = "../ligerito-binary-fields", default-features = false }
+ligerito-binary-fields = { version = "0.4.0", path = "../ligerito-binary-fields", default-features = false }
 rayon = { workspace = true, optional = true }
 
 [dev-dependencies]

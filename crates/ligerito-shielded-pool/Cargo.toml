@@ -1,0 +1,40 @@
+[package]
+name = "ligerito-shielded-pool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "shielded pool with ligerito proofs - penumbra-style utxo model for p2p rollups"
+keywords = ["privacy", "zk-proofs", "shielded", "utxo", "rollup"]
+categories = ["cryptography"]
+
+[features]
+default = ["std", "parallel"]
+std = ["ligerito/std", "rand"]
+parallel = ["ligerito/parallel", "rayon"]
+
+[dependencies]
+# ligerito for proofs
+ligerito = { workspace = true, default-features = false, features = ["prover", "transcript-merlin"] }
+ligerito-binary-fields = { workspace = true, default-features = false }
+ligerito-merkle = { workspace = true, default-features = false }
+
+# crypto
+blake3.workspace = true
+merlin.workspace = true
+
+# serialization
+serde = { workspace = true, optional = true }
+
+# parallel
+rayon = { workspace = true, optional = true }
+
+# randomness
+rand = { workspace = true, optional = true }
+
+# encoding for on-chain
+scale-codec = { package = "parity-scale-codec", version = "3.6", features = ["derive"], optional = true }
+scale-info = { version = "2.10", features = ["derive"], optional = true }
+
+[dev-dependencies]
+rand.workspace = true
