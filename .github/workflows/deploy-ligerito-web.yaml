@@ -32,6 +32,8 @@ jobs:
 
       - name: Build WASM with SIMD
         working-directory: crates/ligerito/scripts
+        env:
+          RUSTFLAGS: ""
         run: |
           chmod +x build-wasm-parallel.sh
           ./build-wasm-parallel.sh
