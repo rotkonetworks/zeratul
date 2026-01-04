@@ -47,21 +47,24 @@ jobs:
           echo "${{ secrets.DEPLOY_KEY }}" > ssh_key
           chmod 600 ssh_key
 
+          PORT="${{ secrets.DEPLOY_HOST_PORT }}"
+          PORT="${PORT:-22}"
+
           # Create deployment directory on server
           ssh -i ssh_key -o StrictHostKeyChecking=no \
-            -p ${{ secrets.DEPLOY_HOST_PORT }} \
+            -p "$PORT" \
             ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
             "mkdir -p ~/ligerito-web"
 
           # Upload deployment files
           scp -i ssh_key -o StrictHostKeyChecking=no \
-            -P ${{ secrets.DEPLOY_HOST_PORT }} \
+            -P "$PORT" \
             -r crates/ligerito/scripts/deploy/* \
             ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:~/ligerito-web/
 
           # Restart web server (adjust based on your setup)
           ssh -i ssh_key -o StrictHostKeyChecking=no \
-            -p ${{ secrets.DEPLOY_HOST_PORT }} \
+            -p "$PORT" \
             ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << 'EOF'
             cd ~/ligerito-web
 
