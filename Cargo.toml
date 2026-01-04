@@ -25,6 +25,10 @@ members = [
     "crates/zafu-wasm",
     # OSST (One-Step Schnorr Threshold)
     "crates/osst",
+    # Mental poker
+    "crates/ligerito-shuffle",
+    # WIM
+    "crates/wim",
 ]
 # Excluded from workspace (different build targets, incomplete, or uncommitted)
 exclude = [
@@ -32,13 +36,11 @@ exclude = [
     "crates/ibp-probe-guest", # PolkaVM guest program (requires special build)
     "crates/poker-p2p",       # iroh conflicts with zcash sha2 versions
     "crates/barnett-smart-card-protocol", # old ark/proof-toolbox deps from private repo
-    "crates/ligerito-shuffle",     # uncommitted
     "crates/state-channel",        # uncommitted
     "crates/poker-sdk",            # uncommitted
     "crates/poker-client",         # uncommitted
     "crates/chain-client",         # uncommitted
     "crates/ligerito-shielded-pool", # uncommitted
-    "crates/wim",                  # uncommitted
     "crates/zeratul-blockchain",   # depends on uncommitted crates
 ]
 resolver = "2"

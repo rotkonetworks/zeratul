@@ -21,17 +21,18 @@ echo "Step 1: Building WASM with atomics + bulk-memory + SIMD..."
 echo "Note: Enabling WASM SIMD128 for 2-4x speedup in binary field operations"
 echo "Note: Setting max memory to 4GB for large polynomial support (2^28)"
 
-# Build from ligerito manifest with explicit target dir
+# Build ligerito package from workspace root
+cd ../../..
 RUSTFLAGS='-C target-feature=+atomics,+bulk-memory,+mutable-globals,+simd128 -C link-arg=--max-memory=4294967296' \
 cargo +nightly build \
-    --manifest-path ../Cargo.toml \
-    --target-dir ../target \
+    --package ligerito \
     --lib \
     --release \
     --target wasm32-unknown-unknown \
-    --features wasm-parallel,hardware-accel \
+    --features ligerito/wasm-parallel,ligerito/hardware-accel \
     --no-default-features \
     -Z build-std=panic_abort,std
+cd crates/ligerito/scripts
 
 echo
 echo "✓ WASM binary built successfully"
