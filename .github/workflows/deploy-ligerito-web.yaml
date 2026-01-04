@@ -50,36 +50,11 @@ jobs:
           PORT="${{ secrets.DEPLOY_HOST_PORT }}"
           PORT="${PORT:-22}"
 
-          # Create deployment directory on server
-          ssh -i ssh_key -o StrictHostKeyChecking=no \
-            -p "$PORT" \
-            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
-            "mkdir -p ~/ligerito-web"
-
-          # Upload deployment files
+          # Upload directly to nginx html directory
           scp -i ssh_key -o StrictHostKeyChecking=no \
             -P "$PORT" \
             -r crates/ligerito/scripts/deploy/* \
-            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:~/ligerito-web/
-
-          # Restart web server (adjust based on your setup)
-          ssh -i ssh_key -o StrictHostKeyChecking=no \
-            -p "$PORT" \
-            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} << 'EOF'
-            cd ~/ligerito-web
-
-            # Option 1: Using systemd service (if configured)
-            # sudo systemctl restart ligerito-web
-
-            # Option 2: Using PM2 (if installed)
-            # pm2 restart ligerito-web || pm2 start serve-multithreaded.py --name ligerito-web
-
-            # Option 3: Simple python server (update port if needed)
-            pkill -f "serve-multithreaded.py" || true
-            nohup python3 serve-multithreaded.py 8080 > ligerito.log 2>&1 &
-
-            echo "Ligerito web deployed successfully!"
-          EOF
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/usr/share/nginx/html/
 
           rm ssh_key
 
