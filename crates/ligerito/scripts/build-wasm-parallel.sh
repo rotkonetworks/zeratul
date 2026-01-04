@@ -29,7 +29,7 @@ cargo +nightly build \
     --lib \
     --release \
     --target wasm32-unknown-unknown \
-    --features ligerito/wasm-parallel,ligerito/hardware-accel \
+    --features ligerito/wasm-parallel,ligerito/hardware-accel,ligerito/transcript-merlin,ligerito/transcript-blake2b \
     --no-default-features \
     -Z build-std=panic_abort,std
 cd crates/ligerito/scripts

@@ -14,8 +14,8 @@ path = "src/main.rs"
 [features]
 default = ["std"]
 std = ["ligerito/std", "ligerito-binary-fields/std"]
-# Enable PolkaVM proof verification
-polkavm = ["polkavm-pcvm"]
+# Enable WIM proof verification
+polkavm = []  # TODO: ["wim"] when committed
 # Enable P2P networking for multi-node testnet
 networking = ["zeratul-p2p", "litep2p", "futures"]
 # Full testnet feature set
@@ -26,8 +26,8 @@ testnet = ["polkavm", "networking"]
 ligerito = { path = "../ligerito", default-features = false, features = ["prover", "parallel"] }
 ligerito-binary-fields = { path = "../ligerito-binary-fields", default-features = false }
 
-# PolkaVM proof verification
-polkavm-pcvm = { path = "../polkavm-pcvm", optional = true }
+# WIM (Witness Indistinguishable Machine) - ZK signing
+# wim = { path = "../wim", optional = true }  # TODO: uncommitted
 
 # P2P networking
 zeratul-p2p = { path = "../zeratul-p2p", optional = true }

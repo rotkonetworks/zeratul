@@ -10,8 +10,8 @@ path = "src/main.rs"
 
 [features]
 default = []
-# Enable PolkaVM trace generation (requires polkavm build support)
-trace = ["polkavm-pcvm/polkavm-integration"]
+# Enable WIM trace generation
+trace = []  # TODO: ["dep:wim", "wim/polkavm-integration"] when committed
 # Enable smoldot P2P verification
 smoldot = ["ibp-probe-host/smoldot"]
 
@@ -19,8 +19,8 @@ smoldot = ["ibp-probe-host/smoldot"]
 # Host functions
 ibp-probe-host = { path = "../../ibp-probe-host" }
 
-# PolkaVM integration (optional - for trace generation)
-polkavm-pcvm = { path = "../../polkavm-pcvm", optional = true }
+# WIM integration (optional - for trace generation)
+# wim = { path = "../../wim", optional = true }  # TODO: uncommitted
 
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
