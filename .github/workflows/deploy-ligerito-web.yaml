@@ -50,11 +50,17 @@ jobs:
           PORT="${{ secrets.DEPLOY_HOST_PORT }}"
           PORT="${PORT:-22}"
 
-          # Upload directly to nginx html directory
+          # Upload to deploy directory
           scp -i ssh_key -o StrictHostKeyChecking=no \
             -P "$PORT" \
             -r crates/ligerito/scripts/deploy/* \
-            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:/usr/share/nginx/html/
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }}:~/ligerito-web/
+
+          # Rebuild and restart docker container
+          ssh -i ssh_key -o StrictHostKeyChecking=no \
+            -p "$PORT" \
+            ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            "cd ~/ligerito-web && docker build -t ligeritorotkonet_ligerito:latest . && docker stop ligerito-wasm && docker rm ligerito-wasm && docker run -d --name ligerito-wasm --restart unless-stopped -p 127.0.0.1:8090:8080 ligeritorotkonet_ligerito:latest"
 
           rm ssh_key
 
