@@ -145,7 +145,7 @@ pub fn prove_with_accidental_computer(
         extra_shards: config.extra_shards,
     };
 
-    let (commitment, shards) = Zoda::<Sha256>::encode(&coding_config, data.as_ref())?;
+    let (commitment, shards) = Zoda::<Sha256>::encode(&coding_config, data.as_ref(), 1)?;
     
     // Step 3: Extract shard data
     // In a real system, these would be distributed to different nodes

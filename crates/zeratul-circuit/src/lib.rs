@@ -17,6 +17,16 @@
 //! 1. **Client**: Generates proof of valid transfer (expensive, ~seconds)
 //! 2. **Server**: Verifies proof (fast, ~milliseconds) and updates NOMT
 //! 3. **Storage**: NOMT stores commitments (not plaintext balances)
+//!
+//! ## ZK Proof System (Ligerito-based)
+//!
+//! New modules provide actual zero-knowledge proving:
+//! - `constraint`: binius64-style constraint system (AND/XOR/MUL constraints)
+//! - `witness_poly`: witness encoding as multilinear polynomial
+//! - `zkproof`: full prove/verify using ligerito pcs
+//!
+//! Unlike `accidental_computer` which leaks witness data in da shards,
+//! `zkproof` ensures verifier only sees polynomial commitment + proofs.
 
 use anyhow::Result;
 
@@ -27,6 +37,14 @@ pub mod note;
 pub mod note_trace;
 pub mod note_state;
 pub mod privacy;
+
+// new zk proof modules
+pub mod constraint;
+pub mod witness_poly;
+pub mod zkproof;
+pub mod spend_circuit;
+pub mod poseidon;
+pub mod poker;
 
 pub use prover::{prove_transfer, StateTransitionProof};
 pub use verifier::{verify_transfer, verify_and_extract_commitments, VerifiedTransition};
@@ -54,6 +72,36 @@ pub use privacy::{
     SpendCircuit, PrivacyParams, SpendProof,
     bytes_to_field, field_to_bytes,
 };
+
+// zk proof exports
+pub use constraint::{
+    WireId, Operand, ShiftOp, Constraint, CircuitBuilder, Circuit, Witness,
+};
+pub use witness_poly::{
+    WitnessPolynomial, ConstraintPolynomial, LigeritoInstance,
+};
+pub use zkproof::{
+    ZkProof, ZkVerifier,
+};
+#[cfg(feature = "prover")]
+pub use zkproof::{ZkProver, prove_and_verify};
+
+// spend circuit exports (uses zeratul constraint system for real zk proofs)
+pub use spend_circuit::{
+    SpendCircuit as NoteSpendCircuit, SpendWires as NoteSpendWires,
+    OutputCircuit as NoteOutputCircuit, OutputWires as NoteOutputWires,
+    BalanceCircuit as NoteBalanceCircuit,
+};
+
+// poker settlement exports
+pub use poker::{
+    CooperativeWithdrawal, PlayerSignature,
+    ShowdownCommitment,
+    WinnerCircuit, WinnerWires,
+    PotWithdrawalCircuit, PotWithdrawalWires,
+    CooperativeWithdrawalRequest, DisputeWithdrawalRequest,
+};
+
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
