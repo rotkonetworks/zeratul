@@ -26,6 +26,7 @@ pub mod dkg_coordinator;  // Golden DKG for epoch-based threshold key generation
 pub mod dkg_scheme_provider;  // Epoch-aware signing scheme from Golden DKG - OLD, will migrate
 pub mod dkg_litep2p;  // Golden DKG over litep2p (MVP network) - OLD, will migrate
 pub mod network;  // Network layer (litep2p TCP, QUIC future)
+pub mod ligerito_pool;  // Ligerito-based shielded pool for fast p2p transactions
 
 pub use application::{Actor as Application, Config as ApplicationConfig, Mailbox as ApplicationMailbox};
 pub use block::Block;
