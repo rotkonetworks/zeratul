@@ -7,6 +7,7 @@ members = [
     "crates/ligerito",
     "crates/ligerito-beefy",
     "crates/ligerito-escrow",
+    "crates/ligerito-shielded-pool",
     # IBP monitoring probes
     "crates/ibp-probe-host",
     # Zeratul blockchain primitives
@@ -25,19 +26,26 @@ members = [
     "crates/zafu-wasm",
     # OSST (One-Step Schnorr Threshold)
     "crates/osst",
+    # Ghettobox (PIN-protected key recovery)
+    "crates/ghettobox",
+    "crates/ghettobox-vault",
+    # Mental poker shuffle proofs
+    "crates/zk-shuffle",
 ]
 # Excluded from workspace (different build targets, incomplete, or uncommitted)
 exclude = [
     "crates/zeratul-guest",  # PolkaVM guest program (requires special build)
     "crates/ibp-probe-guest", # PolkaVM guest program (requires special build)
+    "crates/ghettobox-vault-guest", # PolkaVM guest program (requires special build)
+    "crates/ghettobox-vault-pvm",   # depends on polkavm host, special build
     "crates/poker-p2p",       # iroh conflicts with zcash sha2 versions
     "crates/barnett-smart-card-protocol", # old ark/proof-toolbox deps from private repo
     "crates/state-channel",        # uncommitted
     "crates/poker-sdk",            # uncommitted
     "crates/poker-client",         # uncommitted
     "crates/chain-client",         # uncommitted
-    "crates/ligerito-shielded-pool", # uncommitted
-    "crates/ligerito-shuffle",     # uncommitted
+    "crates/poker-channel-revive", # polkavm contract
+    "crates/poker-chain-wasm",    # wasm target, different build
     "crates/wim",                  # uncommitted
     "crates/zeratul-blockchain",   # depends on uncommitted crates
 ]
