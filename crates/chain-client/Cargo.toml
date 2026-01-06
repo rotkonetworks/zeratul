@@ -1,0 +1,36 @@
+[package]
+name = "chain-client"
+version = "0.1.0"
+edition = "2021"
+description = "chain client for ghettobox poker with RPC and light client support"
+
+[features]
+default = ["rpc"]
+rpc = []
+light-client = []
+
+[dependencies]
+# async runtime
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+futures = "0.3"
+
+# encoding
+parity-scale-codec = { version = "3.6", features = ["derive"] }
+
+# error handling
+thiserror = "1.0"
+anyhow = "1.0"
+
+# logging
+tracing = "0.1"
+
+# serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+
+# crypto
+blake3 = "1.5"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

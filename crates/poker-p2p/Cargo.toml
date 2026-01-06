@@ -1,0 +1,48 @@
+[package]
+name = "poker-p2p"
+version = "0.1.0"
+edition = "2021"
+description = "P2P networking for mental poker - iroh QUIC with word-code rendezvous"
+authors = ["rotko <hq@rotko.net>"]
+license = "MIT"
+repository = "https://github.com/rotkonetworks/zeratul"
+
+[features]
+default = ["native"]
+native = []
+wasm = ["getrandom/js"]
+
+[dependencies]
+# P2P networking with holepunching
+iroh = "0.95"
+iroh-base = "0.95"
+
+# rendezvous over mainline DHT
+pkarr = { version = "3", features = ["dht"] }
+
+# PAKE authentication
+spake2 = "0.4"
+
+# crypto
+ed25519-dalek = "2"
+sha2 = "0.10"
+blake3 = "1.5"
+
+# encoding
+parity-scale-codec = { version = "3.6", features = ["derive"] }
+hex = "0.4"
+
+# async
+tokio = { version = "1", features = ["full"] }
+futures = "0.3"
+
+# utils
+rand = "0.8"
+thiserror = "1.0"
+tracing = "0.1"
+
+# wasm support
+getrandom = { version = "0.2", optional = true }
+
+[dev-dependencies]
+tokio-test = "0.4"

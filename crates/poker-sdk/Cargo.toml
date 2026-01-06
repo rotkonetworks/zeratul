@@ -1,0 +1,52 @@
+[package]
+name = "poker-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "client SDK for ghettobox mental poker - proof generation, encryption, chain integration"
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[features]
+default = ["std"]
+std = [
+    "blake3/std",
+    "chacha20poly1305/std",
+    "ligerito/std",
+    "ligerito/prover",
+]
+wasm = [
+    "std",
+    "getrandom/js",
+]
+# optional: decaf377 for BLS12-377 SNARK compatibility
+decaf377 = ["dep:decaf377", "dep:decaf377-ka"]
+
+[dependencies]
+# crypto - x25519 default, decaf377 optional
+blake3 = { workspace = true, default-features = false }
+sha2 = { workspace = true, default-features = false }
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets"] }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+rand_core = "0.6"
+
+# optional: decaf377 curve (for BLS12-377 SNARKs)
+decaf377 = { version = "0.10", optional = true }
+decaf377-ka = { version = "2.1", optional = true }
+
+# proof generation
+ligerito = { path = "../ligerito", default-features = false }
+
+# encoding
+parity-scale-codec = { version = "3.6", default-features = false, features = ["derive"] }
+
+# errors
+thiserror = { workspace = true }
+
+# wasm support
+getrandom = { version = "0.2", optional = true }
+
+[dev-dependencies]
+hex = { workspace = true }

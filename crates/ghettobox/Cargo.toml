@@ -1,0 +1,51 @@
+[package]
+name = "ghettobox"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "pluggable pin-protected secret recovery using tpm and distributed shares"
+repository = "https://github.com/rotkonetworks/ghettobox"
+keywords = ["tpm", "secret-sharing", "recovery", "cryptography"]
+categories = ["cryptography", "authentication"]
+
+[features]
+default = ["software"]
+software = []
+tpm = ["dep:tss-esapi"]
+network = ["dep:tokio", "dep:reqwest", "dep:futures"]
+full = ["software", "tpm", "network"]
+
+[dependencies]
+# core crypto
+argon2 = "0.5"
+chacha20poly1305 = "0.10"
+rand = "0.8"
+sha2 = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+
+# signing keys
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+
+# field arithmetic for shamir
+# (we implement shamir ourselves for simplicity)
+
+# encoding
+hex = "0.4"
+base64 = "0.22"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# async + network (optional)
+tokio = { version = "1", features = ["full"], optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
+futures = { version = "0.3", optional = true }
+
+# tpm support (optional)
+tss-esapi = { version = "7", optional = true }
+
+# error handling
+thiserror = "1.0"
+
+[dev-dependencies]
+tokio = { version = "1", features = ["full", "test-util"] }

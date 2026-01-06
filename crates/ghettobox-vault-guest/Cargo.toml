@@ -1,0 +1,23 @@
+[package]
+name = "ghettobox-vault-guest"
+version = "0.1.0"
+edition = "2021"
+description = "ghettobox vault - polkavm sandboxed guest"
+
+[lib]
+crate-type = ["cdylib"]
+
+[profile.release]
+lto = "fat"
+panic = "abort"
+opt-level = 3
+codegen-units = 1
+debug = true
+
+[dependencies]
+polkavm-derive = { path = "/home/alice/rotko/polkavm/crates/polkavm-derive" }
+
+# crypto (no_std compatible)
+chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
+ed25519-dalek = { version = "2", default-features = false, features = ["alloc", "zeroize"] }
+subtle = { version = "2.5", default-features = false }

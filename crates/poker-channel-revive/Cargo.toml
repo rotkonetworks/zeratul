@@ -1,0 +1,18 @@
+[package]
+name = "poker-channel-revive"
+version = "0.1.0"
+edition = "2021"
+description = "poker state channel contract for revive/polkavm"
+
+[dependencies]
+uapi = { package = "pallet-revive-uapi", version = "0.7", default-features = false }
+polkavm-derive = "0.27.0"
+
+[[bin]]
+name = "poker-channel"
+path = "src/main.rs"
+
+[profile.release]
+opt-level = "z"
+lto = true
+panic = "abort"

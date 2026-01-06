@@ -1,0 +1,46 @@
+[book]
+title = "zk.poker"
+authors = ["rotko"]
+language = "en"
+multilingual = false
+src = "src"
+
+[build]
+build-dir = "book"
+
+[preprocessor.variables]
+# changeable constants - edit these to update docs
+[preprocessor.variables.variables]
+# crypto params
+SHUFFLE_CURVE = "ristretto255"
+HASH_FUNCTION = "blake3"
+SIGNATURE_SCHEME = "ed25519"
+ENCRYPTION_CIPHER = "chacha20poly1305"
+PIN_KDF = "argon2id"
+PIN_KDF_MEMORY = "16 MB"
+PIN_KDF_ITERATIONS = "32"
+
+# vss params
+VSS_THRESHOLD = "2"
+VSS_TOTAL_SHARES = "3"
+VSS_FIELD = "GF(256)"
+
+# channel params
+DISPUTE_TIMEOUT_BLOCKS = "100"
+BOND_AMOUNT_USD = "5"
+DISPUTE_FEE_PERCENT = "2"
+
+# reputation
+MIN_REPUTATION_DEFAULT = "90"
+TIMEOUT_REPUTATION_PENALTY = "5"
+
+# ghettobox
+PIN_GUESSES_FREE = "5"
+PIN_GUESSES_PREMIUM = "10"
+BACKUP_INACTIVE_WARNING_DAYS = "90"
+BACKUP_ARCHIVE_DAYS = "365"
+RECOVERY_FEE_USD = "5"
+
+[output.html]
+git-repository-url = "https://github.com/nickkuk/zeratul"
+edit-url-template = "https://github.com/nickkuk/zeratul/edit/main/docs/{path}"

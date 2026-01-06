@@ -1,0 +1,202 @@
+# ghettobox-vault.service - hardened systemd unit
+#
+# modes:
+#   --mode software  dev/testing only, no hardware security
+#   --mode tpm       hardware tpm 2.0 (or vtpm in cloud vms)
+#   --mode hsm       future: hsm integration
+#
+# install:
+#   sudo cp ghettobox-vault.service /etc/systemd/system/
+#   sudo useradd -r -s /usr/sbin/nologin -d /var/lib/ghettobox-vault ghettobox-vault
+#   sudo mkdir -p /var/lib/ghettobox-vault
+#   sudo chown ghettobox-vault:ghettobox-vault /var/lib/ghettobox-vault
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now ghettobox-vault
+#
+# for tpm mode, add user to tss group:
+#   sudo usermod -a -G tss ghettobox-vault
+
+[Unit]
+Description=ghettobox vault - guard your users' key shares
+Documentation=https://github.com/aspect/ghettobox
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ghettobox-vault
+Group=ghettobox-vault
+
+# binary and args (use --mode software for testing, --mode tpm for production)
+ExecStart=/usr/local/bin/ghettobox-vault --port 4200 --mode tpm --data-dir /var/lib/ghettobox-vault
+Restart=on-failure
+RestartSec=5s
+
+# working directory
+WorkingDirectory=/var/lib/ghettobox-vault
+StateDirectory=ghettobox-vault
+
+# === filesystem hardening ===
+
+# private /tmp and /var/tmp
+PrivateTmp=yes
+
+# read-only /usr, /boot, /efi
+ProtectSystem=strict
+
+# inaccessible /home, /root, /run/user
+ProtectHome=yes
+
+# private /dev with only pseudo devices
+# NOTE: set to 'no' for TPM mode, or use DeviceAllow
+PrivateDevices=yes
+# for tpm mode, uncomment these and set PrivateDevices=no:
+# DeviceAllow=/dev/tpm0 rw
+# DeviceAllow=/dev/tpmrm0 rw
+
+# no write access to kernel variables
+ProtectKernelTunables=yes
+
+# no loading kernel modules
+ProtectKernelModules=yes
+
+# no access to kernel logs
+ProtectKernelLogs=yes
+
+# no access to control groups
+ProtectControlGroups=yes
+
+# no access to hostname
+ProtectHostname=yes
+
+# no access to clock
+ProtectClock=yes
+
+# private /proc that hides other processes
+ProtectProc=invisible
+ProcSubset=pid
+
+# read-only access to cgroups
+ProtectControlGroups=yes
+
+# bind paths - only what we need
+ReadWritePaths=/var/lib/ghettobox-vault
+BindReadOnlyPaths=/etc/ssl/certs /etc/ca-certificates
+
+# === network hardening ===
+
+# restrict address families to ipv4/ipv6/unix only
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+# no raw sockets
+CapabilityBoundingSet=
+
+# === privilege hardening ===
+
+# no new privileges via execve
+NoNewPrivileges=yes
+
+# no suid/sgid
+RestrictSUIDSGID=yes
+
+# drop all capabilities
+CapabilityBoundingSet=
+AmbientCapabilities=
+
+# restrict realtime scheduling
+RestrictRealtime=yes
+
+# === memory hardening ===
+
+# no writable-executable memory (breaks jit but we don't need it)
+MemoryDenyWriteExecute=yes
+
+# lock memory mappings to prevent swapping secrets
+LockPersonality=yes
+
+# restrict personality to linux only
+RestrictNamespaces=yes
+
+# === syscall filtering ===
+
+# only allow necessary syscall architectures
+SystemCallArchitectures=native
+
+# filter syscalls - allow only what rust/tokio needs
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot @module @raw-io @clock @cpu-emulation @debug @obsolete
+
+# error on filtered syscalls instead of killing (for debugging)
+SystemCallErrorNumber=EPERM
+
+# === resource limits ===
+
+# max open files
+LimitNOFILE=65535
+
+# max processes
+LimitNPROC=64
+
+# max memory locked
+LimitMEMLOCK=64M
+
+# max core dump size (0 = disabled)
+LimitCORE=0
+
+# max address space
+LimitAS=infinity
+
+# === seccomp and sandboxing ===
+
+# use seccomp-bpf
+SecureBits=noroot-locked
+
+# private users namespace (if available)
+PrivateUsers=yes
+
+# private ipc namespace
+PrivateIPC=yes
+
+# private network namespace - DISABLE if you need external network
+# PrivateNetwork=yes
+
+# restrict /proc/sys writes
+RestrictSUIDSGID=yes
+
+# umask for created files
+UMask=0077
+
+# === environment ===
+
+# clean environment
+Environment=RUST_LOG=ghettobox_vault=info
+Environment=RUST_BACKTRACE=1
+
+# === additional sandboxing ===
+
+# no execution from /tmp or /home
+NoExecPaths=/tmp /home /var/tmp
+
+# allow execution only from these paths
+ExecPaths=/usr /usr/local
+
+# keyring isolation
+KeyringMode=private
+
+# === oom handling ===
+
+# lower oom score (less likely to be killed)
+OOMScoreAdjust=-500
+
+# === coredump handling ===
+
+# no core dumps
+LimitCORE=0
+
+# === watchdog ===
+
+# optional: enable watchdog if the service supports it
+# WatchdogSec=30s
+
+[Install]
+WantedBy=multi-user.target

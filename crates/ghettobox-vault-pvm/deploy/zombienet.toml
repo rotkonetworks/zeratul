@@ -1,0 +1,60 @@
+# zombienet config for ghettobox poker demo
+# uses zanchor parachain with shielded pool support
+#
+# start: zombienet spawn deploy/zombienet.toml
+# requires: polkadot, polkadot-omni-node binaries
+
+[settings]
+timeout = 180
+node_spawn_timeout = 60
+
+[relaychain]
+default_command = "polkadot"
+chain = "rococo-local"
+default_args = ["-lparachain=debug"]
+
+[[relaychain.nodes]]
+name = "alice"
+validator = true
+ws_port = 9944
+rpc_port = 9933
+prometheus_port = 9615
+
+[[relaychain.nodes]]
+name = "bob"
+validator = true
+ws_port = 9945
+rpc_port = 9934
+prometheus_port = 9616
+
+# ghettobox parachain (using zanchor runtime)
+[[parachains]]
+id = 2000
+chain = "zanchor-local"
+cumulus_based = true
+
+[[parachains.collators]]
+name = "ghettobox-collator-1"
+command = "polkadot-omni-node"
+ws_port = 9988
+rpc_port = 9977
+args = ["--dev-block-time", "6000", "--runtime", "../zeratul/crates/zanchor/target/release/zanchor_runtime.compact.compressed.wasm"]
+
+[[parachains.collators]]
+name = "ghettobox-collator-2"
+command = "polkadot-omni-node"
+ws_port = 9989
+rpc_port = 9978
+args = ["--dev-block-time", "6000", "--runtime", "../zeratul/crates/zanchor/target/release/zanchor_runtime.compact.compressed.wasm"]
+
+# test: all nodes produce blocks
+[tests]
+[[tests.success_criteria]]
+name = "relay_blocks"
+criteria = { metric = "block_height", comparator = ">", value = 5 }
+timeout = 120
+
+[[tests.success_criteria]]
+name = "para_blocks"
+criteria = { metric = "block_height", comparator = ">", value = 3, para_id = 2000 }
+timeout = 180

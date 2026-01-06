@@ -1,0 +1,36 @@
+[package]
+name = "zk-shuffle"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+repository = "https://github.com/rotkonetworks/zeratul"
+description = "zero-knowledge shuffle proofs for mental poker"
+keywords = ["poker", "shuffle", "mental-poker", "cryptography", "elgamal", "no-std"]
+categories = ["cryptography", "games", "no-std"]
+
+[features]
+default = ["std"]
+std = ["alloc", "ark-std/std", "blake2/std", "rand/std", "rand_core/std"]
+alloc = ["curve25519-dalek/alloc"]
+parallel = ["std", "rayon"]
+
+[dependencies]
+# ristretto255 for elgamal remasking (DDH-hard, prime-order group)
+curve25519-dalek = { version = "4.1", default-features = false, features = ["digest", "rand_core", "group", "zeroize"] }
+
+# arkworks for scalar field ops and rng trait
+ark-ff = { version = "0.3.0", default-features = false }
+ark-std = { version = "0.3.0", default-features = false }
+
+# transcript (blake2-based fiat-shamir)
+blake2 = { version = "0.10", default-features = false }
+
+# random - rand_core is no_std compatible
+rand_core = { version = "0.6", default-features = false }
+rand = { version = "0.8", default-features = false, optional = true }
+
+# parallel (requires std)
+rayon = { version = "1.8", optional = true }
+
+[dev-dependencies]
+rand = "0.8"

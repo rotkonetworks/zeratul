@@ -1,0 +1,7 @@
+services:
+  ligerito:
+    build: .
+    container_name: ligerito-wasm
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8090:8080"

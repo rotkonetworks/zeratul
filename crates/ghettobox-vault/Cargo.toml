@@ -1,0 +1,46 @@
+[package]
+name = "ghettobox-vault"
+version = "0.1.0"
+edition = "2021"
+description = "ghettobox vault - guard your users' key shares"
+
+[[bin]]
+name = "ghettobox-vault"
+path = "src/main.rs"
+
+[features]
+default = ["software"]
+software = ["ghettobox/software"]
+tpm = ["ghettobox/tpm"]
+
+[dependencies]
+# ghettobox core
+ghettobox = { path = "../ghettobox" }
+
+# web server
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors", "trace"] }
+
+# storage (embedded, zero config)
+sled = "0.34"
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# cli
+clap = { version = "4", features = ["derive"] }
+
+# logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# crypto
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+hex = "0.4"
+
+# metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"

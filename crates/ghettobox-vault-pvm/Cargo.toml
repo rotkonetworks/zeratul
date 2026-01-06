@@ -1,0 +1,68 @@
+[package]
+name = "ghettobox-vault-pvm"
+version = "0.1.0"
+edition = "2021"
+description = "ghettobox vault - polkavm sandboxed host"
+
+[[bin]]
+name = "ghettobox-vault-pvm"
+path = "src/main.rs"
+
+[dependencies]
+# polkavm runtime
+polkavm = { path = "/home/alice/rotko/polkavm/crates/polkavm" }
+polkavm-linker = { path = "/home/alice/rotko/polkavm/crates/polkavm-linker" }
+
+# web server
+axum = "0.8"
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["cors"] }
+
+# storage
+sled = "0.34"
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# cli
+clap = { version = "4", features = ["derive"] }
+
+# logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# crypto
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+chacha20poly1305 = "0.10"
+sha2 = "0.10"
+hkdf = "0.12"
+rand = { version = "0.8", features = ["getrandom"] }
+zeroize = { version = "1.8", features = ["derive"] }
+hex = "0.4"
+
+# tls (host-side termination for guest)
+rustls = { version = "0.23", default-features = false, features = ["std", "tls12", "ring"] }
+webpki-roots = "0.26"
+
+# metrics
+metrics = "0.24"
+metrics-exporter-prometheus = "0.16"
+
+# threshold crypto (OSST + reshare)
+osst = { path = "../osst", features = ["ristretto255"] }
+
+# p2p networking (QUIC)
+zeratul-p2p = { path = "../zeratul-p2p" }
+
+# curve crypto (shared with osst)
+curve25519-dalek = "4.1"
+
+# async utilities
+futures = "0.3"
+
+# http client for provider-to-provider communication
+reqwest = { version = "0.12", features = ["json"] }
+
+# logging
+log = "0.4"

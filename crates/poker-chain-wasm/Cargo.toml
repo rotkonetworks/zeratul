@@ -1,0 +1,67 @@
+[package]
+name = "poker-chain-wasm"
+version = "0.1.0"
+edition = "2021"
+description = "high-performance wasm chain client for poker - optimized for 240hz"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[features]
+default = []
+# use smoldot embedded light client (heavier but trustless)
+smoldot = ["smoldot-light"]
+# use rpc only (lighter, requires trusted endpoint)
+rpc = []
+# enable parallel processing
+parallel = ["rayon", "wasm-bindgen-rayon"]
+
+[dependencies]
+# wasm bindings
+wasm-bindgen = "0.2"
+wasm-bindgen-futures = "0.4"
+js-sys = "0.3"
+web-sys = { version = "0.3", features = [
+    "console",
+    "Performance",
+    "Window",
+    "WebSocket",
+    "MessageEvent",
+    "CloseEvent",
+    "ErrorEvent",
+    "BinaryType",
+] }
+
+# serialization - zero-copy where possible
+serde = { version = "1.0", features = ["derive"] }
+serde-wasm-bindgen = "0.6"
+parity-scale-codec = { version = "3.6", features = ["derive"] }
+
+# crypto
+blake3 = "1.5"
+
+# async
+futures = "0.3"
+
+# optional deps
+smoldot-light = { version = "0.16", optional = true }
+rayon = { version = "1.10", optional = true }
+wasm-bindgen-rayon = { version = "1.2", optional = true }
+
+# error handling
+thiserror = "1.0"
+console_error_panic_hook = "0.1"
+
+# getrandom for wasm
+getrandom = { version = "0.2", features = ["js"] }
+
+[dev-dependencies]
+wasm-bindgen-test = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+# smaller wasm
+panic = "abort"

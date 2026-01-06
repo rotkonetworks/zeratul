@@ -1,0 +1,18 @@
+[package]
+name = "poker-state-channel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "state channels for mental poker with ligerito shuffle verification"
+
+[dependencies]
+# encoding
+scale-codec = { package = "parity-scale-codec", version = "3.6", features = ["derive"] }
+scale-info = { version = "2.10", features = ["derive"] }
+
+# crypto
+blake3.workspace = true
+
+# poker logic
+ligerito-shuffle = { path = "../ligerito-shuffle" }
