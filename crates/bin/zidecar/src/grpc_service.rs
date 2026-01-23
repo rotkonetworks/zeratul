@@ -12,7 +12,7 @@ use crate::{
         self, zidecar_server::Zidecar, BlockHeader as ProtoBlockHeader, BlockId, BlockRange,
         CompactAction as ProtoCompactAction, CompactBlock as ProtoCompactBlock, Empty,
         HeaderProof, ProofRequest, SyncStatus, RawTransaction, SendResponse, TxFilter, TreeState,
-        TransparentAddressFilter, UtxoList, Utxo, TxidList,
+        TransparentAddressFilter, UtxoList, Utxo, TxidList, BlockTransactions,
         sync_status::GigaproofStatus,
         // trustless v2 types
         TrustlessStateProof, FrostCheckpoint as ProtoFrostCheckpoint,
@@ -219,6 +219,7 @@ impl Zidecar for ZidecarService {
                                     ephemeral_key: a.ephemeral_key,
                                     ciphertext: a.ciphertext,
                                     nullifier: a.nullifier,
+                                    txid: a.txid,
                                 })
                                 .collect(),
                         };
@@ -436,6 +437,64 @@ impl Zidecar for ZidecarService {
                 Err(Status::not_found(e.to_string()))
             }
         }
+    }
+
+    /// privacy-preserving memo retrieval: get all transactions at a height
+    /// client fetches entire block, server doesn't learn which tx they care about
+    async fn get_block_transactions(
+        &self,
+        request: Request<BlockId>,
+    ) -> std::result::Result<Response<BlockTransactions>, Status> {
+        let block_id = request.into_inner();
+        let height = block_id.height;
+
+        info!("get_block_transactions: height {}", height);
+
+        // get block hash at height
+        let block_hash = match self.zebrad.get_block_hash(height).await {
+            Ok(hash) => hash,
+            Err(e) => {
+                error!("failed to get block hash at {}: {}", height, e);
+                return Err(Status::not_found(e.to_string()));
+            }
+        };
+
+        // get full block with all transactions (verbosity 1 = include tx hashes)
+        let block = match self.zebrad.get_block(&block_hash, 1).await {
+            Ok(b) => b,
+            Err(e) => {
+                error!("failed to get block {}: {}", block_hash, e);
+                return Err(Status::internal(e.to_string()));
+            }
+        };
+
+        // fetch raw transaction bytes for each txid in the block
+        let mut txs = Vec::new();
+        for txid in &block.tx {
+            match self.zebrad.get_raw_transaction(txid).await {
+                Ok(tx) => {
+                    let data = hex::decode(&tx.hex).unwrap_or_default();
+                    txs.push(RawTransaction {
+                        data,
+                        height,
+                    });
+                }
+                Err(e) => {
+                    warn!("failed to get tx {}: {}", txid, e);
+                    // continue with other txs
+                }
+            }
+        }
+
+        let hash = hex::decode(&block_hash).unwrap_or_default();
+
+        info!("returning {} transactions for block {}", txs.len(), height);
+
+        Ok(Response::new(BlockTransactions {
+            height,
+            hash,
+            txs,
+        }))
     }
 
     async fn get_tree_state(
@@ -741,6 +800,7 @@ impl Zidecar for ZidecarService {
                                     ephemeral_key: a.ephemeral_key,
                                     ciphertext: a.ciphertext,
                                     nullifier: a.nullifier,
+                                    txid: a.txid,
                                 })
                                 .collect(),
                             actions_root: actions_root.to_vec(),

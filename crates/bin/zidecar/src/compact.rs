@@ -11,6 +11,7 @@ pub struct CompactAction {
     pub ephemeral_key: Vec<u8>,    // 32 bytes
     pub ciphertext: Vec<u8>,       // 52 bytes (compact)
     pub nullifier: Vec<u8>,        // 32 bytes
+    pub txid: Vec<u8>,             // 32 bytes - for memo retrieval
 }
 
 /// compact block with only scanning data
@@ -37,6 +38,7 @@ impl CompactBlock {
             match zebrad.get_raw_transaction(txid).await {
                 Ok(tx) => {
                     if let Some(orchard) = tx.orchard {
+                        let txid_bytes = hex_to_bytes(txid)?;
                         for action in orchard.actions {
                             actions.push(CompactAction {
                                 cmx: hex_to_bytes(&action.cmx)?,
@@ -47,6 +49,7 @@ impl CompactBlock {
                                     .take(52)
                                     .collect(),
                                 nullifier: hex_to_bytes(&action.nullifier)?,
+                                txid: txid_bytes.clone(),
                             });
                         }
                     }

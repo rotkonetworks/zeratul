@@ -25,6 +25,10 @@ service Zidecar {
     // Get transaction by hash
     rpc GetTransaction(TxFilter) returns (RawTransaction);
 
+    // Get all transactions at a block height (privacy-preserving memo retrieval)
+    // Client fetches entire block, hides which specific tx they care about
+    rpc GetBlockTransactions(BlockId) returns (BlockTransactions);
+
     // Get tree state at a given height (for merkle paths)
     rpc GetTreeState(BlockId) returns (TreeState);
 
@@ -156,6 +160,7 @@ message CompactAction {
     bytes ephemeral_key = 2;    // ephemeral public key (32 bytes)
     bytes ciphertext = 3;       // compact ciphertext (52 bytes)
     bytes nullifier = 4;        // nullifier (32 bytes)
+    bytes txid = 5;             // transaction hash (32 bytes) - for memo retrieval
 }
 
 // Block identifier
@@ -248,6 +253,13 @@ message Utxo {
 // List of transaction IDs
 message TxidList {
     repeated bytes txids = 1;   // 32-byte transaction hashes
+}
+
+// All transactions at a block height (for privacy-preserving memo retrieval)
+message BlockTransactions {
+    uint32 height = 1;
+    bytes hash = 2;                         // block hash
+    repeated RawTransaction txs = 3;        // all transactions in block
 }
 
 // ===== TRUSTLESS STATE PROOF MESSAGES (v2) =====
