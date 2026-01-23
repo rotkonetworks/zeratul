@@ -914,6 +914,305 @@ pub fn parse_signature_response(qr_hex: &str) -> Result<JsValue, JsError> {
         .map_err(|e| JsError::new(&format!("Serialization failed: {}", e)))
 }
 
+// ============================================================================
+// Full Note Decryption with Memos
+// ============================================================================
+
+/// Found note with memo from full decryption
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct FoundNoteWithMemo {
+    pub index: u32,
+    pub value: u64,
+    pub nullifier: String,
+    pub cmx: String,
+    /// The decrypted memo (512 bytes, may be text or binary)
+    pub memo: String,
+    /// Whether the memo appears to be text (UTF-8)
+    pub memo_is_text: bool,
+}
+
+/// Full action data for decryption (includes full 580-byte ciphertext)
+#[derive(Debug, Clone)]
+struct FullOrchardAction {
+    nullifier: [u8; 32],
+    cmx: [u8; 32],
+    epk: [u8; 32],
+    enc_ciphertext: [u8; 580], // full ciphertext including memo
+    out_ciphertext: [u8; 80],   // for outgoing note decryption
+}
+
+/// Full shielded output for use with zcash_note_encryption
+struct FullShieldedOutput {
+    epk: [u8; 32],
+    cmx: [u8; 32],
+    enc_ciphertext: [u8; 580],
+}
+
+/// NOTE_PLAINTEXT_SIZE for Orchard (580 bytes enc_ciphertext)
+const ORCHARD_NOTE_PLAINTEXT_SIZE: usize = 580;
+
+impl zcash_note_encryption::ShieldedOutput<OrchardDomain, ORCHARD_NOTE_PLAINTEXT_SIZE> for FullShieldedOutput {
+    fn ephemeral_key(&self) -> EphemeralKeyBytes {
+        EphemeralKeyBytes(self.epk)
+    }
+
+    fn cmstar_bytes(&self) -> [u8; 32] {
+        self.cmx
+    }
+
+    fn enc_ciphertext(&self) -> &[u8; ORCHARD_NOTE_PLAINTEXT_SIZE] {
+        &self.enc_ciphertext
+    }
+}
+
+/// Parse full Orchard actions from raw transaction bytes
+/// Uses zcash_primitives for proper v5 transaction parsing
+fn parse_orchard_actions_from_tx(tx_bytes: &[u8]) -> Result<Vec<FullOrchardAction>, String> {
+    use zcash_primitives::transaction::Transaction;
+    use zcash_primitives::consensus::BranchId;
+    use std::io::Cursor;
+
+    // Parse transaction using zcash_primitives
+    let mut cursor = Cursor::new(tx_bytes);
+    let tx = Transaction::read(&mut cursor, BranchId::Nu5)
+        .map_err(|e| format!("Failed to parse transaction: {:?}", e))?;
+
+    // Get Orchard bundle if present
+    let orchard_bundle = match tx.orchard_bundle() {
+        Some(bundle) => bundle,
+        None => return Ok(vec![]), // No Orchard actions in this tx
+    };
+
+    // Extract actions with full ciphertext
+    let mut actions = Vec::new();
+
+    for action in orchard_bundle.actions() {
+        // Get action components
+        let nullifier_bytes = action.nullifier().to_bytes();
+        let cmx_bytes = action.cmx().to_bytes();
+        let epk_bytes = action.encrypted_note().epk_bytes;
+
+        // Get full encrypted ciphertext (580 bytes)
+        let enc_ciphertext = action.encrypted_note().enc_ciphertext;
+
+        // Get out_ciphertext for potential outgoing decryption
+        let out_ciphertext = action.encrypted_note().out_ciphertext;
+
+        actions.push(FullOrchardAction {
+            nullifier: nullifier_bytes,
+            cmx: cmx_bytes,
+            epk: epk_bytes,
+            enc_ciphertext,
+            out_ciphertext,
+        });
+    }
+
+    Ok(actions)
+}
+
+#[wasm_bindgen]
+impl WalletKeys {
+    /// Decrypt full notes with memos from a raw transaction
+    ///
+    /// Takes the raw transaction bytes (from zidecar's get_transaction)
+    /// and returns any notes that belong to this wallet, including memos.
+    #[wasm_bindgen]
+    pub fn decrypt_transaction_memos(&self, tx_bytes: &[u8]) -> Result<JsValue, JsError> {
+        use zcash_note_encryption::try_note_decryption;
+
+        let actions = parse_orchard_actions_from_tx(tx_bytes)
+            .map_err(|e| JsError::new(&format!("Failed to parse transaction: {}", e)))?;
+
+        let mut found: Vec<FoundNoteWithMemo> = Vec::new();
+
+        for (idx, action) in actions.iter().enumerate() {
+            // Parse nullifier and cmx using CtOption
+            let nullifier_opt = orchard::note::Nullifier::from_bytes(&action.nullifier);
+            if !bool::from(nullifier_opt.is_some()) {
+                continue;
+            }
+            let nullifier = nullifier_opt.unwrap();
+
+            let cmx_opt = orchard::note::ExtractedNoteCommitment::from_bytes(&action.cmx);
+            if !bool::from(cmx_opt.is_some()) {
+                continue;
+            }
+            let cmx = cmx_opt.unwrap();
+
+            // Create domain for full action
+            let compact_action = orchard::note_encryption::CompactAction::from_parts(
+                nullifier,
+                cmx,
+                EphemeralKeyBytes(action.epk),
+                action.enc_ciphertext[..52].try_into().unwrap(),
+            );
+
+            let domain = OrchardDomain::for_compact_action(&compact_action);
+
+            // Create full shielded output
+            let output = FullShieldedOutput {
+                epk: action.epk,
+                cmx: action.cmx,
+                enc_ciphertext: action.enc_ciphertext,
+            };
+
+            // Try external scope first
+            if let Some((note, _addr, memo)) = try_note_decryption(&domain, &self.prepared_ivk_external, &output) {
+                let note_nf = note.nullifier(&self.fvk);
+                let (memo_str, is_text) = parse_memo_bytes(&memo);
+
+                found.push(FoundNoteWithMemo {
+                    index: idx as u32,
+                    value: note.value().inner(),
+                    nullifier: hex_encode(&note_nf.to_bytes()),
+                    cmx: hex_encode(&action.cmx),
+                    memo: memo_str,
+                    memo_is_text: is_text,
+                });
+                continue;
+            }
+
+            // Try internal scope (change)
+            if let Some((note, _addr, memo)) = try_note_decryption(&domain, &self.prepared_ivk_internal, &output) {
+                let note_nf = note.nullifier(&self.fvk);
+                let (memo_str, is_text) = parse_memo_bytes(&memo);
+
+                found.push(FoundNoteWithMemo {
+                    index: idx as u32,
+                    value: note.value().inner(),
+                    nullifier: hex_encode(&note_nf.to_bytes()),
+                    cmx: hex_encode(&action.cmx),
+                    memo: memo_str,
+                    memo_is_text: is_text,
+                });
+            }
+        }
+
+        serde_wasm_bindgen::to_value(&found)
+            .map_err(|e| JsError::new(&format!("Serialization failed: {}", e)))
+    }
+}
+
+#[wasm_bindgen]
+impl WatchOnlyWallet {
+    /// Decrypt full notes with memos from a raw transaction (watch-only version)
+    #[wasm_bindgen]
+    pub fn decrypt_transaction_memos(&self, tx_bytes: &[u8]) -> Result<JsValue, JsError> {
+        use zcash_note_encryption::try_note_decryption;
+
+        let actions = parse_orchard_actions_from_tx(tx_bytes)
+            .map_err(|e| JsError::new(&format!("Failed to parse transaction: {}", e)))?;
+
+        let mut found: Vec<FoundNoteWithMemo> = Vec::new();
+
+        for (idx, action) in actions.iter().enumerate() {
+            // Parse nullifier and cmx using CtOption
+            let nullifier_opt = orchard::note::Nullifier::from_bytes(&action.nullifier);
+            if !bool::from(nullifier_opt.is_some()) {
+                continue;
+            }
+            let nullifier = nullifier_opt.unwrap();
+
+            let cmx_opt = orchard::note::ExtractedNoteCommitment::from_bytes(&action.cmx);
+            if !bool::from(cmx_opt.is_some()) {
+                continue;
+            }
+            let cmx = cmx_opt.unwrap();
+
+            let compact_action = orchard::note_encryption::CompactAction::from_parts(
+                nullifier,
+                cmx,
+                EphemeralKeyBytes(action.epk),
+                action.enc_ciphertext[..52].try_into().unwrap(),
+            );
+
+            let domain = OrchardDomain::for_compact_action(&compact_action);
+
+            let output = FullShieldedOutput {
+                epk: action.epk,
+                cmx: action.cmx,
+                enc_ciphertext: action.enc_ciphertext,
+            };
+
+            // Try external scope
+            if let Some((note, _addr, memo)) = try_note_decryption(&domain, &self.prepared_ivk_external, &output) {
+                let note_nf = note.nullifier(&self.fvk);
+                let (memo_str, is_text) = parse_memo_bytes(&memo);
+
+                found.push(FoundNoteWithMemo {
+                    index: idx as u32,
+                    value: note.value().inner(),
+                    nullifier: hex_encode(&note_nf.to_bytes()),
+                    cmx: hex_encode(&action.cmx),
+                    memo: memo_str,
+                    memo_is_text: is_text,
+                });
+                continue;
+            }
+
+            // Try internal scope
+            if let Some((note, _addr, memo)) = try_note_decryption(&domain, &self.prepared_ivk_internal, &output) {
+                let note_nf = note.nullifier(&self.fvk);
+                let (memo_str, is_text) = parse_memo_bytes(&memo);
+
+                found.push(FoundNoteWithMemo {
+                    index: idx as u32,
+                    value: note.value().inner(),
+                    nullifier: hex_encode(&note_nf.to_bytes()),
+                    cmx: hex_encode(&action.cmx),
+                    memo: memo_str,
+                    memo_is_text: is_text,
+                });
+            }
+        }
+
+        serde_wasm_bindgen::to_value(&found)
+            .map_err(|e| JsError::new(&format!("Serialization failed: {}", e)))
+    }
+}
+
+/// Parse memo bytes into a string
+/// Returns (memo_string, is_text)
+fn parse_memo_bytes(memo: &[u8; 512]) -> (String, bool) {
+    // Check if memo is empty (all zeros or starts with 0xF6 empty marker)
+    if memo[0] == 0xF6 || memo.iter().all(|&b| b == 0) {
+        return (String::new(), true);
+    }
+
+    // Check if it's a text memo (starts with 0xF5 followed by UTF-8)
+    if memo[0] == 0xF5 {
+        // Find the end of the text (first null byte or end of memo)
+        let text_bytes: Vec<u8> = memo[1..].iter()
+            .take_while(|&&b| b != 0)
+            .copied()
+            .collect();
+
+        if let Ok(text) = String::from_utf8(text_bytes) {
+            return (text, true);
+        }
+    }
+
+    // Try to parse as raw UTF-8 (some wallets don't use the 0xF5 prefix)
+    let text_bytes: Vec<u8> = memo.iter()
+        .take_while(|&&b| b != 0)
+        .copied()
+        .collect();
+
+    if let Ok(text) = String::from_utf8(text_bytes.clone()) {
+        // Check if it looks like text (mostly printable ASCII + common UTF-8)
+        let printable_ratio = text_bytes.iter()
+            .filter(|&&b| b >= 32 && b <= 126 || b >= 0xC0)
+            .count() as f32 / text_bytes.len().max(1) as f32;
+
+        if printable_ratio > 0.8 {
+            return (text, true);
+        }
+    }
+
+    // Return as hex if it's binary data
+    (hex_encode(memo), false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
