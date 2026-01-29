@@ -333,8 +333,8 @@ pub mod secp256k1 {
     use k256::{
         elliptic_curve::{
             ops::Reduce,
-            Field, PrimeField,
             sec1::{FromEncodedPoint, ToEncodedPoint},
+            Field, PrimeField,
         },
         ProjectivePoint, Scalar, U256,
     };
@@ -418,9 +418,7 @@ pub mod secp256k1 {
             scalars
                 .iter()
                 .zip(points.iter())
-                .fold(Self::IDENTITY, |acc, (s, p)| {
-                    acc + p.mul_scalar(s)
-                })
+                .fold(Self::IDENTITY, |acc, (s, p)| acc + p.mul_scalar(s))
         }
 
         // for secp256k1, compress returns first 32 bytes (x-coord)
@@ -573,9 +571,7 @@ pub mod decaf377 {
             scalars
                 .iter()
                 .zip(points.iter())
-                .fold(Element::IDENTITY, |acc, (s, p)| {
-                    acc + (*p * *s)
-                })
+                .fold(Element::IDENTITY, |acc, (s, p)| acc + (*p * *s))
         }
 
         fn compress(&self) -> [u8; 32] {

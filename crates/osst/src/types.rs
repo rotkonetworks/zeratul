@@ -251,9 +251,6 @@ mod tests {
         // Verify recovered proof
         assert!(recovered.verify(&group_pubkey, t).unwrap());
         assert_eq!(original.payload, recovered.payload);
-        assert_eq!(
-            original.contributions.len(),
-            recovered.contributions.len()
-        );
+        assert_eq!(original.contributions.len(), recovered.contributions.len());
     }
 }

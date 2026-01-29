@@ -44,7 +44,11 @@ pub struct CheckpointAnchor {
 
 impl CheckpointAnchor {
     pub fn new(height: u64, block_hash: [u8; 32], timestamp: u64) -> Self {
-        Self { height, block_hash, timestamp }
+        Self {
+            height,
+            block_hash,
+            timestamp,
+        }
     }
 
     /// Serialize for hashing/signing
@@ -80,12 +84,12 @@ pub struct LivenessProof {
 }
 
 impl LivenessProof {
-    pub fn new(
-        anchor: CheckpointAnchor,
-        ligerito_proof: Vec<u8>,
-        state_root: [u8; 32],
-    ) -> Self {
-        Self { anchor, ligerito_proof, state_root }
+    pub fn new(anchor: CheckpointAnchor, ligerito_proof: Vec<u8>, state_root: [u8; 32]) -> Self {
+        Self {
+            anchor,
+            ligerito_proof,
+            state_root,
+        }
     }
 
     /// Estimated proof size for gas/weight estimation
@@ -112,7 +116,11 @@ impl LivenessProof {
         let height = u64::from_le_bytes(bytes[0..8].try_into().unwrap());
         let block_hash: [u8; 32] = bytes[8..40].try_into().unwrap();
         let timestamp = u64::from_le_bytes(bytes[40..48].try_into().unwrap());
-        let anchor = CheckpointAnchor { height, block_hash, timestamp };
+        let anchor = CheckpointAnchor {
+            height,
+            block_hash,
+            timestamp,
+        };
 
         let proof_len = u32::from_le_bytes(bytes[48..52].try_into().unwrap()) as usize;
 
@@ -125,7 +133,11 @@ impl LivenessProof {
             .try_into()
             .unwrap();
 
-        Ok(Self { anchor, ligerito_proof, state_root })
+        Ok(Self {
+            anchor,
+            ligerito_proof,
+            state_root,
+        })
     }
 }
 
@@ -191,8 +203,14 @@ fn hex_short(bytes: &[u8]) -> alloc::string::String {
     } else {
         format!(
             "{}...{}",
-            bytes[0..4].iter().map(|b| format!("{:02x}", b)).collect::<alloc::string::String>(),
-            bytes[bytes.len()-4..].iter().map(|b| format!("{:02x}", b)).collect::<alloc::string::String>()
+            bytes[0..4]
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<alloc::string::String>(),
+            bytes[bytes.len() - 4..]
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<alloc::string::String>()
         )
     }
 }
@@ -204,7 +222,11 @@ impl<P: OsstPoint> DealerContribution<P> {
         liveness: LivenessProof,
         signature: ContributionSignature<P::Scalar>,
     ) -> Self {
-        Self { commitment, liveness, signature }
+        Self {
+            commitment,
+            liveness,
+            signature,
+        }
     }
 
     /// Get dealer index
@@ -220,12 +242,12 @@ impl<P: OsstPoint> DealerContribution<P> {
         liveness: &LivenessProof,
         context: &[u8],
     ) -> [u8; 64] {
-        use sha2::{Sha512, Digest};
+        use sha2::{Digest, Sha512};
 
         let mut hasher = Sha512::new();
         hasher.update(b"OSST-CONTRIBUTION-V1");
-        hasher.update(&commitment.to_bytes());
-        hasher.update(&liveness.to_bytes());
+        hasher.update(commitment.to_bytes());
+        hasher.update(liveness.to_bytes());
         hasher.update(context);
 
         hasher.finalize().into()
@@ -254,7 +276,11 @@ impl<P: OsstPoint> DealerContribution<P> {
 
         let signature = ContributionSignature::new(r, s);
 
-        Self { commitment, liveness, signature }
+        Self {
+            commitment,
+            liveness,
+            signature,
+        }
     }
 
     /// Verify contribution signature
@@ -278,7 +304,7 @@ impl<P: OsstPoint> DealerContribution<P> {
     }
 
     fn challenge_hash(r: &[u8; 32], message: &[u8; 64]) -> P::Scalar {
-        use sha2::{Sha512, Digest};
+        use sha2::{Digest, Sha512};
 
         let mut hasher = Sha512::new();
         hasher.update(r);
@@ -337,10 +363,11 @@ impl<'a, P: OsstPoint, V: LivenessVerifier> ContributionVerifier<'a, P, V> {
         let current = self.verifier.current_anchor();
 
         // Check checkpoint is recent
-        if !contribution.liveness.anchor.is_recent(
-            current.height,
-            self.verifier.max_checkpoint_age(),
-        ) {
+        if !contribution
+            .liveness
+            .anchor
+            .is_recent(current.height, self.verifier.max_checkpoint_age())
+        {
             return Err(ContributionError::CheckpointTooOld);
         }
 
@@ -371,9 +398,7 @@ impl<'a, P: OsstPoint, V: LivenessVerifier> ContributionVerifier<'a, P, V> {
             .iter()
             .zip(public_keys.iter())
             .enumerate()
-            .filter_map(|(i, (contrib, pk))| {
-                self.verify(contrib, pk).ok().map(|_| i)
-            })
+            .filter_map(|(i, (contrib, pk))| self.verify(contrib, pk).ok().map(|_| i))
             .collect()
     }
 }
@@ -446,13 +471,8 @@ mod tests {
 
         // Sign contribution
         let context = b"test-epoch-42";
-        let contribution = DealerContribution::sign(
-            commitment,
-            liveness,
-            &secret,
-            context,
-            &mut rng,
-        );
+        let contribution =
+            DealerContribution::sign(commitment, liveness, &secret, context, &mut rng);
 
         // Verify signature
         assert!(contribution.verify_signature(&public, context));
@@ -461,7 +481,8 @@ mod tests {
         assert!(!contribution.verify_signature(&public, b"wrong-context"));
 
         // Wrong public key should fail
-        let wrong_public: RistrettoPoint = RistrettoPoint::generator().mul_scalar(&Scalar::random(&mut rng));
+        let wrong_public: RistrettoPoint =
+            RistrettoPoint::generator().mul_scalar(&Scalar::random(&mut rng));
         assert!(!contribution.verify_signature(&wrong_public, context));
     }
 
@@ -485,13 +506,8 @@ mod tests {
         let liveness = LivenessProof::new(anchor, vec![1, 2, 3], [0u8; 32]);
         let context = b"epoch-1";
 
-        let contribution = DealerContribution::sign(
-            commitment.clone(),
-            liveness,
-            &secret,
-            context,
-            &mut rng,
-        );
+        let contribution =
+            DealerContribution::sign(commitment.clone(), liveness, &secret, context, &mut rng);
 
         let cv = ContributionVerifier::<RistrettoPoint, _>::new(&verifier, context);
         assert!(cv.verify(&contribution, &public).is_ok());
@@ -500,13 +516,8 @@ mod tests {
         let old_anchor = CheckpointAnchor::new(50, [1u8; 32], 0);
         let old_liveness = LivenessProof::new(old_anchor, vec![1, 2, 3], [0u8; 32]);
 
-        let old_contribution = DealerContribution::sign(
-            commitment,
-            old_liveness,
-            &secret,
-            context,
-            &mut rng,
-        );
+        let old_contribution =
+            DealerContribution::sign(commitment, old_liveness, &secret, context, &mut rng);
 
         assert_eq!(
             cv.verify(&old_contribution, &public),

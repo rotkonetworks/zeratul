@@ -221,8 +221,8 @@ pub fn compute_weights<P: OsstPoint>(
 
     // Compute weights μ_i = λ_i * Π_{j≠i} c_j
     let mut weights: Vec<P::Scalar> = Vec::with_capacity(k);
-    for i in 0..k {
-        let mut weight = lagrange[i].clone();
+    for (i, lambda_i) in lagrange.iter().enumerate().take(k) {
+        let mut weight = lambda_i.clone();
         for (j, c_j) in challenges.iter().enumerate() {
             if i != j {
                 weight = weight.mul(c_j);
@@ -346,7 +346,9 @@ pub mod ristretto255 {
 }
 
 #[cfg(feature = "ristretto255")]
-pub use ristretto255::{Contribution as RistrettoContribution, SecretShare as RistrettoSecretShare};
+pub use ristretto255::{
+    Contribution as RistrettoContribution, SecretShare as RistrettoSecretShare,
+};
 
 // ============================================================================
 // Pallas-specific convenience exports
@@ -374,8 +376,8 @@ pub use pallas::{Contribution as PallasContribution, SecretShare as PallasSecret
 #[cfg(all(test, feature = "pallas"))]
 mod pallas_tests {
     use super::*;
-    use pasta_curves::pallas::{Point, Scalar};
     use pasta_curves::group::ff::Field;
+    use pasta_curves::pallas::{Point, Scalar};
     use rand::rngs::OsRng;
 
     use crate::curve::OsstPoint;
@@ -804,7 +806,10 @@ mod secp256k1_tests {
         assert_eq!(full_compressed.len(), 33, "secp256k1 should be 33 bytes");
 
         let full_decompressed = ProjectivePoint::decompress_slice(&full_compressed);
-        assert!(full_decompressed.is_some(), "should decompress 33-byte form");
+        assert!(
+            full_decompressed.is_some(),
+            "should decompress 33-byte form"
+        );
         assert_eq!(point, full_decompressed.unwrap(), "roundtrip should match");
     }
 

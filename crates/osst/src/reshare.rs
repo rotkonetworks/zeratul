@@ -150,7 +150,10 @@ impl<P: OsstPoint> DealerCommitment<P> {
             coefficients.push(point);
         }
 
-        Ok(Self { dealer_index, coefficients })
+        Ok(Self {
+            dealer_index,
+            coefficients,
+        })
     }
 }
 
@@ -169,7 +172,11 @@ impl<S: OsstScalar> SubShare<S> {
     pub fn new(dealer_index: u32, player_index: u32, value: S) -> Self {
         debug_assert!(dealer_index > 0);
         debug_assert!(player_index > 0);
-        Self { dealer_index, player_index, value }
+        Self {
+            dealer_index,
+            player_index,
+            value,
+        }
     }
 
     pub fn to_bytes(&self) -> [u8; 40] {
@@ -191,7 +198,11 @@ impl<S: OsstScalar> SubShare<S> {
         let value_bytes: [u8; 32] = bytes[8..40].try_into().unwrap();
         let value = S::from_canonical_bytes(&value_bytes).ok_or(OsstError::InvalidResponse)?;
 
-        Ok(Self { dealer_index, player_index, value })
+        Ok(Self {
+            dealer_index,
+            player_index,
+            value,
+        })
     }
 }
 
@@ -243,7 +254,11 @@ impl<P: OsstPoint> Dealer<P> {
 
         let commitment = DealerCommitment::from_polynomial(index, &polynomial);
 
-        Self { index, polynomial, commitment }
+        Self {
+            index,
+            polynomial,
+            commitment,
+        }
     }
 
     #[inline]
@@ -365,7 +380,11 @@ impl<P: OsstPoint> Aggregator<P> {
         }
 
         // Check for duplicate
-        if self.subshares.iter().any(|s| s.dealer_index == subshare.dealer_index) {
+        if self
+            .subshares
+            .iter()
+            .any(|s| s.dealer_index == subshare.dealer_index)
+        {
             return Ok(false);
         }
 
@@ -413,10 +432,7 @@ impl<P: OsstPoint> Aggregator<P> {
             });
         }
 
-        let dealer_indices: Vec<u32> = self.subshares
-            .iter()
-            .map(|s| s.dealer_index)
-            .collect();
+        let dealer_indices: Vec<u32> = self.subshares.iter().map(|s| s.dealer_index).collect();
 
         let lagrange = compute_lagrange_coefficients::<P::Scalar>(&dealer_indices)?;
 
@@ -442,10 +458,7 @@ impl<P: OsstPoint> Aggregator<P> {
             });
         }
 
-        let dealer_indices: Vec<u32> = self.commitments
-            .iter()
-            .map(|c| c.dealer_index)
-            .collect();
+        let dealer_indices: Vec<u32> = self.commitments.iter().map(|c| c.dealer_index).collect();
 
         let lagrange = compute_lagrange_coefficients::<P::Scalar>(&dealer_indices)?;
 
@@ -530,8 +543,13 @@ impl<P: OsstPoint> ReshareState<P> {
     /// Submit a dealer's commitment
     ///
     /// Returns true if this is a new commitment, false if duplicate.
-    pub fn submit_commitment(&mut self, commitment: DealerCommitment<P>) -> Result<bool, OsstError> {
-        let idx = commitment.dealer_index.checked_sub(1)
+    pub fn submit_commitment(
+        &mut self,
+        commitment: DealerCommitment<P>,
+    ) -> Result<bool, OsstError> {
+        let idx = commitment
+            .dealer_index
+            .checked_sub(1)
             .ok_or(OsstError::InvalidIndex)? as usize;
 
         if idx >= self.commitments.len() {
@@ -683,9 +701,8 @@ mod tests {
             .collect();
 
         // Create aggregators for new players
-        let mut aggregators: Vec<Aggregator<RistrettoPoint>> = (1..=new_n)
-            .map(Aggregator::new)
-            .collect();
+        let mut aggregators: Vec<Aggregator<RistrettoPoint>> =
+            (1..=new_n).map(Aggregator::new).collect();
 
         // Distribute sub-shares
         for dealer in &dealers {
@@ -767,10 +784,8 @@ mod tests {
             .iter()
             .map(|d| d.generate_subshare(player_index))
             .collect();
-        let commitments: Vec<DealerCommitment<RistrettoPoint>> = dealers
-            .iter()
-            .map(|d| d.commitment().clone())
-            .collect();
+        let commitments: Vec<DealerCommitment<RistrettoPoint>> =
+            dealers.iter().map(|d| d.commitment().clone()).collect();
 
         // Batch verify should succeed
         assert!(batch_verify_subshares(
@@ -813,13 +828,11 @@ mod tests {
 
         // Submit commitments
         for share in &old_shares {
-            let dealer: Dealer<RistrettoPoint> = Dealer::new(
-                share.index,
-                share.scalar.clone(),
-                3,
-                &mut rng,
-            );
-            state.submit_commitment(dealer.commitment().clone()).unwrap();
+            let dealer: Dealer<RistrettoPoint> =
+                Dealer::new(share.index, share.scalar.clone(), 3, &mut rng);
+            state
+                .submit_commitment(dealer.commitment().clone())
+                .unwrap();
         }
 
         assert!(state.has_quorum());
@@ -837,7 +850,11 @@ mod tests {
 
         assert_eq!(original.dealer_index, recovered.dealer_index);
         assert_eq!(original.coefficients.len(), recovered.coefficients.len());
-        for (a, b) in original.coefficients.iter().zip(recovered.coefficients.iter()) {
+        for (a, b) in original
+            .coefficients
+            .iter()
+            .zip(recovered.coefficients.iter())
+        {
             assert_eq!(a, b);
         }
     }

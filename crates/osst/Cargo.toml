@@ -2,9 +2,13 @@
 name = "osst"
 version = "0.1.0"
 edition = "2021"
-license = "MIT"
-description = "One-Step Schnorr Threshold Identification (OSST) - from Mergoupis-Anagnou paper"
+license = "MIT OR Apache-2.0"
+description = "one-step schnorr threshold identification with proactive resharing"
 repository = "https://github.com/rotkonetworks/zeratul"
+documentation = "https://docs.rs/osst"
+readme = "README.md"
+keywords = ["threshold", "cryptography", "schnorr", "mpc", "reshare"]
+categories = ["cryptography", "no-std"]
 
 [features]
 default = ["std", "ristretto255"]
