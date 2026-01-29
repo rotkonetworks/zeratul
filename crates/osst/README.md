@@ -2,7 +2,7 @@
 
 one-step schnorr threshold identification with proactive resharing.
 
-implementation of the OSST protocol from ["One-Step Schnorr Threshold Identification"](https://eprint.iacr.org/2024/XXX) by Foteinos Mergoupis-Anagnou (GRNET).
+implementation of the OSST protocol from ["One-Step Schnorr Threshold Identification"](https://eprint.iacr.org/2025/722) by Foteinos Mergoupis-Anagnou (GRNET).
 
 ## security warning
 

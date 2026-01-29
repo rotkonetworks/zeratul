@@ -1,5 +1,11 @@
 # changelog
 
+## [0.1.1] - 2025-01-29
+
+### fixed
+
+- correct eprint link for paper (https://eprint.iacr.org/2025/722)
+
 ## [0.1.0] - 2025-01-29
 
 initial release.
