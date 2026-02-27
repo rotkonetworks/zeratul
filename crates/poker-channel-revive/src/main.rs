@@ -109,6 +109,96 @@ fn ecrecover(msg_hash: &[u8; 32], signature: &[u8; 65]) -> Option<[u8; 20]> {
     }
 }
 
+/// verify signatures for a state update or dispute
+/// expects ABI-encoded bytes[] array starting at sigs_offset
+/// returns true if all active players have signed
+fn verify_state_signatures(
+    game_id: &[u8; 32],
+    nonce: u64,
+    state_hash: &[u8; 32],
+    game_data: &[u8; GAME_DATA_SIZE],
+    sigs_offset: usize,
+) -> bool {
+    // build message hash: keccak256(gameId || nonce || stateHash)
+    let mut msg = [0u8; 72];
+    msg[0..32].copy_from_slice(game_id);
+    msg[32..40].copy_from_slice(&nonce.to_be_bytes());
+    msg[40..72].copy_from_slice(state_hash);
+    let msg_hash = keccak256(&msg);
+
+    let max_players = game_data[38];
+
+    // read array offset from fixed params (relative to start of params at offset 4)
+    let mut offset_bytes = [0u8; 32];
+    api::call_data_copy(&mut offset_bytes, sigs_offset as u32);
+    let array_data_offset = 4 + u32::from_be_bytes(offset_bytes[28..32].try_into().unwrap()) as usize;
+
+    // read array length
+    let mut len_bytes = [0u8; 32];
+    api::call_data_copy(&mut len_bytes, array_data_offset as u32);
+    let num_sigs = u32::from_be_bytes(len_bytes[28..32].try_into().unwrap()) as usize;
+
+    // track which players have signed
+    let mut player_signed = [false; 10];
+
+    // process each signature
+    for i in 0..num_sigs.min(10) {
+        // read offset to this bytes element (relative to array start)
+        let elem_offset_pos = array_data_offset + 32 + i * 32;
+        let mut elem_offset_bytes = [0u8; 32];
+        api::call_data_copy(&mut elem_offset_bytes, elem_offset_pos as u32);
+        let elem_offset = array_data_offset + 32 + u32::from_be_bytes(elem_offset_bytes[28..32].try_into().unwrap()) as usize;
+
+        // read bytes length (should be 65)
+        let mut sig_len_bytes = [0u8; 32];
+        api::call_data_copy(&mut sig_len_bytes, elem_offset as u32);
+        let sig_len = u32::from_be_bytes(sig_len_bytes[28..32].try_into().unwrap()) as usize;
+
+        if sig_len != 65 {
+            return false;
+        }
+
+        // read the 65-byte signature
+        let mut signature = [0u8; 65];
+        api::call_data_copy(&mut signature[0..32], (elem_offset + 32) as u32);
+        api::call_data_copy(&mut signature[32..64], (elem_offset + 64) as u32);
+        let mut last_chunk = [0u8; 32];
+        api::call_data_copy(&mut last_chunk, (elem_offset + 96) as u32);
+        signature[64] = last_chunk[0];
+
+        // recover signer address
+        let signer = match ecrecover(&msg_hash, &signature) {
+            Some(addr) => addr,
+            None => return false,
+        };
+
+        // check if signer is a player and mark them as signed
+        for seat in 0..max_players {
+            let player_k = player_key(game_id, seat);
+            let mut player_data = [0u8; PLAYER_DATA_SIZE];
+            if sget(&player_k, &mut player_data) {
+                let mut player_addr = [0u8; 20];
+                player_addr.copy_from_slice(&player_data[0..20]);
+                if player_addr == signer {
+                    player_signed[seat as usize] = true;
+                    break;
+                }
+            }
+        }
+    }
+
+    // verify all active players have signed
+    for seat in 0..max_players {
+        let player_k = player_key(game_id, seat);
+        let mut check = [0u8; 1];
+        if sget(&player_k, &mut check) && !player_signed[seat as usize] {
+            return false;
+        }
+    }
+
+    true
+}
+
 // ============================================================================
 // STORAGE LAYOUT
 // ============================================================================
@@ -537,8 +627,11 @@ fn handle_update_state(input_len: usize) {
         api::return_value(ReturnFlags::REVERT, &[0x15]); // nonce too low
     }
 
-    // TODO: verify signatures from all active players
-    // for now, just accept the update (simplified)
+    // verify signatures from all active players
+    // signatures array offset is at position 4 + 96 = 100
+    if !verify_state_signatures(&game_id, nonce, &state_hash, &game_data, 100) {
+        api::return_value(ReturnFlags::REVERT, &[0x18]); // invalid signatures
+    }
 
     // update state
     game_data[40..72].copy_from_slice(&state_hash);
@@ -582,7 +675,10 @@ fn handle_dispute(input_len: usize) {
         api::return_value(ReturnFlags::REVERT, &[0x15]);
     }
 
-    // TODO: verify signatures
+    // verify signatures from all active players
+    if !verify_state_signatures(&game_id, nonce, &state_hash, &game_data, 100) {
+        api::return_value(ReturnFlags::REVERT, &[0x18]); // invalid signatures
+    }
 
     let mut caller = [0u8; 20];
     api::caller(&mut caller);
