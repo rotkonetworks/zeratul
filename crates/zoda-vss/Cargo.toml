@@ -1,0 +1,29 @@
+[package]
+name = "zoda-vss"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "verifiable secret sharing via reed-solomon coding"
+repository = "https://github.com/rotkonetworks/zeratul"
+documentation = "https://docs.rs/zoda-vss"
+readme = "README.md"
+keywords = ["secret-sharing", "reed-solomon", "verifiable", "threshold", "mpc"]
+categories = ["cryptography", "no-std"]
+
+[features]
+default = ["std"]
+std = ["sha2/std", "rand_core/std"]
+
+[dependencies]
+# hashing for commitment
+sha2 = { version = "0.10", default-features = false }
+
+# randomness
+rand_core = { version = "0.6", default-features = false }
+
+# optional serialization
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"], optional = true }
+
+[dev-dependencies]
+rand = "0.8"
+hex = "0.4"
