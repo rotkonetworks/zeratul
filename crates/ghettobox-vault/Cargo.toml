@@ -38,8 +38,10 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 # crypto
 ed25519-dalek = { version = "2", features = ["rand_core"] }
+curve25519-dalek = { version = "4", features = ["rand_core"] }
 rand = "0.8"
 hex = "0.4"
+sha2 = "0.10"
 
 # metrics
 metrics = "0.24"

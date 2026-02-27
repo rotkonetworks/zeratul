@@ -16,11 +16,18 @@ use axum::{
     Json, Router,
 };
 use clap::{Parser, ValueEnum};
+use curve25519_dalek::{
+    constants::RISTRETTO_BASEPOINT_POINT,
+    ristretto::{CompressedRistretto, RistrettoPoint},
+    scalar::Scalar,
+};
 use ed25519_dalek::{SigningKey, Signer, Signature};
-use ghettobox::{Realm, Error as GhettoError};
+use ghettobox::{Realm, Error as GhettoError, VerifiedOprfResponse, ServerPublicKey};
+use ghettobox::oprf::DleqProof;
 use metrics::{counter, gauge, histogram};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use serde::{Deserialize, Serialize};
+use sha2::{Sha512, Digest};
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -79,7 +86,7 @@ struct Args {
     metrics_port: Option<u16>,
 }
 
-/// registration stored in db
+/// legacy registration stored in db (unlock_tag based)
 #[derive(Clone, Serialize, Deserialize)]
 struct Registration {
     /// sealed share data
@@ -96,15 +103,34 @@ struct Registration {
     realm_mode: String,
 }
 
+/// OPRF registration stored in db (verified OPRF based)
+#[derive(Clone, Serialize, Deserialize)]
+struct OprfRegistration {
+    /// encrypted seed (client encrypts with OPRF output)
+    encrypted_seed: Vec<u8>,
+    /// max allowed guesses
+    allowed_guesses: u32,
+    /// failed attempts so far
+    attempted_guesses: u32,
+    /// registration timestamp
+    created_at: u64,
+}
+
 /// app state shared across handlers
 struct AppState {
     /// embedded database
     db: sled::Db,
+    /// OPRF registrations (separate tree)
+    oprf_db: sled::Tree,
     /// realm for sealing (software, tpm, or hsm)
     realm: Box<dyn Realm>,
-    /// node signing key
+    /// node signing key (ed25519)
     signing_key: SigningKey,
-    /// node index
+    /// OPRF share (ristretto255 scalar)
+    oprf_share: Scalar,
+    /// OPRF public key (G * share)
+    oprf_pubkey: RistrettoPoint,
+    /// node index (0-based for OPRF)
     index: u8,
     /// realm mode
     mode: RealmMode,
@@ -173,6 +199,52 @@ struct TpmInfoResponse {
     firmware_version: String,
     tpm_type: String,
     is_virtual: bool,
+}
+
+// === OPRF request/response types ===
+
+#[derive(Deserialize)]
+struct OprfRegisterRequest {
+    /// user identifier (hex encoded)
+    user_id: String,
+    /// blinded element (hex encoded compressed point)
+    blinded: String,
+    /// encrypted seed (hex encoded)
+    encrypted_seed: String,
+    /// allowed guesses before lockout
+    allowed_guesses: u32,
+}
+
+#[derive(Serialize)]
+struct OprfRegisterResponse {
+    ok: bool,
+    response: Option<VerifiedOprfResponse>,
+    error: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct OprfRecoverRequest {
+    /// user identifier (hex encoded)
+    user_id: String,
+    /// blinded element (hex encoded compressed point)
+    blinded: String,
+}
+
+#[derive(Serialize)]
+struct OprfRecoverResponse {
+    ok: bool,
+    response: Option<VerifiedOprfResponse>,
+    encrypted_seed: Option<String>,
+    guesses_remaining: u32,
+    error: Option<String>,
+}
+
+#[derive(Serialize)]
+struct OprfHealthResponse {
+    ok: bool,
+    index: u8,
+    version: String,
+    oprf_pubkey: String,
 }
 
 // === handlers ===
@@ -354,6 +426,234 @@ async fn health() -> &'static str {
     "ok"
 }
 
+// === OPRF handlers ===
+
+async fn oprf_health(
+    State(state): State<Arc<RwLock<AppState>>>,
+) -> Json<OprfHealthResponse> {
+    let state = state.read().await;
+    Json(OprfHealthResponse {
+        ok: true,
+        index: state.index,
+        version: env!("CARGO_PKG_VERSION").into(),
+        oprf_pubkey: hex::encode(state.oprf_pubkey.compress().as_bytes()),
+    })
+}
+
+async fn oprf_register(
+    State(state): State<Arc<RwLock<AppState>>>,
+    Json(req): Json<OprfRegisterRequest>,
+) -> Result<Json<OprfRegisterResponse>, (StatusCode, String)> {
+    let start = Instant::now();
+    counter!("vault_requests_total", "endpoint" => "oprf_register").increment(1);
+
+    let state = state.write().await;
+
+    // check if already registered
+    if state.oprf_db.contains_key(&req.user_id).unwrap_or(false) {
+        counter!("vault_errors_total", "endpoint" => "oprf_register", "error" => "conflict").increment(1);
+        return Ok(Json(OprfRegisterResponse {
+            ok: false,
+            response: None,
+            error: Some("already registered".into()),
+        }));
+    }
+
+    // decode blinded point
+    let blinded_bytes = hex::decode(&req.blinded)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid blinded hex: {}", e)))?;
+
+    if blinded_bytes.len() != 32 {
+        return Err((StatusCode::BAD_REQUEST, "blinded must be 32 bytes".into()));
+    }
+
+    let blinded = CompressedRistretto::from_slice(&blinded_bytes)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid compressed point".into()))?
+        .decompress()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "point decompression failed".into()))?;
+
+    // evaluate OPRF: response = blinded * share
+    let response_point = blinded * state.oprf_share;
+
+    // create DLEQ proof
+    let proof = DleqProof::create(
+        &state.oprf_share,
+        &blinded,
+        &response_point,
+        &state.oprf_pubkey,
+    );
+
+    // decode encrypted seed
+    let encrypted_seed = hex::decode(&req.encrypted_seed)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid encrypted_seed hex: {}", e)))?;
+
+    // store OPRF registration
+    let reg = OprfRegistration {
+        encrypted_seed,
+        allowed_guesses: req.allowed_guesses.min(10),
+        attempted_guesses: 0,
+        created_at: std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs(),
+    };
+
+    let reg_bytes = serde_json::to_vec(&reg)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    state.oprf_db.insert(&req.user_id, reg_bytes)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // create verified response
+    let oprf_response = VerifiedOprfResponse {
+        server_index: state.index,
+        point: response_point.compress().as_bytes().to_vec().try_into().unwrap(),
+        proof,
+    };
+
+    counter!("vault_oprf_registrations_total").increment(1);
+    histogram!("vault_request_duration_seconds", "endpoint" => "oprf_register")
+        .record(start.elapsed().as_secs_f64());
+
+    info!("oprf registered user {}", &req.user_id[..16.min(req.user_id.len())]);
+
+    Ok(Json(OprfRegisterResponse {
+        ok: true,
+        response: Some(oprf_response),
+        error: None,
+    }))
+}
+
+async fn oprf_recover(
+    State(state): State<Arc<RwLock<AppState>>>,
+    Json(req): Json<OprfRecoverRequest>,
+) -> Result<Json<OprfRecoverResponse>, (StatusCode, String)> {
+    let start = Instant::now();
+    counter!("vault_requests_total", "endpoint" => "oprf_recover").increment(1);
+
+    let mut state = state.write().await;
+
+    // lookup registration
+    let reg_bytes = match state.oprf_db.get(&req.user_id) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => {
+            counter!("vault_errors_total", "endpoint" => "oprf_recover", "error" => "not_found").increment(1);
+            return Ok(Json(OprfRecoverResponse {
+                ok: false,
+                response: None,
+                encrypted_seed: None,
+                guesses_remaining: 0,
+                error: Some("not registered".into()),
+            }));
+        }
+        Err(e) => return Err((StatusCode::INTERNAL_SERVER_ERROR, e.to_string())),
+    };
+
+    let mut reg: OprfRegistration = serde_json::from_slice(&reg_bytes)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // check rate limit
+    if reg.attempted_guesses >= reg.allowed_guesses {
+        // delete registration after too many attempts
+        state.oprf_db.remove(&req.user_id).ok();
+        counter!("vault_oprf_lockouts_total").increment(1);
+        warn!("oprf user {} locked out, deleting", &req.user_id[..16.min(req.user_id.len())]);
+
+        return Ok(Json(OprfRecoverResponse {
+            ok: false,
+            response: None,
+            encrypted_seed: None,
+            guesses_remaining: 0,
+            error: Some("account locked - too many attempts".into()),
+        }));
+    }
+
+    // decode blinded point
+    let blinded_bytes = hex::decode(&req.blinded)
+        .map_err(|e| (StatusCode::BAD_REQUEST, format!("invalid blinded hex: {}", e)))?;
+
+    if blinded_bytes.len() != 32 {
+        return Err((StatusCode::BAD_REQUEST, "blinded must be 32 bytes".into()));
+    }
+
+    let blinded = CompressedRistretto::from_slice(&blinded_bytes)
+        .map_err(|_| (StatusCode::BAD_REQUEST, "invalid compressed point".into()))?
+        .decompress()
+        .ok_or_else(|| (StatusCode::BAD_REQUEST, "point decompression failed".into()))?;
+
+    // evaluate OPRF: response = blinded * share
+    let response_point = blinded * state.oprf_share;
+
+    // create DLEQ proof
+    let proof = DleqProof::create(
+        &state.oprf_share,
+        &blinded,
+        &response_point,
+        &state.oprf_pubkey,
+    );
+
+    // increment attempt counter (will be reset on successful client-side decryption)
+    // note: in OPRF, we can't verify correctness server-side, so we always count
+    reg.attempted_guesses += 1;
+    let remaining = reg.allowed_guesses.saturating_sub(reg.attempted_guesses);
+
+    let reg_bytes = serde_json::to_vec(&reg)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    state.oprf_db.insert(&req.user_id, reg_bytes)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // create verified response
+    let oprf_response = VerifiedOprfResponse {
+        server_index: state.index,
+        point: response_point.compress().as_bytes().to_vec().try_into().unwrap(),
+        proof,
+    };
+
+    counter!("vault_oprf_recoveries_total").increment(1);
+    histogram!("vault_request_duration_seconds", "endpoint" => "oprf_recover")
+        .record(start.elapsed().as_secs_f64());
+
+    info!(
+        "oprf recover for user {}, {} attempts remaining",
+        &req.user_id[..16.min(req.user_id.len())],
+        remaining
+    );
+
+    Ok(Json(OprfRecoverResponse {
+        ok: true,
+        response: Some(oprf_response),
+        encrypted_seed: Some(hex::encode(&reg.encrypted_seed)),
+        guesses_remaining: remaining,
+        error: None,
+    }))
+}
+
+/// reset attempt counter after successful recovery (client calls this)
+async fn oprf_confirm(
+    State(state): State<Arc<RwLock<AppState>>>,
+    Path(user_id): Path<String>,
+) -> Result<Json<serde_json::Value>, (StatusCode, String)> {
+    let state = state.write().await;
+
+    let reg_bytes = state.oprf_db.get(&user_id)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?
+        .ok_or_else(|| (StatusCode::NOT_FOUND, "not registered".into()))?;
+
+    let mut reg: OprfRegistration = serde_json::from_slice(&reg_bytes)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    // reset attempts on successful recovery confirmation
+    reg.attempted_guesses = 0;
+
+    let reg_bytes = serde_json::to_vec(&reg)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+    state.oprf_db.insert(&user_id, reg_bytes)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
+
+    info!("oprf confirmed for user {}", &user_id[..16.min(user_id.len())]);
+
+    Ok(Json(serde_json::json!({ "ok": true })))
+}
+
 /// create realm based on mode, returns (realm, optional tpm info)
 fn create_realm(mode: RealmMode, _data_dir: &str) -> (Box<dyn Realm>, Option<TpmInfoResponse>) {
     match mode {
@@ -448,6 +748,9 @@ async fn main() {
     let db_path = format!("{}/db", data_dir);
     let db = sled::open(&db_path).expect("failed to open database");
 
+    // separate tree for OPRF registrations
+    let oprf_db = db.open_tree("oprf").expect("failed to open oprf tree");
+
     let key_path = format!("{}/node.key", data_dir);
     let signing_key = if std::path::Path::new(&key_path).exists() {
         let key_bytes = std::fs::read(&key_path).expect("failed to read key");
@@ -459,13 +762,35 @@ async fn main() {
         key
     };
 
+    // load or generate OPRF share
+    let oprf_key_path = format!("{}/oprf.key", data_dir);
+    let oprf_share = if std::path::Path::new(&oprf_key_path).exists() {
+        let key_bytes = std::fs::read(&oprf_key_path).expect("failed to read oprf key");
+        let key_arr: [u8; 32] = key_bytes.try_into().expect("invalid oprf key length");
+        Scalar::from_bytes_mod_order(key_arr)
+    } else {
+        // generate random scalar for OPRF share
+        let mut scalar_bytes = [0u8; 64];
+        rand::RngCore::fill_bytes(&mut rand::thread_rng(), &mut scalar_bytes);
+        let share = Scalar::from_bytes_mod_order_wide(&scalar_bytes);
+        // store the canonical 32-byte form
+        std::fs::write(&oprf_key_path, share.as_bytes()).expect("failed to write oprf key");
+        share
+    };
+
+    // compute OPRF public key: G * share
+    let oprf_pubkey = RISTRETTO_BASEPOINT_POINT * oprf_share;
+
     let (realm, tpm_info) = create_realm(args.mode, &data_dir);
 
     let pubkey = hex::encode(signing_key.verifying_key().to_bytes());
+    let oprf_pubkey_hex = hex::encode(oprf_pubkey.compress().as_bytes());
+
     info!("ghettobox-vault v{}", env!("CARGO_PKG_VERSION"));
     info!("  index: {}", args.index);
     info!("  mode: {}", args.mode);
-    info!("  pubkey: {}", pubkey);
+    info!("  ed25519 pubkey: {}", pubkey);
+    info!("  oprf pubkey: {}", oprf_pubkey_hex);
     info!("  data: {}", data_dir);
     info!("  bind: {}:{}", args.bind, args.port);
     info!("  metrics: {}:{}", args.bind, metrics_port);
@@ -479,19 +804,29 @@ async fn main() {
 
     let state = Arc::new(RwLock::new(AppState {
         db,
+        oprf_db,
         realm,
         signing_key,
+        oprf_share,
+        oprf_pubkey,
         index: args.index,
         mode: args.mode,
         tpm_info,
     }));
 
     let app = Router::new()
+        // info endpoints
         .route("/", get(node_info))
         .route("/health", get(health))
+        // legacy protocol
         .route("/register", post(register))
         .route("/recover", post(recover))
         .route("/status/{user_id}", get(status))
+        // OPRF protocol (verified with DLEQ proofs)
+        .route("/oprf/health", get(oprf_health))
+        .route("/oprf/register", post(oprf_register))
+        .route("/oprf/recover", post(oprf_recover))
+        .route("/oprf/confirm/{user_id}", post(oprf_confirm))
         .layer(CorsLayer::permissive())
         .with_state(state);
 
