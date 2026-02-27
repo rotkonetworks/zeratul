@@ -232,18 +232,19 @@ impl StateTransitionTrace {
         })
     }
 
-    /// Extract Orchard actions from a single block
+    /// Extract Orchard actions from a single block.
+    /// Uses verbosity=1 + per-tx fetch to avoid response size limits.
     async fn extract_orchard_actions(
         zebrad: &ZebradClient,
         height: u32,
     ) -> Result<Vec<OrchardAction>> {
         let hash = zebrad.get_block_hash(height).await?;
-        let block = zebrad.get_block_with_txs(&hash).await?;
+        let block = zebrad.get_block(&hash, 1).await?;
 
         let mut actions = Vec::new();
 
-        // Extract Orchard actions from block transactions
-        for tx in &block.tx {
+        for txid in &block.tx {
+            let tx = zebrad.get_raw_transaction(txid).await?;
             if let Some(ref orchard_bundle) = tx.orchard {
                 for action in &orchard_bundle.actions {
                     actions.push(OrchardAction {

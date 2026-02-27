@@ -625,15 +625,18 @@ pub enum NullifierPool {
 }
 
 impl EpochManager {
-    /// Extract all nullifiers from a block
+    /// Extract all nullifiers from a block.
+    /// Uses verbosity=1 (txid list) + per-tx fetch to avoid zebrad response size limits
+    /// on blocks with many shielded transactions.
     pub async fn extract_nullifiers_from_block(&self, height: u32) -> Result<Vec<ExtractedNullifier>> {
         let hash = self.zebrad.get_block_hash(height).await?;
-        let block = self.zebrad.get_block_with_txs(&hash).await?;
+        let block = self.zebrad.get_block(&hash, 1).await?;
 
         let mut nullifiers = Vec::new();
 
-        for tx in &block.tx {
-            // Sapling spends
+        for txid in &block.tx {
+            let tx = self.zebrad.get_raw_transaction(txid).await?;
+
             if let Some(ref spends) = tx.sapling_spends {
                 for spend in spends {
                     if let Some(nf) = spend.nullifier_bytes() {
@@ -645,7 +648,6 @@ impl EpochManager {
                 }
             }
 
-            // Orchard actions (each action has a nullifier)
             if let Some(ref orchard) = tx.orchard {
                 for action in &orchard.actions {
                     if let Some(nf) = action.nullifier_bytes() {
@@ -669,7 +671,6 @@ impl EpochManager {
             let nullifiers = self.extract_nullifiers_from_block(height).await?;
 
             if !nullifiers.is_empty() {
-                // Batch insert into nomt
                 let nf_bytes: Vec<[u8; 32]> = nullifiers.iter().map(|n| n.nullifier).collect();
                 self.storage.batch_insert_nullifiers(&nf_bytes, height)?;
                 total_nullifiers += nullifiers.len() as u32;

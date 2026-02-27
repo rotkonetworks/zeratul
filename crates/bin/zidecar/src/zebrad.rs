@@ -69,13 +69,6 @@ impl ZebradClient {
             .map_err(|e| ZidecarError::ZebradRpc(e.to_string()))
     }
 
-    /// Get block with full transaction data (verbosity=2)
-    pub async fn get_block_with_txs(&self, hash: &str) -> Result<BlockWithTxs> {
-        let result = self.call("getblock", vec![json!(hash), json!(2)]).await?;
-        serde_json::from_value(result)
-            .map_err(|e| ZidecarError::ZebradRpc(e.to_string()))
-    }
-
     pub async fn get_block_header(&self, hash: &str) -> Result<BlockHeader> {
         let block = self.get_block(hash, 1).await?;
         Ok(BlockHeader {
@@ -173,33 +166,6 @@ pub struct Block {
     pub previousblockhash: Option<String>,
     pub nextblockhash: Option<String>,
     pub tx: Vec<String>,
-}
-
-/// Block with full transaction data (verbosity=2)
-#[derive(Debug, Deserialize)]
-pub struct BlockWithTxs {
-    pub hash: String,
-    pub height: u32,
-    pub version: u32,
-    pub merkleroot: String,
-    pub time: u64,
-    pub nonce: String,
-    pub bits: String,
-    pub difficulty: f64,
-    pub previousblockhash: Option<String>,
-    pub nextblockhash: Option<String>,
-    pub tx: Vec<TransactionData>,
-}
-
-/// Transaction data from block (verbosity=2)
-#[derive(Debug, Deserialize)]
-pub struct TransactionData {
-    pub txid: String,
-    pub version: u32,
-    #[serde(default, rename = "vShieldedSpend")]
-    pub sapling_spends: Option<Vec<SaplingSpend>>,
-    #[serde(default)]
-    pub orchard: Option<OrchardBundle>,
 }
 
 /// Sapling shielded spend
