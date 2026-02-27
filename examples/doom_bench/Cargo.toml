@@ -1,0 +1,12 @@
+[package]
+name = "doom_bench"
+version = "0.1.0"
+edition = "2021"
+
+[workspace]
+
+[dependencies]
+polkavm = { path = "/home/alice/rotko/polkavm/crates/polkavm" }
+ligerito = { path = "/home/alice/rotko/zeratul/crates/ligerito" }
+ligerito-binary-fields = { path = "/home/alice/rotko/zeratul/crates/ligerito-binary-fields" }
+env_logger = "0.11"
