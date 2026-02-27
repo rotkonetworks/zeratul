@@ -33,6 +33,9 @@ pub use error::{ZyncError, Result};
 pub use state::{WalletState, WalletStateCommitment};
 pub use scanner::{Scanner, BatchScanner, ScanAction, DecryptedNote};
 
+// re-export orchard key types for downstream consumers
+pub use orchard::keys::{FullViewingKey as OrchardFvk, IncomingViewingKey, Scope, SpendingKey};
+
 #[cfg(feature = "client")]
 pub use client::{ZidecarClient, LightwalletdClient};
 // pub use trace::{SyncTrace, TraceField};
