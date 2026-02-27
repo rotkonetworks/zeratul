@@ -1313,6 +1313,127 @@ mod tests {
         assert!(addr_mainnet.starts_with("u1orchard:"));
         assert!(addr_testnet.starts_with("utest1orchard:"));
     }
+
+    /// base58check encode (zcash transparent address)
+    fn base58check_encode(version: &[u8], payload: &[u8]) -> String {
+        use sha2::Digest as _;
+        let mut data = Vec::with_capacity(version.len() + payload.len() + 4);
+        data.extend_from_slice(version);
+        data.extend_from_slice(payload);
+        let checksum = sha2::Sha256::digest(sha2::Sha256::digest(&data));
+        data.extend_from_slice(&checksum[..4]);
+
+        // base58 encode
+        const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+        let mut num = vec![0u8; data.len()];
+        num.copy_from_slice(&data);
+        let mut out = Vec::new();
+        while !num.iter().all(|&b| b == 0) {
+            let mut rem = 0u32;
+            for byte in num.iter_mut() {
+                let acc = (rem << 8) | (*byte as u32);
+                *byte = (acc / 58) as u8;
+                rem = acc % 58;
+            }
+            out.push(ALPHABET[rem as usize]);
+        }
+        for &b in data.iter() {
+            if b == 0 { out.push(b'1'); } else { break; }
+        }
+        out.reverse();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn test_transparent_privkey_derivation() {
+        let seed = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+        let mnemonic = bip39::Mnemonic::parse(seed).unwrap();
+        let seed_bytes = mnemonic.to_seed("");
+
+        // BIP32 derivation: m/44'/133'/0'/0/0
+        let master = bip32_master_key(&seed_bytes);
+        let child = bip32_derive_child(&master, 44, true).unwrap();
+        let child = bip32_derive_child(&child, 133, true).unwrap();
+        let child = bip32_derive_child(&child, 0, true).unwrap();
+        let child = bip32_derive_child(&child, 0, false).unwrap();
+        let child = bip32_derive_child(&child, 0, false).unwrap();
+
+        // verify we can construct a signing key and derive address
+        let signing_key = k256::ecdsa::SigningKey::from_slice(&child.key).unwrap();
+        let pubkey = signing_key.verifying_key().to_encoded_point(true);
+        assert_eq!(pubkey.as_bytes().len(), 33);
+
+        // derive t-addr: base58check(version_prefix || hash160(compressed_pubkey))
+        let pkh = hash160(pubkey.as_bytes());
+        // zcash mainnet t-addr prefix: 0x1cb8
+        let taddr = base58check_encode(&[0x1c, 0xb8], &pkh);
+        println!("t-addr (m/44'/133'/0'/0/0): {}", taddr);
+        assert!(taddr.starts_with("t1"));
+    }
+
+    #[test]
+    fn test_orchard_builder_shielding() {
+        use orchard::builder::{Builder, BundleType};
+        use orchard::bundle::Flags;
+        use orchard::keys::{SpendingKey, FullViewingKey, Scope};
+        use orchard::tree::Anchor;
+        use orchard::value::NoteValue;
+        use rand::rngs::OsRng;
+        use zcash_protocol::value::ZatBalance;
+
+        // derive orchard key from test seed
+        let seed = "abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon abandon art";
+        let mnemonic = bip39::Mnemonic::parse(seed).unwrap();
+        let seed_bytes = mnemonic.to_seed("");
+
+        let sk = SpendingKey::from_zip32_seed(
+            &seed_bytes,
+            133,
+            zip32::AccountId::try_from(0u32).unwrap(),
+        ).unwrap();
+        let fvk = FullViewingKey::from(&sk);
+        let recipient = fvk.address_at(0u64, Scope::External);
+
+        // build an output-only bundle
+        let bundle_type = BundleType::Transactional {
+            flags: Flags::SPENDS_DISABLED,
+            bundle_required: true,
+        };
+        let mut builder = Builder::new(bundle_type, Anchor::empty_tree());
+
+        builder.add_output(None, recipient, NoteValue::from_raw(50_000), [0u8; 512])
+            .expect("add_output should succeed");
+
+        let mut rng = OsRng;
+        let (unauthorized, _meta) = builder
+            .build::<ZatBalance>(&mut rng)
+            .expect("build should succeed")
+            .expect("should produce a bundle");
+
+        println!("bundle built: {} actions", unauthorized.actions().len());
+        // orchard pads to minimum 2 actions
+        assert!(unauthorized.actions().len() >= 2, "expected >=2 actions (padding)");
+
+        // prove (expensive but should work natively)
+        let pk = orchard::circuit::ProvingKey::build();
+        let proven = unauthorized.create_proof(&pk, &mut rng)
+            .expect("proving should succeed");
+
+        println!("proof generated");
+
+        // apply signatures (no spend auth keys for output-only)
+        let sighash = [0u8; 32]; // dummy sighash for test
+        let authorized = proven.apply_signatures(&mut rng, sighash, &[])
+            .expect("signatures should succeed");
+
+        println!("authorized bundle: {} actions", authorized.actions().len());
+
+        // serialize
+        let mut out = Vec::new();
+        serialize_orchard_bundle(&authorized, &mut out).expect("serialization");
+        println!("serialized orchard bundle: {} bytes", out.len());
+        assert!(out.len() > 100);
+    }
 }
 
 // ============================================================================
@@ -1479,7 +1600,7 @@ pub fn build_unsigned_transaction(
     header_hasher.update(b"ZTxIdHeadersHash");
     header_hasher.update(&5u32.to_le_bytes()); // tx version 5
     header_hasher.update(&0x26A7270Au32.to_le_bytes()); // NU5 version group
-    header_hasher.update(&0xC2D6D0B4u32.to_le_bytes()); // NU5 branch id (mainnet)
+    header_hasher.update(&0x4DEC4DF0u32.to_le_bytes()); // NU6.1 branch id (mainnet)
     header_hasher.update(&0u32.to_le_bytes()); // lock_time
     header_hasher.update(&0u32.to_le_bytes()); // expiry_height (0 = no expiry)
     let header_digest = header_hasher.finalize();
@@ -1777,4 +1898,619 @@ fn test_user_seed_with_real_action() {
     let internal_addr = fvk.to_ivk(Scope::Internal).address_at(0u64);
     println!("External address diversifier_index 0: {:?}", hex_encode(&external_addr.to_raw_address_bytes()[..16]));
     println!("Internal address diversifier_index 0: {:?}", hex_encode(&internal_addr.to_raw_address_bytes()[..16]));
+}
+
+// ============================================================================
+// Transparent Key Derivation & Shielding Transaction Builder
+// ============================================================================
+
+/// BIP32 extended key (private)
+struct Bip32Key {
+    key: [u8; 32],
+    chain_code: [u8; 32],
+}
+
+/// Derive BIP32 master key from seed using HMAC-SHA512 with key "Bitcoin seed"
+fn bip32_master_key(seed: &[u8]) -> Bip32Key {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha512;
+
+    let mut mac = Hmac::<Sha512>::new_from_slice(b"Bitcoin seed")
+        .expect("HMAC accepts any key length");
+    mac.update(seed);
+    let result = mac.finalize().into_bytes();
+
+    let mut key = [0u8; 32];
+    let mut chain_code = [0u8; 32];
+    key.copy_from_slice(&result[..32]);
+    chain_code.copy_from_slice(&result[32..]);
+
+    Bip32Key { key, chain_code }
+}
+
+/// BIP32 child key derivation (hardened or normal)
+fn bip32_derive_child(parent: &Bip32Key, index: u32, hardened: bool) -> Result<Bip32Key, String> {
+    use hmac::{Hmac, Mac};
+    use sha2::Sha512;
+    use k256::elliptic_curve::sec1::ToEncodedPoint;
+    use k256::elliptic_curve::PrimeField;
+
+    let mut mac = Hmac::<Sha512>::new_from_slice(&parent.chain_code)
+        .expect("HMAC accepts any key length");
+
+    let child_index = if hardened { index | 0x80000000 } else { index };
+
+    if hardened {
+        // Hardened: HMAC-SHA512(key=chain_code, data=0x00 || ser256(parent_key) || ser32(index))
+        mac.update(&[0x00]);
+        mac.update(&parent.key);
+    } else {
+        // Normal: HMAC-SHA512(key=chain_code, data=ser_P(parent_pubkey) || ser32(index))
+        let secret_key = k256::SecretKey::from_slice(&parent.key)
+            .map_err(|e| format!("invalid parent key: {}", e))?;
+        let pubkey = secret_key.public_key();
+        let compressed = pubkey.to_encoded_point(true);
+        mac.update(compressed.as_bytes());
+    }
+
+    mac.update(&child_index.to_be_bytes());
+    let result = mac.finalize().into_bytes();
+
+    // child_key = parse256(IL) + parent_key (mod n)
+    let il = &result[..32];
+    let ir = &result[32..];
+
+    // Add IL to parent key modulo the secp256k1 curve order
+    let mut parent_bytes = k256::FieldBytes::default();
+    parent_bytes.copy_from_slice(&parent.key);
+    let parent_scalar = k256::Scalar::from_repr(parent_bytes);
+    if bool::from(parent_scalar.is_none()) {
+        return Err("invalid parent scalar".into());
+    }
+    let parent_scalar = parent_scalar.unwrap();
+
+    let mut il_bytes = k256::FieldBytes::default();
+    il_bytes.copy_from_slice(il);
+    let il_scalar = k256::Scalar::from_repr(il_bytes);
+    if bool::from(il_scalar.is_none()) {
+        return Err("invalid IL scalar".into());
+    }
+    let il_scalar = il_scalar.unwrap();
+
+    let child_scalar = il_scalar + parent_scalar;
+
+    let mut key = [0u8; 32];
+    key.copy_from_slice(&child_scalar.to_repr());
+
+    let mut chain_code = [0u8; 32];
+    chain_code.copy_from_slice(ir);
+
+    Ok(Bip32Key { key, chain_code })
+}
+
+/// Derive transparent private key from mnemonic using BIP44 path m/44'/133'/account'/0/index
+///
+/// Returns hex-encoded 32-byte secp256k1 private key for signing transparent inputs.
+/// Path components: purpose=44' (BIP44), coin_type=133' (ZEC), account', change=0, index
+#[wasm_bindgen]
+pub fn derive_transparent_privkey(seed_phrase: &str, account: u32, index: u32) -> Result<String, JsError> {
+    let mnemonic = bip39::Mnemonic::parse(seed_phrase)
+        .map_err(|e| JsError::new(&format!("invalid mnemonic: {}", e)))?;
+
+    let seed = mnemonic.to_seed("");
+
+    // BIP32 derivation: m/44'/133'/account'/0/index
+    let master = bip32_master_key(&seed);
+
+    let child_44h = bip32_derive_child(&master, 44, true)
+        .map_err(|e| JsError::new(&format!("derivation failed at 44': {}", e)))?;
+    let child_133h = bip32_derive_child(&child_44h, 133, true)
+        .map_err(|e| JsError::new(&format!("derivation failed at 133': {}", e)))?;
+    let child_account = bip32_derive_child(&child_133h, account, true)
+        .map_err(|e| JsError::new(&format!("derivation failed at account': {}", e)))?;
+    let child_change = bip32_derive_child(&child_account, 0, false)
+        .map_err(|e| JsError::new(&format!("derivation failed at change: {}", e)))?;
+    let child_index = bip32_derive_child(&child_change, index, false)
+        .map_err(|e| JsError::new(&format!("derivation failed at index: {}", e)))?;
+
+    Ok(hex_encode(&child_index.key))
+}
+
+/// UTXO input for shielding transaction
+#[derive(Debug, Clone, Deserialize)]
+struct TransparentUtxo {
+    /// Transaction ID (hex, 32 bytes big-endian as displayed)
+    txid: String,
+    /// Output index within the transaction
+    vout: u32,
+    /// Value in zatoshis
+    value: u64,
+    /// scriptPubKey (hex) - expected to be P2PKH
+    script: String,
+}
+
+/// Personalized Blake2b-256 hash (ZIP-244 style)
+fn blake2b_256_personal(personalization: &[u8; 16], data: &[u8]) -> [u8; 32] {
+    let h = blake2b_simd::Params::new()
+        .hash_length(32)
+        .personal(personalization)
+        .hash(data);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(h.as_bytes());
+    out
+}
+
+/// Build a shielding transaction (transparent → orchard) with real Halo 2 proofs.
+///
+/// Spends transparent P2PKH UTXOs and creates an orchard output to the sender's
+/// own shielded address. Uses `orchard::builder::Builder` for proper action
+/// construction and zero-knowledge proof generation (client-side).
+///
+/// Returns hex-encoded signed v5 transaction bytes ready for broadcast.
+///
+/// # Arguments
+/// * `utxos_json` - JSON array of `{txid, vout, value, script}` objects
+/// * `privkey_hex` - hex-encoded 32-byte secp256k1 private key for transparent inputs
+/// * `recipient` - unified address string (u1... or utest1...) for orchard output
+/// * `amount` - total zatoshis to shield (all selected UTXO value minus fee)
+/// * `fee` - transaction fee in zatoshis
+/// * `anchor_height` - block height for expiry (expiry_height = anchor_height + 100)
+/// * `mainnet` - true for mainnet, false for testnet
+#[wasm_bindgen]
+pub fn build_shielding_transaction(
+    utxos_json: &str,
+    privkey_hex: &str,
+    recipient: &str,
+    amount: u64,
+    fee: u64,
+    anchor_height: u32,
+    mainnet: bool,
+) -> Result<String, JsError> {
+    use k256::ecdsa::{SigningKey, signature::hazmat::PrehashSigner};
+    use orchard::builder::{Builder, BundleType};
+    use orchard::bundle::Flags;
+    use orchard::tree::Anchor;
+    use orchard::value::NoteValue;
+    use rand::rngs::OsRng;
+    use zcash_protocol::value::ZatBalance;
+
+    // --- parse recipient orchard address ---
+    let orchard_addr = parse_orchard_address(recipient, mainnet)
+        .map_err(|e| JsError::new(&format!("invalid recipient: {}", e)))?;
+
+    // --- parse transparent private key ---
+    let privkey_bytes = hex_decode(privkey_hex)
+        .ok_or_else(|| JsError::new("invalid privkey hex"))?;
+    if privkey_bytes.len() != 32 {
+        return Err(JsError::new("privkey must be 32 bytes"));
+    }
+
+    let signing_key = SigningKey::from_slice(&privkey_bytes)
+        .map_err(|e| JsError::new(&format!("invalid signing key: {}", e)))?;
+    let pubkey = signing_key.verifying_key();
+    let compressed_pubkey = pubkey.to_encoded_point(true);
+    let pubkey_bytes = compressed_pubkey.as_bytes();
+    let pubkey_hash = hash160(pubkey_bytes);
+    let our_script_pubkey = make_p2pkh_script(&pubkey_hash);
+
+    // --- parse and select UTXOs ---
+    let mut utxos: Vec<TransparentUtxo> = serde_json::from_str(utxos_json)
+        .map_err(|e| JsError::new(&format!("invalid utxos json: {}", e)))?;
+    utxos.sort_by(|a, b| b.value.cmp(&a.value));
+
+    let target = amount.checked_add(fee)
+        .ok_or_else(|| JsError::new("amount + fee overflow"))?;
+
+    let mut selected: Vec<TransparentUtxo> = Vec::new();
+    let mut total_in: u64 = 0;
+    for utxo in &utxos {
+        selected.push(utxo.clone());
+        total_in += utxo.value;
+        if total_in >= target { break; }
+    }
+    if total_in < target {
+        return Err(JsError::new(&format!(
+            "insufficient funds: have {} zat, need {} zat", total_in, target
+        )));
+    }
+
+    // all value goes to orchard (no transparent change output)
+    let shielded_value = total_in - fee;
+
+    // --- build orchard bundle with real Halo 2 proofs ---
+    let bundle_type = BundleType::Transactional {
+        flags: Flags::SPENDS_DISABLED, // outputs only
+        bundle_required: true,
+    };
+    let mut builder = Builder::new(bundle_type, Anchor::empty_tree());
+
+    builder.add_output(None, orchard_addr, NoteValue::from_raw(shielded_value), [0u8; 512])
+        .map_err(|e| JsError::new(&format!("add_output: {:?}", e)))?;
+
+    let mut rng = OsRng;
+    let (unauthorized_bundle, _meta) = builder
+        .build::<ZatBalance>(&mut rng)
+        .map_err(|e| JsError::new(&format!("bundle build: {:?}", e)))?
+        .ok_or_else(|| JsError::new("builder produced no bundle"))?;
+
+    // prove (Halo 2 — this is the expensive step, ~seconds in WASM)
+    let pk = orchard::circuit::ProvingKey::build();
+    let proven_bundle = unauthorized_bundle
+        .create_proof(&pk, &mut rng)
+        .map_err(|e| JsError::new(&format!("create_proof: {:?}", e)))?;
+
+    // --- compute transparent digests for ZIP-244 sighash ---
+    let n_inputs = selected.len();
+    let branch_id: u32 = 0x4DEC4DF0; // NU6.1
+    let expiry_height = anchor_height.saturating_add(100);
+
+    let mut prevout_data = Vec::new();
+    let mut sequence_data = Vec::new();
+    let mut amounts_data = Vec::new();
+    let mut scripts_data = Vec::new();
+
+    for utxo in &selected {
+        let txid_be = hex_decode(&utxo.txid)
+            .ok_or_else(|| JsError::new("invalid utxo txid hex"))?;
+        if txid_be.len() != 32 { return Err(JsError::new("txid must be 32 bytes")); }
+        let mut txid_le = txid_be.clone();
+        txid_le.reverse();
+
+        prevout_data.extend_from_slice(&txid_le);
+        prevout_data.extend_from_slice(&utxo.vout.to_le_bytes());
+        sequence_data.extend_from_slice(&0xffffffffu32.to_le_bytes());
+        amounts_data.extend_from_slice(&utxo.value.to_le_bytes());
+
+        let script_bytes = hex_decode(&utxo.script)
+            .unwrap_or_else(|| our_script_pubkey.clone());
+        scripts_data.extend_from_slice(&compact_size(script_bytes.len() as u64));
+        scripts_data.extend_from_slice(&script_bytes);
+    }
+
+    // ZIP-244 digests
+    let header_data = {
+        let mut d = Vec::new();
+        d.extend_from_slice(&(5u32 | (1u32 << 31)).to_le_bytes());
+        d.extend_from_slice(&0x26A7270Au32.to_le_bytes());
+        d.extend_from_slice(&branch_id.to_le_bytes());
+        d.extend_from_slice(&0u32.to_le_bytes());
+        d.extend_from_slice(&expiry_height.to_le_bytes());
+        d
+    };
+    let header_digest = blake2b_256_personal(b"ZTxIdHeadersHash", &header_data);
+
+    let prevouts_digest = blake2b_256_personal(b"ZTxIdPrevoutHash", &prevout_data);
+    let sequence_digest = blake2b_256_personal(b"ZTxIdSequencHash", &sequence_data);
+    let outputs_digest = blake2b_256_personal(b"ZTxIdOutputsHash", &[]);
+
+    let sapling_digest = blake2b_256_personal(b"ZTxIdSaplingHash", &[]);
+
+    // compute orchard_digest from the proven bundle's action data (ZIP-244)
+    let orchard_digest = compute_orchard_digest(&proven_bundle)?;
+
+    // per-input sighash needs amounts_digest and scriptpubkeys_digest
+    let amounts_digest = blake2b_256_personal(b"ZTxTrAmountsHash", &amounts_data);
+    let scriptpubkeys_digest = blake2b_256_personal(b"ZTxTrScriptsHash", &scripts_data);
+
+    let sighash_personal = {
+        let mut p = [0u8; 16];
+        p[..12].copy_from_slice(b"ZcashTxHash_");
+        p[12..16].copy_from_slice(&branch_id.to_le_bytes());
+        p
+    };
+
+    // --- sign transparent inputs ---
+    let mut signed_inputs: Vec<SignedTransparentInput> = Vec::new();
+
+    for i in 0..n_inputs {
+        let utxo = &selected[i];
+        let txid_be = hex_decode(&utxo.txid).unwrap();
+        let mut txid_le = txid_be.clone();
+        txid_le.reverse();
+
+        let script_bytes = hex_decode(&utxo.script)
+            .unwrap_or_else(|| our_script_pubkey.clone());
+
+        let mut txin_data = Vec::new();
+        txin_data.extend_from_slice(&txid_le);
+        txin_data.extend_from_slice(&utxo.vout.to_le_bytes());
+        txin_data.extend_from_slice(&utxo.value.to_le_bytes());
+        txin_data.extend_from_slice(&compact_size(script_bytes.len() as u64));
+        txin_data.extend_from_slice(&script_bytes);
+        txin_data.extend_from_slice(&0xffffffffu32.to_le_bytes());
+
+        // ZIP-244 S.2g: hash per-input data separately
+        let txin_sig_digest = blake2b_256_personal(b"Zcash___TxInHash", &txin_data);
+
+        let mut sig_input = Vec::new();
+        sig_input.push(0x01); // SIGHASH_ALL
+        sig_input.extend_from_slice(&prevouts_digest);
+        sig_input.extend_from_slice(&amounts_digest);
+        sig_input.extend_from_slice(&scriptpubkeys_digest);
+        sig_input.extend_from_slice(&sequence_digest);
+        sig_input.extend_from_slice(&outputs_digest);
+        sig_input.extend_from_slice(&txin_sig_digest);
+
+        let transparent_sig_digest = blake2b_256_personal(b"ZTxIdTranspaHash", &sig_input);
+
+        let mut sighash_input = Vec::new();
+        sighash_input.extend_from_slice(&header_digest);
+        sighash_input.extend_from_slice(&transparent_sig_digest);
+        sighash_input.extend_from_slice(&sapling_digest);
+        sighash_input.extend_from_slice(&orchard_digest);
+
+        let sighash = blake2b_256_personal(&sighash_personal, &sighash_input);
+
+        let sig: k256::ecdsa::Signature = signing_key.sign_prehash(&sighash)
+            .map_err(|e| JsError::new(&format!("ECDSA signing failed: {}", e)))?;
+        let sig_der = sig.to_der();
+
+        let mut script_sig = Vec::new();
+        let sig_with_hashtype_len = sig_der.as_bytes().len() + 1;
+        script_sig.push(sig_with_hashtype_len as u8);
+        script_sig.extend_from_slice(sig_der.as_bytes());
+        script_sig.push(0x01); // SIGHASH_ALL
+        script_sig.push(pubkey_bytes.len() as u8);
+        script_sig.extend_from_slice(pubkey_bytes);
+
+        signed_inputs.push(SignedTransparentInput {
+            prevout_txid: utxo.txid.clone(),
+            prevout_vout: utxo.vout,
+            script_sig: hex_encode(&script_sig),
+            sequence: 0xffffffff,
+            value: utxo.value,
+        });
+    }
+
+    // --- apply orchard binding signature ---
+    // ZIP-244 S.2: when vin is non-empty, the verifier uses transparent_sig_digest
+    // (not the txid transparent_digest) for the sighash. For the binding signature
+    // (SignableInput::Shielded), hash_type=SIGHASH_ALL, no per-input data.
+    let txin_sig_digest_empty = blake2b_256_personal(b"Zcash___TxInHash", &[]);
+    let binding_transparent_digest = {
+        let mut d = Vec::new();
+        d.push(0x01); // SIGHASH_ALL
+        d.extend_from_slice(&prevouts_digest);
+        d.extend_from_slice(&amounts_digest);
+        d.extend_from_slice(&scriptpubkeys_digest);
+        d.extend_from_slice(&sequence_digest);
+        d.extend_from_slice(&outputs_digest);
+        d.extend_from_slice(&txin_sig_digest_empty);
+        blake2b_256_personal(b"ZTxIdTranspaHash", &d)
+    };
+
+    let txid_sighash = {
+        let mut d = Vec::new();
+        d.extend_from_slice(&header_digest);
+        d.extend_from_slice(&binding_transparent_digest);
+        d.extend_from_slice(&sapling_digest);
+        d.extend_from_slice(&orchard_digest);
+        blake2b_256_personal(&sighash_personal, &d)
+    };
+
+    let authorized_bundle = proven_bundle
+        .apply_signatures(&mut rng, txid_sighash, &[])
+        .map_err(|e| JsError::new(&format!("apply_signatures: {:?}", e)))?;
+
+    // --- serialize v5 transaction ---
+    let mut tx_bytes = Vec::new();
+
+    // header
+    tx_bytes.extend_from_slice(&(5u32 | (1u32 << 31)).to_le_bytes());
+    tx_bytes.extend_from_slice(&0x26A7270Au32.to_le_bytes());
+    tx_bytes.extend_from_slice(&branch_id.to_le_bytes());
+    tx_bytes.extend_from_slice(&0u32.to_le_bytes()); // nLockTime
+    tx_bytes.extend_from_slice(&expiry_height.to_le_bytes());
+
+    // transparent inputs
+    tx_bytes.extend_from_slice(&compact_size(n_inputs as u64));
+    for inp in &signed_inputs {
+        let txid_be = hex_decode(&inp.prevout_txid).unwrap();
+        let mut txid_le = txid_be.clone();
+        txid_le.reverse();
+        tx_bytes.extend_from_slice(&txid_le);
+        tx_bytes.extend_from_slice(&inp.prevout_vout.to_le_bytes());
+
+        let sig_bytes = hex_decode(&inp.script_sig).unwrap();
+        tx_bytes.extend_from_slice(&compact_size(sig_bytes.len() as u64));
+        tx_bytes.extend_from_slice(&sig_bytes);
+        tx_bytes.extend_from_slice(&inp.sequence.to_le_bytes());
+    }
+
+    // transparent outputs (none)
+    tx_bytes.extend_from_slice(&compact_size(0));
+
+    // sapling (none)
+    tx_bytes.extend_from_slice(&compact_size(0)); // spends
+    tx_bytes.extend_from_slice(&compact_size(0)); // outputs
+
+    // orchard bundle — serialize per ZIP-225 v5 format
+    serialize_orchard_bundle(&authorized_bundle, &mut tx_bytes)?;
+
+    Ok(hex_encode(&tx_bytes))
+}
+
+/// Parse an orchard address from a unified address string.
+///
+/// Because zcash_keys uses a different orchard crate version, we extract the raw
+/// 43-byte address and reconstruct it with our orchard 0.12 types.
+fn parse_orchard_address(addr_str: &str, mainnet: bool) -> Result<orchard::Address, String> {
+    use zcash_keys::address::Address as ZkAddress;
+    use zcash_protocol::consensus::{MainNetwork, TestNetwork};
+
+    let decoded = if mainnet {
+        ZkAddress::decode(&MainNetwork, addr_str)
+    } else {
+        ZkAddress::decode(&TestNetwork, addr_str)
+    };
+
+    match decoded {
+        Some(ZkAddress::Unified(ua)) => {
+            // get raw bytes from the zcash_keys orchard address (orchard 0.11)
+            let orchard_addr_old = ua.orchard()
+                .ok_or("unified address has no orchard receiver")?;
+            let raw_bytes = orchard_addr_old.to_raw_address_bytes();
+            // reconstruct as our orchard 0.12 Address
+            Option::from(orchard::Address::from_raw_address_bytes(&raw_bytes))
+                .ok_or_else(|| "invalid orchard address bytes".into())
+        }
+        Some(_) => Err("address is not a unified address".into()),
+        None => Err("failed to decode address".into()),
+    }
+}
+
+/// Compute ZIP-244 orchard_digest from a proven bundle's action data.
+///
+/// ZIP-244 §4.8:
+///   actions_compact_digest = Blake2b-256("ZTxIdOrcActCHash", foreach: nf||cmx||epk||enc[0..52])
+///   actions_memos_digest  = Blake2b-256("ZTxIdOrcActMHash", foreach: enc[52..564])
+///   actions_noncompact_digest = Blake2b-256("ZTxIdOrcActNHash", foreach: cv||rk||enc[564..580]||out[0..80])
+///   orchard_digest = Blake2b-256("ZTxIdOrchardHash",
+///                      compact||memos||noncompact||flags(1)||value_balance(8)||anchor(32))
+fn compute_orchard_digest<A: orchard::bundle::Authorization>(
+    bundle: &orchard::Bundle<A, zcash_protocol::value::ZatBalance>,
+) -> Result<[u8; 32], JsError> {
+    let mut compact_data = Vec::new();
+    let mut memos_data = Vec::new();
+    let mut noncompact_data = Vec::new();
+
+    for action in bundle.actions().iter() {
+        // compact: nf(32) || cmx(32) || epk(32) || enc[0..52]
+        compact_data.extend_from_slice(&action.nullifier().to_bytes());
+        compact_data.extend_from_slice(&action.cmx().to_bytes());
+        let enc = &action.encrypted_note().enc_ciphertext;
+        let epk = &action.encrypted_note().epk_bytes;
+        compact_data.extend_from_slice(epk);
+        compact_data.extend_from_slice(&enc[..52]);
+
+        // memos: enc[52..564]
+        memos_data.extend_from_slice(&enc[52..564]);
+
+        // noncompact: cv(32) || rk(32) || enc[564..580] || out(80)
+        noncompact_data.extend_from_slice(&action.cv_net().to_bytes());
+        noncompact_data.extend_from_slice(&<[u8; 32]>::from(action.rk()));
+        noncompact_data.extend_from_slice(&enc[564..580]);
+        noncompact_data.extend_from_slice(&action.encrypted_note().out_ciphertext);
+    }
+
+    let compact_digest = blake2b_256_personal(b"ZTxIdOrcActCHash", &compact_data);
+    let memos_digest = blake2b_256_personal(b"ZTxIdOrcActMHash", &memos_data);
+    let noncompact_digest = blake2b_256_personal(b"ZTxIdOrcActNHash", &noncompact_data);
+
+    let mut orchard_data = Vec::new();
+    orchard_data.extend_from_slice(&compact_digest);
+    orchard_data.extend_from_slice(&memos_digest);
+    orchard_data.extend_from_slice(&noncompact_digest);
+    orchard_data.push(bundle.flags().to_byte());
+    orchard_data.extend_from_slice(&bundle.value_balance().to_i64_le_bytes());
+    orchard_data.extend_from_slice(&bundle.anchor().to_bytes());
+
+    Ok(blake2b_256_personal(b"ZTxIdOrchardHash", &orchard_data))
+}
+
+/// Serialize an authorized orchard bundle into v5 transaction format (ZIP-225).
+///
+/// Layout: nActions(compactSize) || actions[] || flags(1) || valueBalance(8)
+///         || anchor(32) || proof(compactSize+bytes) || spend_auth_sigs(64*n)
+///         || binding_sig(64)
+fn serialize_orchard_bundle(
+    bundle: &orchard::Bundle<orchard::bundle::Authorized, zcash_protocol::value::ZatBalance>,
+    out: &mut Vec<u8>,
+) -> Result<(), JsError> {
+    let actions = bundle.actions();
+    let n = actions.len();
+
+    // nActionsOrchard
+    out.extend_from_slice(&compact_size(n as u64));
+
+    // each action (without auth)
+    for action in actions.iter() {
+        out.extend_from_slice(&action.cv_net().to_bytes());       // 32
+        out.extend_from_slice(&action.nullifier().to_bytes());    // 32
+        out.extend_from_slice(&<[u8; 32]>::from(action.rk()));    // 32
+        out.extend_from_slice(&action.cmx().to_bytes());          // 32
+        out.extend_from_slice(&action.encrypted_note().epk_bytes); // 32
+        out.extend_from_slice(&action.encrypted_note().enc_ciphertext); // 580
+        out.extend_from_slice(&action.encrypted_note().out_ciphertext); // 80
+    }
+
+    // flags byte
+    out.push(bundle.flags().to_byte());
+
+    // valueBalanceOrchard (i64 LE)
+    out.extend_from_slice(&bundle.value_balance().to_i64_le_bytes());
+
+    // anchor
+    out.extend_from_slice(&bundle.anchor().to_bytes());
+
+    // proof bytes (compactSize-prefixed vector)
+    let proof_bytes = bundle.authorization().proof().as_ref();
+    out.extend_from_slice(&compact_size(proof_bytes.len() as u64));
+    out.extend_from_slice(proof_bytes);
+
+    // spend auth signatures (64 bytes each)
+    for action in actions.iter() {
+        out.extend_from_slice(&<[u8; 64]>::from(action.authorization()));
+    }
+
+    // binding signature (64 bytes)
+    out.extend_from_slice(&<[u8; 64]>::from(
+        bundle.authorization().binding_signature(),
+    ));
+
+    Ok(())
+}
+
+/// HASH160 = RIPEMD160(SHA256(data))
+fn hash160(data: &[u8]) -> [u8; 20] {
+    use sha2::Digest;
+
+    let sha = sha2::Sha256::digest(data);
+    let ripe = ripemd::Ripemd160::digest(sha);
+    let mut out = [0u8; 20];
+    out.copy_from_slice(&ripe);
+    out
+}
+
+/// Construct P2PKH scriptPubKey from pubkey hash
+fn make_p2pkh_script(pubkey_hash: &[u8; 20]) -> Vec<u8> {
+    // OP_DUP OP_HASH160 <20> <hash> OP_EQUALVERIFY OP_CHECKSIG
+    let mut s = Vec::with_capacity(25);
+    s.push(0x76); // OP_DUP
+    s.push(0xa9); // OP_HASH160
+    s.push(0x14); // push 20 bytes
+    s.extend_from_slice(pubkey_hash);
+    s.push(0x88); // OP_EQUALVERIFY
+    s.push(0xac); // OP_CHECKSIG
+    s
+}
+
+/// Bitcoin-style CompactSize encoding
+fn compact_size(n: u64) -> Vec<u8> {
+    if n < 0xfd {
+        vec![n as u8]
+    } else if n <= 0xffff {
+        let mut v = vec![0xfd];
+        v.extend_from_slice(&(n as u16).to_le_bytes());
+        v
+    } else if n <= 0xffffffff {
+        let mut v = vec![0xfe];
+        v.extend_from_slice(&(n as u32).to_le_bytes());
+        v
+    } else {
+        let mut v = vec![0xff];
+        v.extend_from_slice(&n.to_le_bytes());
+        v
+    }
+}
+
+/// A signed transparent input for serialization
+#[derive(Debug, Clone)]
+struct SignedTransparentInput {
+    prevout_txid: String,
+    prevout_vout: u32,
+    script_sig: String,
+    sequence: u32,
+    #[allow(dead_code)]
+    value: u64,
 }

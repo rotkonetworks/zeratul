@@ -21,7 +21,7 @@ group = "0.13"
 
 # Orchard protocol - real key derivation and note encryption
 # Use latest versions to avoid halo2_proofs/indexmap conflict
-orchard = { version = "0.12", default-features = false }
+orchard = { version = "0.12", default-features = false, features = ["circuit"] }
 zcash_keys = { version = "0.12", default-features = false, features = ["orchard"] }
 zcash_protocol = { version = "0.7", default-features = false }
 zip32 = { version = "0.2", default-features = false }
@@ -37,11 +37,21 @@ bip39 = { version = "2.0", features = ["rand"] }
 blake2 = "0.10"
 chacha20poly1305 = "0.10"
 
+# secp256k1 / transparent address support
+k256 = { version = "0.13", features = ["ecdsa-core", "ecdsa", "sha256"] }
+hmac = "0.12"
+sha2 = "0.10"
+ripemd = "0.1"
+blake2b_simd = "1.0"
+
 # wasm bindings
-wasm-bindgen = "0.2"
+wasm-bindgen = "0.2.113"
 js-sys = "0.3"
 console_error_panic_hook = "0.1"
 getrandom = { version = "0.2", features = ["js"] }
+
+# rng for proving
+rand = "0.8"
 
 # serialization
 serde = { version = "1.0", features = ["derive"] }
