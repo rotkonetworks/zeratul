@@ -71,7 +71,7 @@ impl Wallet {
             .map_err(|e| Error::Wallet(format!("read sync height: {}", e)))? {
             Some(bytes) => {
                 if bytes.len() == 4 {
-                    Ok(u32::from_le_bytes(bytes.as_ref().try_into().unwrap()))
+                    Ok(u32::from_le_bytes(bytes.as_ref().try_into().expect("len checked")))
                 } else {
                     Ok(0)
                 }
@@ -119,7 +119,7 @@ impl Wallet {
             .map_err(|e| Error::Wallet(format!("read orchard position: {}", e)))? {
             Some(bytes) => {
                 if bytes.len() == 8 {
-                    Ok(u64::from_le_bytes(bytes.as_ref().try_into().unwrap()))
+                    Ok(u64::from_le_bytes(bytes.as_ref().try_into().expect("len checked")))
                 } else {
                     Ok(0)
                 }

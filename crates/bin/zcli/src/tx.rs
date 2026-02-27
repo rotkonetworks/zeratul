@@ -264,7 +264,8 @@ pub fn build_shielding_tx(
 
     for i in 0..n_inputs {
         let utxo = &selected[i];
-        let txid_be = hex::decode(&utxo.txid).unwrap();
+        let txid_be = hex::decode(&utxo.txid)
+            .map_err(|e| Error::Other(format!("bad utxo txid hex: {e}")))?;
         let mut txid_le = txid_be.clone();
         txid_le.reverse();
 
@@ -358,7 +359,8 @@ pub fn build_shielding_tx(
     // transparent inputs
     tx.extend_from_slice(&compact_size(n_inputs as u64));
     for (i, utxo) in selected.iter().enumerate() {
-        let txid_be = hex::decode(&utxo.txid).unwrap();
+        let txid_be = hex::decode(&utxo.txid)
+            .map_err(|e| Error::Other(format!("bad utxo txid hex: {e}")))?;
         let mut txid_le = txid_be.clone();
         txid_le.reverse();
         tx.extend_from_slice(&txid_le);
