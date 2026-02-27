@@ -1,0 +1,83 @@
+[package]
+name = "narsil"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "private syndicate consensus using threshold signatures"
+repository = "https://github.com/rotkonetworks/zeratul"
+keywords = ["threshold", "consensus", "bft", "syndicate", "privacy"]
+categories = ["cryptography"]
+
+[[bin]]
+name = "narsil"
+required-features = ["cli"]
+
+[features]
+default = ["std", "ristretto255", "borsh"]
+std = ["osst/std", "sha2/std", "borsh?/std"]
+borsh = ["dep:borsh"]
+
+# curve backends (passed through to osst)
+ristretto255 = ["osst/ristretto255"]
+pallas = ["osst/pallas"]
+secp256k1 = ["osst/secp256k1"]
+decaf377 = ["osst/decaf377"]
+
+# shielded chain scanning
+zcash = ["dep:zync-core"]
+
+# penumbra integration (transaction building, scanning)
+penumbra = ["dep:decaf377", "dep:decaf377-rdsa", "dep:penumbra-sdk-keys", "dep:penumbra-sdk-shielded-pool", "dep:penumbra-sdk-transaction", "dep:penumbra-sdk-tct", "dep:penumbra-sdk-asset", "dep:penumbra-sdk-num", "dep:penumbra-sdk-sct", "dep:penumbra-sdk-txhash"]
+
+# networking (requires async runtime)
+net = ["dep:tokio", "dep:thiserror", "dep:reqwest", "dep:base64", "dep:serde", "dep:serde_json"]
+
+# CLI (requires penumbra + std)
+cli = ["std", "penumbra", "decaf377", "dep:clap", "dep:tokio", "dep:directories"]
+
+[dependencies]
+# threshold signatures
+osst = { path = "../osst", default-features = false }
+
+# hashing
+sha2 = { version = "0.10", default-features = false }
+
+# randomness
+rand_core = { version = "0.6", default-features = false }
+
+# serialization
+serde = { version = "1.0", default-features = false, features = ["derive", "alloc"], optional = true }
+borsh = { version = "1.5", default-features = false, features = ["derive"], optional = true }
+
+# hex encoding
+hex = { version = "0.4", default-features = false, features = ["alloc"] }
+
+# networking (optional, feature-gated)
+tokio = { version = "1", features = ["sync", "macros", "rt-multi-thread"], optional = true }
+thiserror = { version = "1.0", optional = true }
+reqwest = { version = "0.12", features = ["json"], optional = true }
+base64 = { version = "0.22", optional = true }
+serde_json = { version = "1.0", optional = true }
+
+# shielded chain scanning (optional)
+zync-core = { path = "../zync-core", default-features = false, optional = true }
+
+# penumbra integration (optional)
+decaf377 = { version = "0.10", optional = true }
+decaf377-rdsa = { version = "0.11", optional = true }
+penumbra-sdk-keys = { version = "2.1", optional = true }
+penumbra-sdk-shielded-pool = { version = "2.1", optional = true }
+penumbra-sdk-transaction = { version = "2.1", optional = true }
+penumbra-sdk-tct = { version = "2.1", optional = true }
+penumbra-sdk-asset = { version = "2.1", optional = true }
+penumbra-sdk-num = { version = "2.1", optional = true }
+penumbra-sdk-sct = { version = "2.1", optional = true }
+penumbra-sdk-txhash = { version = "2.1", optional = true }
+
+# CLI deps (optional)
+clap = { version = "4", features = ["derive"], optional = true }
+directories = { version = "5", optional = true }
+
+[dev-dependencies]
+rand = "0.8"
+curve25519-dalek = { version = "4.1", features = ["rand_core"] }
