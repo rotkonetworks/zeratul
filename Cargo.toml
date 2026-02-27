@@ -21,11 +21,16 @@ members = [
     "crates/bin/zidecar",
     "crates/bin/zafu",
     "crates/bin/ibp-probe",
+    "crates/bin/zcli",
     # Zync (light client)
     "crates/zync-core",
     "crates/zafu-wasm",
     # OSST (One-Step Schnorr Threshold)
     "crates/osst",
+    # Narsil (private syndicate consensus)
+    "crates/narsil",
+    # ZODA-VSS (Verifiable Secret Sharing)
+    "crates/zoda-vss",
     # Ghettobox (PIN-protected key recovery)
     "crates/ghettobox",
     "crates/ghettobox-vault",
