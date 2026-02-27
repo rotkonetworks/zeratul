@@ -53,8 +53,8 @@ pub struct DealerCommitment<P: OsstPoint> {
 impl<P: OsstPoint> DealerCommitment<P> {
     /// Create commitment from polynomial coefficients
     pub fn from_polynomial(dealer_index: u32, coefficients: &[P::Scalar]) -> Self {
-        debug_assert!(dealer_index > 0);
-        debug_assert!(!coefficients.is_empty());
+        assert!(dealer_index > 0, "dealer_index must be 1-indexed");
+        assert!(!coefficients.is_empty(), "coefficients must not be empty");
 
         let committed: Vec<P> = coefficients
             .iter()
@@ -85,7 +85,7 @@ impl<P: OsstPoint> DealerCommitment<P> {
     ///
     /// Uses Horner's method for efficiency: O(t) scalar muls
     pub fn evaluate_at(&self, player_index: u32) -> P {
-        debug_assert!(player_index > 0);
+        assert!(player_index > 0, "player_index must be 1-indexed");
 
         let j = P::Scalar::from_u32(player_index);
 
@@ -160,23 +160,34 @@ impl<P: OsstPoint> DealerCommitment<P> {
 /// Sub-share from dealer to player
 ///
 /// Should be encrypted before transmission. Size: 40 bytes
+///
+/// # Security
+///
+/// This struct holds secret key material. It implements `ZeroizeOnDrop`
+/// to ensure the value is zeroed when the sub-share goes out of scope.
 #[derive(Clone)]
 pub struct SubShare<S: OsstScalar> {
     pub dealer_index: u32,
     pub player_index: u32,
-    pub value: S,
+    value: S,
 }
 
 impl<S: OsstScalar> SubShare<S> {
     #[inline]
     pub fn new(dealer_index: u32, player_index: u32, value: S) -> Self {
-        debug_assert!(dealer_index > 0);
-        debug_assert!(player_index > 0);
+        assert!(dealer_index > 0, "dealer_index must be 1-indexed");
+        assert!(player_index > 0, "player_index must be 1-indexed");
         Self {
             dealer_index,
             player_index,
             value,
         }
+    }
+
+    /// Access the secret value (use sparingly)
+    #[inline]
+    pub fn value(&self) -> &S {
+        &self.value
     }
 
     pub fn to_bytes(&self) -> [u8; 40] {
@@ -206,7 +217,12 @@ impl<S: OsstScalar> SubShare<S> {
     }
 }
 
-// Prevent Debug from leaking secrets
+impl<S: OsstScalar> Drop for SubShare<S> {
+    fn drop(&mut self) {
+        self.value.zeroize();
+    }
+}
+
 impl<S: OsstScalar> core::fmt::Debug for SubShare<S> {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         f.debug_struct("SubShare")
@@ -223,13 +239,27 @@ impl<S: OsstScalar> core::fmt::Debug for SubShare<S> {
 
 /// Dealer generates sub-shares for new custodians
 ///
-/// Holds secret polynomial, should be zeroized after use.
+/// Holds secret polynomial coefficients.
+///
+/// # Security
+///
+/// This struct holds secret key material. It implements `ZeroizeOnDrop`
+/// to ensure the polynomial coefficients are zeroed when the dealer
+/// goes out of scope.
 pub struct Dealer<P: OsstPoint> {
     index: u32,
     /// Polynomial coefficients [a_0=share, a_1, ..., a_{t-1}]
     polynomial: Vec<P::Scalar>,
     /// Cached commitment
     commitment: DealerCommitment<P>,
+}
+
+impl<P: OsstPoint> Drop for Dealer<P> {
+    fn drop(&mut self) {
+        for coeff in &mut self.polynomial {
+            coeff.zeroize();
+        }
+    }
 }
 
 impl<P: OsstPoint> Dealer<P> {
@@ -275,7 +305,7 @@ impl<P: OsstPoint> Dealer<P> {
     ///
     /// Evaluates polynomial at player's index using Horner's method.
     pub fn generate_subshare(&self, player_index: u32) -> SubShare<P::Scalar> {
-        debug_assert!(player_index > 0);
+        assert!(player_index > 0, "player_index must be 1-indexed");
 
         let j = P::Scalar::from_u32(player_index);
 
@@ -389,14 +419,14 @@ impl<P: OsstPoint> Aggregator<P> {
         }
 
         // Verify sub-share against commitment
-        if !commitment.verify_subshare(self.player_index, &subshare.value) {
+        if !commitment.verify_subshare(self.player_index, subshare.value()) {
             return Err(OsstError::InvalidResponse);
         }
 
         // Store
         self.subshares.push(VerifiedSubShare {
             dealer_index: subshare.dealer_index,
-            value: subshare.value,
+            value: subshare.value().clone(),
         });
         self.commitments.push(commitment);
 
@@ -635,7 +665,7 @@ pub fn batch_verify_subshares<P: OsstPoint, R: rand_core::RngCore + rand_core::C
         if subshare.player_index != player_index {
             return false;
         }
-        let term = w.mul(&subshare.value);
+        let term = w.mul(subshare.value());
         lhs_exponent = lhs_exponent.add(&term);
     }
     let lhs = P::generator().mul_scalar(&lhs_exponent);
@@ -697,7 +727,7 @@ mod tests {
         // Create dealers
         let dealers: Vec<Dealer<RistrettoPoint>> = old_shares
             .iter()
-            .map(|s| Dealer::new(s.index, s.scalar.clone(), new_t, &mut rng))
+            .map(|s| Dealer::new(s.index, s.scalar().clone(), new_t, &mut rng))
             .collect();
 
         // Create aggregators for new players
@@ -745,7 +775,7 @@ mod tests {
         // Only 3 of 5 dealers participate
         let active_dealers: Vec<Dealer<RistrettoPoint>> = old_shares[0..3]
             .iter()
-            .map(|s| Dealer::new(s.index, s.scalar.clone(), new_t, &mut rng))
+            .map(|s| Dealer::new(s.index, s.scalar().clone(), new_t, &mut rng))
             .collect();
 
         let mut agg: Aggregator<RistrettoPoint> = Aggregator::new(1);
@@ -760,7 +790,7 @@ mod tests {
         let share = agg.finalize(3, &group_pubkey).unwrap();
 
         // Verify public share matches
-        let public_share: RistrettoPoint = RistrettoPoint::generator().mul_scalar(&share);
+        let _public_share: RistrettoPoint = RistrettoPoint::generator().mul_scalar(&share);
         let derived_key = agg.derive_group_key(3).unwrap();
 
         // This player's public share contributes to group key
@@ -776,7 +806,7 @@ mod tests {
 
         let dealers: Vec<Dealer<RistrettoPoint>> = old_shares
             .iter()
-            .map(|s| Dealer::new(s.index, s.scalar.clone(), 3, &mut rng))
+            .map(|s| Dealer::new(s.index, s.scalar().clone(), 3, &mut rng))
             .collect();
 
         let player_index = 1u32;
@@ -829,7 +859,7 @@ mod tests {
         // Submit commitments
         for share in &old_shares {
             let dealer: Dealer<RistrettoPoint> =
-                Dealer::new(share.index, share.scalar.clone(), 3, &mut rng);
+                Dealer::new(share.index, share.scalar().clone(), 3, &mut rng);
             state
                 .submit_commitment(dealer.commitment().clone())
                 .unwrap();
@@ -868,7 +898,7 @@ mod tests {
         for j in 1..=10u32 {
             let subshare = dealer.generate_subshare(j);
             let eval = dealer.commitment().evaluate_at(j);
-            let expected: RistrettoPoint = RistrettoPoint::generator().mul_scalar(&subshare.value);
+            let expected: RistrettoPoint = RistrettoPoint::generator().mul_scalar(subshare.value());
             assert_eq!(eval, expected);
         }
     }

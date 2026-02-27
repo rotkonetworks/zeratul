@@ -3,13 +3,29 @@
 //! Defines traits for curve operations, allowing OSST to work with different
 //! elliptic curve backends:
 //! - ristretto255 (Polkadot/sr25519 compatible)
-//! - Pallas (Zcash Orchard compatible)
-//! - Jubjub (Zcash Sapling compatible) - future
+//! - pallas (Zcash Orchard compatible)
+//! - secp256k1 (Bitcoin compatible)
+//! - decaf377 (Penumbra compatible)
 
 use core::fmt::Debug;
 
 /// Scalar field element trait
+///
+/// # Security
+///
+/// Implementors must ensure `zeroize()` overwrites the scalar's memory
+/// representation with zeros. This is critical for secret key material.
 pub trait OsstScalar: Clone + Debug + Sized + PartialEq + Send + Sync {
+    /// Overwrite this scalar's memory with zeros
+    ///
+    /// # Security
+    ///
+    /// This method MUST overwrite the scalar's internal representation.
+    /// Default implementation sets self to zero(), which may not actually
+    /// overwrite the original bytes in all implementations.
+    fn zeroize(&mut self) {
+        *self = Self::zero();
+    }
     /// The zero element
     fn zero() -> Self;
 
@@ -112,8 +128,13 @@ pub mod ristretto {
         scalar::Scalar,
         traits::MultiscalarMul,
     };
+    use zeroize::Zeroize;
 
     impl OsstScalar for Scalar {
+        fn zeroize(&mut self) {
+            // Use curve25519-dalek's constant-time zeroize implementation
+            Zeroize::zeroize(self);
+        }
         fn zero() -> Self {
             Scalar::ZERO
         }
@@ -332,11 +353,12 @@ pub mod secp256k1 {
     use alloc::vec::Vec;
     use k256::{
         elliptic_curve::{
+            bigint::U512,
             ops::Reduce,
             sec1::{FromEncodedPoint, ToEncodedPoint},
             Field, PrimeField,
         },
-        ProjectivePoint, Scalar, U256,
+        ProjectivePoint, Scalar,
     };
 
     impl OsstScalar for Scalar {
@@ -377,9 +399,10 @@ pub mod secp256k1 {
         }
 
         fn from_bytes_wide(bytes: &[u8; 64]) -> Self {
-            // reduce 512-bit value modulo curve order
-            let wide = U256::from_be_slice(&bytes[32..64]);
-            <Scalar as Reduce<U256>>::reduce(wide)
+            // reduce full 512-bit value modulo curve order
+            // this preserves the full entropy from the hash
+            let wide = U512::from_be_slice(bytes);
+            <Scalar as Reduce<U512>>::reduce(wide)
         }
 
         fn to_bytes(&self) -> [u8; 32] {
@@ -530,11 +553,9 @@ pub mod decaf377 {
         }
 
         fn from_bytes_wide(bytes: &[u8; 64]) -> Self {
-            // reduce 512-bit value mod field order
-            // decaf377 Fr is ~253 bits, so we use the lower 32 bytes
-            let mut arr = [0u8; 32];
-            arr.copy_from_slice(&bytes[32..64]);
-            Fr::from_le_bytes_mod_order(&arr)
+            // reduce full 512-bit value mod field order
+            // decaf377's from_le_bytes_mod_order accepts arbitrary length slices
+            Fr::from_le_bytes_mod_order(bytes)
         }
 
         fn to_bytes(&self) -> [u8; 32] {

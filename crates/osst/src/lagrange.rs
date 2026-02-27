@@ -104,6 +104,12 @@ pub fn compute_lagrange_coefficients<S: OsstScalar>(indices: &[u32]) -> Result<V
     let d_bar = suffix;
 
     // d̄^{-1} (single inversion)
+    // Safety: d_bar can only be zero if some d_i = 0, which happens iff
+    // two indices collide. Duplicate check above ensures this cannot happen.
+    debug_assert!(
+        d_bar != S::zero(),
+        "d_bar is zero - this indicates duplicate indices slipped through"
+    );
     let d_bar_inv = d_bar.invert();
 
     // λ_i = ξ · ρ_i · d̄^{-1}

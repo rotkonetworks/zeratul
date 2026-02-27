@@ -29,15 +29,21 @@ sha2 = { version = "0.10", default-features = false }
 # randomness
 rand_core = { version = "0.6", default-features = false }
 
+# secret zeroization
+zeroize = { version = "1.8", default-features = false, features = ["derive"] }
+
 # Curve backends (optional)
 # ristretto255 - for Polkadot/sr25519 compatibility
-curve25519-dalek = { version = "4.1", default-features = false, features = ["digest", "group", "alloc", "rand_core"], optional = true }
+curve25519-dalek = { version = "4.1", default-features = false, features = ["digest", "group", "alloc", "rand_core", "zeroize"], optional = true }
 
 # pallas - for Zcash Orchard compatibility
 pasta_curves = { version = "0.5", default-features = false, features = ["alloc"], optional = true }
 
 # secp256k1 - for Bitcoin compatibility
 k256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa"], optional = true }
+
+# for zeroize implementations on external scalar types
+generic-array = { version = "0.14", default-features = false, optional = true }
 
 # decaf377 - for Penumbra compatibility
 decaf377 = { version = "0.10", default-features = false, optional = true }

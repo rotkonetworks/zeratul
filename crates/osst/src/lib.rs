@@ -80,18 +80,45 @@ pub fn hash_to_challenge<S: OsstScalar, P: OsstPoint<Scalar = S>>(
 }
 
 /// A secret share from DKG
-#[derive(Clone, Debug)]
+///
+/// # Security
+///
+/// This struct holds secret key material. It implements `ZeroizeOnDrop`
+/// to ensure the scalar is zeroed when the share goes out of scope.
+#[derive(Clone)]
 pub struct SecretShare<S: OsstScalar> {
     /// Shareholder index (1-indexed, as per Shamir convention)
     pub index: u32,
     /// The secret scalar x_i
-    pub scalar: S,
+    scalar: S,
+}
+
+impl<S: OsstScalar> core::fmt::Debug for SecretShare<S> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SecretShare")
+            .field("index", &self.index)
+            .field("scalar", &"[REDACTED]")
+            .finish()
+    }
+}
+
+impl<S: OsstScalar> Drop for SecretShare<S> {
+    fn drop(&mut self) {
+        // Zero the scalar bytes via the OsstScalar trait
+        self.scalar.zeroize();
+    }
 }
 
 impl<S: OsstScalar> SecretShare<S> {
     pub fn new(index: u32, scalar: S) -> Self {
         assert!(index > 0, "index must be 1-indexed");
         Self { index, scalar }
+    }
+
+    /// Access the secret scalar (use sparingly, avoid logging/debugging)
+    #[inline]
+    pub fn scalar(&self) -> &S {
+        &self.scalar
     }
 
     /// Generate an OSST contribution (Schnorr proof for this share)
@@ -150,7 +177,9 @@ impl<P: OsstPoint> Contribution<P> {
         }
     }
 
-    /// Serialize for transmission
+    /// Serialize for transmission (fixed 68-byte format for 32-byte curves)
+    ///
+    /// For curves with non-32-byte points (e.g. secp256k1), use `to_bytes_vec`.
     pub fn to_bytes(&self) -> [u8; 68] {
         let mut buf = [0u8; 68];
         buf[0..4].copy_from_slice(&self.index.to_le_bytes());
@@ -159,7 +188,7 @@ impl<P: OsstPoint> Contribution<P> {
         buf
     }
 
-    /// Deserialize
+    /// Deserialize from fixed 68-byte format
     pub fn from_bytes(bytes: &[u8; 68]) -> Result<Self, OsstError> {
         let index = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
 
@@ -167,6 +196,46 @@ impl<P: OsstPoint> Contribution<P> {
         let commitment = P::decompress(&point_bytes).ok_or(OsstError::InvalidCommitment)?;
 
         let response_bytes: [u8; 32] = bytes[36..68].try_into().unwrap();
+        let response =
+            P::Scalar::from_canonical_bytes(&response_bytes).ok_or(OsstError::InvalidResponse)?;
+
+        Ok(Self {
+            index,
+            commitment,
+            response,
+        })
+    }
+
+    /// Serialize to variable-length bytes (handles all curve types)
+    ///
+    /// Format: [index: 4][commitment: COMPRESSED_SIZE][response: 32]
+    pub fn to_bytes_vec(&self) -> Vec<u8> {
+        let compressed = self.commitment.compress_vec();
+        let mut buf = Vec::with_capacity(4 + compressed.len() + 32);
+        buf.extend_from_slice(&self.index.to_le_bytes());
+        buf.extend_from_slice(&compressed);
+        buf.extend_from_slice(&self.response.to_bytes());
+        buf
+    }
+
+    /// Deserialize from variable-length bytes
+    ///
+    /// Requires knowing the point compression size for the curve.
+    pub fn from_bytes_vec(bytes: &[u8]) -> Result<Self, OsstError> {
+        let expected_len = 4 + P::COMPRESSED_SIZE + 32;
+        if bytes.len() != expected_len {
+            return Err(OsstError::InvalidCommitment);
+        }
+
+        let index = u32::from_le_bytes(bytes[0..4].try_into().unwrap());
+
+        let point_bytes = &bytes[4..4 + P::COMPRESSED_SIZE];
+        let commitment = P::decompress_slice(point_bytes).ok_or(OsstError::InvalidCommitment)?;
+
+        let response_offset = 4 + P::COMPRESSED_SIZE;
+        let response_bytes: [u8; 32] = bytes[response_offset..response_offset + 32]
+            .try_into()
+            .unwrap();
         let response =
             P::Scalar::from_canonical_bytes(&response_bytes).ok_or(OsstError::InvalidResponse)?;
 
@@ -634,7 +703,7 @@ mod tests {
         let mut rng = OsRng;
 
         let secret = Scalar::random(&mut rng);
-        let group_pubkey: RistrettoPoint = RistrettoPoint::generator().mul_scalar(&secret);
+        let _group_pubkey: RistrettoPoint = RistrettoPoint::generator().mul_scalar(&secret);
 
         // Different public key
         let wrong_secret = Scalar::random(&mut rng);
@@ -835,6 +904,26 @@ mod secp256k1_tests {
         let result = verify(&group_pubkey, &contributions, t, payload);
         assert!(result.is_ok());
         assert!(result.unwrap(), "2-of-3 secp256k1 should verify");
+    }
+
+    #[test]
+    fn test_secp256k1_contribution_serialization() {
+        let mut rng = OsRng;
+
+        let secret = <Scalar as OsstScalar>::random(&mut rng);
+        let shares = shamir_split_secp(&secret, 3, 2);
+
+        let payload = b"secp256k1 serialization test";
+        let original: Contribution<ProjectivePoint> = shares[0].contribute(&mut rng, payload);
+
+        // test variable-length serialization (correct for secp256k1)
+        let bytes = original.to_bytes_vec();
+        assert_eq!(bytes.len(), 4 + 33 + 32, "secp256k1 contribution should be 69 bytes");
+
+        let recovered = Contribution::<ProjectivePoint>::from_bytes_vec(&bytes).unwrap();
+        assert_eq!(original.index, recovered.index);
+        assert_eq!(original.commitment, recovered.commitment);
+        assert_eq!(original.response, recovered.response);
     }
 }
 
