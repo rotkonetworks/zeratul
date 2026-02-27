@@ -13,7 +13,8 @@ default = ["software"]
 software = []
 tpm = ["dep:tss-esapi"]
 network = ["dep:tokio", "dep:reqwest", "dep:futures"]
-full = ["software", "tpm", "network"]
+zoda = ["dep:commonware-coding", "dep:commonware-cryptography", "dep:commonware-parallel", "dep:commonware-codec"]
+full = ["software", "tpm", "network", "zoda"]
 
 [dependencies]
 # core crypto
@@ -23,6 +24,9 @@ rand = "0.8"
 sha2 = "0.10"
 hkdf = "0.12"
 hmac = "0.12"
+
+# threshold oprf (ristretto255)
+curve25519-dalek = { version = "4", features = ["rand_core"] }
 
 # signing keys
 ed25519-dalek = { version = "2", features = ["rand_core"] }
@@ -43,6 +47,12 @@ futures = { version = "0.3", optional = true }
 
 # tpm support (optional)
 tss-esapi = { version = "7", optional = true }
+
+# zoda data availability (optional)
+commonware-coding = { version = "0.0.65", optional = true }
+commonware-cryptography = { version = "0.0.65", optional = true }
+commonware-parallel = { version = "0.0.65", optional = true }
+commonware-codec = { version = "0.0.65", optional = true }
 
 # error handling
 thiserror = "1.0"

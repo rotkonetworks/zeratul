@@ -70,11 +70,16 @@ pub mod realm;
 pub mod share;
 pub mod protocol;
 pub mod vss;
+pub mod oprf;
+pub mod oprf_protocol;
 pub mod account;
 pub mod client;
 
 #[cfg(feature = "network")]
 pub mod network;
+
+// verified oprf module (always available - uses DLEQ)
+pub mod zoda_oprf;
 
 pub use error::{Error, Result};
 pub use protocol::Ghettobox;
@@ -84,6 +89,19 @@ pub use account::Account;
 pub use client::Client;
 pub use vss::{split_secret, combine_shares};
 
+// oprf protocol exports
+pub use oprf_protocol::{
+    ThresholdOprfProtocol, OprfServer, MemoryOprfServer,
+    EncryptedSeed, RegistrationBundle, RecoveryResult,
+};
+
+// verified oprf exports (DLEQ-based, always available)
+pub use zoda_oprf::{
+    VerifiedOprfServer, VerifiedOprfDealer, VerifiedOprfClient,
+    VerifiedOprfResponse, ServerPublicKey,
+    MisbehaviorReport, MisbehaviorType,
+};
+
 #[cfg(feature = "software")]
 pub use realm::software::SoftwareRealm;
 
@@ -91,4 +109,11 @@ pub use realm::software::SoftwareRealm;
 pub use realm::tpm::{TpmRealm, TpmInfo, TpmType};
 
 #[cfg(feature = "network")]
-pub use network::NetworkClient;
+pub use network::{
+    NetworkClient, OprfNetworkClient, OprfRealmNode, OprfRecoverRawResult,
+    OprfRegisterRequest, OprfRegisterResponse, OprfRecoverRequest, OprfRecoverResponse,
+};
+
+// zoda data availability exports (optional)
+#[cfg(feature = "zoda")]
+pub use zoda_oprf::{ZodaCommitment, ZodaShard, encode_share_for_da, verify_shard_format};

@@ -59,6 +59,16 @@ pub enum Error {
     #[error("not enough shares: have {have}, need {need}")]
     NotEnoughShares { have: usize, need: usize },
 
+    // === oprf errors ===
+    #[error("invalid point encoding")]
+    InvalidPoint,
+
+    #[error("invalid threshold parameters")]
+    InvalidThreshold,
+
+    #[error("oprf evaluation failed: {0}")]
+    OprfFailed(String),
+
     // === network errors ===
     #[error("network error: {0}")]
     NetworkError(String),
