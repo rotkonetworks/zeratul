@@ -1,6 +1,7 @@
 //! client-side shielded state storage
 //!
 //! stores encrypted notes, nullifiers, and merkle witnesses locally.
+//! also stores playmate history and settings.
 //! uses NOMT on native (linux) or IndexedDB on wasm.
 //!
 //! ## architecture
@@ -12,6 +13,10 @@
 //! ├── witnesses: merkle proofs for our notes
 //! ├── sync_height: last synced block
 //! └── viewing_keys: for scanning new notes
+//!
+//! PlaymateStorage
+//! ├── playmates: friends and recent players
+//! └── settings: user preferences
 //! ```
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -20,6 +25,8 @@ mod native;
 mod wasm;
 
 use std::collections::HashMap;
+
+use crate::friends::{FriendsState, Playmate, PlayerId};
 
 /// encrypted note stored locally
 #[derive(Clone, Debug)]
@@ -84,6 +91,96 @@ pub enum StorageError {
     Encryption(String),
     #[error("nomt error: {0}")]
     Nomt(String),
+}
+
+/// playmate storage trait
+pub trait PlaymateStorage: Send + Sync {
+    /// load all playmates
+    fn load_playmates(&self) -> Result<HashMap<PlayerId, Playmate>, StorageError>;
+
+    /// save all playmates
+    fn save_playmates(&self, playmates: &HashMap<PlayerId, Playmate>) -> Result<(), StorageError>;
+}
+
+/// simple file-based playmate storage (for native)
+#[cfg(not(target_arch = "wasm32"))]
+pub struct FilePlaymateStorage {
+    path: std::path::PathBuf,
+    encryption_key: [u8; 32],
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl FilePlaymateStorage {
+    pub fn new(path: &str, encryption_key: &[u8; 32]) -> Self {
+        Self {
+            path: std::path::PathBuf::from(path).join("playmates.dat"),
+            encryption_key: *encryption_key,
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PlaymateStorage for FilePlaymateStorage {
+    fn load_playmates(&self) -> Result<HashMap<PlayerId, Playmate>, StorageError> {
+        use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
+        use chacha20poly1305::aead::generic_array::GenericArray;
+
+        if !self.path.exists() {
+            return Ok(HashMap::new());
+        }
+
+        let data = std::fs::read(&self.path)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+
+        if data.len() < 12 {
+            return Ok(HashMap::new());
+        }
+
+        // first 12 bytes are nonce
+        let nonce = GenericArray::from_slice(&data[..12]);
+        let ciphertext = &data[12..];
+
+        let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&self.encryption_key));
+        let plaintext = cipher.decrypt(nonce, ciphertext)
+            .map_err(|e| StorageError::Encryption(e.to_string()))?;
+
+        FriendsState::deserialize(&plaintext)
+            .ok_or_else(|| StorageError::Serialization("failed to deserialize playmates".into()))
+    }
+
+    fn save_playmates(&self, playmates: &HashMap<PlayerId, Playmate>) -> Result<(), StorageError> {
+        use chacha20poly1305::{ChaCha20Poly1305, KeyInit, aead::Aead};
+        use chacha20poly1305::aead::generic_array::GenericArray;
+        use rand::RngCore;
+
+        let records: Vec<&Playmate> = playmates.values().collect();
+        let plaintext = bincode::serialize(&records)
+            .map_err(|e| StorageError::Serialization(e.to_string()))?;
+
+        // generate random nonce
+        let mut nonce_bytes = [0u8; 12];
+        rand::thread_rng().fill_bytes(&mut nonce_bytes);
+        let nonce = GenericArray::from_slice(&nonce_bytes);
+
+        let cipher = ChaCha20Poly1305::new(GenericArray::from_slice(&self.encryption_key));
+        let ciphertext = cipher.encrypt(nonce, plaintext.as_ref())
+            .map_err(|e| StorageError::Encryption(e.to_string()))?;
+
+        // write nonce + ciphertext
+        let mut output = nonce_bytes.to_vec();
+        output.extend(ciphertext);
+
+        // ensure parent dir exists
+        if let Some(parent) = self.path.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| StorageError::Io(e.to_string()))?;
+        }
+
+        std::fs::write(&self.path, output)
+            .map_err(|e| StorageError::Io(e.to_string()))?;
+
+        Ok(())
+    }
 }
 
 /// create storage backend for current platform

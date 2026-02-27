@@ -10,10 +10,12 @@ use bevy_egui::{egui, EguiContexts};
 use std::sync::mpsc;
 
 use crate::auth::{AuthEvent, AuthState, AuthStatus};
+use crate::chain_client::ChainConnection;
 use crate::multitable::{HintAction, HintModeState, HintTarget};
 use crate::p2p::P2PNotification;
-use crate::vault_client::{VaultCheckResult, VaultClient};
+use crate::vault_client::{OprfVaultClient, OprfVaultNode, OprfHealthResponse};
 use crate::DebugMode;
+use ghettobox::ServerPublicKey;
 
 pub struct LobbyPlugin;
 
@@ -21,14 +23,136 @@ impl Plugin for LobbyPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<LobbyState>()
             .init_resource::<VaultConnection>()
-            .add_systems(Update, (render_lobby, check_vault_status, handle_p2p_notifications));
+            .init_resource::<PublicTables>()
+            .add_systems(Update, (
+                render_lobby,
+                check_vault_status,
+                sync_vault_to_auth,
+                handle_p2p_notifications,
+                connect_chain_on_login,
+                sync_chain_balance,
+                trigger_table_discovery,
+                handle_pending_create,
+            ));
+    }
+}
+
+/// trigger P2P table discovery when requested
+fn trigger_table_discovery(
+    mut public_tables: ResMut<PublicTables>,
+    mut p2p_commands: EventWriter<crate::p2p::P2PCommand>,
+) {
+    if public_tables.needs_refresh {
+        public_tables.needs_refresh = false;
+        public_tables.refreshing = true;
+        p2p_commands.send(crate::p2p::P2PCommand::DiscoverTables);
+    }
+}
+
+/// handle pending table creation
+fn handle_pending_create(
+    mut lobby: ResMut<LobbyState>,
+    auth: Res<AuthState>,
+    mut p2p_commands: EventWriter<crate::p2p::P2PCommand>,
+) {
+    if let Some(pending) = lobby.pending_create.take() {
+        let (small_blind, big_blind) = pending.stakes.blinds();
+        let rules = crate::p2p::TableRules {
+            seats: pending.seats,
+            small_blind: small_blind as u128,
+            big_blind: big_blind as u128,
+            min_buy_in: pending.stakes.min_buy_in() as u128,
+            max_buy_in: (pending.stakes.min_buy_in() * 5) as u128,
+            ante: 0,
+            allow_spectators: true,
+            max_spectators: 10,
+        };
+
+        let host_name = auth.account_address
+            .as_ref()
+            .map(|s| format!("{}...", &s[..8]))
+            .unwrap_or_else(|| "Anonymous".to_string());
+
+        let visibility = match pending.visibility {
+            TableVisibility::Public => crate::p2p::TableVisibility::Public,
+            TableVisibility::FriendsOnly => crate::p2p::TableVisibility::FriendsOnly,
+            TableVisibility::Private => crate::p2p::TableVisibility::Private,
+        };
+
+        lobby.created_visibility = pending.visibility;
+
+        p2p_commands.send(crate::p2p::P2PCommand::CreateTable {
+            rules,
+            visibility,
+            host_name,
+        });
+
+        info!("lobby: requesting table creation with {:?} visibility", pending.visibility);
+    }
+}
+
+/// connect to chain when user logs in
+fn connect_chain_on_login(
+    auth: Res<AuthState>,
+    mut chain: ResMut<ChainConnection>,
+    mut connected: Local<bool>,
+) {
+    // trigger chain connect once when auth becomes LoggedIn
+    if auth.status == AuthStatus::LoggedIn && !*connected {
+        *connected = true;
+
+        // derive account from auth pubkey
+        if let Some(ref addr) = auth.account_address {
+            let mut account = [0u8; 32];
+            // use first 32 bytes of address or hash
+            let bytes = addr.as_bytes();
+            let len = bytes.len().min(32);
+            account[..len].copy_from_slice(&bytes[..len]);
+
+            info!("chain: connecting with account from auth...");
+            chain.connect("ws://127.0.0.1:9944", account);
+        }
+    }
+
+    // reset when logged out
+    if auth.status == AuthStatus::NotLoggedIn && *connected {
+        *connected = false;
+        chain.disconnect();
+    }
+}
+
+/// sync chain balance to lobby
+fn sync_chain_balance(
+    chain: Res<ChainConnection>,
+    mut lobby: ResMut<LobbyState>,
+) {
+    if chain.is_connected() {
+        // use chain balance for lobby
+        lobby.balance = chain.transferable_balance();
+    }
+}
+
+/// sync vault connection to auth config when vault connects
+fn sync_vault_to_auth(
+    vault: Res<VaultConnection>,
+    mut auth_config: ResMut<crate::auth::VaultConfig>,
+    mut synced: Local<bool>,
+) {
+    // only sync once when vault becomes connected and has nodes
+    if !*synced && matches!(vault.status, VaultStatus::Connected) && !vault.nodes.is_empty() {
+        *synced = true;
+        auth_config.nodes = vault.nodes.clone();
+        auth_config.threshold = 2; // 2-of-3 threshold
+        info!("synced {} OPRF vault nodes to auth config", vault.nodes.len());
     }
 }
 
 /// handle P2P notifications
 fn handle_p2p_notifications(
     mut lobby: ResMut<LobbyState>,
+    mut public_tables: ResMut<PublicTables>,
     mut notifications: EventReader<P2PNotification>,
+    friends: Res<crate::friends::FriendsState>,
 ) {
     for notification in notifications.read() {
         match notification {
@@ -48,6 +172,30 @@ fn handle_p2p_notifications(
                 info!("lobby: ready to start game");
                 lobby.connected = true;
             }
+            P2PNotification::TablesDiscovered { tables } => {
+                info!("lobby: discovered {} tables", tables.len());
+                public_tables.tables = tables.iter().map(|t| {
+                    let host_is_friend = friends.is_friend_by_pubkey(&t.host_pubkey);
+                    PublicTable {
+                        code: t.code.clone(),
+                        host: t.host_name.clone(),
+                        stakes: t.stakes.clone(),
+                        players: t.players,
+                        friends_only: matches!(t.visibility, crate::p2p::TableVisibility::FriendsOnly),
+                        host_is_friend,
+                        announced_at: std::time::SystemTime::now()
+                            .duration_since(std::time::UNIX_EPOCH)
+                            .map(|d| d.as_secs())
+                            .unwrap_or(0),
+                        ping_ms: Some(rand::random::<u32>() % 100 + 20), // mock ping
+                    }
+                }).collect();
+                public_tables.refreshing = false;
+                public_tables.last_refresh = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+            }
             P2PNotification::Error { message } => {
                 lobby.error = Some(message.clone());
                 warn!("lobby: p2p error - {}", message);
@@ -56,11 +204,12 @@ fn handle_p2p_notifications(
     }
 }
 
-/// vault connection state
+/// vault connection state (uses OPRF protocol)
 #[derive(Resource)]
 pub struct VaultConnection {
     pub status: VaultStatus,
-    pub nodes: Vec<String>,
+    pub node_urls: Vec<String>,
+    pub nodes: Vec<OprfVaultNode>,
     pub connected_count: usize,
 }
 
@@ -68,11 +217,12 @@ impl Default for VaultConnection {
     fn default() -> Self {
         Self {
             status: VaultStatus::Disconnected,
-            nodes: vec![
+            node_urls: vec![
+                "http://127.0.0.1:4200".to_string(),
                 "http://127.0.0.1:4201".to_string(),
                 "http://127.0.0.1:4202".to_string(),
-                "http://127.0.0.1:4203".to_string(),
             ],
+            nodes: Vec::new(),
             connected_count: 0,
         }
     }
@@ -100,6 +250,10 @@ pub struct LobbyState {
     pub balance: u64,
     /// created table code (to show after creation)
     pub created_code: Option<String>,
+    /// created table visibility
+    pub created_visibility: TableVisibility,
+    /// pending table creation request
+    pub pending_create: Option<PendingTableCreate>,
     /// error message
     pub error: Option<String>,
     /// connected to table
@@ -110,6 +264,52 @@ pub struct LobbyState {
     pub console_logs: Vec<ConsoleEntry>,
 }
 
+/// pending table creation
+#[derive(Clone, Debug)]
+pub struct PendingTableCreate {
+    pub stakes: StakesPreset,
+    pub seats: u8,
+    pub visibility: TableVisibility,
+}
+
+/// a public table listing
+#[derive(Clone, Debug)]
+pub struct PublicTable {
+    /// table code to join
+    pub code: String,
+    /// host name
+    pub host: String,
+    /// stakes (e.g. "1/2")
+    pub stakes: String,
+    /// current players / max players
+    pub players: (u8, u8),
+    /// is friends-only?
+    pub friends_only: bool,
+    /// host is a friend?
+    pub host_is_friend: bool,
+    /// when the table was announced
+    pub announced_at: u64,
+    /// ping/latency in ms (if known)
+    pub ping_ms: Option<u32>,
+}
+
+/// public tables resource
+#[derive(Resource, Default)]
+pub struct PublicTables {
+    /// list of discovered tables
+    pub tables: Vec<PublicTable>,
+    /// last refresh timestamp
+    pub last_refresh: u64,
+    /// is currently refreshing?
+    pub refreshing: bool,
+    /// needs refresh (triggers P2P discovery)
+    pub needs_refresh: bool,
+    /// filter: show friends' tables only
+    pub filter_friends: bool,
+    /// filter: stakes preset
+    pub filter_stakes: Option<StakesPreset>,
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum LobbyView {
     #[default]
@@ -117,6 +317,7 @@ pub enum LobbyView {
     Main,
     CreateTable,
     JoinTable,
+    BrowseTables,
     WaitingForPlayers,
     Connecting,
 }
@@ -174,6 +375,19 @@ impl LobbyState {
 pub struct CreateTableForm {
     pub stakes: StakesPreset,
     pub seats: u8,
+    pub visibility: TableVisibility,
+}
+
+/// table visibility setting
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TableVisibility {
+    /// anyone can find and join
+    #[default]
+    Public,
+    /// only friends can see in browser
+    FriendsOnly,
+    /// private - need code to join
+    Private,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -186,7 +400,7 @@ pub enum StakesPreset {
 }
 
 impl StakesPreset {
-    fn label(&self) -> &'static str {
+    pub fn label(&self) -> &'static str {
         match self {
             StakesPreset::Micro => "1/2",
             StakesPreset::Low => "5/10",
@@ -215,44 +429,94 @@ pub struct JoinTableForm {
     pub code: String,
 }
 
-/// check vault testnet status and poll for results
+/// OPRF vault check result
+pub struct OprfVaultCheckResult {
+    pub total: usize,
+    pub connected: usize,
+    pub nodes: Vec<OprfVaultNode>,
+}
+
+/// check vault testnet status and poll for results (OPRF protocol)
 fn check_vault_status(
     mut vault: ResMut<VaultConnection>,
-    mut receiver: Local<Option<mpsc::Receiver<VaultCheckResult>>>,
+    mut receiver: Local<Option<mpsc::Receiver<OprfVaultCheckResult>>>,
     mut checked: Local<bool>,
 ) {
     // start check once at startup
     if !*checked {
         *checked = true;
         vault.status = VaultStatus::Connecting;
-        info!("vault: checking testnet nodes...");
+        info!("vault: checking OPRF testnet nodes...");
 
         // spawn async vault check
         let (tx, rx) = mpsc::channel();
         *receiver = Some(rx);
-        VaultClient::check_async(vault.nodes.clone(), tx);
+
+        let urls = vault.node_urls.clone();
+        std::thread::spawn(move || {
+            let mut connected = 0;
+            let mut nodes = Vec::new();
+
+            for (i, url) in urls.iter().enumerate() {
+                // try to fetch OPRF health (includes public key)
+                if let Ok(resp) = ureq::get(&format!("{}/oprf/health", url))
+                    .timeout(std::time::Duration::from_secs(3))
+                    .call()
+                {
+                    if let Ok(health) = resp.into_json::<OprfHealthResponse>() {
+                        if health.ok {
+                            // decode public key
+                            if let Ok(pk_bytes) = hex::decode(&health.oprf_pubkey) {
+                                if pk_bytes.len() == 32 {
+                                    let mut public_key = [0u8; 32];
+                                    public_key.copy_from_slice(&pk_bytes);
+
+                                    nodes.push(OprfVaultNode {
+                                        url: url.clone(),
+                                        oprf_pubkey: ServerPublicKey {
+                                            index: health.index,
+                                            public_key,
+                                        },
+                                        index: health.index,
+                                    });
+                                    connected += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            let _ = tx.send(OprfVaultCheckResult {
+                total: urls.len(),
+                connected,
+                nodes,
+            });
+        });
     }
 
     // poll for results
     if let Some(ref rx) = *receiver {
         if let Ok(result) = rx.try_recv() {
             vault.connected_count = result.connected;
+            vault.nodes = result.nodes.clone();
 
-            if result.is_healthy() {
+            if result.connected >= 2 {
                 vault.status = VaultStatus::Connected;
-                info!("vault: connected to {}/{} nodes", result.connected, result.total);
-                for (url, info) in &result.node_infos {
-                    info!("  {} - node {} (pubkey: {}...)", url, info.index, &info.pubkey[..16]);
+                info!("vault: connected to {}/{} OPRF nodes", result.connected, result.total);
+                for node in &result.nodes {
+                    info!("  {} - node {} (oprf pubkey: {}...)",
+                        node.url, node.index, &hex::encode(&node.oprf_pubkey.public_key)[..16]);
                 }
             } else if result.connected > 0 {
                 vault.status = VaultStatus::Error(format!(
                     "only {}/{} nodes online (need 2)",
                     result.connected, result.total
                 ));
-                warn!("vault: insufficient nodes for threshold");
+                warn!("vault: insufficient OPRF nodes for threshold");
             } else {
                 vault.status = VaultStatus::Disconnected;
-                warn!("vault: no nodes reachable");
+                warn!("vault: no OPRF nodes reachable");
             }
 
             // clear receiver after processing
@@ -350,6 +614,9 @@ fn render_lobby(
     mut auth_state: ResMut<AuthState>,
     mut auth_events: EventWriter<AuthEvent>,
     vault: Res<VaultConnection>,
+    mut chain: ResMut<ChainConnection>,
+    mut friends: ResMut<crate::friends::FriendsState>,
+    mut public_tables: ResMut<PublicTables>,
     mut hint_state: ResMut<HintModeState>,
     debug_mode: Res<DebugMode>,
     keys: Res<ButtonInput<KeyCode>>,
@@ -398,9 +665,10 @@ fn render_lobby(
 
     match lobby.view {
         LobbyView::Login => render_login(ctx, &mut auth_state, &mut auth_events, &*vault, &mut hint_state),
-        LobbyView::Main => render_main(ctx, &mut lobby, &auth_state, &*vault, &mut hint_state, debug_mode.enabled),
+        LobbyView::Main => render_main_inner(ctx, &mut lobby, &auth_state, &*vault, &mut chain, &mut friends, &mut hint_state, debug_mode.enabled),
         LobbyView::CreateTable => render_create_table(ctx, &mut lobby),
         LobbyView::JoinTable => render_join_table(ctx, &mut lobby, &mut hint_state),
+        LobbyView::BrowseTables => render_browse_tables(ctx, &mut lobby, &mut public_tables, &friends),
         LobbyView::WaitingForPlayers => render_waiting(ctx, &mut lobby, debug_mode.enabled),
         LobbyView::Connecting => render_connecting(ctx, &mut lobby, debug_mode.enabled),
     }
@@ -562,11 +830,21 @@ fn render_login(
     }
 }
 
-fn render_main(ctx: &egui::Context, lobby: &mut LobbyState, auth_state: &AuthState, vault: &VaultConnection, hint_state: &mut HintModeState, debug_enabled: bool) {
+fn render_main_inner(
+    ctx: &egui::Context,
+    lobby: &mut LobbyState,
+    auth_state: &AuthState,
+    vault: &VaultConnection,
+    chain: &mut ChainConnection,
+    friends: &mut crate::friends::FriendsState,
+    hint_state: &mut HintModeState,
+    debug_enabled: bool,
+) {
     let mut create_rect: Option<egui::Rect> = None;
     let mut join_rect: Option<egui::Rect> = None;
     let mut faucet_rect: Option<egui::Rect> = None;
     let mut demo_rect: Option<egui::Rect> = None;
+    let mut friends_rect: Option<egui::Rect> = None;
 
     egui::CentralPanel::default().show(ctx, |ui| {
         ui.vertical_centered(|ui| {
@@ -617,7 +895,9 @@ fn render_main(ctx: &egui::Context, lobby: &mut LobbyState, auth_state: &AuthSta
                         let resp = ui.add_sized([140.0, 40.0], faucet_btn);
                         faucet_rect = Some(resp.rect);
                         if resp.clicked() {
-                            lobby.balance += 1000;
+                            // add to chain balance (will sync to lobby)
+                            chain.add_mock_balance(1_000_000_000_000); // 1000 chips in base units
+                            lobby.balance = chain.transferable_balance();
                             info!("faucet: +1000 chips (total: {})", lobby.balance);
                         }
                     });
@@ -641,6 +921,7 @@ fn render_main(ctx: &egui::Context, lobby: &mut LobbyState, auth_state: &AuthSta
                     lobby.create_form = CreateTableForm {
                         stakes: StakesPreset::Micro,
                         seats: 6,
+                        visibility: TableVisibility::Public,
                     };
                 }
 
@@ -659,7 +940,33 @@ fn render_main(ctx: &egui::Context, lobby: &mut LobbyState, auth_state: &AuthSta
                 }
             });
 
-            ui.add_space(40.0);
+            ui.add_space(20.0);
+
+            // browse tables button
+            let browse_btn = egui::Button::new(
+                egui::RichText::new("BROWSE TABLES")
+                    .size(17.0)
+                    .color(theme::TEXT_PRIMARY)
+            ).fill(theme::BTN_SECONDARY);
+            if ui.add_sized([200.0, 50.0], browse_btn).clicked() {
+                lobby.view = LobbyView::BrowseTables;
+            }
+
+            ui.add_space(15.0);
+
+            // friends button
+            let friends_btn = egui::Button::new(
+                egui::RichText::new(format!("FRIENDS ({})", friends.friends().len()))
+                    .size(17.0)
+                    .color(theme::TEXT_PRIMARY)
+            ).fill(theme::BTN_SECONDARY);
+            let resp = ui.add_sized([160.0, 45.0], friends_btn);
+            friends_rect = Some(resp.rect);
+            if resp.clicked() {
+                friends.panel_open = !friends.panel_open;
+            }
+
+            ui.add_space(25.0);
 
             // demo button (only in debug mode)
             if debug_enabled {
@@ -706,6 +1013,16 @@ fn render_main(ctx: &egui::Context, lobby: &mut LobbyState, auth_state: &AuthSta
             };
             ui.label(egui::RichText::new(status_text).size(13.0).color(status_color));
 
+            // chain status
+            let (chain_text, chain_color) = match &chain.state {
+                crate::chain::ChainState::Disconnected => ("chain: offline".to_string(), theme::TEXT_MUTED),
+                crate::chain::ChainState::Connecting => ("chain: connecting...".to_string(), theme::ACCENT_GOLD),
+                crate::chain::ChainState::Syncing { finalized, target } => (format!("chain: syncing {}/{}", finalized, target), theme::ACCENT_GOLD),
+                crate::chain::ChainState::Connected { finalized } => (format!("chain: block #{}", finalized), theme::ACCENT_GREEN),
+                crate::chain::ChainState::Error(e) => (format!("chain: {}", e), theme::ACCENT_RED),
+            };
+            ui.label(egui::RichText::new(chain_text).size(13.0).color(chain_color));
+
             // show any error
             if let Some(ref err) = lobby.error {
                 ui.add_space(15.0);
@@ -715,6 +1032,11 @@ fn render_main(ctx: &egui::Context, lobby: &mut LobbyState, auth_state: &AuthSta
             }
         });
     });
+
+    // friends panel (side window)
+    if friends.panel_open {
+        render_friends_panel(ctx, friends, lobby);
+    }
 
     // register hints for main view when hint mode is active
     if hint_state.active {
@@ -746,6 +1068,248 @@ fn render_main(ctx: &egui::Context, lobby: &mut LobbyState, auth_state: &AuthSta
                 action: HintAction::Click(rect.center()),
             });
         }
+        if let Some(rect) = friends_rect {
+            hint_state.external_hints.push(HintTarget {
+                label: String::new(),
+                pos: rect.center(),
+                action: HintAction::Click(rect.center()),
+            });
+        }
+    }
+}
+
+/// render the friends panel
+fn render_friends_panel(
+    ctx: &egui::Context,
+    friends: &mut crate::friends::FriendsState,
+    lobby: &LobbyState,
+) {
+    use crate::friends::FriendsView;
+
+    egui::Window::new("Friends & Playmates")
+        .default_width(350.0)
+        .default_height(500.0)
+        .resizable(true)
+        .collapsible(true)
+        .show(ctx, |ui| {
+            // tab bar
+            ui.horizontal(|ui| {
+                if ui.selectable_label(friends.view == FriendsView::Friends, "Friends").clicked() {
+                    friends.view = FriendsView::Friends;
+                }
+                if ui.selectable_label(friends.view == FriendsView::RecentPlaymates, "Recent").clicked() {
+                    friends.view = FriendsView::RecentPlaymates;
+                }
+                if ui.selectable_label(friends.view == FriendsView::Stats, "Stats").clicked() {
+                    friends.view = FriendsView::Stats;
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("X").clicked() {
+                        friends.panel_open = false;
+                    }
+                });
+            });
+
+            ui.separator();
+
+            // search bar
+            ui.horizontal(|ui| {
+                ui.label("Search:");
+                ui.text_edit_singleline(&mut friends.search);
+            });
+
+            ui.separator();
+
+            match friends.view {
+                FriendsView::Friends => {
+                    let friend_list = friends.friends();
+                    if friend_list.is_empty() {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(40.0);
+                            ui.label(egui::RichText::new("No friends yet")
+                                .size(18.0)
+                                .color(theme::TEXT_MUTED));
+                            ui.add_space(10.0);
+                            ui.label(egui::RichText::new("Play with someone and add them as a friend!")
+                                .size(14.0)
+                                .color(theme::TEXT_MUTED));
+                        });
+                    } else {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for playmate in friend_list {
+                                render_playmate_card(ui, playmate, lobby, friends);
+                            }
+                        });
+                    }
+                }
+
+                FriendsView::RecentPlaymates => {
+                    let recent = if friends.search.is_empty() {
+                        friends.recent()
+                    } else {
+                        friends.search_playmates(&friends.search)
+                    };
+
+                    if recent.is_empty() {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(40.0);
+                            ui.label(egui::RichText::new("No recent playmates")
+                                .size(18.0)
+                                .color(theme::TEXT_MUTED));
+                            ui.add_space(10.0);
+                            ui.label(egui::RichText::new("Join a table to meet other players")
+                                .size(14.0)
+                                .color(theme::TEXT_MUTED));
+                        });
+                    } else {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for playmate in recent {
+                                render_playmate_card(ui, playmate, lobby, friends);
+                            }
+                        });
+                    }
+                }
+
+                FriendsView::Stats => {
+                    ui.add_space(20.0);
+
+                    egui::Grid::new("stats_grid")
+                        .num_columns(2)
+                        .spacing([40.0, 10.0])
+                        .show(ui, |ui| {
+                            ui.label(egui::RichText::new("Total playmates:").color(theme::TEXT_SECONDARY));
+                            ui.label(egui::RichText::new(format!("{}", friends.total_playmates()))
+                                .strong()
+                                .color(theme::ACCENT_GOLD));
+                            ui.end_row();
+
+                            ui.label(egui::RichText::new("Friends:").color(theme::TEXT_SECONDARY));
+                            ui.label(egui::RichText::new(format!("{}", friends.friends().len()))
+                                .strong()
+                                .color(theme::ACCENT_GREEN));
+                            ui.end_row();
+
+                            ui.label(egui::RichText::new("Total games:").color(theme::TEXT_SECONDARY));
+                            ui.label(egui::RichText::new(format!("{}", friends.total_games()))
+                                .strong()
+                                .color(theme::TEXT_PRIMARY));
+                            ui.end_row();
+
+                            ui.label(egui::RichText::new("Win rate:").color(theme::TEXT_SECONDARY));
+                            let wr = friends.overall_win_rate();
+                            let wr_color = if wr > 0.5 { theme::ACCENT_GREEN } else if wr < 0.5 { theme::ACCENT_RED } else { theme::TEXT_PRIMARY };
+                            ui.label(egui::RichText::new(format!("{:.1}%", wr * 100.0))
+                                .strong()
+                                .color(wr_color));
+                            ui.end_row();
+                        });
+                }
+
+                FriendsView::Blocked => {
+                    let blocked = friends.blocked();
+                    if blocked.is_empty() {
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(40.0);
+                            ui.label(egui::RichText::new("No blocked players")
+                                .color(theme::TEXT_MUTED));
+                        });
+                    } else {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for playmate in blocked {
+                                render_playmate_card(ui, playmate, lobby, friends);
+                            }
+                        });
+                    }
+                }
+            }
+        });
+}
+
+/// render a single playmate card
+fn render_playmate_card(
+    ui: &mut egui::Ui,
+    playmate: &crate::friends::Playmate,
+    lobby: &LobbyState,
+    _friends: &crate::friends::FriendsState,
+) {
+    egui::Frame::none()
+        .fill(theme::BG_CARD)
+        .stroke(egui::Stroke::new(1.0, theme::BORDER))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::same(12.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                // friend indicator
+                if playmate.is_friend {
+                    ui.label(egui::RichText::new("*")
+                        .size(20.0)
+                        .color(theme::ACCENT_GOLD));
+                }
+
+                ui.vertical(|ui| {
+                    // name
+                    ui.label(egui::RichText::new(playmate.name())
+                        .size(16.0)
+                        .strong()
+                        .color(theme::TEXT_PRIMARY));
+
+                    // stats
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new(format!("{} games", playmate.games_together))
+                            .size(12.0)
+                            .color(theme::TEXT_MUTED));
+
+                        ui.label(egui::RichText::new("|")
+                            .size(12.0)
+                            .color(theme::TEXT_MUTED));
+
+                        let wr = playmate.win_rate();
+                        let wr_color = if wr > 0.5 { theme::ACCENT_GREEN } else if wr < 0.5 { theme::ACCENT_RED } else { theme::TEXT_MUTED };
+                        ui.label(egui::RichText::new(format!("{:.0}% WR", wr * 100.0))
+                            .size(12.0)
+                            .color(wr_color));
+                    });
+
+                    // last played
+                    let ago = format_time_ago(playmate.last_played);
+                    ui.label(egui::RichText::new(format!("last: {}", ago))
+                        .size(11.0)
+                        .color(theme::TEXT_MUTED));
+                });
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // invite button (only if we have a table)
+                    if lobby.created_code.is_some() {
+                        if ui.small_button("Invite").clicked() {
+                            // TODO: send invite event
+                        }
+                    }
+                });
+            });
+        });
+
+    ui.add_space(6.0);
+}
+
+/// format timestamp as "X ago"
+fn format_time_ago(timestamp: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+
+    let diff = now.saturating_sub(timestamp);
+
+    if diff < 60 {
+        "just now".to_string()
+    } else if diff < 3600 {
+        format!("{}m ago", diff / 60)
+    } else if diff < 86400 {
+        format!("{}h ago", diff / 3600)
+    } else if diff < 604800 {
+        format!("{}d ago", diff / 86400)
+    } else {
+        format!("{}w ago", diff / 604800)
     }
 }
 
@@ -819,6 +1383,39 @@ fn render_create_table(ctx: &egui::Context, lobby: &mut LobbyState) {
 
                     ui.add_space(25.0);
 
+                    // visibility selection
+                    ui.label(egui::RichText::new("Visibility")
+                        .size(20.0)
+                        .color(theme::TEXT_SECONDARY));
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        ui.add_space(50.0);
+                        for vis in [TableVisibility::Public, TableVisibility::FriendsOnly, TableVisibility::Private] {
+                            let selected = lobby.create_form.visibility == vis;
+                            let (label, desc) = match vis {
+                                TableVisibility::Public => ("PUBLIC", "anyone can find"),
+                                TableVisibility::FriendsOnly => ("FRIENDS", "friends only"),
+                                TableVisibility::Private => ("PRIVATE", "code only"),
+                            };
+                            let fill = if selected { theme::ACCENT_BLUE } else { theme::BG_CARD };
+                            let text_color = if selected { theme::TEXT_PRIMARY } else { theme::TEXT_SECONDARY };
+
+                            let btn = egui::Button::new(
+                                egui::RichText::new(label)
+                                    .size(15.0)
+                                    .color(text_color)
+                            ).fill(fill);
+                            let resp = ui.add_sized([95.0, 42.0], btn);
+                            if resp.clicked() {
+                                lobby.create_form.visibility = vis;
+                            }
+                            resp.on_hover_text(desc);
+                            ui.add_space(8.0);
+                        }
+                    });
+
+                    ui.add_space(25.0);
+
                     // min buy-in info
                     let min_buy = lobby.create_form.stakes.min_buy_in();
                     ui.horizontal(|ui| {
@@ -863,10 +1460,12 @@ fn render_create_table(ctx: &egui::Context, lobby: &mut LobbyState) {
                                     .color(theme::TEXT_PRIMARY)
                             ).fill(theme::ACCENT_GREEN.linear_multiply(0.8));
                             if ui.add_sized([110.0, 45.0], create_btn).clicked() {
-                                let code = generate_table_code();
-                                lobby.created_code = Some(code);
-                                lobby.view = LobbyView::WaitingForPlayers;
-                                info!("created table with code: {:?}", lobby.created_code);
+                                // queue table creation request
+                                lobby.pending_create = Some(PendingTableCreate {
+                                    stakes: lobby.create_form.stakes,
+                                    seats: lobby.create_form.seats,
+                                    visibility: lobby.create_form.visibility,
+                                });
                             }
                         });
                     });
@@ -987,6 +1586,263 @@ fn render_join_table(ctx: &egui::Context, lobby: &mut LobbyState, hint_state: &m
     }
 }
 
+fn render_browse_tables(
+    ctx: &egui::Context,
+    lobby: &mut LobbyState,
+    public_tables: &mut PublicTables,
+    friends: &crate::friends::FriendsState,
+) {
+    egui::CentralPanel::default().show(ctx, |ui| {
+        ui.vertical_centered(|ui| {
+            ui.add_space(30.0);
+
+            ui.label(egui::RichText::new("BROWSE TABLES")
+                .size(38.0)
+                .strong()
+                .color(theme::TEXT_PRIMARY));
+
+            ui.add_space(25.0);
+
+            // filter bar
+            egui::Frame::none()
+                .fill(theme::BG_PANEL)
+                .stroke(egui::Stroke::new(1.0, theme::BORDER))
+                .rounding(egui::Rounding::same(8.0))
+                .inner_margin(egui::Margin::same(15.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // refresh button
+                        let refresh_text = if public_tables.refreshing { "..." } else { "REFRESH" };
+                        let refresh_btn = egui::Button::new(
+                            egui::RichText::new(refresh_text)
+                                .size(14.0)
+                                .color(theme::TEXT_PRIMARY)
+                        ).fill(theme::BTN_SECONDARY);
+                        if ui.add_sized([90.0, 32.0], refresh_btn).clicked() && !public_tables.refreshing {
+                            public_tables.needs_refresh = true;
+                        }
+
+                        ui.add_space(20.0);
+
+                        // friends filter toggle
+                        let friends_label = if public_tables.filter_friends { "FRIENDS [x]" } else { "FRIENDS [ ]" };
+                        let friends_btn = egui::Button::new(
+                            egui::RichText::new(friends_label)
+                                .size(13.0)
+                                .color(if public_tables.filter_friends { theme::ACCENT_GOLD } else { theme::TEXT_SECONDARY })
+                        ).fill(theme::BG_CARD);
+                        if ui.add_sized([100.0, 32.0], friends_btn).clicked() {
+                            public_tables.filter_friends = !public_tables.filter_friends;
+                        }
+
+                        ui.add_space(10.0);
+
+                        // stakes filter
+                        egui::ComboBox::from_id_source("stakes_filter")
+                            .selected_text(
+                                public_tables.filter_stakes
+                                    .map(|s| s.label())
+                                    .unwrap_or("All Stakes")
+                            )
+                            .show_ui(ui, |ui: &mut egui::Ui| {
+                                if ui.selectable_label(public_tables.filter_stakes.is_none(), "All Stakes").clicked() {
+                                    public_tables.filter_stakes = None;
+                                }
+                                for preset in [StakesPreset::Micro, StakesPreset::Low, StakesPreset::Medium, StakesPreset::High] {
+                                    if ui.selectable_label(public_tables.filter_stakes == Some(preset), preset.label()).clicked() {
+                                        public_tables.filter_stakes = Some(preset);
+                                    }
+                                }
+                            });
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            ui.label(egui::RichText::new(format!("{} tables", public_tables.tables.len()))
+                                .size(14.0)
+                                .color(theme::TEXT_MUTED));
+                        });
+                    });
+                });
+
+            ui.add_space(20.0);
+
+            // table list
+            let filtered_tables: Vec<&PublicTable> = public_tables.tables.iter()
+                .filter(|t| {
+                    if public_tables.filter_friends && !t.host_is_friend {
+                        return false;
+                    }
+                    if let Some(stakes) = public_tables.filter_stakes {
+                        if t.stakes != stakes.label() {
+                            return false;
+                        }
+                    }
+                    true
+                })
+                .collect();
+
+            if filtered_tables.is_empty() {
+                ui.add_space(60.0);
+                ui.label(egui::RichText::new("No tables found")
+                    .size(22.0)
+                    .color(theme::TEXT_MUTED));
+                ui.add_space(15.0);
+                ui.label(egui::RichText::new("Click REFRESH to search for tables")
+                    .size(16.0)
+                    .color(theme::TEXT_MUTED));
+            } else {
+                egui::ScrollArea::vertical()
+                    .max_height(350.0)
+                    .show(ui, |ui| {
+                        for table in filtered_tables {
+                            render_table_row(ui, table, lobby, friends);
+                        }
+                    });
+            }
+
+            ui.add_space(30.0);
+
+            // back button
+            let back_btn = egui::Button::new(
+                egui::RichText::new("BACK")
+                    .size(17.0)
+                    .color(theme::TEXT_PRIMARY)
+            ).fill(theme::BTN_SECONDARY);
+            if ui.add_sized([120.0, 45.0], back_btn).clicked() {
+                lobby.view = LobbyView::Main;
+            }
+        });
+    });
+}
+
+fn render_table_row(
+    ui: &mut egui::Ui,
+    table: &PublicTable,
+    lobby: &mut LobbyState,
+    _friends: &crate::friends::FriendsState,
+) {
+    egui::Frame::none()
+        .fill(theme::BG_CARD)
+        .stroke(egui::Stroke::new(1.0, if table.host_is_friend { theme::ACCENT_GOLD.linear_multiply(0.5) } else { theme::BORDER }))
+        .rounding(egui::Rounding::same(8.0))
+        .inner_margin(egui::Margin::symmetric(20.0, 12.0))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                // friend indicator
+                if table.host_is_friend {
+                    ui.label(egui::RichText::new("*")
+                        .size(20.0)
+                        .color(theme::ACCENT_GOLD));
+                }
+
+                // host name
+                ui.label(egui::RichText::new(&table.host)
+                    .size(16.0)
+                    .strong()
+                    .color(theme::TEXT_PRIMARY));
+
+                ui.add_space(15.0);
+
+                // stakes
+                ui.label(egui::RichText::new(&table.stakes)
+                    .size(15.0)
+                    .color(theme::ACCENT_GOLD));
+
+                ui.add_space(15.0);
+
+                // players
+                let (current, max) = table.players;
+                let players_color = if current >= max { theme::ACCENT_RED } else { theme::TEXT_SECONDARY };
+                ui.label(egui::RichText::new(format!("{}/{} players", current, max))
+                    .size(14.0)
+                    .color(players_color));
+
+                // friends only badge
+                if table.friends_only {
+                    ui.add_space(10.0);
+                    ui.label(egui::RichText::new("[friends]")
+                        .size(12.0)
+                        .color(theme::ACCENT_BLUE));
+                }
+
+                // ping
+                if let Some(ping) = table.ping_ms {
+                    ui.add_space(10.0);
+                    let ping_color = if ping < 50 { theme::ACCENT_GREEN }
+                        else if ping < 150 { theme::ACCENT_GOLD }
+                        else { theme::ACCENT_RED };
+                    ui.label(egui::RichText::new(format!("{}ms", ping))
+                        .size(12.0)
+                        .color(ping_color));
+                }
+
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let (current, max) = table.players;
+                    let can_join = current < max;
+
+                    ui.add_enabled_ui(can_join, |ui| {
+                        let join_btn = egui::Button::new(
+                            egui::RichText::new("JOIN")
+                                .size(14.0)
+                                .color(theme::TEXT_PRIMARY)
+                        ).fill(theme::BTN_PRIMARY);
+                        if ui.add_sized([70.0, 32.0], join_btn).clicked() {
+                            lobby.join_form.code = table.code.clone();
+                            lobby.view = LobbyView::Connecting;
+                        }
+                    });
+                });
+            });
+        });
+
+    ui.add_space(6.0);
+}
+
+/// generate mock tables for testing
+fn generate_mock_tables() -> Vec<PublicTable> {
+    vec![
+        PublicTable {
+            code: "42-alpha-bravo".to_string(),
+            host: "CryptoKing".to_string(),
+            stakes: "1/2".to_string(),
+            players: (3, 6),
+            friends_only: false,
+            host_is_friend: false,
+            announced_at: 0,
+            ping_ms: Some(35),
+        },
+        PublicTable {
+            code: "17-delta-echo".to_string(),
+            host: "AceHunter".to_string(),
+            stakes: "5/10".to_string(),
+            players: (5, 9),
+            friends_only: false,
+            host_is_friend: true,
+            announced_at: 0,
+            ping_ms: Some(48),
+        },
+        PublicTable {
+            code: "88-golf-hotel".to_string(),
+            host: "PokerPro99".to_string(),
+            stakes: "25/50".to_string(),
+            players: (2, 6),
+            friends_only: true,
+            host_is_friend: true,
+            announced_at: 0,
+            ping_ms: Some(72),
+        },
+        PublicTable {
+            code: "33-mike-november".to_string(),
+            host: "NightOwl".to_string(),
+            stakes: "1/2".to_string(),
+            players: (6, 6),
+            friends_only: false,
+            host_is_friend: false,
+            announced_at: 0,
+            ping_ms: Some(120),
+        },
+    ]
+}
+
 fn render_waiting(ctx: &egui::Context, lobby: &mut LobbyState, debug_enabled: bool) {
     egui::CentralPanel::default().show(ctx, |ui| {
         ui.vertical_centered(|ui| {
@@ -1008,8 +1864,17 @@ fn render_waiting(ctx: &egui::Context, lobby: &mut LobbyState, debug_enabled: bo
                     .show(ui, |ui| {
                         ui.set_min_width(480.0);
                         ui.vertical_centered(|ui| {
-                            ui.label(egui::RichText::new("Share this code with friends")
-                                .size(19.0)
+                            // visibility badge
+                            let (vis_text, vis_color, vis_desc) = match lobby.created_visibility {
+                                TableVisibility::Public => ("PUBLIC", theme::ACCENT_GREEN, "Anyone can find and join"),
+                                TableVisibility::FriendsOnly => ("FRIENDS ONLY", theme::ACCENT_BLUE, "Only friends can see this table"),
+                                TableVisibility::Private => ("PRIVATE", theme::TEXT_MUTED, "Share the code to invite players"),
+                            };
+                            ui.label(egui::RichText::new(vis_text)
+                                .size(14.0)
+                                .color(vis_color));
+                            ui.label(egui::RichText::new(vis_desc)
+                                .size(16.0)
                                 .color(theme::TEXT_SECONDARY));
                             ui.add_space(20.0);
 

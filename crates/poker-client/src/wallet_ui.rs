@@ -8,6 +8,8 @@
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 
+use crate::chain_client::ChainConnection;
+
 pub struct WalletUiPlugin;
 
 impl Plugin for WalletUiPlugin {
@@ -229,8 +231,12 @@ impl WalletState {
 fn render_wallet_ui(
     mut contexts: EguiContexts,
     mut wallet: ResMut<WalletState>,
+    chain: Res<ChainConnection>,
     keys: Res<ButtonInput<KeyCode>>,
 ) {
+    // sync balance from chain
+    wallet.balance.on_chain = chain.balance.free;
+    wallet.balance.in_pool = chain.balance.reserved;
     // toggle wallet with W key
     if keys.just_pressed(KeyCode::KeyW) && !keys.pressed(KeyCode::ControlLeft) {
         wallet.panel = match wallet.panel {

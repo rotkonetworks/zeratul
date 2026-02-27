@@ -1,15 +1,18 @@
 //! ghettobox authentication module
 //!
-//! extension-free web3 identity using email + PIN
-//! - login: PIN stretched → vault shares → seed → signing key
+//! extension-free web3 identity using email + PIN with verified OPRF
+//! - login: PIN → OPRF evaluation → decrypt seed → signing key
+//! - DLEQ proofs verify servers computed correctly
+//! - misbehavior reports for accountability
 //! - signing key lives in memory for session (no prompts during gameplay)
 //! - confirmations for withdrawals/transfers (configurable)
 
 use bevy::prelude::*;
-use ed25519_dalek::{Signature, Signer as Ed25519Signer, SigningKey, VerifyingKey};
-use ghettobox::{Account, Client as GhettoboxClient, vss};
-use std::sync::Arc;
+use ed25519_dalek::{Signature, Signer as Ed25519Signer, SigningKey};
+use ghettobox::Account;
 use tokio::sync::mpsc;
+
+use crate::vault_client::{OprfVaultClient, OprfVaultNode, decrypt_seed_with_oprf};
 
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -29,26 +32,48 @@ impl Plugin for AuthPlugin {
     }
 }
 
-/// vault node configuration
+/// vault node configuration with OPRF public keys
 #[derive(Resource, Clone)]
 pub struct VaultConfig {
-    /// vault node URLs (need 2 of 3)
-    pub nodes: Vec<String>,
+    /// OPRF vault nodes with public keys for verification
+    pub nodes: Vec<OprfVaultNode>,
+    /// threshold (need this many nodes for recovery)
+    pub threshold: usize,
     /// timeout for vault requests (ms)
     pub timeout_ms: u64,
 }
 
 impl Default for VaultConfig {
     fn default() -> Self {
+        // use localhost dev nodes by default
+        let client = OprfVaultClient::localhost();
         Self {
-            // default to localhost for development
-            nodes: vec![
-                "http://127.0.0.1:4200".into(),
-                "http://127.0.0.1:4201".into(),
-                "http://127.0.0.1:4202".into(),
-            ],
+            nodes: client.nodes,
+            threshold: client.threshold,
             timeout_ms: 10_000,
         }
+    }
+}
+
+impl VaultConfig {
+    /// production config with rotko mainnet nodes (connects to fetch keys)
+    pub fn mainnet() -> Result<Self, String> {
+        let client = OprfVaultClient::rotko_mainnet()?;
+        Ok(Self {
+            nodes: client.nodes,
+            threshold: client.threshold,
+            timeout_ms: 15_000,
+        })
+    }
+
+    /// localhost config that connects to fetch keys
+    pub fn localhost_connect() -> Result<Self, String> {
+        let client = OprfVaultClient::localhost_connect()?;
+        Ok(Self {
+            nodes: client.nodes,
+            threshold: client.threshold,
+            timeout_ms: 10_000,
+        })
     }
 }
 
@@ -269,13 +294,14 @@ fn handle_auth_events(
                         auth_state.session_started = Some(now_timestamp());
                     }
                     AuthMode::Production => {
-                        // production: async vault recovery
+                        // production: async vault recovery with verified OPRF
                         let (tx, rx) = mpsc::channel(1);
                         auth_state.auth_rx = Some(rx);
 
                         let email = email.clone();
                         let pin = pin.clone();
                         let nodes = vault_config.nodes.clone();
+                        let threshold = vault_config.threshold;
 
                         // spawn async login task
                         #[cfg(not(target_arch = "wasm32"))]
@@ -283,7 +309,7 @@ fn handle_auth_events(
                             std::thread::spawn(move || {
                                 let rt = tokio::runtime::Runtime::new().unwrap();
                                 rt.block_on(async {
-                                    let result = do_vault_login(&email, &pin, &nodes).await;
+                                    let result = do_vault_login(&email, &pin, &nodes, threshold).await;
                                     let _ = tx.blocking_send(result);
                                 });
                             });
@@ -292,7 +318,7 @@ fn handle_auth_events(
                         #[cfg(target_arch = "wasm32")]
                         {
                             wasm_bindgen_futures::spawn_local(async move {
-                                let result = do_vault_login(&email, &pin, &nodes).await;
+                                let result = do_vault_login(&email, &pin, &nodes, threshold).await;
                                 let _ = tx.send(result).await;
                             });
                         }
@@ -316,20 +342,21 @@ fn handle_auth_events(
                         auth_state.session_started = Some(now_timestamp());
                     }
                     AuthMode::Production => {
-                        // production: async vault registration
+                        // production: async vault registration with verified OPRF
                         let (tx, rx) = mpsc::channel(1);
                         auth_state.auth_rx = Some(rx);
 
                         let email = email.clone();
                         let pin = pin.clone();
                         let nodes = vault_config.nodes.clone();
+                        let threshold = vault_config.threshold;
 
                         #[cfg(not(target_arch = "wasm32"))]
                         {
                             std::thread::spawn(move || {
                                 let rt = tokio::runtime::Runtime::new().unwrap();
                                 rt.block_on(async {
-                                    let result = do_vault_register(&email, &pin, &nodes).await;
+                                    let result = do_vault_register(&email, &pin, &nodes, threshold).await;
                                     let _ = tx.blocking_send(result);
                                 });
                             });
@@ -338,7 +365,7 @@ fn handle_auth_events(
                         #[cfg(target_arch = "wasm32")]
                         {
                             wasm_bindgen_futures::spawn_local(async move {
-                                let result = do_vault_register(&email, &pin, &nodes).await;
+                                let result = do_vault_register(&email, &pin, &nodes, threshold).await;
                                 let _ = tx.send(result).await;
                             });
                         }
@@ -430,94 +457,127 @@ fn handle_signing_requests(
     }
 }
 
-/// perform vault login (async)
-async fn do_vault_login(email: &str, pin: &str, nodes: &[String]) -> AuthResult {
-    // create ghettobox client
-    let client = GhettoboxClient::offline();
-
-    // for production, we'd use:
-    // let client = GhettoboxClient::new(nodes).await?;
-
-    // try to recover from vaults
-    // this is simplified - real impl would:
-    // 1. compute unlock_tag from PIN
-    // 2. request shares from 2+ vault nodes
-    // 3. VSS combine shares to get seed
-    // 4. derive account from seed
-
-    // for now, use offline mode (same as test but with ghettobox)
+/// perform vault login with verified OPRF (async)
+async fn do_vault_login(email: &str, pin: &str, nodes: &[OprfVaultNode], threshold: usize) -> AuthResult {
+    let vault_client = OprfVaultClient::new(nodes.to_vec(), threshold);
     let pin_bytes = pin.as_bytes();
 
-    // derive deterministic seed for demo
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"ghettobox-demo-seed-v1");
-    hasher.update(email.as_bytes());
-    hasher.update(pin_bytes);
-    let seed: [u8; 32] = *hasher.finalize().as_bytes();
+    // recover using OPRF protocol
+    match vault_client.oprf_recover(email, pin_bytes) {
+        Ok(result) => {
+            // log any misbehavior for later reporting
+            if !result.misbehavior_reports.is_empty() {
+                warn!(
+                    "detected {} misbehaving vault servers during login",
+                    result.misbehavior_reports.len()
+                );
+                // TODO: submit reports to governance
+            }
 
-    match Account::from_seed(&seed) {
-        Ok(account) => {
-            let address = account.address_hex();
+            // decrypt seed using OPRF output
+            let seed = match decrypt_seed_with_oprf(&result.oprf_output, &result.encrypted_seed) {
+                Ok(s) if s.len() == 32 => {
+                    // decryption succeeded - confirm with servers to reset attempt counter
+                    vault_client.oprf_confirm(email);
 
-            // extract signing key from account
-            // note: Account doesn't expose signing_key directly,
-            // so we re-derive it the same way ghettobox does
-            use hkdf::Hkdf;
-            use sha2::Sha256;
-            let hk = Hkdf::<Sha256>::new(None, &seed);
-            let mut signing_bytes = [0u8; 32];
-            hk.expand(b"ghettobox:ed25519:v1", &mut signing_bytes).unwrap();
-            let signing_key = SigningKey::from_bytes(&signing_bytes);
+                    let mut arr = [0u8; 32];
+                    arr.copy_from_slice(&s);
+                    arr
+                }
+                Ok(_) => {
+                    return AuthResult::Failed {
+                        error: "invalid seed length".into(),
+                    };
+                }
+                Err(_) => {
+                    // wrong PIN - decryption failed
+                    return AuthResult::Failed {
+                        error: format!(
+                            "wrong PIN ({} attempts remaining)",
+                            result.guesses_remaining
+                        ),
+                    };
+                }
+            };
 
-            AuthResult::Success {
-                email: email.to_string(),
-                address,
-                signing_key,
+            // derive account from seed
+            match Account::from_seed(&seed) {
+                Ok(account) => {
+                    let address = account.address_hex();
+
+                    // derive signing key (same as ghettobox does internally)
+                    use hkdf::Hkdf;
+                    use sha2::Sha256;
+                    let hk = Hkdf::<Sha256>::new(None, &seed);
+                    let mut signing_bytes = [0u8; 32];
+                    hk.expand(b"ghettobox:ed25519:v1", &mut signing_bytes).unwrap();
+                    let signing_key = SigningKey::from_bytes(&signing_bytes);
+
+                    AuthResult::Success {
+                        email: email.to_string(),
+                        address,
+                        signing_key,
+                    }
+                }
+                Err(e) => AuthResult::Failed {
+                    error: format!("failed to derive account: {}", e),
+                },
             }
         }
         Err(e) => AuthResult::Failed {
-            error: format!("failed to derive account: {}", e),
+            error: e,
         },
     }
 }
 
-/// perform vault registration (async)
-async fn do_vault_register(email: &str, pin: &str, nodes: &[String]) -> AuthResult {
-    // create account and register with vaults
-    let client = GhettoboxClient::offline();
-
+/// perform vault registration with verified OPRF (async)
+async fn do_vault_register(email: &str, pin: &str, nodes: &[OprfVaultNode], threshold: usize) -> AuthResult {
+    let vault_client = OprfVaultClient::new(nodes.to_vec(), threshold);
     let pin_bytes = pin.as_bytes();
 
-    // create new account
-    match client.create_account(email, pin_bytes) {
+    // generate new random seed
+    let seed: [u8; 32] = {
+        use rand::RngCore;
+        let mut seed = [0u8; 32];
+        rand::thread_rng().fill_bytes(&mut seed);
+        seed
+    };
+
+    // register with OPRF protocol
+    match vault_client.oprf_register(email, pin_bytes, &seed) {
         Ok(result) => {
-            let address = result.account.address_hex();
+            // log any misbehavior
+            if !result.misbehavior_reports.is_empty() {
+                warn!(
+                    "detected {} misbehaving vault servers during registration",
+                    result.misbehavior_reports.len()
+                );
+            }
 
-            // in production, we'd distribute shares to vaults:
-            // for (i, node) in nodes.iter().enumerate() {
-            //     register_share(node, &result.user_share, &result.vss_shares[i]).await?;
-            // }
+            // derive account from seed
+            match Account::from_seed(&seed) {
+                Ok(account) => {
+                    let address = account.address_hex();
 
-            // extract signing key (same derivation as login)
-            let mut hasher = blake3::Hasher::new();
-            hasher.update(b"ghettobox-demo-seed-v1");
-            hasher.update(email.as_bytes());
-            hasher.update(pin_bytes);
-            let seed: [u8; 32] = *hasher.finalize().as_bytes();
+                    // derive signing key
+                    use hkdf::Hkdf;
+                    use sha2::Sha256;
+                    let hk = Hkdf::<Sha256>::new(None, &seed);
+                    let mut signing_bytes = [0u8; 32];
+                    hk.expand(b"ghettobox:ed25519:v1", &mut signing_bytes).unwrap();
+                    let signing_key = SigningKey::from_bytes(&signing_bytes);
 
-            use hkdf::Hkdf;
-            use sha2::Sha256;
-            let hk = Hkdf::<Sha256>::new(None, &seed);
-            let mut signing_bytes = [0u8; 32];
-            hk.expand(b"ghettobox:ed25519:v1", &mut signing_bytes).unwrap();
-            let signing_key = SigningKey::from_bytes(&signing_bytes);
+                    info!("registered new account: {}", address);
 
-            info!("registered new account: {}", address);
-
-            AuthResult::Success {
-                email: email.to_string(),
-                address,
-                signing_key,
+                    AuthResult::Success {
+                        email: email.to_string(),
+                        address,
+                        signing_key,
+                    }
+                }
+                Err(e) => AuthResult::Failed {
+                    error: format!("failed to derive account: {}", e),
+                },
             }
         }
         Err(e) => AuthResult::Failed {

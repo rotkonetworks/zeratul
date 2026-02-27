@@ -66,6 +66,9 @@ getrandom = "0.2"
 bincode = "1.3"
 parking_lot = "0.12"
 
+# local paths
+dirs = "5.0"
+
 # shielded state storage (native only)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 nomt = { path = "../../../nomt/nomt" }

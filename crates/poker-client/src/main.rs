@@ -6,6 +6,9 @@
 
 mod auth;
 mod blockout;
+mod chain;
+mod chain_client;
+mod friends;
 mod lobby;
 mod multitable;
 mod p2p;
@@ -19,7 +22,7 @@ mod vault_client;
 mod chat;
 mod voice;
 mod mental_poker;
-// mod wallet_ui;
+mod wallet_ui;
 
 use bevy::prelude::*;
 use bevy::window::PresentMode;
@@ -102,6 +105,9 @@ fn main() {
         .add_plugins(blockout::BlockoutPlugin)
         .add_plugins(chat::ChatPlugin)
         .add_plugins(voice::VoicePlugin)
+        .add_plugins(chain_client::ChainClientPlugin)
+        .add_plugins(wallet_ui::WalletUiPlugin)
+        .add_plugins(friends::FriendsPlugin)
         .add_systems(Startup, setup_initial_state)
         .add_systems(Update, (toggle_competitive_mode, toggle_training_game, toggle_debug_mode, handle_lobby_to_game_transition))
         .run();

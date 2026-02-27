@@ -57,12 +57,37 @@ impl P2PManager {
     }
 }
 
+/// table visibility for P2P discovery
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum TableVisibility {
+    #[default]
+    Public,
+    FriendsOnly,
+    Private,
+}
+
 /// commands to the P2P system
 #[derive(Event, Clone, Debug)]
 pub enum P2PCommand {
-    CreateTable { rules: TableRules },
+    CreateTable {
+        rules: TableRules,
+        visibility: TableVisibility,
+        host_name: String,
+    },
     JoinTable { code: String },
+    DiscoverTables,
     Leave,
+}
+
+/// discovered table info
+#[derive(Clone, Debug)]
+pub struct DiscoveredTable {
+    pub code: String,
+    pub host_name: String,
+    pub stakes: String,
+    pub players: (u8, u8),
+    pub visibility: TableVisibility,
+    pub host_pubkey: [u8; 32],
 }
 
 /// notifications from the P2P system
@@ -72,6 +97,7 @@ pub enum P2PNotification {
     PlayerJoined { seat: u8 },
     JoinedTable { seat: u8 },
     ReadyToStart,
+    TablesDiscovered { tables: Vec<DiscoveredTable> },
     Error { message: String },
 }
 
@@ -82,7 +108,7 @@ fn process_p2p_commands(
 ) {
     for cmd in commands.read() {
         match cmd {
-            P2PCommand::CreateTable { rules } => {
+            P2PCommand::CreateTable { rules, visibility, host_name } => {
                 if let Some(m) = &mut manager.inner {
                     let code = m.create_table(rules.clone());
                     // simulate instant table creation for demo
@@ -90,7 +116,15 @@ fn process_p2p_commands(
                     notifications.send(P2PNotification::TableCreated {
                         code: code.to_string(),
                     });
-                    info!("p2p: created table with code {}", code);
+
+                    // register in public registry if not private
+                    if *visibility != TableVisibility::Private {
+                        let stakes = format!("{}/{}", rules.small_blind, rules.big_blind);
+                        info!("p2p: registering {:?} table {} in public registry", visibility, code);
+                        // TODO: call poker_p2p::register_public_table async
+                    }
+
+                    info!("p2p: created {:?} table with code {}", visibility, code);
                 }
             }
             P2PCommand::JoinTable { code } => {
@@ -104,6 +138,30 @@ fn process_p2p_commands(
                     notifications.send(P2PNotification::JoinedTable { seat: 2 });
                     info!("p2p: joined table {}", code);
                 }
+            }
+            P2PCommand::DiscoverTables => {
+                info!("p2p: discovering public tables...");
+                // for now, send mock discovered tables
+                // TODO: call poker_p2p::list_public_tables async
+                let mock_tables = vec![
+                    DiscoveredTable {
+                        code: "42-alpha-bravo".to_string(),
+                        host_name: "CryptoKing".to_string(),
+                        stakes: "1/2".to_string(),
+                        players: (3, 6),
+                        visibility: TableVisibility::Public,
+                        host_pubkey: [0u8; 32],
+                    },
+                    DiscoveredTable {
+                        code: "17-delta-echo".to_string(),
+                        host_name: "AceHunter".to_string(),
+                        stakes: "5/10".to_string(),
+                        players: (5, 9),
+                        visibility: TableVisibility::Public,
+                        host_pubkey: [1u8; 32],
+                    },
+                ];
+                notifications.send(P2PNotification::TablesDiscovered { tables: mock_tables });
             }
             P2PCommand::Leave => {
                 if let Some(m) = &mut manager.inner {
