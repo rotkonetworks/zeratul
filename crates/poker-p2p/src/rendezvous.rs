@@ -19,6 +19,20 @@ use crate::protocol::TableRules;
 const DHT_TIMEOUT: Duration = Duration::from_secs(30);
 const CODE_TTL: u32 = 300; // 5 minutes
 
+/// well-known seed for public table registry
+const PUBLIC_REGISTRY_SEED: &[u8] = b"poker-public-tables-v1";
+
+/// table visibility for discovery
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TableVisibility {
+    /// anyone can discover and join
+    Public,
+    /// only visible to friends (requires friend list check)
+    FriendsOnly,
+    /// not discoverable, code required
+    Private,
+}
+
 /// table code wrapper
 #[derive(Clone, Debug)]
 pub struct TableCode(pub String);
@@ -231,6 +245,267 @@ impl PakeClient {
             .map_err(|_| RendezvousError::AuthFailed)?;
         Ok(key.try_into().expect("spake2 produces 32 byte key"))
     }
+}
+
+/// public table listing entry
+#[derive(Clone, Debug)]
+pub struct PublicTableEntry {
+    /// table code
+    pub code: String,
+    /// host endpoint id
+    pub endpoint_id: EndpointId,
+    /// host display name
+    pub host_name: String,
+    /// stakes string (e.g. "1/2")
+    pub stakes: String,
+    /// current/max players
+    pub players: (u8, u8),
+    /// visibility
+    pub visibility: TableVisibility,
+    /// host's public key (for friend matching)
+    pub host_pubkey: [u8; 32],
+    /// timestamp when registered
+    pub registered_at: u64,
+}
+
+/// derive the public registry keypair
+fn derive_registry_keypair() -> Keypair {
+    let mut hasher = Sha256::new();
+    hasher.update(PUBLIC_REGISTRY_SEED);
+    let seed: [u8; 32] = hasher.finalize().into();
+    let signing_key = SigningKey::from_bytes(&seed);
+    Keypair::from_secret_key(&signing_key.to_bytes())
+}
+
+/// register a public table in the discovery registry
+pub async fn register_public_table(
+    code: &TableCode,
+    endpoint_id: EndpointId,
+    host_name: &str,
+    stakes: &str,
+    max_players: u8,
+    visibility: TableVisibility,
+    host_pubkey: &[u8; 32],
+) -> Result<(), RendezvousError> {
+    // only register public/friends-only tables
+    if visibility == TableVisibility::Private {
+        return Ok(());
+    }
+
+    let keypair = derive_registry_keypair();
+    let client = PkarrClient::builder()
+        .build()
+        .map_err(|e| RendezvousError::DhtError(e.to_string()))?;
+
+    // first try to get existing entries
+    let mut entries = list_public_tables_internal(&client).await.unwrap_or_default();
+
+    // remove stale entries (older than 5 min) and our own if exists
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    entries.retain(|e| e.code != code.as_str() && now - e.registered_at < 300);
+
+    // add our entry
+    let vis_byte = match visibility {
+        TableVisibility::Public => b'P',
+        TableVisibility::FriendsOnly => b'F',
+        TableVisibility::Private => b'X',
+    };
+
+    // encode: code|endpoint|name|stakes|max|vis|pubkey|time
+    let entry_str = format!(
+        "{}|{}|{}|{}|{}|{}|{}|{}",
+        code.as_str(),
+        hex::encode(endpoint_id.as_bytes()),
+        host_name,
+        stakes,
+        max_players,
+        vis_byte as char,
+        hex::encode(host_pubkey),
+        now
+    );
+
+    // build TXT records for all entries (max ~10 to stay within packet limits)
+    let mut builder = SignedPacket::builder();
+
+    // add existing entries
+    for (i, existing) in entries.iter().take(9).enumerate() {
+        let vis_byte = match existing.visibility {
+            TableVisibility::Public => 'P',
+            TableVisibility::FriendsOnly => 'F',
+            TableVisibility::Private => 'X',
+        };
+        let txt_val = format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}",
+            existing.code,
+            hex::encode(existing.endpoint_id.as_bytes()),
+            existing.host_name,
+            existing.stakes,
+            existing.players.1,
+            vis_byte,
+            hex::encode(existing.host_pubkey),
+            existing.registered_at
+        );
+        let name_str = format!("_t{}", i);
+        let name = Name::new(&name_str)
+            .map_err(|e| RendezvousError::DhtError(e.to_string()))?;
+        let txt = TXT::new()
+            .with_string(&txt_val)
+            .map_err(|e| RendezvousError::DhtError(e.to_string()))?;
+        builder = builder.txt(name, txt, CODE_TTL);
+    }
+
+    // add our new entry
+    let idx = entries.len().min(9);
+    let name_str = format!("_t{}", idx);
+    let name = Name::new(&name_str)
+        .map_err(|e| RendezvousError::DhtError(e.to_string()))?;
+    let txt = TXT::new()
+        .with_string(&entry_str)
+        .map_err(|e| RendezvousError::DhtError(e.to_string()))?;
+    builder = builder.txt(name, txt, CODE_TTL);
+
+    let packet = builder
+        .sign(&keypair)
+        .map_err(|e| RendezvousError::DhtError(e.to_string()))?;
+
+    client
+        .publish(&packet, None)
+        .await
+        .map_err(|e| RendezvousError::DhtError(e.to_string()))?;
+
+    Ok(())
+}
+
+/// list all public tables from the registry
+pub async fn list_public_tables() -> Result<Vec<PublicTableEntry>, RendezvousError> {
+    let client = PkarrClient::builder()
+        .build()
+        .map_err(|e| RendezvousError::DhtError(e.to_string()))?;
+    list_public_tables_internal(&client).await
+}
+
+async fn list_public_tables_internal(client: &PkarrClient) -> Result<Vec<PublicTableEntry>, RendezvousError> {
+    let keypair = derive_registry_keypair();
+    let public_key = keypair.public_key();
+
+    let packet = timeout(DHT_TIMEOUT, client.resolve(&public_key))
+        .await
+        .map_err(|_| RendezvousError::Timeout)?
+        .ok_or(RendezvousError::NotFound)?;
+
+    let mut entries = Vec::new();
+
+    // scan for _t0, _t1, ... records
+    for i in 0..10 {
+        let name = format!("_t{}", i);
+        for record in packet.resource_records(&name) {
+            if let pkarr::dns::rdata::RData::TXT(ref txt) = record.rdata {
+                let txt_str: String = txt
+                    .clone()
+                    .try_into()
+                    .map_err(|_| RendezvousError::InvalidRecord)?;
+
+                if let Some(entry) = parse_table_entry(&txt_str) {
+                    entries.push(entry);
+                }
+            }
+        }
+    }
+
+    Ok(entries)
+}
+
+fn parse_table_entry(s: &str) -> Option<PublicTableEntry> {
+    let parts: Vec<&str> = s.split('|').collect();
+    if parts.len() != 8 {
+        return None;
+    }
+
+    let code = parts[0].to_string();
+    let endpoint_bytes = hex::decode(parts[1]).ok()?;
+    let endpoint_arr: [u8; 32] = endpoint_bytes.try_into().ok()?;
+    let endpoint_id = PublicKey::from_bytes(&endpoint_arr).ok()?;
+    let host_name = parts[2].to_string();
+    let stakes = parts[3].to_string();
+    let max_players: u8 = parts[4].parse().ok()?;
+    let visibility = match parts[5].chars().next()? {
+        'P' => TableVisibility::Public,
+        'F' => TableVisibility::FriendsOnly,
+        _ => return None,
+    };
+    let pubkey_bytes = hex::decode(parts[6]).ok()?;
+    let host_pubkey: [u8; 32] = pubkey_bytes.try_into().ok()?;
+    let registered_at: u64 = parts[7].parse().ok()?;
+
+    Some(PublicTableEntry {
+        code,
+        endpoint_id,
+        host_name,
+        stakes,
+        players: (0, max_players), // current players unknown from registry
+        visibility,
+        host_pubkey,
+        registered_at,
+    })
+}
+
+/// unregister a table from the public registry
+pub async fn unregister_public_table(code: &TableCode) -> Result<(), RendezvousError> {
+    let keypair = derive_registry_keypair();
+    let client = PkarrClient::builder()
+        .build()
+        .map_err(|e| RendezvousError::DhtError(e.to_string()))?;
+
+    // get existing entries and remove ours
+    let mut entries = list_public_tables_internal(&client).await.unwrap_or_default();
+    entries.retain(|e| e.code != code.as_str());
+
+    if entries.is_empty() {
+        // nothing to publish
+        return Ok(());
+    }
+
+    // rebuild packet without our entry
+    let mut builder = SignedPacket::builder();
+    for (i, existing) in entries.iter().enumerate() {
+        let vis_byte = match existing.visibility {
+            TableVisibility::Public => 'P',
+            TableVisibility::FriendsOnly => 'F',
+            TableVisibility::Private => 'X',
+        };
+        let txt_val = format!(
+            "{}|{}|{}|{}|{}|{}|{}|{}",
+            existing.code,
+            hex::encode(existing.endpoint_id.as_bytes()),
+            existing.host_name,
+            existing.stakes,
+            existing.players.1,
+            vis_byte,
+            hex::encode(existing.host_pubkey),
+            existing.registered_at
+        );
+        let name_str = format!("_t{}", i);
+        let name = Name::new(&name_str)
+            .map_err(|e| RendezvousError::DhtError(e.to_string()))?;
+        let txt = TXT::new()
+            .with_string(&txt_val)
+            .map_err(|e| RendezvousError::DhtError(e.to_string()))?;
+        builder = builder.txt(name, txt, CODE_TTL);
+    }
+
+    let packet = builder
+        .sign(&keypair)
+        .map_err(|e| RendezvousError::DhtError(e.to_string()))?;
+
+    client
+        .publish(&packet, None)
+        .await
+        .map_err(|e| RendezvousError::DhtError(e.to_string()))?;
+
+    Ok(())
 }
 
 /// rendezvous errors

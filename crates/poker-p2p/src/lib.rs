@@ -21,9 +21,12 @@ pub mod protocol;
 pub mod table;
 pub mod session;
 
-pub use rendezvous::{generate_code, TableCode};
+pub use rendezvous::{
+    generate_code, TableCode, TableVisibility, PublicTableEntry,
+    register_public_table, list_public_tables, unregister_public_table,
+};
 pub use protocol::*;
-pub use table::{Table, TableHost, TableClient};
+pub use table::{Table, TableHost, TableClient, TableEvent, TableError};
 pub use session::Session;
 
 /// ALPN protocol identifier
