@@ -14,10 +14,10 @@ use tokio::sync::RwLock;
 use tracing::{info, warn, error};
 
 /// maximum epochs to cover with tip proof before regenerating gigaproof
-/// Tip proof uses 2^24 config which handles up to 2M elements
-/// 2M / 8 fields = 256K headers = ~250 epochs
-/// We use 200 as a safe threshold (~200K blocks, ~1.3s proof)
-const GIGAPROOF_REGEN_THRESHOLD: u32 = 200;
+/// tip proof uses 2^20 config (1M elements max)
+/// 1M / 32 fields = ~32K headers = ~31 epochs
+/// threshold of 30 keeps tip proof within config bounds
+const GIGAPROOF_REGEN_THRESHOLD: u32 = 30;
 
 /// regenerate tip proof every N new blocks
 const TIP_PROOF_REGEN_BLOCKS: u32 = 1; // real-time: regenerate on every new block

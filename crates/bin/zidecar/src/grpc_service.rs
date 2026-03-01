@@ -147,20 +147,17 @@ impl Zidecar for ZidecarService {
         // The public outputs contain the verified tip hash which is sufficient
         let headers = Vec::new();
 
-        // combine gigaproof + tip proof with size prefix
-        // format: [gigaproof_size: u32][gigaproof_bytes][tip_bytes]
-        let gigaproof_size = gigaproof.len();
-        let tip_size = tip_proof.len();
-
-        let mut combined_proof = Vec::with_capacity(4 + gigaproof_size + tip_size);
-        combined_proof.extend_from_slice(&(gigaproof_size as u32).to_le_bytes());
+        // combine full proofs (with public outputs) - client verifies continuity
+        // format: [giga_full_size: u32][giga_full][tip_full]
+        let mut combined_proof = Vec::with_capacity(4 + gigaproof.len() + tip_proof.len());
+        combined_proof.extend_from_slice(&(gigaproof.len() as u32).to_le_bytes());
         combined_proof.extend_from_slice(&gigaproof);
         combined_proof.extend_from_slice(&tip_proof);
 
         info!(
             "serving proof: {} KB gigaproof + {} KB tip = {} KB total (continuity={})",
-            gigaproof_size / 1024,
-            tip_size / 1024,
+            gigaproof.len() / 1024,
+            tip_proof.len() / 1024,
             combined_proof.len() / 1024,
             continuity_verified
         );
