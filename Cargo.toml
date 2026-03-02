@@ -21,7 +21,7 @@ members = [
     "crates/bin/zidecar",
     "crates/bin/zafu",
     "crates/bin/ibp-probe",
-    "crates/bin/zcli",
+    # zcli moved to https://github.com/rotkonetworks/zcli
     # Zync (light client)
     "crates/zync-core",
     "crates/zafu-wasm",

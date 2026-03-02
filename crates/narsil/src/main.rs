@@ -3,12 +3,14 @@
 //! commands:
 //!   init     - create a new syndicate (generates spending key)
 //!   address  - show syndicate receiving address
-//!   balance  - show syndicate balance (requires view service)
-//!   send     - propose a spend transaction
+//!   balance  - scan and show syndicate balance
+//!   send     - send funds from syndicate
+//!   status   - show syndicate governance status
 
 use clap::{Parser, Subcommand};
 use penumbra_sdk_keys::keys::{SpendKey, SeedPhrase, Bip44Path, AddressIndex};
 use std::path::PathBuf;
+use std::process::Command;
 
 /// narsil - threshold syndicate for penumbra
 #[derive(Parser)]
@@ -19,6 +21,10 @@ struct Cli {
     /// data directory (default: ~/.narsil)
     #[arg(short, long)]
     data_dir: Option<PathBuf>,
+
+    /// penumbra grpc endpoint
+    #[arg(long, default_value = "https://penumbra.rotko.net")]
+    grpc_url: String,
 
     #[command(subcommand)]
     command: Commands,
@@ -51,6 +57,28 @@ enum Commands {
         name: String,
     },
 
+    /// scan chain and show balance
+    Balance {
+        /// syndicate name
+        #[arg(short, long, default_value = "default")]
+        name: String,
+    },
+
+    /// send funds from syndicate (single-member mode)
+    Send {
+        /// syndicate name
+        #[arg(short, long, default_value = "default")]
+        name: String,
+
+        /// amount (e.g. "5mpenumbra", "100upenumbra")
+        #[arg(short, long)]
+        amount: String,
+
+        /// destination address
+        #[arg(short, long)]
+        to: String,
+    },
+
     /// show spending key (DANGER: reveals secret)
     #[command(hide = true)]
     ExportSpendKey {
@@ -72,6 +100,56 @@ fn syndicate_path(data_dir: &PathBuf, name: &str) -> PathBuf {
     data_dir.join(format!("{}.spend_key", name))
 }
 
+/// get or create pcli home for a syndicate
+fn pcli_home(data_dir: &PathBuf, name: &str) -> PathBuf {
+    data_dir.join(format!("{}.pcli", name))
+}
+
+/// ensure pcli is initialized for this syndicate
+fn ensure_pcli(data_dir: &PathBuf, name: &str, grpc_url: &str) -> PathBuf {
+    let home = pcli_home(data_dir, name);
+    if home.join("config.toml").exists() {
+        return home;
+    }
+
+    let seed_path = data_dir.join(format!("{}.seed", name));
+    let seed = std::fs::read_to_string(&seed_path).expect("failed to read seed phrase");
+
+    std::fs::create_dir_all(&home).expect("failed to create pcli home");
+
+    let status = Command::new("pcli")
+        .args(["--home", home.to_str().unwrap()])
+        .args(["init", "--grpc-url", grpc_url, "soft-kms", "import-phrase"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit())
+        .spawn()
+        .and_then(|mut child| {
+            use std::io::Write;
+            if let Some(ref mut stdin) = child.stdin {
+                writeln!(stdin, "{}", seed.trim())?;
+            }
+            child.wait()
+        })
+        .expect("failed to init pcli");
+
+    if !status.success() {
+        eprintln!("pcli init failed");
+        std::process::exit(1);
+    }
+
+    home
+}
+
+/// run pcli command for a syndicate
+fn run_pcli(home: &PathBuf, args: &[&str]) -> std::process::Output {
+    Command::new("pcli")
+        .args(["--home", home.to_str().unwrap()])
+        .args(args)
+        .output()
+        .expect("failed to run pcli")
+}
+
 fn main() {
     let cli = Cli::parse();
     let data_dir = get_data_dir(cli.data_dir);
@@ -84,30 +162,26 @@ fn main() {
                 std::process::exit(1);
             }
 
-            // create data dir
             std::fs::create_dir_all(&data_dir).expect("failed to create data dir");
 
-            // generate seed phrase and spending key
             let seed_phrase = SeedPhrase::generate(rand_core::OsRng);
             let spend_key = SpendKey::from_seed_phrase_bip44(seed_phrase.clone(), &Bip44Path::new(0));
             let fvk = spend_key.full_viewing_key();
             let (address, _) = fvk.payment_address(AddressIndex::new(0));
 
-            // save seed phrase (more portable than raw spend key bytes)
             let seed_path = data_dir.join(format!("{}.seed", name));
             std::fs::write(&seed_path, seed_phrase.to_string()).expect("failed to save seed");
 
-            // also save spend key bytes for quick loading
             let spend_key_bytes = spend_key.to_bytes();
             std::fs::write(&path, spend_key_bytes.0).expect("failed to save spend key");
 
             println!("syndicate '{}' initialized", name);
             println!("address: {}", address);
             println!("");
-            println!("seed phrase (BACK THIS UP!):");
+            println!("seed phrase:");
             println!("  {}", seed_phrase);
             println!("");
-            println!("send test funds with:");
+            println!("send test funds:");
             println!("  pcli tx send 1mpenumbra --to {}", address);
         }
 
@@ -121,7 +195,6 @@ fn main() {
             let spend_key = load_spend_key(&path);
             let fvk = spend_key.full_viewing_key();
             let (address, _) = fvk.payment_address(AddressIndex::new(index));
-
             println!("{}", address);
         }
 
@@ -134,9 +207,56 @@ fn main() {
 
             let spend_key = load_spend_key(&path);
             let fvk = spend_key.full_viewing_key();
-
-            // encode FVK as bech32
             println!("{}", fvk);
+        }
+
+        Commands::Balance { name } => {
+            let path = syndicate_path(&data_dir, &name);
+            if !path.exists() {
+                eprintln!("syndicate '{}' not found", name);
+                std::process::exit(1);
+            }
+
+            let home = ensure_pcli(&data_dir, &name, &cli.grpc_url);
+            let output = run_pcli(&home, &["view", "balance"]);
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            if !stderr.is_empty() {
+                eprint!("{}", stderr);
+            }
+            print!("{}", stdout);
+        }
+
+        Commands::Send { name, amount, to } => {
+            let path = syndicate_path(&data_dir, &name);
+            if !path.exists() {
+                eprintln!("syndicate '{}' not found", name);
+                std::process::exit(1);
+            }
+
+            let home = ensure_pcli(&data_dir, &name, &cli.grpc_url);
+
+            println!("sending {} to {}...", amount, &to[..20]);
+            let output = run_pcli(&home, &["tx", "send", &amount, "--to", &to]);
+
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+
+            if !stderr.is_empty() {
+                eprint!("{}", stderr);
+            }
+            if !stdout.is_empty() {
+                print!("{}", stdout);
+            }
+
+            if output.status.success() {
+                println!("send complete");
+            } else {
+                eprintln!("send failed");
+                std::process::exit(1);
+            }
         }
 
         Commands::ExportSpendKey { name } => {
