@@ -26,6 +26,10 @@ zcash_keys = { version = "0.12", default-features = false, features = ["orchard"
 zcash_protocol = { version = "0.7", default-features = false }
 zip32 = { version = "0.2", default-features = false }
 
+# merkle witness building
+incrementalmerkletree = { version = "0.8", features = ["legacy-api"] }
+hex = "0.4"
+
 # note encryption (no heavy circuit deps)
 zcash_note_encryption = "0.4"
 

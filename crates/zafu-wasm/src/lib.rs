@@ -8,6 +8,8 @@
 //! RUSTFLAGS='-C target-feature=+simd128' wasm-pack build --target web --out-dir ../bin/zidecar/www/pkg
 //! ```
 
+mod witness;
+
 use wasm_bindgen::prelude::*;
 use blake2::{Blake2b512, Digest};
 use serde::{Deserialize, Serialize};
@@ -102,11 +104,14 @@ impl WalletKeys {
             .par_iter()
             .enumerate()
             .filter_map(|(idx, action)| {
-                self.try_decrypt_action_binary(action).map(|(value, note_nf)| FoundNote {
+                self.try_decrypt_action_binary(action).map(|(value, note_nf, rseed, rho, addr)| FoundNote {
                     index: idx as u32,
                     value,
-                    nullifier: hex_encode(&note_nf),  // Use computed note nullifier, not action's spend nullifier
+                    nullifier: hex_encode(&note_nf),
                     cmx: hex_encode(&action.cmx),
+                    rseed: Some(hex_encode(&rseed)),
+                    rho: Some(hex_encode(&rho)),
+                    recipient: Some(hex_encode(&addr)),
                 })
             })
             .collect();
@@ -116,11 +121,14 @@ impl WalletKeys {
             .iter()
             .enumerate()
             .filter_map(|(idx, action)| {
-                self.try_decrypt_action_binary(action).map(|(value, note_nf)| FoundNote {
+                self.try_decrypt_action_binary(action).map(|(value, note_nf, rseed, rho, addr)| FoundNote {
                     index: idx as u32,
                     value,
-                    nullifier: hex_encode(&note_nf),  // Use computed note nullifier, not action's spend nullifier
+                    nullifier: hex_encode(&note_nf),
                     cmx: hex_encode(&action.cmx),
+                    rseed: Some(hex_encode(&rseed)),
+                    rho: Some(hex_encode(&rho)),
+                    recipient: Some(hex_encode(&addr)),
                 })
             })
             .collect();
@@ -145,6 +153,9 @@ impl WalletKeys {
                     value,
                     nullifier: action.nullifier.clone(),
                     cmx: action.cmx.clone(),
+                    rseed: None,
+                    rho: None,
+                    recipient: None,
                 })
             })
             .collect();
@@ -159,6 +170,9 @@ impl WalletKeys {
                     value,
                     nullifier: action.nullifier.clone(),
                     cmx: action.cmx.clone(),
+                    rseed: None,
+                    rho: None,
+                    recipient: None,
                 })
             })
             .collect();
@@ -185,8 +199,8 @@ impl WalletKeys {
 
     /// Try to decrypt a binary-format action using official Orchard note decryption
     /// Tries BOTH external and internal scope IVKs
-    /// Returns (value, note_nullifier) - the nullifier is for THIS note, not the action's spend
-    fn try_decrypt_action_binary(&self, action: &CompactActionBinary) -> Option<(u64, [u8; 32])> {
+    /// Returns (value, note_nullifier, rseed_bytes, rho_bytes, recipient_address_bytes)
+    fn try_decrypt_action_binary(&self, action: &CompactActionBinary) -> Option<(u64, [u8; 32], [u8; 32], [u8; 32], [u8; 43])> {
         // Parse the nullifier and cmx
         let nullifier = orchard::note::Nullifier::from_bytes(&action.nullifier);
         if nullifier.is_none().into() {
@@ -219,17 +233,19 @@ impl WalletKeys {
         };
 
         // Try compact note decryption with EXTERNAL scope IVK first
-        if let Some((note, _addr)) = try_compact_note_decryption(&domain, &self.prepared_ivk_external, &output) {
-            // Compute this note's nullifier using our FVK
+        if let Some((note, addr)) = try_compact_note_decryption(&domain, &self.prepared_ivk_external, &output) {
             let note_nf = note.nullifier(&self.fvk);
-            return Some((note.value().inner(), note_nf.to_bytes()));
+            let rseed = *note.rseed().as_bytes();
+            let rho = note.rho().to_bytes();
+            return Some((note.value().inner(), note_nf.to_bytes(), rseed, rho, addr.to_raw_address_bytes()));
         }
 
         // If external failed, try INTERNAL scope IVK (for change/shielding outputs)
-        if let Some((note, _addr)) = try_compact_note_decryption(&domain, &self.prepared_ivk_internal, &output) {
-            // Compute this note's nullifier using our FVK
+        if let Some((note, addr)) = try_compact_note_decryption(&domain, &self.prepared_ivk_internal, &output) {
             let note_nf = note.nullifier(&self.fvk);
-            return Some((note.value().inner(), note_nf.to_bytes()));
+            let rseed = *note.rseed().as_bytes();
+            let rho = note.rho().to_bytes();
+            return Some((note.value().inner(), note_nf.to_bytes(), rseed, rho, addr.to_raw_address_bytes()));
         }
 
         None
@@ -379,6 +395,15 @@ pub struct FoundNote {
     pub value: u64,
     pub nullifier: String,
     pub cmx: String,
+    /// rseed bytes for note reconstruction (hex, 32 bytes)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rseed: Option<String>,
+    /// rho bytes for note reconstruction (hex, 32 bytes)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rho: Option<String>,
+    /// recipient address bytes for note reconstruction (hex, 43 bytes)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<String>,
 }
 
 /// Batch scan result with stats
@@ -600,11 +625,14 @@ impl WatchOnlyWallet {
             .par_iter()
             .enumerate()
             .filter_map(|(idx, action)| {
-                self.try_decrypt_action(action).map(|(value, note_nf)| FoundNote {
+                self.try_decrypt_action(action).map(|(value, note_nf, rseed, rho, addr)| FoundNote {
                     index: idx as u32,
                     value,
                     nullifier: hex_encode(&note_nf),
                     cmx: hex_encode(&action.cmx),
+                    rseed: Some(hex_encode(&rseed)),
+                    rho: Some(hex_encode(&rho)),
+                    recipient: Some(hex_encode(&addr)),
                 })
             })
             .collect();
@@ -614,11 +642,14 @@ impl WatchOnlyWallet {
             .iter()
             .enumerate()
             .filter_map(|(idx, action)| {
-                self.try_decrypt_action(action).map(|(value, note_nf)| FoundNote {
+                self.try_decrypt_action(action).map(|(value, note_nf, rseed, rho, addr)| FoundNote {
                     index: idx as u32,
                     value,
                     nullifier: hex_encode(&note_nf),
                     cmx: hex_encode(&action.cmx),
+                    rseed: Some(hex_encode(&rseed)),
+                    rho: Some(hex_encode(&rho)),
+                    recipient: Some(hex_encode(&addr)),
                 })
             })
             .collect();
@@ -628,7 +659,8 @@ impl WatchOnlyWallet {
     }
 
     /// Try to decrypt a compact action
-    fn try_decrypt_action(&self, action: &CompactActionBinary) -> Option<(u64, [u8; 32])> {
+    /// Returns (value, note_nullifier, rseed_bytes, rho_bytes, recipient_address_bytes)
+    fn try_decrypt_action(&self, action: &CompactActionBinary) -> Option<(u64, [u8; 32], [u8; 32], [u8; 32], [u8; 43])> {
         let nullifier = orchard::note::Nullifier::from_bytes(&action.nullifier);
         if nullifier.is_none().into() {
             return None;
@@ -656,15 +688,19 @@ impl WatchOnlyWallet {
         };
 
         // Try external scope first
-        if let Some((note, _addr)) = try_compact_note_decryption(&domain, &self.prepared_ivk_external, &output) {
+        if let Some((note, addr)) = try_compact_note_decryption(&domain, &self.prepared_ivk_external, &output) {
             let note_nf = note.nullifier(&self.fvk);
-            return Some((note.value().inner(), note_nf.to_bytes()));
+            let rseed = *note.rseed().as_bytes();
+            let rho = note.rho().to_bytes();
+            return Some((note.value().inner(), note_nf.to_bytes(), rseed, rho, addr.to_raw_address_bytes()));
         }
 
         // Try internal scope (change addresses)
-        if let Some((note, _addr)) = try_compact_note_decryption(&domain, &self.prepared_ivk_internal, &output) {
+        if let Some((note, addr)) = try_compact_note_decryption(&domain, &self.prepared_ivk_internal, &output) {
             let note_nf = note.nullifier(&self.fvk);
-            return Some((note.value().inner(), note_nf.to_bytes()));
+            let rseed = *note.rseed().as_bytes();
+            let rho = note.rho().to_bytes();
+            return Some((note.value().inner(), note_nf.to_bytes(), rseed, rho, addr.to_raw_address_bytes()));
         }
 
         None
@@ -1838,6 +1874,359 @@ pub fn get_commitment_proof_request(note_cmx_hex: &str) -> Result<String, JsErro
     Ok(note_cmx_hex.to_string())
 }
 
+// ============================================================================
+// Witness Building (merkle paths for orchard spends)
+// ============================================================================
+
+/// Build merkle paths for note positions by replaying compact blocks from a checkpoint.
+///
+/// # Arguments
+/// * `tree_state_hex` - hex-encoded orchard frontier from GetTreeState
+/// * `compact_blocks_json` - JSON array of `[{height, actions: [{cmx_hex}]}]`
+/// * `note_positions_json` - JSON array of note positions `[position_u64, ...]`
+/// * `anchor_height` - the block height to use as anchor
+///
+/// # Returns
+/// JSON `{anchor_hex, paths: [{position, path: [{hash}]}]}`
+#[wasm_bindgen]
+pub fn build_merkle_paths(
+    tree_state_hex: &str,
+    compact_blocks_json: &str,
+    note_positions_json: &str,
+    anchor_height: u32,
+) -> Result<JsValue, JsError> {
+    let blocks: Vec<witness::CompactBlockData> = serde_json::from_str(compact_blocks_json)
+        .map_err(|e| JsError::new(&format!("invalid compact_blocks_json: {}", e)))?;
+
+    let positions: Vec<u64> = serde_json::from_str(note_positions_json)
+        .map_err(|e| JsError::new(&format!("invalid note_positions_json: {}", e)))?;
+
+    let result =
+        witness::build_merkle_paths_inner(tree_state_hex, &blocks, &positions, anchor_height)
+            .map_err(|e| JsError::new(&format!("{}", e)))?;
+
+    let json = serde_json::to_string(&result)
+        .map_err(|e| JsError::new(&format!("failed to serialize result: {}", e)))?;
+
+    Ok(JsValue::from_str(&json))
+}
+
+/// Compute the tree size from a hex-encoded frontier.
+#[wasm_bindgen]
+pub fn frontier_tree_size(tree_state_hex: &str) -> Result<u64, JsError> {
+    let data =
+        hex::decode(tree_state_hex).map_err(|e| JsError::new(&format!("invalid hex: {}", e)))?;
+    witness::compute_frontier_tree_size(&data).map_err(|e| JsError::new(&format!("{}", e)))
+}
+
+/// Compute the tree root from a hex-encoded frontier.
+#[wasm_bindgen]
+pub fn tree_root_hex(tree_state_hex: &str) -> Result<String, JsError> {
+    let data =
+        hex::decode(tree_state_hex).map_err(|e| JsError::new(&format!("invalid hex: {}", e)))?;
+    let root = witness::compute_tree_root(&data).map_err(|e| JsError::new(&format!("{}", e)))?;
+    Ok(hex::encode(root))
+}
+
+// ============================================================================
+// Signed Spend Transaction (mnemonic wallets — no cold signing needed)
+// ============================================================================
+
+/// A spendable note with rseed and rho for reconstruction
+#[derive(Debug, Clone, Deserialize)]
+#[allow(dead_code)]
+struct SpendableNote {
+    value: u64,
+    nullifier: String,
+    cmx: String,
+    position: u64,
+    rseed_hex: String,
+    rho_hex: String,
+    /// raw orchard recipient address bytes (hex, 43 bytes) — captured during scan
+    #[serde(default)]
+    recipient_hex: String,
+}
+
+/// Build a fully signed orchard spend transaction from a mnemonic wallet.
+///
+/// Unlike `build_unsigned_transaction` (for cold signing), this function
+/// derives the spending key from the mnemonic, constructs the full orchard
+/// bundle with Halo 2 proofs, and returns a broadcast-ready transaction.
+///
+/// # Arguments
+/// * `seed_phrase` - BIP39 mnemonic for key derivation
+/// * `notes_json` - JSON array of spendable notes with rseed/rho
+/// * `recipient` - unified address string (u1... or utest1...)
+/// * `amount` - zatoshis to send
+/// * `fee` - transaction fee in zatoshis
+/// * `anchor_hex` - merkle tree anchor (hex, 32 bytes)
+/// * `merkle_paths_json` - JSON array of merkle paths from witness building
+/// * `account_index` - ZIP-32 account index
+/// * `mainnet` - true for mainnet, false for testnet
+///
+/// # Returns
+/// Hex-encoded signed v5 transaction bytes ready for broadcast
+#[wasm_bindgen]
+pub fn build_signed_spend_transaction(
+    seed_phrase: &str,
+    notes_json: JsValue,
+    recipient: &str,
+    amount: u64,
+    fee: u64,
+    anchor_hex: &str,
+    merkle_paths_json: JsValue,
+    account_index: u32,
+    mainnet: bool,
+) -> Result<String, JsError> {
+    use orchard::builder::{Builder, BundleType};
+    use orchard::bundle::Flags;
+    use orchard::keys::SpendAuthorizingKey;
+    use orchard::note::{Rho, RandomSeed};
+    use orchard::tree::{Anchor, MerkleHashOrchard, MerklePath as OrchardMerklePath};
+    use orchard::value::NoteValue;
+    use rand::rngs::OsRng;
+    use zcash_protocol::value::ZatBalance;
+
+    // --- derive keys from mnemonic ---
+    let mnemonic = bip39::Mnemonic::parse(seed_phrase)
+        .map_err(|e| JsError::new(&format!("invalid mnemonic: {}", e)))?;
+    let seed = mnemonic.to_seed("");
+
+    let coin_type = if mainnet { 133 } else { 1 };
+    let account_id = zip32::AccountId::try_from(account_index)
+        .map_err(|_| JsError::new("invalid account index"))?;
+
+    let sk = SpendingKey::from_zip32_seed(&seed, coin_type, account_id)
+        .map_err(|e| JsError::new(&format!("spending key derivation failed: {:?}", e)))?;
+    let fvk = orchard::keys::FullViewingKey::from(&sk);
+    let ask = SpendAuthorizingKey::from(&sk);
+
+    // derive change address (internal scope, diversifier 0)
+    let change_addr = fvk.to_ivk(Scope::Internal).address_at(0u64);
+
+    // --- parse recipient ---
+    let recipient_addr = parse_orchard_address(recipient, mainnet)
+        .map_err(|e| JsError::new(&format!("invalid recipient: {}", e)))?;
+
+    // --- parse anchor ---
+    let anchor_bytes = hex_decode(anchor_hex)
+        .ok_or_else(|| JsError::new("invalid anchor hex"))?;
+    if anchor_bytes.len() != 32 {
+        return Err(JsError::new("anchor must be 32 bytes"));
+    }
+    let mut anchor_arr = [0u8; 32];
+    anchor_arr.copy_from_slice(&anchor_bytes);
+    let anchor = Option::from(Anchor::from_bytes(anchor_arr))
+        .ok_or_else(|| JsError::new("invalid anchor"))?;
+
+    // --- parse notes and merkle paths ---
+    let notes: Vec<SpendableNote> = serde_wasm_bindgen::from_value(notes_json)
+        .map_err(|e| JsError::new(&format!("invalid notes: {}", e)))?;
+    let merkle_paths: Vec<MerklePathInfo> = serde_wasm_bindgen::from_value(merkle_paths_json)
+        .map_err(|e| JsError::new(&format!("invalid merkle paths: {}", e)))?;
+
+    if notes.len() != merkle_paths.len() {
+        return Err(JsError::new("notes and merkle paths count mismatch"));
+    }
+
+    // --- calculate totals ---
+    let total_input: u64 = notes.iter().map(|n| n.value).sum();
+    if total_input < amount + fee {
+        return Err(JsError::new(&format!(
+            "insufficient funds: {} < {} + {}", total_input, amount, fee
+        )));
+    }
+    let change = total_input - amount - fee;
+
+    // --- build orchard bundle ---
+    let bundle_type = BundleType::Transactional {
+        flags: Flags::ENABLED,
+        bundle_required: true,
+    };
+    let mut builder = Builder::new(bundle_type, anchor);
+
+    // add spends
+    for (i, note_info) in notes.iter().enumerate() {
+        // reconstruct the orchard::Note from stored rseed + rho + value + address
+        let rho_bytes = hex_decode(&note_info.rho_hex)
+            .ok_or_else(|| JsError::new(&format!("invalid rho hex for note {}", i)))?;
+        if rho_bytes.len() != 32 {
+            return Err(JsError::new(&format!("rho must be 32 bytes for note {}", i)));
+        }
+        let mut rho_arr = [0u8; 32];
+        rho_arr.copy_from_slice(&rho_bytes);
+        let rho = Option::from(Rho::from_bytes(&rho_arr))
+            .ok_or_else(|| JsError::new(&format!("invalid rho for note {}", i)))?;
+
+        let rseed_bytes = hex_decode(&note_info.rseed_hex)
+            .ok_or_else(|| JsError::new(&format!("invalid rseed hex for note {}", i)))?;
+        if rseed_bytes.len() != 32 {
+            return Err(JsError::new(&format!("rseed must be 32 bytes for note {}", i)));
+        }
+        let mut rseed_arr = [0u8; 32];
+        rseed_arr.copy_from_slice(&rseed_bytes);
+        let rseed = Option::from(RandomSeed::from_bytes(rseed_arr, &rho))
+            .ok_or_else(|| JsError::new(&format!("invalid rseed for note {}", i)))?;
+
+        let note_value = NoteValue::from_raw(note_info.value);
+
+        // use stored recipient address from scan (handles diversified addresses correctly)
+        let note: orchard::Note = if !note_info.recipient_hex.is_empty() {
+            let addr_bytes = hex_decode(&note_info.recipient_hex)
+                .ok_or_else(|| JsError::new(&format!("invalid recipient hex for note {}", i)))?;
+            let addr_arr: [u8; 43] = addr_bytes.try_into()
+                .map_err(|_| JsError::new(&format!("recipient must be 43 bytes for note {}", i)))?;
+            let addr = Option::from(orchard::Address::from_raw_address_bytes(&addr_arr))
+                .ok_or_else(|| JsError::new(&format!("invalid orchard address for note {}", i)))?;
+            Option::from(orchard::Note::from_parts(addr, note_value, rho, rseed))
+                .ok_or_else(|| JsError::new(&format!("failed to reconstruct note {} from stored address", i)))?
+        } else {
+            // fallback: try default addresses (legacy notes without stored recipient)
+            let ext_addr = fvk.to_ivk(Scope::External).address_at(0u64);
+            let int_addr = fvk.to_ivk(Scope::Internal).address_at(0u64);
+            Option::from(orchard::Note::from_parts(ext_addr, note_value, rho, rseed))
+                .or_else(|| Option::from(orchard::Note::from_parts(int_addr, note_value, rho, rseed)))
+                .ok_or_else(|| JsError::new(&format!("failed to reconstruct note {} — rseed/rho/value mismatch", i)))?
+        };
+
+        // verify the reconstructed note matches the expected cmx
+        let expected_cmx = hex_decode(&note_info.cmx)
+            .ok_or_else(|| JsError::new(&format!("invalid cmx hex for note {}", i)))?;
+        let reconstructed_cmx = orchard::note::ExtractedNoteCommitment::from(note.commitment());
+        if hex_encode(&reconstructed_cmx.to_bytes()) != hex_encode(&expected_cmx) {
+            return Err(JsError::new(&format!(
+                "cmx mismatch for note {}: reconstructed={} expected={}",
+                i, hex_encode(&reconstructed_cmx.to_bytes()), hex_encode(&expected_cmx)
+            )));
+        }
+
+        // parse merkle path
+        let mp = &merkle_paths[i];
+        if mp.path.len() != 32 {
+            return Err(JsError::new(&format!(
+                "merkle path must have 32 elements, got {} for note {}", mp.path.len(), i
+            )));
+        }
+
+        let mut auth_path = [[0u8; 32]; 32];
+        for (j, hash_hex) in mp.path.iter().enumerate() {
+            let hash_bytes = hex_decode(hash_hex)
+                .ok_or_else(|| JsError::new(&format!("invalid merkle path hash at {}/{}", i, j)))?;
+            if hash_bytes.len() != 32 {
+                return Err(JsError::new(&format!("merkle path hash must be 32 bytes at {}/{}", i, j)));
+            }
+            auth_path[j].copy_from_slice(&hash_bytes);
+        }
+
+        let merkle_hashes: Vec<MerkleHashOrchard> = auth_path.iter()
+            .filter_map(|bytes| Option::from(MerkleHashOrchard::from_bytes(bytes)))
+            .collect();
+
+        if merkle_hashes.len() != 32 {
+            return Err(JsError::new(&format!(
+                "invalid merkle path hashes for note {}", i
+            )));
+        }
+
+        let merkle_path = OrchardMerklePath::from_parts(
+            (mp.position as u32).into(),
+            merkle_hashes.try_into().map_err(|_| JsError::new("merkle path conversion"))?,
+        );
+
+        builder.add_spend(fvk.clone(), note, merkle_path)
+            .map_err(|e| JsError::new(&format!("add_spend for note {}: {:?}", i, e)))?;
+    }
+
+    // add recipient output
+    let mut memo = [0u8; 512];
+    builder.add_output(None, recipient_addr, NoteValue::from_raw(amount), memo)
+        .map_err(|e| JsError::new(&format!("add_output (recipient): {:?}", e)))?;
+
+    // add change output if needed
+    if change > 0 {
+        memo = [0u8; 512];
+        builder.add_output(None, change_addr, NoteValue::from_raw(change), memo)
+            .map_err(|e| JsError::new(&format!("add_output (change): {:?}", e)))?;
+    }
+
+    // --- build, prove, sign ---
+    let mut rng = OsRng;
+    let (unauthorized_bundle, _meta) = builder
+        .build::<ZatBalance>(&mut rng)
+        .map_err(|e| JsError::new(&format!("bundle build: {:?}", e)))?
+        .ok_or_else(|| JsError::new("builder produced no bundle"))?;
+
+    // Halo 2 proof generation (expensive)
+    let pk = orchard::circuit::ProvingKey::build();
+    let proven_bundle = unauthorized_bundle
+        .create_proof(&pk, &mut rng)
+        .map_err(|e| JsError::new(&format!("create_proof: {:?}", e)))?;
+
+    // --- compute ZIP-244 sighash ---
+    let branch_id: u32 = 0x4DEC4DF0; // NU6.1
+    let expiry_height: u32 = 0; // no expiry for orchard-only
+
+    let header_data = {
+        let mut d = Vec::new();
+        d.extend_from_slice(&(5u32 | (1u32 << 31)).to_le_bytes());
+        d.extend_from_slice(&0x26A7270Au32.to_le_bytes());
+        d.extend_from_slice(&branch_id.to_le_bytes());
+        d.extend_from_slice(&0u32.to_le_bytes()); // nLockTime
+        d.extend_from_slice(&expiry_height.to_le_bytes());
+        d
+    };
+    let header_digest = blake2b_256_personal(b"ZTxIdHeadersHash", &header_data);
+
+    // no transparent inputs/outputs
+    let transparent_digest = blake2b_256_personal(b"ZTxIdTranspaHash", &[]);
+    let sapling_digest = blake2b_256_personal(b"ZTxIdSaplingHash", &[]);
+
+    let orchard_digest = compute_orchard_digest(&proven_bundle)?;
+
+    let sighash_personal = {
+        let mut p = [0u8; 16];
+        p[..12].copy_from_slice(b"ZcashTxHash_");
+        p[12..16].copy_from_slice(&branch_id.to_le_bytes());
+        p
+    };
+
+    let mut sighash_input = Vec::new();
+    sighash_input.extend_from_slice(&header_digest);
+    sighash_input.extend_from_slice(&transparent_digest);
+    sighash_input.extend_from_slice(&sapling_digest);
+    sighash_input.extend_from_slice(&orchard_digest);
+
+    let sighash = blake2b_256_personal(&sighash_personal, &sighash_input);
+
+    // apply spend auth signatures + binding signature
+    let authorized_bundle = proven_bundle
+        .apply_signatures(&mut rng, sighash, &[ask])
+        .map_err(|e| JsError::new(&format!("apply_signatures: {:?}", e)))?;
+
+    // --- serialize v5 transaction ---
+    let mut tx_bytes = Vec::new();
+
+    // header
+    tx_bytes.extend_from_slice(&(5u32 | (1u32 << 31)).to_le_bytes());
+    tx_bytes.extend_from_slice(&0x26A7270Au32.to_le_bytes());
+    tx_bytes.extend_from_slice(&branch_id.to_le_bytes());
+    tx_bytes.extend_from_slice(&0u32.to_le_bytes()); // nLockTime
+    tx_bytes.extend_from_slice(&expiry_height.to_le_bytes());
+
+    // transparent (none)
+    tx_bytes.extend_from_slice(&compact_size(0)); // vin
+    tx_bytes.extend_from_slice(&compact_size(0)); // vout
+
+    // sapling (none)
+    tx_bytes.extend_from_slice(&compact_size(0)); // spends
+    tx_bytes.extend_from_slice(&compact_size(0)); // outputs
+
+    // orchard bundle
+    serialize_orchard_bundle(&authorized_bundle, &mut tx_bytes)?;
+
+    Ok(hex_encode(&tx_bytes))
+}
+
 #[test]
 fn test_user_seed_with_real_action() {
     let seed_phrase = "master bid journey tank since conduct fire picture medal toward dish trend army true cushion ramp yellow high once jealous van occur swamp liberty";
@@ -1865,7 +2254,7 @@ fn test_user_seed_with_real_action() {
 
     // Try to decrypt with External scope
     let result = keys.try_decrypt_action_binary(&action);
-    println!("Decryption result (External scope): {:?}", result);
+    println!("Decryption result (External scope): {:?}", result.map(|(v, nf, _, _)| (v, hex_encode(&nf))));
 
     // Also try Internal scope
     let mnemonic = bip39::Mnemonic::parse(seed_phrase).unwrap();
