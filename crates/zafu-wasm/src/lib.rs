@@ -540,6 +540,43 @@ impl WatchOnlyWallet {
         })
     }
 
+    /// Import from a UFVK string (uview1.../uviewtest1...)
+    #[wasm_bindgen]
+    pub fn from_ufvk(ufvk_str: &str) -> Result<WatchOnlyWallet, JsError> {
+        use zcash_keys::keys::UnifiedFullViewingKey;
+        use zcash_protocol::consensus::{MainNetwork, TestNetwork};
+
+        let mainnet = ufvk_str.starts_with("uview1") && !ufvk_str.starts_with("uviewtest");
+
+        let ufvk = if mainnet {
+            UnifiedFullViewingKey::decode(&MainNetwork, ufvk_str)
+        } else {
+            UnifiedFullViewingKey::decode(&TestNetwork, ufvk_str)
+        }.map_err(|e| JsError::new(&format!("invalid UFVK: {}", e)))?;
+
+        let orchard_fvk = ufvk.orchard()
+            .ok_or_else(|| JsError::new("UFVK has no orchard component"))?;
+
+        // extract raw 96-byte FVK
+        let fvk_bytes = orchard_fvk.to_bytes();
+        let fvk = orchard::keys::FullViewingKey::from_bytes(&fvk_bytes);
+        if fvk.is_none().into() {
+            return Err(JsError::new("invalid orchard FVK in UFVK"));
+        }
+        let fvk = fvk.unwrap();
+
+        let ivk_external = fvk.to_ivk(Scope::External);
+        let ivk_internal = fvk.to_ivk(Scope::Internal);
+
+        Ok(WatchOnlyWallet {
+            fvk,
+            prepared_ivk_external: ivk_external.prepare(),
+            prepared_ivk_internal: ivk_internal.prepare(),
+            account_index: 0,
+            mainnet,
+        })
+    }
+
     /// Import from hex-encoded QR data
     #[wasm_bindgen]
     pub fn from_qr_hex(qr_hex: &str) -> Result<WatchOnlyWallet, JsError> {
@@ -1928,6 +1965,109 @@ pub fn tree_root_hex(tree_state_hex: &str) -> Result<String, JsError> {
     Ok(hex::encode(root))
 }
 
+/// Derive an Orchard receiving address from a UFVK string (uview1.../uviewtest1...)
+#[wasm_bindgen]
+pub fn address_from_ufvk(ufvk_str: &str, diversifier_index: u32) -> Result<String, JsError> {
+    use zcash_keys::keys::UnifiedFullViewingKey;
+    use zcash_protocol::consensus::{MainNetwork, TestNetwork};
+
+    let ufvk = if ufvk_str.starts_with("uview1") {
+        UnifiedFullViewingKey::decode(&MainNetwork, ufvk_str)
+    } else {
+        UnifiedFullViewingKey::decode(&TestNetwork, ufvk_str)
+    }.map_err(|e| JsError::new(&format!("invalid UFVK: {}", e)))?;
+
+    let mainnet = ufvk_str.starts_with("uview1") && !ufvk_str.starts_with("uviewtest");
+
+    // get the orchard FVK from the UFVK
+    let orchard_fvk_old = ufvk.orchard()
+        .ok_or_else(|| JsError::new("UFVK has no orchard component"))?;
+
+    // derive address at diversifier index
+    let addr_old = orchard_fvk_old.address_at(diversifier_index as u64, orchard::keys::Scope::External);
+    let raw = addr_old.to_raw_address_bytes();
+
+    // encode as unified address string
+    let addr = Option::from(orchard::Address::from_raw_address_bytes(&raw))
+        .ok_or_else(|| JsError::new("invalid orchard address bytes"))?;
+
+    Ok(encode_orchard_address(&addr, mainnet))
+}
+
+/// Derive a transparent (t1.../tm...) address from a UFVK string, if the UFVK has a transparent component.
+/// Returns the base58check-encoded P2PKH address.
+#[wasm_bindgen]
+pub fn transparent_address_from_ufvk(ufvk_str: &str) -> Result<String, JsError> {
+    use zcash_keys::keys::UnifiedFullViewingKey;
+    use zcash_protocol::consensus::{MainNetwork, TestNetwork};
+
+    let mainnet = ufvk_str.starts_with("uview1") && !ufvk_str.starts_with("uviewtest");
+
+    let ufvk = if mainnet {
+        UnifiedFullViewingKey::decode(&MainNetwork, ufvk_str)
+    } else {
+        UnifiedFullViewingKey::decode(&TestNetwork, ufvk_str)
+    }.map_err(|e| JsError::new(&format!("invalid UFVK: {}", e)))?;
+
+    let account_pubkey = ufvk.transparent()
+        .ok_or_else(|| JsError::new("UFVK has no transparent component"))?;
+
+    let external_ivk = account_pubkey.derive_external_ivk()
+        .map_err(|e| JsError::new(&format!("failed to derive external IVK: {}", e)))?;
+
+    use zcash_transparent::keys::IncomingViewingKey;
+    let (t_addr, _idx) = external_ivk.default_address();
+
+    // extract pubkey hash
+    let pkh = match t_addr {
+        zcash_transparent::address::TransparentAddress::PublicKeyHash(hash) => hash,
+        _ => return Err(JsError::new("unexpected transparent address type")),
+    };
+
+    // encode as base58check P2PKH
+    let version = if mainnet { [0x1c, 0xb8] } else { [0x1d, 0x25] };
+    let mut payload = Vec::with_capacity(26);
+    payload.extend_from_slice(&version);
+    payload.extend_from_slice(&pkh);
+    use sha2::Digest;
+    let checksum = sha2::Sha256::digest(sha2::Sha256::digest(&payload));
+    payload.extend_from_slice(&checksum[..4]);
+    Ok(base58_encode(&payload))
+}
+
+/// Base58 encode (no checksum — caller provides full payload including checksum)
+fn base58_encode(data: &[u8]) -> String {
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+    // count leading zeros
+    let leading_zeros = data.iter().take_while(|&&b| b == 0).count();
+
+    // convert to base58
+    let mut digits: Vec<u8> = vec![0];
+    for &byte in data {
+        let mut carry = byte as u32;
+        for d in digits.iter_mut() {
+            carry += (*d as u32) * 256;
+            *d = (carry % 58) as u8;
+            carry /= 58;
+        }
+        while carry > 0 {
+            digits.push((carry % 58) as u8);
+            carry /= 58;
+        }
+    }
+
+    // build string: leading '1's + reversed digits
+    let mut result = String::with_capacity(leading_zeros + digits.len());
+    for _ in 0..leading_zeros {
+        result.push('1');
+    }
+    for &d in digits.iter().rev() {
+        result.push(ALPHABET[d as usize] as char);
+    }
+    result
+}
+
 // ============================================================================
 // Signed Spend Transaction (mnemonic wallets — no cold signing needed)
 // ============================================================================
@@ -2004,9 +2144,20 @@ pub fn build_signed_spend_transaction(
     // derive change address (internal scope, diversifier 0)
     let change_addr = fvk.to_ivk(Scope::Internal).address_at(0u64);
 
-    // --- parse recipient ---
-    let recipient_addr = parse_orchard_address(recipient, mainnet)
-        .map_err(|e| JsError::new(&format!("invalid recipient: {}", e)))?;
+    // --- parse recipient (orchard or transparent) ---
+    let is_transparent = recipient.starts_with("t1") || recipient.starts_with("tm");
+    let recipient_addr = if is_transparent {
+        None // transparent recipient — no orchard output for the recipient
+    } else {
+        Some(parse_orchard_address(recipient, mainnet)
+            .map_err(|e| JsError::new(&format!("invalid recipient: {}", e)))?)
+    };
+    let t_output_script = if is_transparent {
+        Some(decode_t_address_script(recipient, mainnet)
+            .map_err(|e| JsError::new(&format!("invalid transparent address: {}", e)))?)
+    } else {
+        None
+    };
 
     // --- parse anchor ---
     let anchor_bytes = hex_decode(anchor_hex)
@@ -2137,14 +2288,16 @@ pub fn build_signed_spend_transaction(
             .map_err(|e| JsError::new(&format!("add_spend for note {}: {:?}", i, e)))?;
     }
 
-    // add recipient output
-    let mut memo = [0u8; 512];
-    builder.add_output(None, recipient_addr, NoteValue::from_raw(amount), memo)
-        .map_err(|e| JsError::new(&format!("add_output (recipient): {:?}", e)))?;
+    // add recipient output (orchard only — transparent outputs are added to the tx directly)
+    if let Some(ref addr) = recipient_addr {
+        let memo = [0u8; 512];
+        builder.add_output(None, *addr, NoteValue::from_raw(amount), memo)
+            .map_err(|e| JsError::new(&format!("add_output (recipient): {:?}", e)))?;
+    }
 
-    // add change output if needed
+    // add change output if needed (for z→t, all orchard value minus amount+fee goes to change)
     if change > 0 {
-        memo = [0u8; 512];
+        let memo = [0u8; 512];
         builder.add_output(None, change_addr, NoteValue::from_raw(change), memo)
             .map_err(|e| JsError::new(&format!("add_output (change): {:?}", e)))?;
     }
@@ -2177,8 +2330,23 @@ pub fn build_signed_spend_transaction(
     };
     let header_digest = blake2b_256_personal(b"ZTxIdHeadersHash", &header_data);
 
-    // no transparent inputs/outputs
-    let transparent_digest = blake2b_256_personal(b"ZTxIdTranspaHash", &[]);
+    // transparent digest (includes outputs for z→t)
+    let transparent_digest = if let Some(ref script) = t_output_script {
+        let prevouts_digest = blake2b_256_personal(b"ZTxIdPrevoutHash", &[]);
+        let sequence_digest = blake2b_256_personal(b"ZTxIdSequencHash", &[]);
+        let mut outputs_data = Vec::new();
+        outputs_data.extend_from_slice(&amount.to_le_bytes());
+        outputs_data.extend_from_slice(&compact_size(script.len() as u64));
+        outputs_data.extend_from_slice(script);
+        let outputs_digest = blake2b_256_personal(b"ZTxIdOutputsHash", &outputs_data);
+        let mut d = Vec::new();
+        d.extend_from_slice(&prevouts_digest);
+        d.extend_from_slice(&sequence_digest);
+        d.extend_from_slice(&outputs_digest);
+        blake2b_256_personal(b"ZTxIdTranspaHash", &d)
+    } else {
+        blake2b_256_personal(b"ZTxIdTranspaHash", &[])
+    };
     let sapling_digest = blake2b_256_personal(b"ZTxIdSaplingHash", &[]);
 
     let orchard_digest = compute_orchard_digest(&proven_bundle)?;
@@ -2213,9 +2381,17 @@ pub fn build_signed_spend_transaction(
     tx_bytes.extend_from_slice(&0u32.to_le_bytes()); // nLockTime
     tx_bytes.extend_from_slice(&expiry_height.to_le_bytes());
 
-    // transparent (none)
+    // transparent inputs (none)
     tx_bytes.extend_from_slice(&compact_size(0)); // vin
-    tx_bytes.extend_from_slice(&compact_size(0)); // vout
+    // transparent outputs
+    if let Some(ref script) = t_output_script {
+        tx_bytes.extend_from_slice(&compact_size(1)); // 1 vout
+        tx_bytes.extend_from_slice(&amount.to_le_bytes());
+        tx_bytes.extend_from_slice(&compact_size(script.len() as u64));
+        tx_bytes.extend_from_slice(script);
+    } else {
+        tx_bytes.extend_from_slice(&compact_size(0)); // 0 vout
+    }
 
     // sapling (none)
     tx_bytes.extend_from_slice(&compact_size(0)); // spends
@@ -2891,6 +3067,56 @@ fn compact_size(n: u64) -> Vec<u8> {
         v.extend_from_slice(&n.to_le_bytes());
         v
     }
+}
+
+/// Base58check decode — returns version+payload (checksum verified)
+fn base58_decode(s: &str) -> Result<Vec<u8>, String> {
+    const ALPHABET: &[u8] = b"123456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+
+    let mut num: Vec<u8> = vec![0];
+    for &c in s.as_bytes() {
+        let val = ALPHABET.iter().position(|&a| a == c)
+            .ok_or_else(|| "invalid base58 character".to_string())? as u32;
+        let mut carry = val;
+        for byte in num.iter_mut().rev() {
+            carry += (*byte as u32) * 58;
+            *byte = (carry & 0xff) as u8;
+            carry >>= 8;
+        }
+        while carry > 0 {
+            num.insert(0, (carry & 0xff) as u8);
+            carry >>= 8;
+        }
+    }
+
+    let leading = s.bytes().take_while(|&b| b == b'1').count();
+    let start = num.iter().position(|&b| b != 0).unwrap_or(num.len());
+    let mut result = vec![0u8; leading];
+    result.extend_from_slice(&num[start..]);
+
+    if result.len() < 4 {
+        return Err("base58check too short".into());
+    }
+    let (payload, checksum) = result.split_at(result.len() - 4);
+    use sha2::Digest;
+    let hash = sha2::Sha256::digest(sha2::Sha256::digest(payload));
+    if &hash[..4] != checksum {
+        return Err("base58check checksum mismatch".into());
+    }
+    Ok(payload.to_vec())
+}
+
+/// Decode a transparent t-address to a P2PKH scriptPubKey
+fn decode_t_address_script(addr: &str, mainnet: bool) -> Result<Vec<u8>, String> {
+    let decoded = base58_decode(addr)
+        .map_err(|e| format!("invalid base58 in t-address: {} ({})", addr, e))?;
+    let expected = if mainnet { [0x1c, 0xb8] } else { [0x1d, 0x25] };
+    if decoded.len() != 22 || decoded[..2] != expected {
+        return Err(format!("invalid transparent address: {}", addr));
+    }
+    let mut pkh = [0u8; 20];
+    pkh.copy_from_slice(&decoded[2..]);
+    Ok(make_p2pkh_script(&pkh))
 }
 
 /// A signed transparent input for serialization
