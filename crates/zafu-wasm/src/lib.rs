@@ -25,6 +25,31 @@ use rayon::prelude::*;
 #[cfg(feature = "parallel")]
 pub use wasm_bindgen_rayon::init_thread_pool;
 
+// JS console.log binding for WASM debug output
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_namespace = console)]
+    fn log(s: &str);
+}
+
+/// Cached Halo 2 proving key — building this is very expensive (~seconds).
+/// Cache it in thread-local storage so it's only built once per WASM instance.
+thread_local! {
+    static PROVING_KEY: std::cell::RefCell<Option<orchard::circuit::ProvingKey>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+fn with_proving_key<R>(f: impl FnOnce(&orchard::circuit::ProvingKey) -> R) -> R {
+    PROVING_KEY.with(|cell| {
+        let mut opt = cell.borrow_mut();
+        if opt.is_none() {
+            log("[zafu-wasm] building Halo 2 proving key (one-time)");
+            *opt = Some(orchard::circuit::ProvingKey::build());
+        }
+        f(opt.as_ref().unwrap())
+    })
+}
+
 /// Initialize panic hook for better error messages
 #[wasm_bindgen(start)]
 pub fn init() {
@@ -818,7 +843,7 @@ fn encode_orchard_address(addr: &orchard::Address, mainnet: bool) -> String {
 // PCZT (Partially Constructed Zcash Transaction) for Cold Signing
 // ============================================================================
 
-/// A spendable note with merkle path for transaction building
+/// A spendable note for transaction building
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SpendableNoteInfo {
     /// The note's nullifier (hex)
@@ -827,10 +852,11 @@ pub struct SpendableNoteInfo {
     pub cmx: String,
     /// The note's value in zatoshis
     pub value: u64,
-    /// The merkle path (hex-encoded, implementation-specific)
-    pub merkle_path: String,
     /// Position in the commitment tree
     pub position: u64,
+    /// The merkle path (hex-encoded) — optional, paths come via separate param
+    #[serde(default)]
+    pub merkle_path: String,
 }
 
 /// Transaction request to build
@@ -1488,8 +1514,7 @@ mod tests {
         assert!(unauthorized.actions().len() >= 2, "expected >=2 actions (padding)");
 
         // prove (expensive but should work natively)
-        let pk = orchard::circuit::ProvingKey::build();
-        let proven = unauthorized.create_proof(&pk, &mut rng)
+        let proven = with_proving_key(|pk| unauthorized.create_proof(pk, &mut rng))
             .expect("proving should succeed");
 
         println!("proof generated");
@@ -1510,206 +1535,387 @@ mod tests {
 }
 
 // ============================================================================
-// Transaction Building for Cold Signing
+// Transaction Building for Cold Signing (Real v5 Transaction Bytes)
 // ============================================================================
 
-/// Build an unsigned transaction and return the data needed for cold signing
-/// This is called by the online watch-only wallet.
+/// Build an unsigned transaction and return the data needed for cold signing.
+/// Uses the PCZT (Partially Constructed Zcash Transaction) flow from the orchard
+/// crate to produce real v5 transaction bytes with Halo 2 proofs.
 ///
 /// Returns JSON with:
-/// - sighash: the transaction sighash (hex)
-/// - alphas: array of alpha randomizers for each orchard action (hex)
-/// - unsigned_tx: the serialized unsigned transaction (hex)
+/// - sighash: the transaction sighash (hex, 32 bytes)
+/// - alphas: array of alpha randomizers for real spend actions only (hex, 32 bytes each)
+/// - unsigned_tx: the serialized v5 transaction with dummy spend auth sigs (hex)
+/// - spend_indices: array of action indices that need external signatures
 /// - summary: human-readable transaction summary
 #[wasm_bindgen]
 pub fn build_unsigned_transaction(
+    ufvk_str: &str,
     notes_json: JsValue,
     recipient: &str,
     amount: u64,
     fee: u64,
     anchor_hex: &str,
     merkle_paths_json: JsValue,
-    account_index: u32,
-    _mainnet: bool,
+    _account_index: u32,
+    mainnet: bool,
 ) -> Result<JsValue, JsError> {
-    use pasta_curves::pallas;
     use group::ff::PrimeField;
+    use orchard::builder::{Builder, BundleType};
+    use orchard::bundle::Flags;
+    use orchard::note::{Rho, RandomSeed};
+    use orchard::tree::{Anchor, MerkleHashOrchard, MerklePath as OrchardMerklePath};
+    use orchard::value::NoteValue;
+    use rand::rngs::OsRng;
+    use zcash_keys::keys::UnifiedFullViewingKey;
+    use zcash_protocol::consensus::{MainNetwork, TestNetwork};
+    use zcash_protocol::value::ZatBalance;
 
-    // Parse inputs
-    let notes: Vec<SpendableNoteInfo> = serde_wasm_bindgen::from_value(notes_json)
-        .map_err(|e| JsError::new(&format!("Invalid notes: {}", e)))?;
+    // --- derive FVK from UFVK ---
+    let ufvk = if mainnet {
+        UnifiedFullViewingKey::decode(&MainNetwork, ufvk_str)
+    } else {
+        UnifiedFullViewingKey::decode(&TestNetwork, ufvk_str)
+    }.map_err(|e| JsError::new(&format!("invalid UFVK: {}", e)))?;
 
+    let orchard_fvk_old = ufvk.orchard()
+        .ok_or_else(|| JsError::new("UFVK has no orchard component"))?;
+
+    // Reconstruct as our orchard 0.12 FVK via raw bytes
+    let fvk = {
+        let raw = orchard_fvk_old.to_bytes();
+        orchard::keys::FullViewingKey::from_bytes(&raw)
+            .ok_or_else(|| JsError::new("failed to reconstruct orchard FVK from UFVK bytes"))?
+    };
+
+    // derive change address (internal scope, diversifier 0)
+    let change_addr = fvk.to_ivk(Scope::Internal).address_at(0u64);
+
+    // --- parse recipient (orchard or transparent) ---
+    let is_transparent = recipient.starts_with("t1") || recipient.starts_with("tm");
+    let recipient_addr = if is_transparent {
+        None
+    } else {
+        Some(parse_orchard_address(recipient, mainnet)
+            .map_err(|e| JsError::new(&format!("invalid recipient: {}", e)))?)
+    };
+    let t_output_script = if is_transparent {
+        Some(decode_t_address_script(recipient, mainnet)
+            .map_err(|e| JsError::new(&format!("invalid transparent address: {}", e)))?)
+    } else {
+        None
+    };
+
+    // --- parse anchor ---
+    let anchor_bytes = hex_decode(anchor_hex)
+        .ok_or_else(|| JsError::new("invalid anchor hex"))?;
+    if anchor_bytes.len() != 32 {
+        return Err(JsError::new("anchor must be 32 bytes"));
+    }
+    let mut anchor_arr = [0u8; 32];
+    anchor_arr.copy_from_slice(&anchor_bytes);
+    let anchor = Option::from(Anchor::from_bytes(anchor_arr))
+        .ok_or_else(|| JsError::new("invalid anchor"))?;
+
+    // --- parse notes and merkle paths ---
+    let notes: Vec<SpendableNote> = serde_wasm_bindgen::from_value(notes_json)
+        .map_err(|e| JsError::new(&format!("invalid notes: {}", e)))?;
     let merkle_paths: Vec<MerklePathInfo> = serde_wasm_bindgen::from_value(merkle_paths_json)
-        .map_err(|e| JsError::new(&format!("Invalid merkle paths: {}", e)))?;
+        .map_err(|e| JsError::new(&format!("invalid merkle paths: {}", e)))?;
 
     if notes.len() != merkle_paths.len() {
-        return Err(JsError::new("Notes and merkle paths count mismatch"));
+        return Err(JsError::new("notes and merkle paths count mismatch"));
     }
 
-    // Parse anchor
-    let anchor_bytes = hex_decode(anchor_hex)
-        .ok_or_else(|| JsError::new("Invalid anchor hex"))?;
-    if anchor_bytes.len() != 32 {
-        return Err(JsError::new("Anchor must be 32 bytes"));
-    }
-
-    // Calculate totals
+    // --- calculate totals ---
     let total_input: u64 = notes.iter().map(|n| n.value).sum();
     if total_input < amount + fee {
         return Err(JsError::new(&format!(
-            "Insufficient funds: {} < {} + {}",
-            total_input, amount, fee
+            "insufficient funds: {} < {} + {}", total_input, amount, fee
         )));
     }
     let change = total_input - amount - fee;
+    let num_spends = notes.len();
 
-    // For now, generate mock alphas and sighash
-    // In a full implementation, we would use the Orchard builder
-    // which requires access to proving keys (too heavy for WASM)
-    //
-    // Instead, we use a simplified approach:
-    // 1. Generate deterministic alphas from note data
-    // 2. Compute sighash from transaction structure
-    // 3. Cold wallet signs sighash with randomized key
 
-    let mut alphas = Vec::new();
-    let mut hasher = Blake2b512::new();
+    // --- build orchard bundle using PCZT path ---
+    let bundle_type = BundleType::Transactional {
+        flags: Flags::ENABLED,
+        bundle_required: true,
+    };
+    let mut builder = Builder::new(bundle_type, anchor);
 
-    // Add domain separator
-    hasher.update(b"ZafuOrchardAlpha");
-    hasher.update(&account_index.to_le_bytes());
+    // add spends (same note reconstruction as build_signed_spend_transaction)
+    for (i, note_info) in notes.iter().enumerate() {
+        let rho_bytes = hex_decode(&note_info.rho_hex)
+            .ok_or_else(|| JsError::new(&format!("invalid rho hex for note {}", i)))?;
+        if rho_bytes.len() != 32 {
+            return Err(JsError::new(&format!("rho must be 32 bytes for note {}", i)));
+        }
+        let mut rho_arr = [0u8; 32];
+        rho_arr.copy_from_slice(&rho_bytes);
+        let rho = Option::from(Rho::from_bytes(&rho_arr))
+            .ok_or_else(|| JsError::new(&format!("invalid rho for note {}", i)))?;
 
-    // Generate one alpha per spend action
-    for (i, note) in notes.iter().enumerate() {
-        let note_nullifier = hex_decode(&note.nullifier)
-            .ok_or_else(|| JsError::new("Invalid nullifier hex"))?;
+        let rseed_bytes = hex_decode(&note_info.rseed_hex)
+            .ok_or_else(|| JsError::new(&format!("invalid rseed hex for note {}", i)))?;
+        if rseed_bytes.len() != 32 {
+            return Err(JsError::new(&format!("rseed must be 32 bytes for note {}", i)));
+        }
+        let mut rseed_arr = [0u8; 32];
+        rseed_arr.copy_from_slice(&rseed_bytes);
+        let rseed = Option::from(RandomSeed::from_bytes(rseed_arr, &rho))
+            .ok_or_else(|| JsError::new(&format!("invalid rseed for note {}", i)))?;
 
-        let mut alpha_hasher = Blake2b512::new();
-        alpha_hasher.update(b"ZafuAlpha");
-        alpha_hasher.update(&(i as u32).to_le_bytes());
-        alpha_hasher.update(&note_nullifier);
-        // Add randomness from JS crypto
-        let mut random_bytes = [0u8; 32];
-        getrandom::getrandom(&mut random_bytes)
-            .map_err(|e| JsError::new(&format!("RNG failed: {}", e)))?;
-        alpha_hasher.update(&random_bytes);
+        let note_value = NoteValue::from_raw(note_info.value);
 
-        let alpha_hash = alpha_hasher.finalize();
-        let mut alpha = [0u8; 32];
-        alpha.copy_from_slice(&alpha_hash[..32]);
+        let note: orchard::Note = if !note_info.recipient_hex.is_empty() {
+            let addr_bytes = hex_decode(&note_info.recipient_hex)
+                .ok_or_else(|| JsError::new(&format!("invalid recipient hex for note {}", i)))?;
+            let addr_arr: [u8; 43] = addr_bytes.try_into()
+                .map_err(|_| JsError::new(&format!("recipient must be 43 bytes for note {}", i)))?;
+            let addr = Option::from(orchard::Address::from_raw_address_bytes(&addr_arr))
+                .ok_or_else(|| JsError::new(&format!("invalid orchard address for note {}", i)))?;
+            Option::from(orchard::Note::from_parts(addr, note_value, rho, rseed))
+                .ok_or_else(|| JsError::new(&format!("failed to reconstruct note {} from stored address", i)))?
+        } else {
+            let ext_addr = fvk.to_ivk(Scope::External).address_at(0u64);
+            let int_addr = fvk.to_ivk(Scope::Internal).address_at(0u64);
+            Option::from(orchard::Note::from_parts(ext_addr, note_value, rho, rseed))
+                .or_else(|| Option::from(orchard::Note::from_parts(int_addr, note_value, rho, rseed)))
+                .ok_or_else(|| JsError::new(&format!("failed to reconstruct note {} — rseed/rho/value mismatch", i)))?
+        };
 
-        // Reduce modulo the Pallas scalar field order
-        // This ensures alpha is a valid scalar
-        let scalar = pallas::Scalar::from_repr(alpha);
-        if bool::from(scalar.is_some()) {
-            alpha = scalar.unwrap().to_repr();
+        // verify cmx
+        let expected_cmx = hex_decode(&note_info.cmx)
+            .ok_or_else(|| JsError::new(&format!("invalid cmx hex for note {}", i)))?;
+        let reconstructed_cmx = orchard::note::ExtractedNoteCommitment::from(note.commitment());
+        if hex_encode(&reconstructed_cmx.to_bytes()) != hex_encode(&expected_cmx) {
+            return Err(JsError::new(&format!(
+                "cmx mismatch for note {}: reconstructed={} expected={}",
+                i, hex_encode(&reconstructed_cmx.to_bytes()), hex_encode(&expected_cmx)
+            )));
         }
 
-        alphas.push(hex_encode(&alpha));
-        hasher.update(&alpha);
-    }
-
-    // Also add one alpha for the output action (recipient)
-    {
-        let mut alpha_hasher = Blake2b512::new();
-        alpha_hasher.update(b"ZafuAlphaOutput");
-        alpha_hasher.update(&amount.to_le_bytes());
-        alpha_hasher.update(recipient.as_bytes());
-        let mut random_bytes = [0u8; 32];
-        getrandom::getrandom(&mut random_bytes)
-            .map_err(|e| JsError::new(&format!("RNG failed: {}", e)))?;
-        alpha_hasher.update(&random_bytes);
-
-        let alpha_hash = alpha_hasher.finalize();
-        let mut alpha = [0u8; 32];
-        alpha.copy_from_slice(&alpha_hash[..32]);
-
-        let scalar = pallas::Scalar::from_repr(alpha);
-        if bool::from(scalar.is_some()) {
-            alpha = scalar.unwrap().to_repr();
+        // parse merkle path
+        let mp = &merkle_paths[i];
+        if mp.path.len() != 32 {
+            return Err(JsError::new(&format!(
+                "merkle path must have 32 elements, got {} for note {}", mp.path.len(), i
+            )));
         }
 
-        alphas.push(hex_encode(&alpha));
-        hasher.update(&alpha);
+        let mut auth_path = [[0u8; 32]; 32];
+        for (j, hash_hex) in mp.path.iter().enumerate() {
+            let hash_bytes = hex_decode(hash_hex)
+                .ok_or_else(|| JsError::new(&format!("invalid merkle path hash at {}/{}", i, j)))?;
+            if hash_bytes.len() != 32 {
+                return Err(JsError::new(&format!("merkle path hash must be 32 bytes at {}/{}", i, j)));
+            }
+            auth_path[j].copy_from_slice(&hash_bytes);
+        }
+
+        let merkle_hashes: Vec<MerkleHashOrchard> = auth_path.iter()
+            .filter_map(|bytes| Option::from(MerkleHashOrchard::from_bytes(bytes)))
+            .collect();
+        if merkle_hashes.len() != 32 {
+            return Err(JsError::new(&format!("invalid merkle path hashes for note {}", i)));
+        }
+
+        let merkle_path = OrchardMerklePath::from_parts(
+            u32::try_from(mp.position).map_err(|_| JsError::new(&format!("tree position {} exceeds u32 max", mp.position)))?.into(),
+            merkle_hashes.try_into().map_err(|_| JsError::new("merkle path conversion"))?,
+        );
+
+        builder.add_spend(fvk.clone(), note, merkle_path)
+            .map_err(|e| JsError::new(&format!("add_spend for note {}: {:?}", i, e)))?;
     }
 
-    // Add change action if needed
+    // add recipient output (orchard only — transparent outputs are added to the tx directly)
+    if let Some(ref addr) = recipient_addr {
+        let memo = [0u8; 512];
+        builder.add_output(None, *addr, NoteValue::from_raw(amount), memo)
+            .map_err(|e| JsError::new(&format!("add_output (recipient): {:?}", e)))?;
+    }
+
+    // add change output if needed (for z→t, all orchard value minus amount+fee goes to change)
     if change > 0 {
-        let mut alpha_hasher = Blake2b512::new();
-        alpha_hasher.update(b"ZafuAlphaChange");
-        alpha_hasher.update(&change.to_le_bytes());
-        let mut random_bytes = [0u8; 32];
-        getrandom::getrandom(&mut random_bytes)
-            .map_err(|e| JsError::new(&format!("RNG failed: {}", e)))?;
-        alpha_hasher.update(&random_bytes);
-
-        let alpha_hash = alpha_hasher.finalize();
-        let mut alpha = [0u8; 32];
-        alpha.copy_from_slice(&alpha_hash[..32]);
-
-        let scalar = pallas::Scalar::from_repr(alpha);
-        if bool::from(scalar.is_some()) {
-            alpha = scalar.unwrap().to_repr();
-        }
-
-        alphas.push(hex_encode(&alpha));
-        hasher.update(&alpha);
+        let memo = [0u8; 512];
+        builder.add_output(None, change_addr, NoteValue::from_raw(change), memo)
+            .map_err(|e| JsError::new(&format!("add_output (change): {:?}", e)))?;
     }
 
-    // Compute sighash following ZIP-244 structure
-    // https://zips.z.cash/zip-0244
-    //
-    // ZIP-244 defines: sighash = BLAKE2b-256("ZTxIdSigHash", [
-    //   header_digest, transparent_digest, sapling_digest, orchard_digest
-    // ])
-    //
-    // For Orchard-only transactions (our case):
-    // - transparent_digest = empty hash
-    // - sapling_digest = empty hash
-    // - orchard_digest = hash of all orchard actions
+    // --- build PCZT bundle (gives us access to alphas) ---
+    let mut rng = OsRng;
+    let (mut pczt_bundle, _meta) = builder
+        .build_for_pczt(&mut rng)
+        .map_err(|e| JsError::new(&format!("pczt bundle build: {:?}", e)))?;
 
-    // Header digest (version, branch, locktime, expiry)
-    let mut header_hasher = Blake2b512::new();
-    header_hasher.update(b"ZTxIdHeadersHash");
-    header_hasher.update(&5u32.to_le_bytes()); // tx version 5
-    header_hasher.update(&0x26A7270Au32.to_le_bytes()); // NU5 version group
-    header_hasher.update(&0x4DEC4DF0u32.to_le_bytes()); // NU6.1 branch id (mainnet)
-    header_hasher.update(&0u32.to_le_bytes()); // lock_time
-    header_hasher.update(&0u32.to_le_bytes()); // expiry_height (0 = no expiry)
-    let header_digest = header_hasher.finalize();
 
-    // Orchard digest (actions commitment)
-    let mut orchard_hasher = Blake2b512::new();
-    orchard_hasher.update(b"ZTxIdOrchardHash");
-    orchard_hasher.update(&anchor_bytes);
-    orchard_hasher.update(&(notes.len() as u32).to_le_bytes());
-    for note in &notes {
-        if let Some(nf) = hex_decode(&note.nullifier) {
-            orchard_hasher.update(&nf);
+    // --- create proof (Halo 2 — expensive) ---
+    with_proving_key(|pk| pczt_bundle.create_proof(pk, &mut rng))
+        .map_err(|e| JsError::new(&format!("create_proof: {}", e)))?;
+
+
+    // --- extract effects bundle for sighash computation ---
+    let effects_bundle: orchard::Bundle<orchard::bundle::EffectsOnly, ZatBalance> =
+        pczt_bundle.extract_effects()
+            .map_err(|e| JsError::new(&format!("extract_effects: {}", e)))?
+            .ok_or_else(|| JsError::new("extract_effects produced no bundle"))?;
+
+    // --- compute ZIP-244 sighash ---
+    let branch_id: u32 = 0x4DEC4DF0; // NU6.1
+    let expiry_height: u32 = 0;
+
+    let header_data = {
+        let mut d = Vec::new();
+        d.extend_from_slice(&(5u32 | (1u32 << 31)).to_le_bytes());
+        d.extend_from_slice(&0x26A7270Au32.to_le_bytes());
+        d.extend_from_slice(&branch_id.to_le_bytes());
+        d.extend_from_slice(&0u32.to_le_bytes()); // nLockTime
+        d.extend_from_slice(&expiry_height.to_le_bytes());
+        d
+    };
+    let header_digest = blake2b_256_personal(b"ZTxIdHeadersHash", &header_data);
+
+    // transparent digest (includes outputs for z→t)
+    let transparent_digest = if let Some(ref script) = t_output_script {
+        let prevouts_digest = blake2b_256_personal(b"ZTxIdPrevoutHash", &[]);
+        let sequence_digest = blake2b_256_personal(b"ZTxIdSequencHash", &[]);
+        let mut outputs_data = Vec::new();
+        outputs_data.extend_from_slice(&amount.to_le_bytes());
+        outputs_data.extend_from_slice(&compact_size(script.len() as u64));
+        outputs_data.extend_from_slice(script);
+        let outputs_digest = blake2b_256_personal(b"ZTxIdOutputsHash", &outputs_data);
+        let mut d = Vec::new();
+        d.extend_from_slice(&prevouts_digest);
+        d.extend_from_slice(&sequence_digest);
+        d.extend_from_slice(&outputs_digest);
+        blake2b_256_personal(b"ZTxIdTranspaHash", &d)
+    } else {
+        blake2b_256_personal(b"ZTxIdTranspaHash", &[])
+    };
+    let sapling_digest = blake2b_256_personal(b"ZTxIdSaplingHash", &[]);
+    let orchard_digest = compute_orchard_digest(&effects_bundle)?;
+
+    let sighash_personal = {
+        let mut p = [0u8; 16];
+        p[..12].copy_from_slice(b"ZcashTxHash_");
+        p[12..16].copy_from_slice(&branch_id.to_le_bytes());
+        p
+    };
+
+    let mut sighash_input = Vec::new();
+    sighash_input.extend_from_slice(&header_digest);
+    sighash_input.extend_from_slice(&transparent_digest);
+    sighash_input.extend_from_slice(&sapling_digest);
+    sighash_input.extend_from_slice(&orchard_digest);
+
+    let sighash = blake2b_256_personal(&sighash_personal, &sighash_input);
+
+
+    // --- finalize IO (signs dummies, computes bsk) ---
+    pczt_bundle.finalize_io(sighash, &mut rng)
+        .map_err(|e| JsError::new(&format!("finalize_io: {}", e)))?;
+
+
+    // --- extract alphas for real (non-dummy) spend actions ---
+    // After finalize_io, dummy spends have spend_auth_sig set, real spends do not.
+    // We return alphas only for actions that need external signing.
+    let mut alphas: Vec<String> = Vec::new();
+    let mut spend_indices: Vec<u32> = Vec::new();
+
+    for (i, action) in pczt_bundle.actions().iter().enumerate() {
+        if action.spend().spend_auth_sig().is_none() {
+            // This is a real spend that needs external signing
+            let alpha = action.spend().alpha()
+                .ok_or_else(|| JsError::new(&format!("missing alpha for action {}", i)))?;
+            alphas.push(hex_encode(&alpha.to_repr()));
+            spend_indices.push(i as u32);
         }
-        orchard_hasher.update(&note.value.to_le_bytes());
     }
-    orchard_hasher.update(&amount.to_le_bytes());
-    orchard_hasher.update(&fee.to_le_bytes());
-    orchard_hasher.update(recipient.as_bytes());
-    // Include alphas in digest for binding
-    for alpha_hex in &alphas {
-        if let Some(alpha_bytes) = hex_decode(alpha_hex) {
-            orchard_hasher.update(&alpha_bytes);
+
+
+    // --- serialize v5 transaction from PCZT bundle ---
+    // Get proof and bsk from the PCZT bundle
+    let proof = pczt_bundle.zkproof()
+        .as_ref()
+        .ok_or_else(|| JsError::new("missing proof after create_proof"))?;
+    let bsk = pczt_bundle.bsk()
+        .as_ref()
+        .ok_or_else(|| JsError::new("missing bsk after finalize_io"))?;
+
+    // Compute binding signature
+    let binding_sig = bsk.sign(&mut rng, &sighash);
+
+    let mut tx_bytes = Vec::new();
+
+    // v5 header
+    tx_bytes.extend_from_slice(&(5u32 | (1u32 << 31)).to_le_bytes());
+    tx_bytes.extend_from_slice(&0x26A7270Au32.to_le_bytes());
+    tx_bytes.extend_from_slice(&branch_id.to_le_bytes());
+    tx_bytes.extend_from_slice(&0u32.to_le_bytes()); // nLockTime
+    tx_bytes.extend_from_slice(&expiry_height.to_le_bytes());
+
+    // transparent inputs (none)
+    tx_bytes.extend_from_slice(&compact_size(0)); // vin
+    // transparent outputs
+    if let Some(ref script) = t_output_script {
+        tx_bytes.extend_from_slice(&compact_size(1)); // 1 vout
+        tx_bytes.extend_from_slice(&amount.to_le_bytes());
+        tx_bytes.extend_from_slice(&compact_size(script.len() as u64));
+        tx_bytes.extend_from_slice(script);
+    } else {
+        tx_bytes.extend_from_slice(&compact_size(0)); // 0 vout
+    }
+
+    // sapling (empty)
+    tx_bytes.extend_from_slice(&compact_size(0)); // spends
+    tx_bytes.extend_from_slice(&compact_size(0)); // outputs
+
+    // --- orchard bundle ---
+    let actions = pczt_bundle.actions();
+    let n_actions = actions.len();
+    tx_bytes.extend_from_slice(&compact_size(n_actions as u64));
+
+    // each action (without auth sigs)
+    for action in actions.iter() {
+        tx_bytes.extend_from_slice(&action.cv_net().to_bytes());           // 32
+        tx_bytes.extend_from_slice(&action.spend().nullifier().to_bytes()); // 32
+        tx_bytes.extend_from_slice(&<[u8; 32]>::from(action.spend().rk())); // 32
+        tx_bytes.extend_from_slice(&action.output().cmx().to_bytes());      // 32
+        tx_bytes.extend_from_slice(&action.output().encrypted_note().epk_bytes); // 32
+        tx_bytes.extend_from_slice(&action.output().encrypted_note().enc_ciphertext); // 580
+        tx_bytes.extend_from_slice(&action.output().encrypted_note().out_ciphertext); // 80
+    }
+
+    // flags byte
+    tx_bytes.push(pczt_bundle.flags().to_byte());
+
+    // valueBalanceOrchard (i64 LE) — from the effects bundle
+    tx_bytes.extend_from_slice(&effects_bundle.value_balance().to_i64_le_bytes());
+
+    // anchor
+    tx_bytes.extend_from_slice(&effects_bundle.anchor().to_bytes());
+
+    // proof bytes (compactSize-prefixed)
+    let proof_bytes = proof.as_ref();
+    tx_bytes.extend_from_slice(&compact_size(proof_bytes.len() as u64));
+    tx_bytes.extend_from_slice(proof_bytes);
+
+    // spend auth signatures: real sigs for dummies, zero bytes for real spends
+    for action in actions.iter() {
+        if let Some(sig) = action.spend().spend_auth_sig() {
+            tx_bytes.extend_from_slice(&<[u8; 64]>::from(sig));
+        } else {
+            // Dummy zero signature — will be patched by complete_transaction
+            tx_bytes.extend_from_slice(&[0u8; 64]);
         }
     }
-    let orchard_digest = orchard_hasher.finalize();
 
-    // Final sighash
-    let mut sighash_hasher = Blake2b512::new();
-    sighash_hasher.update(b"ZTxIdSigHash");
-    sighash_hasher.update(&header_digest[..32]);
-    sighash_hasher.update(&[0u8; 32]); // transparent_digest (empty)
-    sighash_hasher.update(&[0u8; 32]); // sapling_digest (empty)
-    sighash_hasher.update(&orchard_digest[..32]);
-    let sighash_full = sighash_hasher.finalize();
-    let mut sighash = [0u8; 32];
-    sighash.copy_from_slice(&sighash_full[..32]);
+    // binding signature (64 bytes)
+    tx_bytes.extend_from_slice(&<[u8; 64]>::from(&binding_sig));
+
 
     // Build summary
     let amount_zec = amount as f64 / 100_000_000.0;
@@ -1719,61 +1925,28 @@ pub fn build_unsigned_transaction(
         amount_zec,
         &recipient[..recipient.len().min(20)],
         fee_zec,
-        notes.len()
+        num_spends
     );
-
-    // Build unsigned transaction data
-    // This is a simplified structure - real implementation would use full tx format
-    let unsigned_tx = UnsignedTransaction {
-        version: 5, // Orchard-supporting version
-        anchor: anchor_hex.to_string(),
-        spends: notes.iter().map(|n| SpendInfo {
-            nullifier: n.nullifier.clone(),
-            cmx: n.cmx.clone(),
-            value: n.value,
-            position: n.position,
-        }).collect(),
-        outputs: {
-            let mut outputs = vec![OutputInfo {
-                recipient: recipient.to_string(),
-                value: amount,
-                memo: None,
-            }];
-            if change > 0 {
-                outputs.push(OutputInfo {
-                    recipient: "change".to_string(),
-                    value: change,
-                    memo: None,
-                });
-            }
-            outputs
-        },
-        fee,
-        alphas: alphas.clone(),
-    };
-
-    let unsigned_tx_json = serde_json::to_string(&unsigned_tx)
-        .map_err(|e| JsError::new(&format!("Serialization failed: {}", e)))?;
 
     #[derive(Serialize)]
     struct BuildResult {
         sighash: String,
         alphas: Vec<String>,
         unsigned_tx: String,
+        spend_indices: Vec<u32>,
         summary: String,
-        account_index: u32,
     }
 
     let result = BuildResult {
         sighash: hex_encode(&sighash),
         alphas,
-        unsigned_tx: unsigned_tx_json,
+        unsigned_tx: hex_encode(&tx_bytes),
+        spend_indices,
         summary,
-        account_index,
     };
 
     serde_wasm_bindgen::to_value(&result)
-        .map_err(|e| JsError::new(&format!("Serialization failed: {}", e)))
+        .map_err(|e| JsError::new(&format!("serialization failed: {}", e)))
 }
 
 /// Merkle path info for a spendable note
@@ -1785,117 +1958,127 @@ pub struct MerklePathInfo {
     pub position: u64,
 }
 
-/// Spend info for unsigned transaction
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct SpendInfo {
-    nullifier: String,
-    cmx: String,
-    value: u64,
-    position: u64,
-}
-
-/// Output info for unsigned transaction
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct OutputInfo {
-    recipient: String,
-    value: u64,
-    memo: Option<String>,
-}
-
-/// Unsigned transaction structure
-#[derive(Debug, Clone, Serialize, Deserialize)]
-struct UnsignedTransaction {
-    version: u32,
-    anchor: String,
-    spends: Vec<SpendInfo>,
-    outputs: Vec<OutputInfo>,
-    fee: u64,
-    alphas: Vec<String>,
-}
-
-/// Complete a transaction by applying signatures from cold wallet
-/// Returns the serialized signed transaction ready for broadcast
+/// Complete a transaction by patching in spend auth signatures from cold wallet.
+///
+/// Takes the unsigned v5 tx hex (with zero spend auth sigs for real spends) and an
+/// array of hex-encoded 64-byte RedPallas signatures. Patches them into the correct
+/// offsets in the orchard bundle.
+///
+/// # Arguments
+/// * `unsigned_tx_hex` - hex-encoded v5 transaction bytes from build_unsigned_transaction
+/// * `signatures_json` - JSON array of hex-encoded 64-byte signatures, one per spend_index
+/// * `spend_indices_json` - JSON array of action indices that need signatures (from build result)
+///
+/// # Returns
+/// Hex-encoded signed v5 transaction bytes ready for broadcast
 #[wasm_bindgen]
 pub fn complete_transaction(
-    unsigned_tx_json: &str,
+    unsigned_tx_hex: &str,
     signatures_json: JsValue,
+    spend_indices_json: JsValue,
 ) -> Result<String, JsError> {
-    // Parse unsigned transaction
-    let unsigned_tx: UnsignedTransaction = serde_json::from_str(unsigned_tx_json)
-        .map_err(|e| JsError::new(&format!("Invalid unsigned tx: {}", e)))?;
-
-    // Parse signatures
     let signatures: Vec<String> = serde_wasm_bindgen::from_value(signatures_json)
-        .map_err(|e| JsError::new(&format!("Invalid signatures: {}", e)))?;
+        .map_err(|e| JsError::new(&format!("invalid signatures: {}", e)))?;
 
-    // Verify signature count matches action count
-    let expected_sigs = unsigned_tx.spends.len() + unsigned_tx.outputs.len();
-    if signatures.len() != expected_sigs {
+    let spend_indices: Vec<u32> = serde_wasm_bindgen::from_value(spend_indices_json)
+        .map_err(|e| JsError::new(&format!("invalid spend_indices: {}", e)))?;
+
+    if signatures.len() != spend_indices.len() {
         return Err(JsError::new(&format!(
-            "Signature count mismatch: got {}, expected {}",
-            signatures.len(),
-            expected_sigs
+            "signature count {} != spend_indices count {}",
+            signatures.len(), spend_indices.len()
         )));
     }
 
-    // Build signed transaction
-    // In a full implementation, this would create proper Zcash v5 transaction bytes
-    // For now, we create a structure that zidecar can parse
-    #[derive(Serialize)]
-    struct SignedTransaction {
-        version: u32,
-        anchor: String,
-        actions: Vec<SignedAction>,
-        fee: u64,
+    let mut tx_bytes = hex_decode(unsigned_tx_hex)
+        .ok_or_else(|| JsError::new("invalid unsigned tx hex"))?;
+
+
+    // Parse the v5 transaction to find the orchard bundle offsets.
+    // v5 layout:
+    //   header: 20 bytes (version(4) + versionGroupId(4) + branchId(4) + nLockTime(4) + expiryHeight(4))
+    //   transparent: compactSize(vin_count) + vin... + compactSize(vout_count) + vout...
+    //   sapling: compactSize(spends) + compactSize(outputs)
+    //   orchard: compactSize(nActions) + actions[] + flags(1) + valueBalance(8)
+    //            + anchor(32) + compactSize(proof_len) + proof + spend_auth_sigs(64*n) + binding_sig(64)
+
+    let mut pos = 20usize; // skip header
+
+    // skip transparent vin
+    let (vin_count, cs_len) = read_compact_size(&tx_bytes, pos)?;
+    pos += cs_len;
+    for _ in 0..vin_count {
+        pos += 36; // prevout (txid + vout)
+        let (script_len, cs_len) = read_compact_size(&tx_bytes, pos)?;
+        pos += cs_len + script_len as usize + 4; // script + sequence
     }
 
-    #[derive(Serialize)]
-    struct SignedAction {
-        nullifier: String,
-        cmx: String,
-        value: u64,
-        signature: String,
-        alpha: String,
+    // skip transparent vout
+    let (vout_count, cs_len) = read_compact_size(&tx_bytes, pos)?;
+    pos += cs_len;
+    for _ in 0..vout_count {
+        pos += 8; // value
+        let (script_len, cs_len) = read_compact_size(&tx_bytes, pos)?;
+        pos += cs_len + script_len as usize;
     }
 
-    let mut actions = Vec::new();
+    // skip sapling spends + outputs (both should be 0)
+    let (_, cs_len) = read_compact_size(&tx_bytes, pos)?;
+    pos += cs_len;
+    let (_, cs_len) = read_compact_size(&tx_bytes, pos)?;
+    pos += cs_len;
 
-    // Add spend actions
-    for (i, spend) in unsigned_tx.spends.iter().enumerate() {
-        actions.push(SignedAction {
-            nullifier: spend.nullifier.clone(),
-            cmx: spend.cmx.clone(),
-            value: spend.value,
-            signature: signatures.get(i).cloned().unwrap_or_default(),
-            alpha: unsigned_tx.alphas.get(i).cloned().unwrap_or_default(),
-        });
+    // parse orchard nActions
+    let (n_actions, cs_len) = read_compact_size(&tx_bytes, pos)?;
+    pos += cs_len;
+
+    if n_actions == 0 {
+        return Err(JsError::new("no orchard actions in transaction"));
     }
 
-    // Add output actions (with dummy nullifiers)
-    let spend_count = unsigned_tx.spends.len();
-    for (i, output) in unsigned_tx.outputs.iter().enumerate() {
-        let sig_idx = spend_count + i;
-        actions.push(SignedAction {
-            nullifier: "0".repeat(64), // Outputs don't have nullifiers
-            cmx: "0".repeat(64), // CMX computed by network
-            value: output.value,
-            signature: signatures.get(sig_idx).cloned().unwrap_or_default(),
-            alpha: unsigned_tx.alphas.get(sig_idx).cloned().unwrap_or_default(),
-        });
+    // skip action data: each action is 820 bytes
+    // cv(32) + nf(32) + rk(32) + cmx(32) + epk(32) + enc(580) + out(80) = 820
+    let actions_start = pos;
+    pos += n_actions as usize * 820;
+
+    // skip flags(1) + valueBalance(8) + anchor(32) = 41
+    pos += 41;
+
+    // skip proof (compactSize + bytes)
+    let (proof_len, cs_len) = read_compact_size(&tx_bytes, pos)?;
+    pos += cs_len + proof_len as usize;
+
+    // now pos points to the start of spend auth signatures
+    let spend_auth_sigs_start = pos;
+
+
+    // Patch each signature at the correct offset
+    for (sig_idx, &action_idx) in spend_indices.iter().enumerate() {
+        if action_idx as u64 >= n_actions {
+            return Err(JsError::new(&format!(
+                "spend_index {} out of range (n_actions={})", action_idx, n_actions
+            )));
+        }
+
+        let sig_hex = &signatures[sig_idx];
+        let sig_bytes = hex_decode(sig_hex)
+            .ok_or_else(|| JsError::new(&format!("invalid signature hex at index {}", sig_idx)))?;
+        if sig_bytes.len() != 64 {
+            return Err(JsError::new(&format!(
+                "signature must be 64 bytes, got {} at index {}", sig_bytes.len(), sig_idx
+            )));
+        }
+
+        let offset = spend_auth_sigs_start + (action_idx as usize) * 64;
+        if offset + 64 > tx_bytes.len() {
+            return Err(JsError::new("signature offset exceeds tx length"));
+        }
+
+        tx_bytes[offset..offset + 64].copy_from_slice(&sig_bytes);
     }
 
-    let signed_tx = SignedTransaction {
-        version: unsigned_tx.version,
-        anchor: unsigned_tx.anchor,
-        actions,
-        fee: unsigned_tx.fee,
-    };
 
-    // Serialize as hex for broadcast
-    let tx_json = serde_json::to_string(&signed_tx)
-        .map_err(|e| JsError::new(&format!("Serialization failed: {}", e)))?;
-
-    Ok(hex_encode(tx_json.as_bytes()))
+    Ok(hex_encode(&tx_bytes))
 }
 
 /// Get the commitment proof request data for a note
@@ -2284,7 +2467,7 @@ pub fn build_signed_spend_transaction(
         }
 
         let merkle_path = OrchardMerklePath::from_parts(
-            (mp.position as u32).into(),
+            u32::try_from(mp.position).map_err(|_| JsError::new(&format!("tree position {} exceeds u32 max", mp.position)))?.into(),
             merkle_hashes.try_into().map_err(|_| JsError::new("merkle path conversion"))?,
         );
 
@@ -2314,9 +2497,7 @@ pub fn build_signed_spend_transaction(
         .ok_or_else(|| JsError::new("builder produced no bundle"))?;
 
     // Halo 2 proof generation (expensive)
-    let pk = orchard::circuit::ProvingKey::build();
-    let proven_bundle = unauthorized_bundle
-        .create_proof(&pk, &mut rng)
+    let proven_bundle = with_proving_key(|pk| unauthorized_bundle.create_proof(pk, &mut rng))
         .map_err(|e| JsError::new(&format!("create_proof: {:?}", e)))?;
 
     // --- compute ZIP-244 sighash ---
@@ -2725,9 +2906,7 @@ pub fn build_shielding_transaction(
         .ok_or_else(|| JsError::new("builder produced no bundle"))?;
 
     // prove (Halo 2 — this is the expensive step, ~seconds in WASM)
-    let pk = orchard::circuit::ProvingKey::build();
-    let proven_bundle = unauthorized_bundle
-        .create_proof(&pk, &mut rng)
+    let proven_bundle = with_proving_key(|pk| unauthorized_bundle.create_proof(pk, &mut rng))
         .map_err(|e| JsError::new(&format!("create_proof: {:?}", e)))?;
 
     // --- compute transparent digests for ZIP-244 sighash ---
@@ -3016,9 +3195,7 @@ pub fn build_unsigned_shielding_transaction(
         .map_err(|e| JsError::new(&format!("bundle build: {:?}", e)))?
         .ok_or_else(|| JsError::new("builder produced no bundle"))?;
 
-    let pk = orchard::circuit::ProvingKey::build();
-    let proven_bundle = unauthorized_bundle
-        .create_proof(&pk, &mut rng)
+    let proven_bundle = with_proving_key(|pk| unauthorized_bundle.create_proof(pk, &mut rng))
         .map_err(|e| JsError::new(&format!("create_proof: {:?}", e)))?;
 
     // --- compute transparent digests for ZIP-244 sighash ---
