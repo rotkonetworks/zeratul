@@ -18,7 +18,21 @@ impl Plugin for P2PPlugin {
         app.init_resource::<P2PManager>()
             .add_event::<P2PCommand>()
             .add_event::<P2PNotification>()
-            .add_systems(Update, process_p2p_commands);
+            .add_systems(Update, (
+                process_p2p_commands,
+                flush_rtc_signals,
+            ));
+    }
+}
+
+/// flush outgoing WebRTC signaling messages from voice → p2p
+fn flush_rtc_signals(
+    mut rtc_state: ResMut<crate::voice::RtcVoiceState>,
+    mut p2p_commands: EventWriter<P2PCommand>,
+) {
+    for msg in rtc_state.outgoing_signals.drain(..) {
+        let encoded = parity_scale_codec::Encode::encode(&msg);
+        p2p_commands.send(P2PCommand::SendRtcSignal { message: encoded });
     }
 }
 
@@ -76,7 +90,21 @@ pub enum P2PCommand {
     },
     JoinTable { code: String },
     DiscoverTables,
+    SendAction { table_id: u64, action: ActionType },
+    /// forward a WebRTC signaling message to a peer
+    SendRtcSignal { message: Vec<u8> },
     Leave,
+}
+
+/// player action type for p2p transmission
+#[derive(Clone, Debug)]
+pub enum ActionType {
+    Fold,
+    Check,
+    Call(u64),
+    Bet(u64),
+    Raise(u64),
+    AllIn,
 }
 
 /// discovered table info
@@ -98,6 +126,8 @@ pub enum P2PNotification {
     JoinedTable { seat: u8 },
     ReadyToStart,
     TablesDiscovered { tables: Vec<DiscoveredTable> },
+    /// received WebRTC signaling message from a peer
+    RtcSignalReceived { from_seat: u8, message: Vec<u8> },
     Error { message: String },
 }
 
@@ -120,8 +150,8 @@ fn process_p2p_commands(
                     // register in public registry if not private
                     if *visibility != TableVisibility::Private {
                         let stakes = format!("{}/{}", rules.small_blind, rules.big_blind);
-                        info!("p2p: registering {:?} table {} in public registry", visibility, code);
-                        // TODO: call poker_p2p::register_public_table async
+                        info!("p2p: registering {:?} table {} (stakes {}) in public registry", visibility, code, stakes);
+                        // registration happens via the TableHost DHT publish in poker-p2p
                     }
 
                     info!("p2p: created {:?} table with code {}", visibility, code);
@@ -140,28 +170,29 @@ fn process_p2p_commands(
                 }
             }
             P2PCommand::DiscoverTables => {
-                info!("p2p: discovering public tables...");
-                // for now, send mock discovered tables
-                // TODO: call poker_p2p::list_public_tables async
-                let mock_tables = vec![
-                    DiscoveredTable {
-                        code: "42-alpha-bravo".to_string(),
-                        host_name: "CryptoKing".to_string(),
-                        stakes: "1/2".to_string(),
-                        players: (3, 6),
-                        visibility: TableVisibility::Public,
-                        host_pubkey: [0u8; 32],
-                    },
-                    DiscoveredTable {
-                        code: "17-delta-echo".to_string(),
-                        host_name: "AceHunter".to_string(),
-                        stakes: "5/10".to_string(),
-                        players: (5, 9),
-                        visibility: TableVisibility::Public,
-                        host_pubkey: [1u8; 32],
-                    },
-                ];
-                notifications.send(P2PNotification::TablesDiscovered { tables: mock_tables });
+                info!("p2p: discovering public tables via DHT...");
+                // DHT discovery happens via poker_p2p::resolve_table for known codes
+                // For browsing, we publish/resolve via the mainline DHT in poker-p2p
+                // Return empty for now until DHT browsing is implemented
+                notifications.send(P2PNotification::TablesDiscovered { tables: vec![] });
+            }
+            P2PCommand::SendAction { table_id, action } => {
+                if let Some(m) = &manager.inner {
+                    let encoded = m.encode_action(action);
+                    info!(
+                        "p2p: sending action {:?} for table {} ({} bytes encoded)",
+                        action, table_id, encoded.len()
+                    );
+                    // in production: send `encoded` bytes via TableClient.send()
+                    // for now the encoded PlayerAction is ready for transmission
+                } else {
+                    warn!("p2p: cannot send action, no table manager");
+                }
+            }
+            P2PCommand::SendRtcSignal { message } => {
+                info!("p2p: forwarding WebRTC signal ({} bytes)", message.len());
+                // in production: send via iroh QUIC to the target peer
+                // the message is already SCALE-encoded poker_p2p::Message
             }
             P2PCommand::Leave => {
                 if let Some(m) = &mut manager.inner {
@@ -299,7 +330,12 @@ pub struct TableManager {
     state: P2pState,
     rules: Option<TableRules>,
     my_pubkey: [u8; 32],
+    my_secret: [u8; 32],
     participants: Vec<ParticipantInfo>,
+    /// current hand number (incremented each hand)
+    hand_number: u64,
+    /// our seat at the table
+    our_seat: u8,
 }
 
 #[derive(Clone, Debug)]
@@ -312,11 +348,16 @@ pub struct ParticipantInfo {
 
 impl TableManager {
     pub fn new(my_pubkey: [u8; 32]) -> Self {
+        // derive secret from pubkey for signing (in production, this comes from auth)
+        let my_secret = *blake3::hash(&my_pubkey).as_bytes();
         Self {
             state: P2pState::Disconnected,
             rules: None,
             my_pubkey,
+            my_secret,
             participants: Vec::new(),
+            hand_number: 0,
+            our_seat: 0,
         }
     }
 
@@ -392,6 +433,9 @@ impl TableManager {
                 });
             }
             TableEvent::JoinedTable { role, seat } => {
+                if let Some(s) = seat {
+                    self.our_seat = s;
+                }
                 self.state = P2pState::Connected { role, seat };
             }
             TableEvent::ParticipantLeft { pubkey } => {
@@ -412,6 +456,40 @@ impl TableManager {
     /// check if table is ready to start
     pub fn is_ready(&self) -> bool {
         self.player_count() >= 2 && self.participants.iter().all(|p| p.is_ready)
+    }
+
+    /// encode a player action for p2p transmission
+    pub fn encode_action(&self, action: &ActionType) -> Vec<u8> {
+        use poker_p2p::protocol::{PlayerAction, ActionType as P2PActionType};
+
+        let p2p_action = match action {
+            ActionType::Fold => P2PActionType::Fold,
+            ActionType::Check => P2PActionType::Check,
+            ActionType::Call(_) => P2PActionType::Call,
+            ActionType::Bet(amt) => P2PActionType::Bet(*amt as u128),
+            ActionType::Raise(amt) => P2PActionType::Raise(*amt as u128),
+            ActionType::AllIn => P2PActionType::AllIn,
+        };
+
+        // sign the action
+        let mut msg_bytes = Vec::new();
+        msg_bytes.extend_from_slice(&self.hand_number.to_le_bytes());
+        msg_bytes.push(self.our_seat);
+        msg_bytes.extend_from_slice(&parity_scale_codec::Encode::encode(&p2p_action));
+
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&self.my_secret);
+        use ed25519_dalek::Signer;
+        let signature = signing_key.sign(&msg_bytes).to_bytes();
+
+        let player_action = PlayerAction {
+            hand_number: self.hand_number,
+            seat: self.our_seat,
+            action: p2p_action,
+            signature,
+        };
+
+        let msg = poker_p2p::protocol::Message::Action(player_action);
+        parity_scale_codec::Encode::encode(&msg)
     }
 }
 

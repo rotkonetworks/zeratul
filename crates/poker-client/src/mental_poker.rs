@@ -10,7 +10,7 @@
 //! 3. shuffle rounds: each player shuffles + remasks + proves
 //! 4. card reveal: when card needed, all players provide reveal tokens
 
-#![allow(dead_code)]
+#![allow(dead_code)] // protocol types used incrementally as integration progresses
 
 use zk_shuffle::{
     poker::{Card, Rank, Suit},
@@ -497,6 +497,290 @@ pub enum MentalPokerMessage {
     },
     /// request reveal tokens for cards
     RequestReveal { card_indices: Vec<u8> },
+}
+
+// ============================================================================
+// bevy integration
+// ============================================================================
+
+use bevy::prelude::*;
+use std::collections::HashMap;
+
+use crate::table_2d::GamePhase;
+
+/// mental poker state per table (Bevy resource)
+#[derive(Resource, Default)]
+pub struct MentalPokerManager {
+    /// shuffle contexts per table id
+    pub tables: HashMap<u64, TableMentalPoker>,
+    /// outgoing messages to be sent via p2p
+    pub outgoing: Vec<(u64, MentalPokerMessage)>,
+    /// incoming messages from p2p to be processed
+    pub incoming: Vec<(u64, MentalPokerMessage)>,
+}
+
+impl MentalPokerManager {
+    /// initialize mental poker for a table
+    pub fn init_table(&mut self, table_id: u64, seed: &[u8], player_id: u8, num_players: u8) {
+        let table_mp = TableMentalPoker::new(seed, player_id, num_players);
+        self.tables.insert(table_id, table_mp);
+        // publish our key
+        let pubkey = self.tables[&table_id].context.keys.public_key_bytes();
+        self.outgoing.push((table_id, MentalPokerMessage::PublishKey { pubkey }));
+    }
+
+    /// handle a phase transition for a table
+    pub fn on_phase_change(&mut self, table_id: u64, new_phase: GamePhase) {
+        let Some(table_mp) = self.tables.get_mut(&table_id) else { return };
+        let num_players = table_mp.context.num_players;
+
+        match new_phase {
+            GamePhase::Waiting => {
+                // new hand — start shuffle protocol
+                let hand_id = table_mp.hand_number;
+                table_mp.context.start_hand(hand_id);
+                table_mp.last_phase = GamePhase::Waiting;
+
+                // if we're player 0, create initial masked deck
+                if table_mp.context.player_id == 0 && table_mp.context.aggregate_key.is_some() {
+                    let deck = table_mp.context.mask_initial_deck();
+                    let deck_bytes: Vec<Vec<u8>> = deck.iter().map(|c| c.to_bytes()).collect();
+                    self.outgoing.push((table_id, MentalPokerMessage::InitialDeck { deck: deck_bytes }));
+                }
+            }
+            GamePhase::Preflop => {
+                // trigger shuffle if not already done
+                if table_mp.context.current_hand.as_ref()
+                    .map(|h| h.state != ShuffleState::Ready)
+                    .unwrap_or(true)
+                {
+                    // our turn to shuffle?
+                    if let Some(ref hand) = table_mp.context.current_hand {
+                        if let ShuffleState::AwaitingShuffle { next_player } = hand.state {
+                            if next_player == table_mp.context.player_id {
+                                if let Ok((deck, proof)) = table_mp.context.shuffle_deck() {
+                                    let deck_bytes: Vec<Vec<u8>> = deck.iter().map(|c| c.to_bytes()).collect();
+                                    let proof_bytes = parity_scale_codec::Encode::encode(&proof);
+                                    self.outgoing.push((table_id, MentalPokerMessage::ShuffleResult {
+                                        player_id: table_mp.context.player_id,
+                                        deck: deck_bytes,
+                                        proof_bytes,
+                                    }));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // request reveal tokens for hole cards (2 per player)
+                let indices: Vec<u8> = (0..2 * num_players).collect();
+                table_mp.phase_card_indices = indices.clone();
+                self.outgoing.push((table_id, MentalPokerMessage::RequestReveal { card_indices: indices }));
+
+                // provide our own reveal tokens for all hole cards
+                for idx in 0..2 * num_players {
+                    if let Some(token) = table_mp.context.provide_reveal_token(idx) {
+                        self.outgoing.push((table_id, MentalPokerMessage::RevealToken {
+                            card_index: idx,
+                            token: token.to_bytes(),
+                        }));
+                    }
+                }
+            }
+            GamePhase::Flop => {
+                let base = 2 * num_players;
+                let indices = vec![base, base + 1, base + 2];
+                table_mp.phase_card_indices = indices.clone();
+                self.outgoing.push((table_id, MentalPokerMessage::RequestReveal { card_indices: indices.clone() }));
+                for idx in indices {
+                    if let Some(token) = table_mp.context.provide_reveal_token(idx) {
+                        self.outgoing.push((table_id, MentalPokerMessage::RevealToken {
+                            card_index: idx,
+                            token: token.to_bytes(),
+                        }));
+                    }
+                }
+            }
+            GamePhase::Turn => {
+                let idx = 2 * num_players + 3;
+                table_mp.phase_card_indices = vec![idx];
+                self.outgoing.push((table_id, MentalPokerMessage::RequestReveal { card_indices: vec![idx] }));
+                if let Some(token) = table_mp.context.provide_reveal_token(idx) {
+                    self.outgoing.push((table_id, MentalPokerMessage::RevealToken {
+                        card_index: idx,
+                        token: token.to_bytes(),
+                    }));
+                }
+            }
+            GamePhase::River => {
+                let idx = 2 * num_players + 4;
+                table_mp.phase_card_indices = vec![idx];
+                self.outgoing.push((table_id, MentalPokerMessage::RequestReveal { card_indices: vec![idx] }));
+                if let Some(token) = table_mp.context.provide_reveal_token(idx) {
+                    self.outgoing.push((table_id, MentalPokerMessage::RevealToken {
+                        card_index: idx,
+                        token: token.to_bytes(),
+                    }));
+                }
+            }
+            GamePhase::Showdown => {
+                table_mp.hand_number += 1;
+            }
+        }
+
+        table_mp.last_phase = new_phase;
+    }
+}
+
+/// per-table mental poker state
+pub struct TableMentalPoker {
+    pub context: ShuffleContext,
+    /// which player is currently shuffling
+    pub shuffle_round: u8,
+    /// pending reveal requests: card_index → requesting_player_ids
+    pub pending_reveals: HashMap<u8, Vec<u8>>,
+    /// cards needed for current phase
+    pub phase_card_indices: Vec<u8>,
+    /// hand counter
+    pub hand_number: u32,
+    /// last known game phase (for detecting transitions)
+    pub last_phase: GamePhase,
+}
+
+impl TableMentalPoker {
+    pub fn new(seed: &[u8], player_id: u8, num_players: u8) -> Self {
+        Self {
+            context: ShuffleContext::new(seed, player_id, num_players),
+            shuffle_round: 0,
+            pending_reveals: HashMap::new(),
+            phase_card_indices: Vec::new(),
+            hand_number: 0,
+            last_phase: GamePhase::Waiting,
+        }
+    }
+
+    /// get card indices for hole cards deal (2 cards per player)
+    pub fn hole_card_indices(&self, num_players: u8) -> Vec<u8> {
+        (0..2 * num_players).collect()
+    }
+
+    /// get card indices for flop (first 3 community cards after hole cards)
+    pub fn flop_indices(&self, num_players: u8) -> Vec<u8> {
+        let base = 2 * num_players;
+        vec![base, base + 1, base + 2]
+    }
+
+    /// get card index for turn
+    pub fn turn_index(&self, num_players: u8) -> u8 {
+        2 * num_players + 3
+    }
+
+    /// get card index for river
+    pub fn river_index(&self, num_players: u8) -> u8 {
+        2 * num_players + 4
+    }
+}
+
+/// detect game phase transitions and trigger mental poker protocol steps
+pub fn detect_phase_transitions(
+    state: Res<crate::multitable::MultiTableState>,
+    mut mp_manager: ResMut<MentalPokerManager>,
+) {
+    // collect phase changes first to avoid borrow conflict with on_phase_change
+    let changes: Vec<(u64, crate::table_2d::GamePhase)> = state.tables.iter()
+        .filter_map(|table| {
+            mp_manager.tables.get(&table.id)
+                .filter(|table_mp| table.game_state.phase != table_mp.last_phase)
+                .map(|_| (table.id, table.game_state.phase))
+        })
+        .collect();
+
+    for (table_id, new_phase) in changes {
+        mp_manager.on_phase_change(table_id, new_phase);
+    }
+}
+
+/// process incoming mental poker messages and check for reveals
+pub fn process_mental_poker_messages(
+    mut mp_manager: ResMut<MentalPokerManager>,
+) {
+    // drain incoming messages
+    let incoming: Vec<_> = mp_manager.incoming.drain(..).collect();
+    let mut new_outgoing: Vec<(u64, MentalPokerMessage)> = Vec::new();
+
+    for (table_id, msg) in incoming {
+        let Some(table_mp) = mp_manager.tables.get_mut(&table_id) else { continue };
+
+        match msg {
+            MentalPokerMessage::PublishKey { pubkey } => {
+                // register remote player's key
+                let next_id = table_mp.context.player_keys.iter()
+                    .position(|k| *k == RistrettoPoint::default())
+                    .unwrap_or(0) as u8;
+                table_mp.context.register_player_key(next_id, pubkey);
+
+                // check if all keys received → compute aggregate
+                let all_registered = table_mp.context.player_keys.iter()
+                    .all(|k| *k != RistrettoPoint::default());
+                if all_registered {
+                    table_mp.context.compute_aggregate_key();
+                    info!("mental poker: all keys registered for table {}", table_id);
+                }
+            }
+            MentalPokerMessage::InitialDeck { deck } => {
+                if let Some(ref mut hand) = table_mp.context.current_hand {
+                    hand.masked_deck = deck.iter()
+                        .filter_map(|bytes| MaskedCard::from_bytes(bytes))
+                        .collect();
+                    hand.state = ShuffleState::AwaitingShuffle { next_player: 0 };
+                    if let Some(agg) = table_mp.context.aggregate_key {
+                        hand.transcript.bind_aggregate_key(&agg.compress().to_bytes());
+                    }
+                }
+            }
+            MentalPokerMessage::ShuffleResult { player_id, deck, proof_bytes } => {
+                let new_deck: Vec<MaskedCard> = deck.iter()
+                    .filter_map(|bytes| MaskedCard::from_bytes(bytes))
+                    .collect();
+                if let Ok(proof) = parity_scale_codec::Decode::decode(&mut &proof_bytes[..]) {
+                    match table_mp.context.receive_shuffle(player_id, new_deck, proof) {
+                        Ok(()) => info!("mental poker: verified shuffle from player {}", player_id),
+                        Err(e) => warn!("mental poker: shuffle verification failed: {}", e),
+                    }
+                }
+            }
+            MentalPokerMessage::RevealToken { card_index, token } => {
+                if let Some(rt) = RevealToken::from_bytes(&token) {
+                    if let Err(e) = table_mp.context.receive_reveal_token(card_index, rt) {
+                        warn!("mental poker: bad reveal token: {}", e);
+                    }
+                }
+            }
+            MentalPokerMessage::RequestReveal { card_indices } => {
+                for idx in card_indices {
+                    if let Some(token) = table_mp.context.provide_reveal_token(idx) {
+                        new_outgoing.push((table_id, MentalPokerMessage::RevealToken {
+                            card_index: idx,
+                            token: token.to_bytes(),
+                        }));
+                    }
+                }
+            }
+        }
+    }
+
+    mp_manager.outgoing.extend(new_outgoing);
+
+    // try to reveal cards that have all tokens
+    for (_table_id, table_mp) in mp_manager.tables.iter_mut() {
+        let indices_to_try: Vec<u8> = table_mp.phase_card_indices.clone();
+        for card_idx in indices_to_try {
+            if let Some(card) = table_mp.context.try_reveal_card(card_idx) {
+                info!("mental poker: revealed card {} = {}", card_idx, card);
+                table_mp.phase_card_indices.retain(|&i| i != card_idx);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

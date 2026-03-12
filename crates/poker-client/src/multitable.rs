@@ -10,14 +10,46 @@
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
+use tokio::sync::mpsc;
 
 use crate::table_2d::{self, TableState, Player, Card, Suit, Rank, GamePhase};
+
+/// resource for sending poker actions to the P2P layer
+#[derive(Resource)]
+pub struct P2PActionSender {
+    pub tx: mpsc::UnboundedSender<(u64, QueuedAction)>,
+}
+
+/// resource for receiving poker actions (consumed by flush system)
+#[derive(Resource)]
+pub struct P2PActionReceiver {
+    pub rx: mpsc::UnboundedReceiver<(u64, QueuedAction)>,
+}
+
+/// create the action channel pair
+pub fn create_action_channel() -> (P2PActionSender, P2PActionReceiver) {
+    let (tx, rx) = mpsc::unbounded_channel();
+    (P2PActionSender { tx }, P2PActionReceiver { rx })
+}
+
+/// helper: send an action for a table via the P2P sender
+fn send_p2p_action(sender: Option<&P2PActionSender>, table_id: u64, action: &QueuedAction) {
+    if let Some(sender) = sender {
+        if let Err(e) = sender.tx.send((table_id, action.clone())) {
+            warn!("failed to send p2p action: {}", e);
+        }
+    }
+}
 
 pub struct MultiTablePlugin;
 
 impl Plugin for MultiTablePlugin {
     fn build(&self, app: &mut App) {
+        // create action channel and register both halves
+        let (sender, receiver) = create_action_channel();
         app
+            .insert_resource(sender)
+            .insert_resource(receiver)
             .init_resource::<MultiTableState>()
             .init_resource::<TableLayoutSettings>()
             .init_resource::<NotificationQueue>()
@@ -36,6 +68,7 @@ impl Plugin for MultiTablePlugin {
                 handle_hint_mode,
                 handle_radial_menu,
                 process_auto_actions,
+                flush_p2p_actions,
                 process_notifications,
                 render_notification_overlay,
                 render_hotkey_overlay,
@@ -1388,6 +1421,7 @@ fn handle_action_hotkeys(
     mut pending: ResMut<PendingAction>,
     hint_state: Res<HintModeState>,
     time: Res<Time>,
+    action_sender: Option<Res<P2PActionSender>>,
 ) {
     // block action keys when in hint mode (F+A shouldn't all-in)
     if hint_state.active {
@@ -1424,7 +1458,7 @@ fn handle_action_hotkeys(
             info!("queued: fold (press Enter to confirm)");
         } else {
             info!("action: fold on table {}", table.id);
-            // TODO: send fold action via p2p/chain
+            send_p2p_action(action_sender.as_deref(), table.id, &QueuedAction::Fold);
         }
         return;
     }
@@ -1452,7 +1486,7 @@ fn handle_action_hotkeys(
                 QueuedAction::Call(amt) => info!("action: call {} on table {}", amt, table.id),
                 _ => {}
             }
-            // TODO: send action via p2p/chain
+            send_p2p_action(action_sender.as_deref(), table.id, &action);
         }
         return;
     }
@@ -1467,7 +1501,7 @@ fn handle_action_hotkeys(
             info!("queued: ALL-IN (press Enter to confirm)");
         } else {
             info!("action: all-in on table {}", table.id);
-            // TODO: send all-in action via p2p/chain
+            send_p2p_action(action_sender.as_deref(), table.id, &QueuedAction::AllIn);
         }
         return;
     }
@@ -1524,7 +1558,7 @@ fn handle_action_hotkeys(
                     info!("queued: {} = {} (press Enter to confirm)", label, amount);
                 } else {
                     info!("action: bet/raise {} on table {}", amount, table.id);
-                    // TODO: send action via p2p/chain
+                    send_p2p_action(action_sender.as_deref(), table.id, &action);
                 }
             }
             return;
@@ -1541,6 +1575,7 @@ fn handle_pending_confirm(
     hotkeys: Res<HotkeySettings>,
     keys: Res<ButtonInput<KeyCode>>,
     time: Res<Time>,
+    action_sender: Option<Res<P2PActionSender>>,
 ) {
     if pending.action.is_none() {
         return;
@@ -1607,25 +1642,16 @@ fn handle_pending_confirm(
             let now = time.elapsed_seconds_f64();
 
             match action {
-                QueuedAction::Fold => {
-                    info!("table {}: fold", table_id);
-                }
-                QueuedAction::Check => {
-                    info!("table {}: check", table_id);
-                }
-                QueuedAction::Call(amt) => {
-                    info!("table {}: call {}", table_id, amt);
-                }
-                QueuedAction::Bet(amt) => {
-                    info!("table {}: bet {}", table_id, amt);
-                }
-                QueuedAction::Raise(amt) => {
-                    info!("table {}: raise to {}", table_id, amt);
-                }
-                QueuedAction::AllIn => {
-                    info!("table {}: all-in", table_id);
-                }
+                QueuedAction::Fold => info!("table {}: fold", table_id),
+                QueuedAction::Check => info!("table {}: check", table_id),
+                QueuedAction::Call(amt) => info!("table {}: call {}", table_id, amt),
+                QueuedAction::Bet(amt) => info!("table {}: bet {}", table_id, amt),
+                QueuedAction::Raise(amt) => info!("table {}: raise to {}", table_id, amt),
+                QueuedAction::AllIn => info!("table {}: all-in", table_id),
             }
+
+            // send confirmed action via p2p
+            send_p2p_action(action_sender.as_deref(), table_id, &action);
 
             // mark action taken - end our turn on this table
             if let Some(table) = state.tables.iter_mut().find(|t| t.id == table_id) {
@@ -2531,6 +2557,7 @@ fn render_hint_overlay(
 fn process_auto_actions(
     state: Res<MultiTableState>,
     mut auto_settings: ResMut<AutoActionSettings>,
+    action_sender: Option<Res<P2PActionSender>>,
 ) {
     for table in &state.tables {
         if !table.is_our_turn {
@@ -2546,33 +2573,33 @@ fn process_auto_actions(
         // process auto-actions in priority order
         if auto_action.auto_check && game.current_bet == 0 {
             info!("auto-action: check on table {}", table.id);
-            // TODO: send check action
-            // clear auto-action after execution
+            send_p2p_action(action_sender.as_deref(), table.id, &QueuedAction::Check);
         }
 
         if auto_action.auto_check_fold {
             if game.current_bet == 0 {
                 info!("auto-action: check on table {}", table.id);
+                send_p2p_action(action_sender.as_deref(), table.id, &QueuedAction::Check);
             } else {
                 info!("auto-action: fold on table {}", table.id);
+                send_p2p_action(action_sender.as_deref(), table.id, &QueuedAction::Fold);
             }
-            // TODO: send action
         }
 
         if auto_action.auto_fold && game.current_bet > 0 {
             info!("auto-action: fold on table {}", table.id);
-            // TODO: send fold action
+            send_p2p_action(action_sender.as_deref(), table.id, &QueuedAction::Fold);
         }
 
         if auto_action.auto_call_any && game.current_bet > 0 {
             info!("auto-action: call {} on table {}", game.current_bet, table.id);
-            // TODO: send call action
+            send_p2p_action(action_sender.as_deref(), table.id, &QueuedAction::Call(game.current_bet));
         }
 
         if let Some(limit) = auto_action.auto_call_limit {
             if game.current_bet > 0 && game.current_bet <= limit {
                 info!("auto-action: call {} (under limit {}) on table {}", game.current_bet, limit, table.id);
-                // TODO: send call action
+                send_p2p_action(action_sender.as_deref(), table.id, &QueuedAction::Call(game.current_bet));
             }
         }
     }
@@ -2582,6 +2609,29 @@ fn process_auto_actions(
         if table.is_our_turn {
             auto_settings.table_actions.remove(&table.id);
         }
+    }
+}
+
+// === flush p2p actions ===
+
+/// drain the action channel and forward to P2P as protocol messages
+fn flush_p2p_actions(
+    mut receiver: ResMut<P2PActionReceiver>,
+    mut p2p_commands: EventWriter<crate::p2p::P2PCommand>,
+) {
+    while let Ok((table_id, action)) = receiver.rx.try_recv() {
+        let action_type = match action {
+            QueuedAction::Fold => crate::p2p::ActionType::Fold,
+            QueuedAction::Check => crate::p2p::ActionType::Check,
+            QueuedAction::Call(amt) => crate::p2p::ActionType::Call(amt),
+            QueuedAction::Bet(amt) => crate::p2p::ActionType::Bet(amt),
+            QueuedAction::Raise(amt) => crate::p2p::ActionType::Raise(amt),
+            QueuedAction::AllIn => crate::p2p::ActionType::AllIn,
+        };
+        p2p_commands.send(crate::p2p::P2PCommand::SendAction {
+            table_id,
+            action: action_type,
+        });
     }
 }
 

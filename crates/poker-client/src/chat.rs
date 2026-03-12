@@ -93,6 +93,8 @@ pub struct ChatState {
     pub local_name: String,
     /// unread message count (when minimized)
     pub unread_count: u32,
+    /// prefer WebRTC data channel for chat when available
+    pub prefer_webrtc: bool,
 }
 
 impl Default for ChatState {
@@ -110,6 +112,7 @@ impl Default for ChatState {
             local_seat: 0,
             local_name: "You".to_string(),
             unread_count: 0,
+            prefer_webrtc: true,
         }
     }
 }

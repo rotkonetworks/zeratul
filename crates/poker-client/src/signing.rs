@@ -1,6 +1,6 @@
 //! state channel signing
 //!
-//! signs state transitions for mental poker
+//! signs state transitions for mental poker using ed25519 via AuthState
 //!
 //! ## privacy analysis
 //!
@@ -32,53 +32,24 @@
 //! - tor integration: hide IP from other players
 //! - zk disputes: prove winner without revealing hands
 
-use crate::auth::{AuthState, AuthMode};
+use crate::auth::AuthState;
 use parity_scale_codec::Encode;
 
-/// sign a message using current auth session
+/// sign a message using current auth session (ed25519 for both test and production)
 pub fn sign_message(auth: &AuthState, message: &[u8]) -> Result<[u8; 64], SigningError> {
-    match auth.mode {
-        AuthMode::Test => {
-            let key = auth.test_signing_key.ok_or(SigningError::NotLoggedIn)?;
-            sign_with_blake3_key(&key, message)
-        }
-        AuthMode::Ghettobox => {
-            // TODO: implement WIM signing when ready
-            Err(SigningError::NotImplemented)
-        }
-    }
+    auth.sign(message).ok_or(SigningError::NotLoggedIn)
 }
 
-/// sign using blake3-derived ed25519-like key (test mode)
-/// NOT SECURE - for testing only
-fn sign_with_blake3_key(key: &[u8; 32], message: &[u8]) -> Result<[u8; 64], SigningError> {
-    // derive signing key and public key
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"mental-poker.test-sign.v1");
-    hasher.update(key);
-    hasher.update(message);
-    let sig_hash = hasher.finalize();
-
-    // create 64-byte "signature" (not real crypto, just for testing)
-    let mut signature = [0u8; 64];
-    signature[..32].copy_from_slice(sig_hash.as_bytes());
-
-    // second half is hash of message for verification
-    let msg_hash = blake3::hash(message);
-    signature[32..].copy_from_slice(msg_hash.as_bytes());
-
-    Ok(signature)
-}
-
-/// verify a test mode signature
+/// verify an ed25519 signature
 pub fn verify_signature(
     pubkey: &[u8; 32],
     message: &[u8],
     signature: &[u8; 64],
 ) -> bool {
-    // in test mode, just verify message hash matches
-    let msg_hash = blake3::hash(message);
-    signature[32..] == msg_hash.as_bytes()[..]
+    use ed25519_dalek::{VerifyingKey, Verifier, Signature};
+    let Ok(vk) = VerifyingKey::from_bytes(pubkey) else { return false };
+    let sig = Signature::from_bytes(signature);
+    vk.verify(message, &sig).is_ok()
 }
 
 /// create a signed state transition
@@ -118,7 +89,6 @@ pub struct SignedTransition {
 #[derive(Clone, Debug)]
 pub enum SigningError {
     NotLoggedIn,
-    NotImplemented,
     InvalidKey,
 }
 
@@ -126,7 +96,6 @@ impl std::fmt::Display for SigningError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::NotLoggedIn => write!(f, "not logged in"),
-            Self::NotImplemented => write!(f, "ghettobox signing not yet implemented"),
             Self::InvalidKey => write!(f, "invalid signing key"),
         }
     }
@@ -137,16 +106,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_sign_verify() {
-        let key = [0x42u8; 32];
+    fn test_ed25519_sign_verify() {
+        use ed25519_dalek::{SigningKey, Signer as _};
+        let key = SigningKey::from_bytes(&[0x42u8; 32]);
         let message = b"test message";
 
-        let sig = sign_with_blake3_key(&key, message).unwrap();
+        let sig = key.sign(message);
+        let pubkey = key.verifying_key().to_bytes();
 
-        // derive pubkey same way as in auth
-        let pubkey = *blake3::hash(&key).as_bytes();
-
-        assert!(verify_signature(&pubkey, message, &sig));
-        assert!(!verify_signature(&pubkey, b"wrong message", &sig));
+        assert!(verify_signature(&pubkey, message, &sig.to_bytes()));
+        assert!(!verify_signature(&pubkey, b"wrong message", &sig.to_bytes()));
     }
 }

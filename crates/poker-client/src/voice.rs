@@ -1,12 +1,18 @@
 //! voice chat for poker table
 //!
-//! opus codec over iroh QUIC, push-to-talk, per-player mute/volume
+//! WebRTC for media transport, signaling over iroh QUIC.
+//! supports push-to-talk, per-player mute/volume, voice activity detection.
+//!
+//! native: cpal audio capture → opus encode → WebRTC data channel
+//! wasm: browser getUserMedia → WebRTC native
 
 use bevy::prelude::*;
 use bevy_egui::{egui, EguiContexts};
 use std::collections::HashMap;
+use tokio::sync::mpsc;
 
 use poker_p2p::{VoiceData, VoiceState as P2PVoiceState, VoiceStateType};
+use poker_p2p::{RtcEvent, RtcManager, AudioProcessor, IceConnectionState, MediaKind};
 
 /// opus frame duration in milliseconds
 const FRAME_DURATION_MS: u32 = 20;
@@ -23,11 +29,13 @@ impl Plugin for VoicePlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<VoiceSettings>()
             .init_resource::<VoiceState>()
+            .init_resource::<RtcVoiceState>()
             .add_event::<VoiceEvent>()
             .add_systems(
                 Update,
                 (
                     handle_ptt_input,
+                    poll_rtc_events,
                     process_voice_events,
                     render_voice_indicators,
                     render_voice_settings,
@@ -54,6 +62,14 @@ pub enum VoiceEvent {
     ToggleMute,
     /// toggle deafen
     ToggleDeafen,
+    /// WebRTC peer connected
+    RtcConnected { seat: u8 },
+    /// WebRTC peer disconnected
+    RtcDisconnected { seat: u8 },
+    /// start voice session with all table players
+    StartVoiceSession { seats: Vec<u8> },
+    /// stop voice session
+    StopVoiceSession,
 }
 
 /// per-player voice state for rendering indicators
@@ -69,6 +85,8 @@ pub struct PlayerVoiceState {
     pub volume: f32,
     /// last voice packet time
     pub last_packet: f64,
+    /// WebRTC connection state
+    pub rtc_state: IceConnectionState,
 }
 
 impl Default for PlayerVoiceState {
@@ -79,6 +97,7 @@ impl Default for PlayerVoiceState {
             muted_by_us: false,
             volume: 1.0,
             last_packet: 0.0,
+            rtc_state: IceConnectionState::New,
         }
     }
 }
@@ -129,6 +148,73 @@ impl VoiceState {
         self.seq = self.seq.wrapping_add(1);
         seq
     }
+
+    /// count of peers with active WebRTC connections
+    pub fn connected_peers(&self) -> usize {
+        self.players.values()
+            .filter(|p| matches!(p.rtc_state, IceConnectionState::Connected | IceConnectionState::Completed))
+            .count()
+    }
+}
+
+/// WebRTC voice state — bridges RtcManager to the Bevy ECS voice system
+#[derive(Resource)]
+pub struct RtcVoiceState {
+    /// event receiver from RtcManager
+    pub event_rx: Option<mpsc::UnboundedReceiver<RtcEvent>>,
+    /// signal sender to RtcManager (for forwarding signaling messages)
+    pub signal_tx: Option<mpsc::UnboundedSender<poker_p2p::protocol::Message>>,
+    /// audio processor for capture/playback mixing
+    pub audio_processor: AudioProcessor,
+    /// outgoing signaling messages to send via iroh QUIC
+    pub outgoing_signals: Vec<poker_p2p::protocol::Message>,
+    /// is a voice session active
+    pub session_active: bool,
+}
+
+impl Default for RtcVoiceState {
+    fn default() -> Self {
+        Self {
+            event_rx: None,
+            signal_tx: None,
+            audio_processor: AudioProcessor::new(SAMPLE_RATE, SAMPLE_RATE),
+            outgoing_signals: Vec::new(),
+            session_active: false,
+        }
+    }
+}
+
+impl RtcVoiceState {
+    /// initialize WebRTC for a table voice session
+    pub fn start_session(&mut self, local_seat: u8, seats: &[u8]) {
+        let (mut manager, event_rx, signal_tx) = RtcManager::new(local_seat);
+
+        // request voice connections with all other players
+        manager.request_all(seats, MediaKind::Voice);
+
+        self.event_rx = Some(event_rx);
+        self.signal_tx = Some(signal_tx);
+        self.session_active = true;
+
+        info!("voice: started WebRTC session for seat {} with {} peers",
+            local_seat, seats.len().saturating_sub(1));
+    }
+
+    /// stop the voice session
+    pub fn stop_session(&mut self) {
+        self.event_rx = None;
+        self.signal_tx = None;
+        self.session_active = false;
+        self.outgoing_signals.clear();
+        info!("voice: stopped WebRTC session");
+    }
+
+    /// forward a signaling message from the network to the RtcManager
+    pub fn forward_signal(&self, msg: poker_p2p::protocol::Message) {
+        if let Some(ref tx) = self.signal_tx {
+            let _ = tx.send(msg);
+        }
+    }
 }
 
 /// voice settings resource
@@ -148,6 +234,8 @@ pub struct VoiceSettings {
     pub use_vad: bool,
     /// noise gate threshold
     pub noise_gate: f32,
+    /// auto-join voice when sitting at table
+    pub auto_join: bool,
 }
 
 impl Default for VoiceSettings {
@@ -160,6 +248,7 @@ impl Default for VoiceSettings {
             vad_threshold: 0.02,
             use_vad: false,
             noise_gate: 0.01,
+            auto_join: true,
         }
     }
 }
@@ -199,8 +288,63 @@ fn handle_ptt_input(
     // note: should check if chat input is focused
 }
 
+/// poll RtcManager events and convert to Bevy voice events
+fn poll_rtc_events(
+    mut rtc_state: ResMut<RtcVoiceState>,
+    mut voice_state: ResMut<VoiceState>,
+    mut events: EventWriter<VoiceEvent>,
+) {
+    let Some(ref mut rx) = rtc_state.event_rx else {
+        return;
+    };
+
+    while let Ok(event) = rx.try_recv() {
+        match event {
+            RtcEvent::Connected { seat } => {
+                let player = voice_state.players.entry(seat).or_default();
+                player.rtc_state = IceConnectionState::Connected;
+                events.send(VoiceEvent::RtcConnected { seat });
+                info!("voice: WebRTC connected to seat {}", seat);
+            }
+            RtcEvent::Disconnected { seat } => {
+                if let Some(player) = voice_state.players.get_mut(&seat) {
+                    player.rtc_state = IceConnectionState::Disconnected;
+                    player.speaking = false;
+                    player.activity_level = 0.0;
+                }
+                events.send(VoiceEvent::RtcDisconnected { seat });
+                info!("voice: WebRTC disconnected from seat {}", seat);
+            }
+            RtcEvent::AudioReceived { seat, frame, vad } => {
+                if !voice_state.deafened {
+                    events.send(VoiceEvent::ReceivedVoice(VoiceData {
+                        seat,
+                        seq: 0,
+                        frame,
+                        vad,
+                    }));
+                }
+            }
+            RtcEvent::IceStateChanged { seat, state } => {
+                if let Some(player) = voice_state.players.get_mut(&seat) {
+                    player.rtc_state = state;
+                }
+            }
+            RtcEvent::Signal(msg) => {
+                // queue for sending via iroh QUIC
+                rtc_state.outgoing_signals.push(msg);
+            }
+            _ => {}
+        }
+    }
+}
+
 /// process voice events
-fn process_voice_events(mut events: EventReader<VoiceEvent>, mut voice_state: ResMut<VoiceState>) {
+fn process_voice_events(
+    mut events: EventReader<VoiceEvent>,
+    mut voice_state: ResMut<VoiceState>,
+    mut rtc_state: ResMut<RtcVoiceState>,
+) {
     for event in events.read() {
         match event {
             VoiceEvent::ReceivedVoice(data) => {
@@ -235,6 +379,12 @@ fn process_voice_events(mut events: EventReader<VoiceEvent>, mut voice_state: Re
             VoiceEvent::ToggleDeafen => {
                 voice_state.deafened = !voice_state.deafened;
             }
+            VoiceEvent::StartVoiceSession { seats } => {
+                rtc_state.start_session(voice_state.local_seat, seats);
+            }
+            VoiceEvent::StopVoiceSession => {
+                rtc_state.stop_session();
+            }
             _ => {}
         }
     }
@@ -254,7 +404,11 @@ fn process_voice_events(mut events: EventReader<VoiceEvent>, mut voice_state: Re
 }
 
 /// render voice activity indicators on player avatars
-fn render_voice_indicators(mut contexts: EguiContexts, voice_state: Res<VoiceState>) {
+fn render_voice_indicators(
+    mut contexts: EguiContexts,
+    voice_state: Res<VoiceState>,
+    rtc_state: Res<RtcVoiceState>,
+) {
     if !voice_state.enabled {
         return;
     }
@@ -265,52 +419,75 @@ fn render_voice_indicators(mut contexts: EguiContexts, voice_state: Res<VoiceSta
     egui::Area::new(egui::Id::new("voice_status"))
         .anchor(egui::Align2::RIGHT_BOTTOM, egui::vec2(-10.0, -10.0))
         .show(ctx, |ui| {
-            ui.horizontal(|ui| {
-                // mic status
-                let mic_icon = if voice_state.muted {
-                    "\u{1F507}" // muted speaker
-                } else if voice_state.ptt_active {
-                    "\u{1F3A4}" // microphone
-                } else {
-                    "\u{1F3A4}" // microphone (dim)
-                };
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgba_premultiplied(20, 20, 20, 200))
+                .rounding(egui::Rounding::same(6.0))
+                .inner_margin(egui::Margin::same(6.0))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // WebRTC connection indicator
+                        let connected = voice_state.connected_peers();
+                        if rtc_state.session_active {
+                            let conn_color = if connected > 0 {
+                                egui::Color32::GREEN
+                            } else {
+                                egui::Color32::YELLOW
+                            };
+                            ui.label(egui::RichText::new(
+                                format!("[{}]", connected)
+                            ).small().color(conn_color));
+                        }
 
-                let mic_color = if voice_state.muted {
-                    egui::Color32::RED
-                } else if voice_state.ptt_active {
-                    egui::Color32::GREEN
-                } else {
-                    egui::Color32::GRAY
-                };
+                        // mic status
+                        let mic_icon = if voice_state.muted {
+                            "MIC OFF"
+                        } else if voice_state.ptt_active {
+                            "MIC"
+                        } else {
+                            "mic"
+                        };
 
-                ui.label(egui::RichText::new(mic_icon).color(mic_color));
+                        let mic_color = if voice_state.muted {
+                            egui::Color32::RED
+                        } else if voice_state.ptt_active {
+                            egui::Color32::GREEN
+                        } else {
+                            egui::Color32::GRAY
+                        };
 
-                // headphone status
-                if voice_state.deafened {
-                    ui.label(egui::RichText::new("\u{1F508}").color(egui::Color32::RED));
-                }
+                        ui.label(egui::RichText::new(mic_icon).small().color(mic_color));
 
-                // show who's speaking
-                let speaking: Vec<_> = voice_state
-                    .players
-                    .iter()
-                    .filter(|(_, p)| p.speaking)
-                    .collect();
+                        // headphone status
+                        if voice_state.deafened {
+                            ui.label(egui::RichText::new("DEAF").small().color(egui::Color32::RED));
+                        }
 
-                if !speaking.is_empty() {
-                    ui.separator();
-                    for (seat, _) in speaking.iter().take(3) {
-                        ui.label(
-                            egui::RichText::new(format!("P{}", seat))
-                                .small()
-                                .color(egui::Color32::GREEN),
-                        );
-                    }
-                    if speaking.len() > 3 {
-                        ui.label(egui::RichText::new(format!("+{}", speaking.len() - 3)).small());
-                    }
-                }
-            });
+                        // show who's speaking
+                        let speaking: Vec<_> = voice_state
+                            .players
+                            .iter()
+                            .filter(|(_, p)| p.speaking)
+                            .collect();
+
+                        if !speaking.is_empty() {
+                            ui.separator();
+                            for (seat, player) in speaking.iter().take(3) {
+                                // color intensity based on activity level
+                                let g = (100.0 + 155.0 * player.activity_level) as u8;
+                                ui.label(
+                                    egui::RichText::new(format!("P{}", seat))
+                                        .small()
+                                        .color(egui::Color32::from_rgb(0, g, 0)),
+                                );
+                            }
+                            if speaking.len() > 3 {
+                                ui.label(egui::RichText::new(
+                                    format!("+{}", speaking.len() - 3)
+                                ).small());
+                            }
+                        }
+                    });
+                });
         });
 }
 
@@ -319,6 +496,7 @@ fn render_voice_settings(
     mut contexts: EguiContexts,
     mut voice_state: ResMut<VoiceState>,
     mut settings: ResMut<VoiceSettings>,
+    rtc_state: Res<RtcVoiceState>,
 ) {
     if !voice_state.show_settings {
         return;
@@ -331,6 +509,20 @@ fn render_voice_settings(
         .resizable(false)
         .show(ctx, |ui| {
             ui.checkbox(&mut voice_state.enabled, "enable voice chat");
+
+            // WebRTC status
+            if rtc_state.session_active {
+                let connected = voice_state.connected_peers();
+                let total = voice_state.players.len();
+                ui.horizontal(|ui| {
+                    ui.label("WebRTC:");
+                    ui.label(egui::RichText::new(
+                        format!("{}/{} connected", connected, total)
+                    ).color(if connected > 0 { egui::Color32::GREEN } else { egui::Color32::YELLOW }));
+                });
+            } else {
+                ui.label(egui::RichText::new("WebRTC: inactive").color(egui::Color32::GRAY));
+            }
 
             ui.separator();
 
@@ -359,11 +551,30 @@ fn render_voice_settings(
 
             ui.separator();
 
+            ui.checkbox(&mut settings.auto_join, "auto-join voice on table sit");
+
+            ui.separator();
+
             ui.label("player volumes:");
             let players: Vec<_> = voice_state.players.keys().cloned().collect();
             for seat in players {
                 if let Some(player) = voice_state.players.get_mut(&seat) {
                     ui.horizontal(|ui| {
+                        // connection state indicator
+                        let state_icon = match player.rtc_state {
+                            IceConnectionState::Connected | IceConnectionState::Completed => {
+                                egui::RichText::new("*").color(egui::Color32::GREEN)
+                            }
+                            IceConnectionState::Checking => {
+                                egui::RichText::new("~").color(egui::Color32::YELLOW)
+                            }
+                            IceConnectionState::Disconnected | IceConnectionState::Failed => {
+                                egui::RichText::new("x").color(egui::Color32::RED)
+                            }
+                            _ => egui::RichText::new("-").color(egui::Color32::GRAY),
+                        };
+                        ui.label(state_icon);
+
                         ui.label(format!("player {}:", seat));
                         ui.add(egui::Slider::new(&mut player.volume, 0.0..=2.0).show_value(false));
                         if ui.checkbox(&mut player.muted_by_us, "mute").changed() {
@@ -460,5 +671,25 @@ mod tests {
 
         state.muted = true;
         assert!(!state.should_transmit());
+    }
+
+    #[test]
+    fn test_connected_peers_count() {
+        let mut state = VoiceState::default();
+
+        state.players.insert(1, PlayerVoiceState {
+            rtc_state: IceConnectionState::Connected,
+            ..Default::default()
+        });
+        state.players.insert(2, PlayerVoiceState {
+            rtc_state: IceConnectionState::Checking,
+            ..Default::default()
+        });
+        state.players.insert(3, PlayerVoiceState {
+            rtc_state: IceConnectionState::Completed,
+            ..Default::default()
+        });
+
+        assert_eq!(state.connected_peers(), 2); // seats 1 and 3
     }
 }

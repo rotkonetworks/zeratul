@@ -903,7 +903,34 @@ fn render_main_inner(
                     });
                 });
 
-            ui.add_space(45.0);
+            ui.add_space(20.0);
+
+            // === fair play warning for new players ===
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgb(45, 38, 20))
+                .stroke(egui::Stroke::new(1.0, theme::ACCENT_GOLD))
+                .rounding(egui::Rounding::same(8.0))
+                .inner_margin(egui::Margin::same(12.0))
+                .outer_margin(egui::Margin::symmetric(40.0, 0.0))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(egui::RichText::new("FAIR PLAY")
+                            .size(13.0)
+                            .strong()
+                            .color(theme::ACCENT_GOLD));
+                        ui.label(egui::RichText::new(
+                            "Poker is a solved game \u{2014} AI has beaten top humans since 2017. \
+                             In public tables, coordinated players and bots have an inherent \
+                             advantage through information sharing. For the best and fairest \
+                             experience, play with people you know and trust. \
+                             Create a private table and share the code with friends.")
+                            .size(12.0)
+                            .color(theme::TEXT_SECONDARY));
+                    });
+                });
+
+            ui.add_space(20.0);
 
             // main action buttons
             ui.horizontal(|ui| {
@@ -1601,7 +1628,32 @@ fn render_browse_tables(
                 .strong()
                 .color(theme::TEXT_PRIMARY));
 
-            ui.add_space(25.0);
+            ui.add_space(15.0);
+
+            // collusion warning for public tables
+            egui::Frame::none()
+                .fill(egui::Color32::from_rgb(50, 30, 25))
+                .stroke(egui::Stroke::new(1.0, theme::ACCENT_RED.linear_multiply(0.7)))
+                .rounding(egui::Rounding::same(8.0))
+                .inner_margin(egui::Margin::same(10.0))
+                .outer_margin(egui::Margin::symmetric(20.0, 0.0))
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing.x = 6.0;
+                        ui.label(egui::RichText::new("CAUTION")
+                            .size(12.0)
+                            .strong()
+                            .color(theme::ACCENT_RED));
+                        ui.label(egui::RichText::new(
+                            "Public tables carry risk of bots and collusion. \
+                             Multiple strangers at a table may be coordinating. \
+                             For fair games, create a private table with friends instead.")
+                            .size(11.0)
+                            .color(theme::TEXT_SECONDARY));
+                    });
+                });
+
+            ui.add_space(15.0);
 
             // filter bar
             egui::Frame::none()

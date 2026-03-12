@@ -13,14 +13,16 @@ mod lobby;
 mod multitable;
 mod p2p;
 mod settings;
+mod signing;
 mod storage;
 mod table_2d;
 mod tiling;
 mod vault_client;
 
-// chat and voice
+// chat, voice and avatar
 mod chat;
 mod voice;
+mod avatar;
 mod mental_poker;
 mod wallet_ui;
 
@@ -108,8 +110,18 @@ fn main() {
         .add_plugins(chain_client::ChainClientPlugin)
         .add_plugins(wallet_ui::WalletUiPlugin)
         .add_plugins(friends::FriendsPlugin)
+        .add_plugins(avatar::AvatarPlugin)
+        .insert_resource(avatar::AvatarCatalog::with_defaults())
+        .init_resource::<mental_poker::MentalPokerManager>()
         .add_systems(Startup, setup_initial_state)
-        .add_systems(Update, (toggle_competitive_mode, toggle_training_game, toggle_debug_mode, handle_lobby_to_game_transition))
+        .add_systems(Update, (
+            toggle_competitive_mode,
+            toggle_training_game,
+            toggle_debug_mode,
+            handle_lobby_to_game_transition,
+            mental_poker::detect_phase_transitions,
+            mental_poker::process_mental_poker_messages,
+        ))
         .run();
 }
 
