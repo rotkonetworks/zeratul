@@ -204,10 +204,26 @@ pub enum Message {
     Typing(TypingIndicator),
 
     // === Voice ===
-    /// voice audio packet (opus encoded)
+    /// voice audio packet (opus encoded, fallback over iroh QUIC)
     VoiceData(VoiceData),
     /// voice state change (mute, unmute, speaking)
     VoiceState(VoiceState),
+
+    // === Avatar ===
+    /// face blend shapes for avatar animation (sent over WebRTC data channel)
+    AvatarFrame(AvatarFrame),
+
+    // === WebRTC Signaling (exchanged over iroh QUIC) ===
+    /// SDP offer for WebRTC peer connection
+    RtcOffer(RtcSessionDescription),
+    /// SDP answer for WebRTC peer connection
+    RtcAnswer(RtcSessionDescription),
+    /// ICE candidate for NAT traversal
+    RtcIceCandidate(RtcIceCandidate),
+    /// request to start WebRTC media session
+    RtcMediaRequest(RtcMediaRequest),
+    /// accept/reject WebRTC media session
+    RtcMediaResponse(RtcMediaResponse),
 }
 
 /// table announcement from host
@@ -298,6 +314,8 @@ pub struct PlayerAction {
     pub hand_number: u64,
     pub seat: u8,
     pub action: ActionType,
+    /// monotonically increasing per-seat counter for replay protection
+    pub sequence: u64,
     pub signature: [u8; 64],
 }
 
@@ -452,6 +470,202 @@ pub enum VoiceStateType {
     Disconnected,
 }
 
+// === Avatar Types ===
+
+/// face blend shape frame for avatar animation
+/// compact: 52 blend shapes (u8 each, 0-255 mapped to 0.0-1.0) + head pose = ~60 bytes
+/// at 30fps over WebRTC data channel = ~1.8 KB/s per player
+#[derive(Clone, Debug, Encode, Decode)]
+pub struct AvatarFrame {
+    /// sender seat
+    pub seat: u8,
+    /// sequence number
+    pub seq: u32,
+    /// ARKit-compatible blend shape weights (0-255, quantized from 0.0-1.0)
+    /// 52 values following Apple ARKit face anchor ordering
+    pub blend_shapes: Vec<u8>,
+    /// head rotation (pitch, yaw, roll) in milliradians
+    pub head_rotation: [i16; 3],
+    /// head position offset (x, y, z) in millimeters from neutral
+    pub head_position: [i16; 3],
+}
+
+impl AvatarFrame {
+    /// size in bytes when encoded (approximately)
+    pub const APPROX_SIZE: usize = 1 + 4 + 52 + 6 + 6; // ~69 bytes
+
+    /// create from float blend shapes and radians
+    pub fn from_floats(seat: u8, seq: u32, shapes: &[f32], rotation: [f32; 3], position: [f32; 3]) -> Self {
+        Self {
+            seat,
+            seq,
+            blend_shapes: shapes.iter()
+                .map(|v| (v.clamp(0.0, 1.0) * 255.0) as u8)
+                .collect(),
+            head_rotation: [
+                (rotation[0] * 1000.0) as i16,
+                (rotation[1] * 1000.0) as i16,
+                (rotation[2] * 1000.0) as i16,
+            ],
+            head_position: [
+                (position[0] * 1000.0) as i16,
+                (position[1] * 1000.0) as i16,
+                (position[2] * 1000.0) as i16,
+            ],
+        }
+    }
+
+    /// get blend shape as float (0.0 - 1.0)
+    pub fn shape(&self, index: usize) -> f32 {
+        self.blend_shapes.get(index).map(|v| *v as f32 / 255.0).unwrap_or(0.0)
+    }
+
+    /// get head rotation as radians
+    pub fn rotation_rad(&self) -> [f32; 3] {
+        [
+            self.head_rotation[0] as f32 / 1000.0,
+            self.head_rotation[1] as f32 / 1000.0,
+            self.head_rotation[2] as f32 / 1000.0,
+        ]
+    }
+
+    /// get head position as float
+    pub fn position_f32(&self) -> [f32; 3] {
+        [
+            self.head_position[0] as f32 / 1000.0,
+            self.head_position[1] as f32 / 1000.0,
+            self.head_position[2] as f32 / 1000.0,
+        ]
+    }
+}
+
+/// ARKit blend shape indices (subset — the most expressive ones for poker)
+pub mod blend_shape {
+    // eyes
+    pub const EYE_BLINK_LEFT: usize = 0;
+    pub const EYE_BLINK_RIGHT: usize = 1;
+    pub const EYE_LOOK_DOWN_LEFT: usize = 2;
+    pub const EYE_LOOK_DOWN_RIGHT: usize = 3;
+    pub const EYE_LOOK_IN_LEFT: usize = 4;
+    pub const EYE_LOOK_IN_RIGHT: usize = 5;
+    pub const EYE_LOOK_OUT_LEFT: usize = 6;
+    pub const EYE_LOOK_OUT_RIGHT: usize = 7;
+    pub const EYE_LOOK_UP_LEFT: usize = 8;
+    pub const EYE_LOOK_UP_RIGHT: usize = 9;
+    pub const EYE_SQUINT_LEFT: usize = 10;
+    pub const EYE_SQUINT_RIGHT: usize = 11;
+    pub const EYE_WIDE_LEFT: usize = 12;
+    pub const EYE_WIDE_RIGHT: usize = 13;
+    // eyebrows
+    pub const BROW_DOWN_LEFT: usize = 14;
+    pub const BROW_DOWN_RIGHT: usize = 15;
+    pub const BROW_INNER_UP: usize = 16;
+    pub const BROW_OUTER_UP_LEFT: usize = 17;
+    pub const BROW_OUTER_UP_RIGHT: usize = 18;
+    // jaw
+    pub const JAW_FORWARD: usize = 19;
+    pub const JAW_LEFT: usize = 20;
+    pub const JAW_OPEN: usize = 21;
+    pub const JAW_RIGHT: usize = 22;
+    // mouth
+    pub const MOUTH_CLOSE: usize = 23;
+    pub const MOUTH_DIMPLE_LEFT: usize = 24;
+    pub const MOUTH_DIMPLE_RIGHT: usize = 25;
+    pub const MOUTH_FROWN_LEFT: usize = 26;
+    pub const MOUTH_FROWN_RIGHT: usize = 27;
+    pub const MOUTH_FUNNEL: usize = 28;
+    pub const MOUTH_LEFT: usize = 29;
+    pub const MOUTH_LOWER_DOWN_LEFT: usize = 30;
+    pub const MOUTH_LOWER_DOWN_RIGHT: usize = 31;
+    pub const MOUTH_PRESS_LEFT: usize = 32;
+    pub const MOUTH_PRESS_RIGHT: usize = 33;
+    pub const MOUTH_PUCKER: usize = 34;
+    pub const MOUTH_RIGHT: usize = 35;
+    pub const MOUTH_ROLL_LOWER: usize = 36;
+    pub const MOUTH_ROLL_UPPER: usize = 37;
+    pub const MOUTH_SHRUG_LOWER: usize = 38;
+    pub const MOUTH_SHRUG_UPPER: usize = 39;
+    pub const MOUTH_SMILE_LEFT: usize = 40;
+    pub const MOUTH_SMILE_RIGHT: usize = 41;
+    pub const MOUTH_STRETCH_LEFT: usize = 42;
+    pub const MOUTH_STRETCH_RIGHT: usize = 43;
+    pub const MOUTH_UPPER_UP_LEFT: usize = 44;
+    pub const MOUTH_UPPER_UP_RIGHT: usize = 45;
+    // cheeks/nose
+    pub const CHEEK_PUFF: usize = 46;
+    pub const CHEEK_SQUINT_LEFT: usize = 47;
+    pub const CHEEK_SQUINT_RIGHT: usize = 48;
+    pub const NOSE_SNEER_LEFT: usize = 49;
+    pub const NOSE_SNEER_RIGHT: usize = 50;
+    // tongue
+    pub const TONGUE_OUT: usize = 51;
+
+    pub const COUNT: usize = 52;
+}
+
+// === WebRTC Signaling Types ===
+
+/// WebRTC media capabilities
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+pub enum MediaKind {
+    /// voice only (opus)
+    Voice,
+    /// voice + camera
+    VoiceVideo,
+    /// screen share
+    Screen,
+}
+
+/// request to establish WebRTC media session
+#[derive(Clone, Debug, Encode, Decode)]
+pub struct RtcMediaRequest {
+    /// requesting seat
+    pub seat: u8,
+    /// what media to establish
+    pub media: MediaKind,
+    /// peer's fingerprint for DTLS verification
+    pub dtls_fingerprint: Vec<u8>,
+}
+
+/// response to media request
+#[derive(Clone, Debug, Encode, Decode)]
+pub struct RtcMediaResponse {
+    /// responding seat
+    pub seat: u8,
+    /// accepted or rejected
+    pub accepted: bool,
+    /// reason if rejected
+    pub reason: Option<String>,
+    /// peer's fingerprint for DTLS verification
+    pub dtls_fingerprint: Vec<u8>,
+}
+
+/// SDP session description (offer or answer)
+#[derive(Clone, Debug, Encode, Decode)]
+pub struct RtcSessionDescription {
+    /// sender seat
+    pub seat: u8,
+    /// target seat (0 = broadcast/host)
+    pub target: u8,
+    /// SDP string
+    pub sdp: String,
+}
+
+/// ICE candidate for WebRTC NAT traversal
+#[derive(Clone, Debug, Encode, Decode)]
+pub struct RtcIceCandidate {
+    /// sender seat
+    pub seat: u8,
+    /// target seat
+    pub target: u8,
+    /// ICE candidate string (SDP format)
+    pub candidate: String,
+    /// SDP media index
+    pub sdp_m_line_index: u32,
+    /// SDP mid
+    pub sdp_mid: Option<String>,
+}
+
 impl Message {
     /// encode message to bytes
     pub fn encode_to_vec(&self) -> Vec<u8> {
@@ -501,5 +715,40 @@ mod tests {
             Message::Ping(n) => assert_eq!(n, 12345),
             _ => panic!("wrong message type"),
         }
+    }
+
+    #[test]
+    fn test_avatar_frame_roundtrip() {
+        let shapes: Vec<f32> = (0..blend_shape::COUNT).map(|i| i as f32 / 51.0).collect();
+        let frame = AvatarFrame::from_floats(3, 42, &shapes, [0.1, -0.3, 0.05], [0.0; 3]);
+
+        let msg = Message::AvatarFrame(frame);
+        let encoded = msg.encode_to_vec();
+        let decoded = Message::decode_from_slice(&encoded).unwrap();
+
+        match decoded {
+            Message::AvatarFrame(f) => {
+                assert_eq!(f.seat, 3);
+                assert_eq!(f.seq, 42);
+                assert_eq!(f.blend_shapes.len(), blend_shape::COUNT);
+                // check quantization preserves approximate values
+                assert!((f.shape(0) - 0.0).abs() < 0.01);
+                assert!((f.shape(blend_shape::COUNT - 1) - 1.0).abs() < 0.01);
+                // head rotation preserved
+                let rot = f.rotation_rad();
+                assert!((rot[0] - 0.1).abs() < 0.01);
+                assert!((rot[1] - (-0.3)).abs() < 0.01);
+            }
+            _ => panic!("wrong message type"),
+        }
+    }
+
+    #[test]
+    fn test_avatar_frame_compact_size() {
+        let frame = AvatarFrame::from_floats(1, 0, &vec![0.5; blend_shape::COUNT], [0.0; 3], [0.0; 3]);
+        let msg = Message::AvatarFrame(frame);
+        let encoded = msg.encode_to_vec();
+        // should be compact — well under 200 bytes
+        assert!(encoded.len() < 200, "avatar frame too large: {} bytes", encoded.len());
     }
 }
