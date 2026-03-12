@@ -15,7 +15,7 @@
 #![no_std]
 #![allow(static_mut_refs)]
 
-use uapi::{HostFn, HostFnImpl as api, ReturnFlags, StorageFlags};
+use uapi::{CallFlags, HostFn, HostFnImpl as api, ReturnFlags, StorageFlags};
 
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
@@ -95,18 +95,51 @@ fn keccak256(data: &[u8]) -> [u8; 32] {
     out
 }
 
-/// recover signer from signature (ECDSA secp256k1)
+/// recover signer from signature via ecrecover precompile (address 0x01)
+/// input: hash(32) || v(32) || r(32) || s(32) = 128 bytes
+/// output: address (32 bytes, left-padded)
 fn ecrecover(msg_hash: &[u8; 32], signature: &[u8; 65]) -> Option<[u8; 20]> {
-    let mut out = [0u8; 33];
-    let result = api::ecdsa_recover(signature, msg_hash, &mut out);
-    if result.is_ok() {
-        let pubkey_hash = keccak256(&out[1..]);
-        let mut addr = [0u8; 20];
-        addr.copy_from_slice(&pubkey_hash[12..32]);
-        Some(addr)
-    } else {
-        None
+    // build precompile input: hash(32) || v(32) || r(32) || s(32)
+    let mut input = [0u8; 128];
+    input[0..32].copy_from_slice(msg_hash);
+    // v is recovery id (27 or 28)
+    let v = if signature[64] < 27 { signature[64] + 27 } else { signature[64] };
+    input[63] = v;
+    // r
+    input[64..96].copy_from_slice(&signature[0..32]);
+    // s
+    input[96..128].copy_from_slice(&signature[32..64]);
+
+    // call ecrecover precompile at address 0x01
+    let mut precompile_addr = [0u8; 20];
+    precompile_addr[19] = 0x01;
+    let zero_value = [0u8; 32];
+    let mut output_buf = [0u8; 32];
+    let mut output = &mut output_buf[..];
+
+    let result = api::call(
+        CallFlags::empty(),
+        &precompile_addr,
+        0,    // ref_time
+        0,    // proof_size
+        &zero_value, // deposit
+        &zero_value, // value
+        &input,
+        Some(&mut output),
+    );
+
+    if result.is_err() {
+        return None;
     }
+
+    // reject zero address (invalid recovery)
+    let mut addr = [0u8; 20];
+    addr.copy_from_slice(&output_buf[12..32]);
+    if addr == [0u8; 20] {
+        return None;
+    }
+
+    Some(addr)
 }
 
 /// verify signatures for a state update or dispute
@@ -684,7 +717,9 @@ fn handle_dispute(input_len: usize) {
     api::caller(&mut caller);
 
     // get current block
-    let block_number = api::block_number();
+    let mut block_bytes = [0u8; 32];
+    api::block_number(&mut block_bytes);
+    let block_number = u64::from_be_bytes(block_bytes[24..32].try_into().unwrap());
 
     // update state
     game_data[0] = STATE_DISPUTED;
@@ -719,7 +754,9 @@ fn handle_settle(input_len: usize) {
     if game_data[0] == STATE_DISPUTED {
         let dispute_block = u64::from_le_bytes(game_data[80..88].try_into().unwrap());
         let dispute_timeout = u64::from_le_bytes(game_data[88..96].try_into().unwrap());
-        let current_block = api::block_number();
+        let mut block_bytes = [0u8; 32];
+        api::block_number(&mut block_bytes);
+        let current_block = u64::from_be_bytes(block_bytes[24..32].try_into().unwrap());
 
         if current_block < dispute_block + dispute_timeout {
             api::return_value(ReturnFlags::REVERT, &[0x16]); // dispute not timed out
@@ -739,7 +776,11 @@ fn handle_settle(input_len: usize) {
         api::return_value(ReturnFlags::REVERT, &[0x17]); // too many payouts
     }
 
-    // distribute payouts
+    // parse and validate payouts BEFORE any transfers
+    let mut total_payout: u128 = 0;
+    let mut payout_list: [(u128, [u8; 20]); 10] = [(0u128, [0u8; 20]); 10];
+    let mut payout_count = 0usize;
+
     for i in 0..payouts_len {
         let payout_offset = payouts_len_offset + 32 + i * 32;
         let mut payout_bytes = [0u8; 32];
@@ -749,20 +790,64 @@ fn handle_settle(input_len: usize) {
         if payout > 0 {
             let player_k = player_key(&game_id, i as u8);
             let mut player_data = [0u8; PLAYER_DATA_SIZE];
-            if sget(&player_k, &mut player_data) {
-                let mut addr = [0u8; 20];
-                addr.copy_from_slice(&player_data[0..20]);
-
-                // transfer payout
-                let mut payout_256 = [0u8; 32];
-                payout_256[16..32].copy_from_slice(&payout.to_be_bytes());
-                let _ = api::transfer(&addr, &payout_256);
+            if !sget(&player_k, &mut player_data) {
+                api::return_value(ReturnFlags::REVERT, &[0x19]); // payout to non-existent player
             }
+            payout_list[payout_count].0 = payout;
+            payout_list[payout_count].1.copy_from_slice(&player_data[0..20]);
+            payout_count += 1;
         }
+
+        // overflow-safe accumulation
+        total_payout = match total_payout.checked_add(payout) {
+            Some(v) => v,
+            None => { api::return_value(ReturnFlags::REVERT, &[0x1A]); } // overflow
+        };
     }
 
+    // conservation check: total payouts must not exceed total deposits
+    let mut total_deposits: u128 = 0;
+    let current_players = game_data[39];
+    for seat in 0..max_players {
+        let player_k = player_key(&game_id, seat as u8);
+        let mut player_data = [0u8; PLAYER_DATA_SIZE];
+        if sget(&player_k, &mut player_data) {
+            let deposit = u128::from_le_bytes(player_data[20..36].try_into().unwrap());
+            total_deposits = total_deposits.saturating_add(deposit);
+        }
+    }
+    if total_payout > total_deposits {
+        api::return_value(ReturnFlags::REVERT, &[0x1B]); // payouts exceed deposits
+    }
+
+    // EFFECTS: update state BEFORE transfers (CEI pattern)
     game_data[0] = STATE_SETTLED;
     sset(&key, &game_data);
+
+    // INTERACTIONS: distribute payouts
+    for i in 0..payout_count {
+        let (payout, addr) = payout_list[i];
+        let mut payout_256 = [0u8; 32];
+        payout_256[16..32].copy_from_slice(&payout.to_be_bytes());
+        let zero_deposit = [0u8; 32];
+        let result = api::call(
+            CallFlags::empty(),
+            &addr,
+            0,
+            0,
+            &zero_deposit, // deposit
+            &payout_256,   // value (transfer amount)
+            &[],           // input data
+            None,
+        );
+        if result.is_err() {
+            // revert entire settlement if any transfer fails
+            // restore state to pre-settlement
+            game_data[0] = if game_data[80..88] == [0u8; 8] { STATE_ACTIVE } else { STATE_DISPUTED };
+            sset(&key, &game_data);
+            api::return_value(ReturnFlags::REVERT, &[0x1C]); // transfer failed
+        }
+    }
 
     emit_game_settled(&game_id);
     api::return_value(ReturnFlags::empty(), &[0x01]);

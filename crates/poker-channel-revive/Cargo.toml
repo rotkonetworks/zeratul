@@ -5,8 +5,8 @@ edition = "2021"
 description = "poker state channel contract for revive/polkavm"
 
 [dependencies]
-uapi = { package = "pallet-revive-uapi", version = "0.7", default-features = false }
-polkavm-derive = "0.27.0"
+uapi = { package = "pallet-revive-uapi", version = "0.9", default-features = false }
+polkavm-derive = "0.30.0"
 
 [[bin]]
 name = "poker-channel"
