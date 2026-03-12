@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>zk.poker</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: #1a1a2e; color: #e0e0e0; font-family: 'Courier New', monospace; display: flex; justify-content: center; align-items: center; min-height: 100vh; }
+#app { width: 800px; max-width: 95vw; }
+
+/* lobby */
+#lobby { text-align: center; padding: 40px; }
+#lobby h1 { font-size: 2em; color: #0f0; margin-bottom: 10px; }
+#lobby .sub { color: #888; margin-bottom: 30px; }
+#lobby input { background: #16213e; border: 1px solid #0f3460; color: #e0e0e0; padding: 12px 20px; font-size: 16px; font-family: inherit; border-radius: 4px; width: 250px; }
+#lobby button { background: #0f3460; color: #e94560; border: none; padding: 12px 30px; font-size: 16px; font-family: inherit; cursor: pointer; border-radius: 4px; margin-left: 8px; }
+#lobby button:hover { background: #e94560; color: #fff; }
+
+/* table */
+#game { display: none; }
+.table-felt { background: #0d4a2e; border: 3px solid #1a6b3c; border-radius: 120px; padding: 30px; margin: 20px 0; min-height: 280px; position: relative; }
+
+/* seats */
+.seat { position: absolute; text-align: center; width: 160px; }
+.seat-0 { bottom: -10px; left: 50%; transform: translateX(-50%); }
+.seat-1 { top: -10px; left: 50%; transform: translateX(-50%); }
+.seat-name { font-size: 12px; color: #aaa; }
+.seat-stack { font-size: 14px; color: #ffd700; font-weight: bold; }
+.seat-bet { font-size: 13px; color: #f0f0f0; margin-top: 2px; }
+.seat-cards { display: flex; gap: 4px; justify-content: center; margin: 4px 0; }
+.seat.active .seat-name { color: #0f0; }
+.seat.acting .seat-name { color: #e94560; text-shadow: 0 0 8px #e94560; }
+
+/* cards */
+.card { width: 38px; height: 54px; border-radius: 4px; display: inline-flex; align-items: center; justify-content: center; font-size: 14px; font-weight: bold; border: 1px solid #555; }
+.card-front { background: #fff; color: #000; }
+.card-back { background: linear-gradient(135deg, #1a1a8e, #4a0a5e); border-color: #666; }
+.card-red { color: #d00; }
+
+/* community */
+.community { display: flex; gap: 6px; justify-content: center; margin: 60px 0; }
+.community .card { width: 46px; height: 64px; font-size: 16px; }
+
+/* pot */
+.pot-display { text-align: center; color: #ffd700; font-size: 16px; margin: 8px 0; }
+
+/* actions */
+#actions { display: flex; gap: 8px; justify-content: center; padding: 15px; flex-wrap: wrap; }
+#actions button { background: #16213e; color: #e0e0e0; border: 1px solid #0f3460; padding: 10px 20px; font-size: 14px; font-family: inherit; cursor: pointer; border-radius: 4px; min-width: 70px; }
+#actions button:hover { background: #0f3460; color: #fff; }
+#actions button.fold { border-color: #900; }
+#actions button.fold:hover { background: #900; }
+#actions button.allin { border-color: #e94560; }
+#actions button.allin:hover { background: #e94560; }
+#raise-input { background: #16213e; border: 1px solid #0f3460; color: #e0e0e0; padding: 8px; width: 80px; font-family: inherit; border-radius: 4px; text-align: center; }
+
+/* log */
+#log { background: #16213e; border-radius: 4px; padding: 10px; max-height: 150px; overflow-y: auto; font-size: 12px; margin-top: 10px; }
+#log .entry { padding: 2px 0; border-bottom: 1px solid #1a1a2e; }
+.log-action { color: #aaa; }
+.log-pot { color: #ffd700; }
+.log-phase { color: #0f0; }
+.log-win { color: #e94560; font-weight: bold; }
+
+/* status bar */
+#status { text-align: center; padding: 8px; color: #888; font-size: 13px; }
+
+/* waiting overlay */
+#waiting { display: none; text-align: center; padding: 60px; }
+#waiting .spinner { display: inline-block; width: 30px; height: 30px; border: 3px solid #333; border-top-color: #0f0; border-radius: 50%; animation: spin 1s linear infinite; margin-bottom: 16px; }
+@keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="lobby">
+    <h1>zk.poker</h1>
+    <p class="sub">heads-up no-limit hold'em</p>
+    <div>
+      <input id="name-input" placeholder="your name" maxlength="20" autofocus>
+      <button onclick="joinGame()">sit down</button>
+    </div>
+  </div>
+
+  <div id="waiting">
+    <div class="spinner"></div>
+    <p>waiting for opponent...</p>
+  </div>
+
+  <div id="game">
+    <div id="status"></div>
+    <div class="table-felt">
+      <div class="seat seat-1" id="seat-1">
+        <div class="seat-name" id="name-1">—</div>
+        <div class="seat-cards" id="cards-1"></div>
+        <div class="seat-stack" id="stack-1"></div>
+        <div class="seat-bet" id="bet-1"></div>
+      </div>
+      <div class="community" id="community"></div>
+      <div class="pot-display" id="pot"></div>
+      <div class="seat seat-0" id="seat-0">
+        <div class="seat-bet" id="bet-0"></div>
+        <div class="seat-stack" id="stack-0"></div>
+        <div class="seat-cards" id="cards-0"></div>
+        <div class="seat-name" id="name-0">—</div>
+      </div>
+    </div>
+    <div id="actions"></div>
+    <div id="log"></div>
+  </div>
+</div>
+
+<script>
+let ws, mySeat = null, myName = '';
+let stacks = [0, 0], currentBets = [0, 0];
+const opponentSeat = () => mySeat === 0 ? 1 : 0;
+
+function joinGame() {
+  myName = document.getElementById('name-input').value.trim() || 'anon';
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  ws = new WebSocket(`${proto}//${location.host}/ws`);
+  ws.onopen = () => ws.send(JSON.stringify({ type: 'Join', name: myName }));
+  ws.onmessage = e => handleMsg(JSON.parse(e.data));
+  ws.onclose = () => log('disconnected', 'log-action');
+  document.getElementById('lobby').style.display = 'none';
+}
+
+document.getElementById('name-input').addEventListener('keydown', e => {
+  if (e.key === 'Enter') joinGame();
+});
+
+function handleMsg(msg) {
+  switch (msg.type) {
+    case 'Seated':
+      mySeat = msg.seat;
+      document.getElementById('waiting').style.display = 'block';
+      break;
+    case 'Waiting':
+      document.getElementById('waiting').style.display = 'block';
+      break;
+    case 'OpponentJoined':
+      setName(msg.seat, msg.name);
+      break;
+    case 'OpponentLeft':
+      setName(msg.seat, '—');
+      log('opponent left', 'log-action');
+      document.getElementById('actions').innerHTML = '';
+      document.getElementById('waiting').style.display = 'block';
+      document.getElementById('game').style.display = 'none';
+      break;
+    case 'HandStarted':
+      document.getElementById('waiting').style.display = 'none';
+      document.getElementById('game').style.display = 'block';
+      stacks = msg.stacks;
+      currentBets = [0, 0];
+      updateStacks();
+      clearCards();
+      document.getElementById('community').innerHTML = '';
+      document.getElementById('pot').textContent = '';
+      document.getElementById('actions').innerHTML = '';
+      if (msg.your_cards) {
+        showCards(mySeat, msg.your_cards, true);
+        showCards(opponentSeat(), null, false);
+      }
+      const dealer = msg.button === mySeat ? 'you' : 'opponent';
+      document.getElementById('status').textContent = `hand #${msg.hand_number} — ${dealer} deals`;
+      log(`hand #${msg.hand_number} started`, 'log-phase');
+      break;
+    case 'BlindsPosted':
+      currentBets[msg.small_blind[0]] = msg.small_blind[1];
+      currentBets[msg.big_blind[0]] = msg.big_blind[1];
+      updateBets();
+      log(`blinds: ${msg.small_blind[1]}/${msg.big_blind[1]}`, 'log-action');
+      break;
+    case 'ActionRequired':
+      if (msg.seat === mySeat) {
+        showActions(msg.valid_actions);
+      } else {
+        document.getElementById('actions').innerHTML = '<em style="color:#888">opponent thinking...</em>';
+      }
+      highlightSeat(msg.seat, true);
+      break;
+    case 'PlayerActed':
+      highlightSeat(msg.seat, false);
+      let actStr = msg.action;
+      if (msg.amount > 0 && (msg.action === 'bet' || msg.action === 'raise')) {
+        actStr += ` ${msg.amount}`;
+      }
+      stacks[msg.seat] = msg.new_stack;
+      // update bets based on action
+      if (msg.action === 'bet' || msg.action === 'raise') {
+        currentBets[msg.seat] = msg.amount;
+      } else if (msg.action === 'call') {
+        currentBets[msg.seat] = Math.max(...currentBets);
+      } else if (msg.action === 'allin') {
+        // bet already reflected in new_stack
+        currentBets[msg.seat] = currentBets[msg.seat] + (stacks[msg.seat] === 0 ? msg.new_stack : 0);
+      }
+      updateStacks();
+      updateBets();
+      const who = msg.seat === mySeat ? 'you' : 'opponent';
+      log(`${who}: ${actStr}`, 'log-action');
+      break;
+    case 'CommunityCards':
+      showCommunity(msg.cards);
+      currentBets = [0, 0];
+      updateBets();
+      log(`${msg.phase}: ${msg.cards.map(c => c.rank + c.suit).join(' ')}`, 'log-phase');
+      break;
+    case 'PotUpdate':
+      const total = msg.pots.reduce((s, p) => s + p.amount, 0);
+      document.getElementById('pot').textContent = total > 0 ? `pot: ${total}` : '';
+      break;
+    case 'Showdown':
+      msg.hands.forEach(([seat, cards]) => showCards(seat, cards, true));
+      log('showdown', 'log-phase');
+      break;
+    case 'PotAwarded':
+      const winner = msg.seat === mySeat ? 'you win' : 'opponent wins';
+      log(`${winner} ${msg.amount}`, 'log-win');
+      break;
+    case 'HandComplete':
+      stacks = msg.stacks;
+      currentBets = [0, 0];
+      updateStacks();
+      updateBets();
+      document.getElementById('actions').innerHTML = '';
+      break;
+    case 'Error':
+      log(`error: ${msg.message}`, 'log-action');
+      break;
+  }
+}
+
+function showActions(valid) {
+  const el = document.getElementById('actions');
+  el.innerHTML = '';
+  valid.forEach(a => {
+    if (a.kind === 'fold') {
+      el.innerHTML += `<button class="fold" onclick="sendAction('fold')">fold</button>`;
+    } else if (a.kind === 'check') {
+      el.innerHTML += `<button onclick="sendAction('check')">check</button>`;
+    } else if (a.kind === 'call') {
+      el.innerHTML += `<button onclick="sendAction('call')">call ${a.min_amount}</button>`;
+    } else if (a.kind === 'bet') {
+      el.innerHTML += `<input id="raise-input" type="number" min="${a.min_amount}" max="${a.max_amount}" value="${a.min_amount}">`;
+      el.innerHTML += `<button onclick="sendBet()">bet</button>`;
+    } else if (a.kind === 'raise') {
+      if (!document.getElementById('raise-input')) {
+        el.innerHTML += `<input id="raise-input" type="number" min="${a.min_amount}" max="${a.max_amount}" value="${a.min_amount}">`;
+      }
+      el.innerHTML += `<button onclick="sendRaise()">raise</button>`;
+    } else if (a.kind === 'allin') {
+      el.innerHTML += `<button class="allin" onclick="sendAction('allin')">all-in ${a.min_amount}</button>`;
+    }
+  });
+}
+
+function sendAction(action) {
+  ws.send(JSON.stringify({ type: 'Action', action }));
+  document.getElementById('actions').innerHTML = '';
+}
+function sendBet() {
+  const v = parseInt(document.getElementById('raise-input')?.value || '0');
+  ws.send(JSON.stringify({ type: 'Action', action: 'bet', amount: v }));
+  document.getElementById('actions').innerHTML = '';
+}
+function sendRaise() {
+  const v = parseInt(document.getElementById('raise-input')?.value || '0');
+  ws.send(JSON.stringify({ type: 'Action', action: 'raise', amount: v }));
+  document.getElementById('actions').innerHTML = '';
+}
+
+// --- rendering ---
+
+function setName(seat, name) {
+  const displaySeat = seat === mySeat ? 0 : 1;
+  document.getElementById(`name-${displaySeat}`).textContent = name;
+}
+
+function updateStacks() {
+  const mineDisplay = 0, oppDisplay = 1;
+  document.getElementById(`stack-${mineDisplay}`).textContent = `${stacks[mySeat]}`;
+  document.getElementById(`stack-${oppDisplay}`).textContent = `${stacks[opponentSeat()]}`;
+}
+
+function updateBets() {
+  for (let display = 0; display < 2; display++) {
+    const actual = display === 0 ? mySeat : opponentSeat();
+    const el = document.getElementById(`bet-${display}`);
+    el.textContent = currentBets[actual] > 0 ? `bet: ${currentBets[actual]}` : '';
+  }
+}
+
+function clearCards() {
+  document.getElementById('cards-0').innerHTML = '';
+  document.getElementById('cards-1').innerHTML = '';
+}
+
+function showCards(seat, cards, faceUp) {
+  const displaySeat = seat === mySeat ? 0 : 1;
+  const el = document.getElementById(`cards-${displaySeat}`);
+  if (!faceUp || !cards) {
+    el.innerHTML = '<div class="card card-back"></div><div class="card card-back"></div>';
+  } else {
+    el.innerHTML = cards.map(c => {
+      const red = (c.suit === 'h' || c.suit === 'd') ? ' card-red' : '';
+      const sym = { c: '♣', d: '♦', h: '♥', s: '♠' }[c.suit];
+      return `<div class="card card-front${red}">${c.rank}${sym}</div>`;
+    }).join('');
+  }
+}
+
+function showCommunity(cards) {
+  const el = document.getElementById('community');
+  el.innerHTML = cards.map(c => {
+    const red = (c.suit === 'h' || c.suit === 'd') ? ' card-red' : '';
+    const sym = { c: '♣', d: '♦', h: '♥', s: '♠' }[c.suit];
+    return `<div class="card card-front${red}">${c.rank}${sym}</div>`;
+  }).join('');
+}
+
+function highlightSeat(seat, acting) {
+  for (let d = 0; d < 2; d++) {
+    document.getElementById(`seat-${d}`).classList.remove('acting');
+  }
+  if (acting) {
+    const displaySeat = seat === mySeat ? 0 : 1;
+    document.getElementById(`seat-${displaySeat}`).classList.add('acting');
+  }
+}
+
+function log(text, cls) {
+  const el = document.getElementById('log');
+  el.innerHTML += `<div class="entry ${cls || ''}">${text}</div>`;
+  el.scrollTop = el.scrollHeight;
+}
+</script>
+</body>
+</html>

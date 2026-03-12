@@ -44,6 +44,7 @@ exclude = [
     "crates/ghettobox-vault-guest", # PolkaVM guest program (requires special build)
     "crates/ghettobox-vault-pvm",   # depends on polkavm host, special build
     "crates/poker-p2p",       # iroh conflicts with zcash sha2 versions
+    "crates/poker-server",    # standalone websocket game server
     "crates/barnett-smart-card-protocol", # old ark/proof-toolbox deps from private repo
     "crates/state-channel",        # uncommitted
     "crates/poker-sdk",            # uncommitted

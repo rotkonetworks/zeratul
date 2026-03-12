@@ -1,0 +1,26 @@
+[package]
+name = "poker-server"
+version = "0.1.0"
+edition = "2021"
+description = "WebSocket poker server for browser-based heads-up play"
+
+[dependencies]
+poker-p2p = { path = "../poker-p2p" }
+zk-shuffle = { path = "../zk-shuffle" }
+
+# web server
+axum = { version = "0.8", features = ["ws"] }
+tokio = { version = "1", features = ["full"] }
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+
+# serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# async
+futures = "0.3"
+
+# utils
+rand = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
