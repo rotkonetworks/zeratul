@@ -129,11 +129,12 @@ impl WalletKeys {
             .par_iter()
             .enumerate()
             .filter_map(|(idx, action)| {
-                self.try_decrypt_action_binary(action).map(|(value, note_nf, rseed, rho, addr)| FoundNote {
+                self.try_decrypt_action_binary(action).map(|(value, note_nf, rseed, rho, addr, is_change)| FoundNote {
                     index: idx as u32,
                     value,
                     nullifier: hex_encode(&note_nf),
                     cmx: hex_encode(&action.cmx),
+                    is_change,
                     rseed: Some(hex_encode(&rseed)),
                     rho: Some(hex_encode(&rho)),
                     recipient: Some(hex_encode(&addr)),
@@ -146,11 +147,12 @@ impl WalletKeys {
             .iter()
             .enumerate()
             .filter_map(|(idx, action)| {
-                self.try_decrypt_action_binary(action).map(|(value, note_nf, rseed, rho, addr)| FoundNote {
+                self.try_decrypt_action_binary(action).map(|(value, note_nf, rseed, rho, addr, is_change)| FoundNote {
                     index: idx as u32,
                     value,
                     nullifier: hex_encode(&note_nf),
                     cmx: hex_encode(&action.cmx),
+                    is_change,
                     rseed: Some(hex_encode(&rseed)),
                     rho: Some(hex_encode(&rho)),
                     recipient: Some(hex_encode(&addr)),
@@ -178,6 +180,7 @@ impl WalletKeys {
                     value,
                     nullifier: action.nullifier.clone(),
                     cmx: action.cmx.clone(),
+                    is_change: false,
                     rseed: None,
                     rho: None,
                     recipient: None,
@@ -195,6 +198,7 @@ impl WalletKeys {
                     value,
                     nullifier: action.nullifier.clone(),
                     cmx: action.cmx.clone(),
+                    is_change: false,
                     rseed: None,
                     rho: None,
                     recipient: None,
@@ -224,8 +228,8 @@ impl WalletKeys {
 
     /// Try to decrypt a binary-format action using official Orchard note decryption
     /// Tries BOTH external and internal scope IVKs
-    /// Returns (value, note_nullifier, rseed_bytes, rho_bytes, recipient_address_bytes)
-    fn try_decrypt_action_binary(&self, action: &CompactActionBinary) -> Option<(u64, [u8; 32], [u8; 32], [u8; 32], [u8; 43])> {
+    /// Returns (value, note_nullifier, rseed_bytes, rho_bytes, recipient_address_bytes, is_change)
+    fn try_decrypt_action_binary(&self, action: &CompactActionBinary) -> Option<(u64, [u8; 32], [u8; 32], [u8; 32], [u8; 43], bool)> {
         // Parse the nullifier and cmx
         let nullifier = orchard::note::Nullifier::from_bytes(&action.nullifier);
         if nullifier.is_none().into() {
@@ -257,20 +261,20 @@ impl WalletKeys {
             ciphertext: action.ciphertext,
         };
 
-        // Try compact note decryption with EXTERNAL scope IVK first
+        // Try compact note decryption with EXTERNAL scope IVK first (incoming payment)
         if let Some((note, addr)) = try_compact_note_decryption(&domain, &self.prepared_ivk_external, &output) {
             let note_nf = note.nullifier(&self.fvk);
             let rseed = *note.rseed().as_bytes();
             let rho = note.rho().to_bytes();
-            return Some((note.value().inner(), note_nf.to_bytes(), rseed, rho, addr.to_raw_address_bytes()));
+            return Some((note.value().inner(), note_nf.to_bytes(), rseed, rho, addr.to_raw_address_bytes(), false));
         }
 
-        // If external failed, try INTERNAL scope IVK (for change/shielding outputs)
+        // If external failed, try INTERNAL scope IVK (change from our own send)
         if let Some((note, addr)) = try_compact_note_decryption(&domain, &self.prepared_ivk_internal, &output) {
             let note_nf = note.nullifier(&self.fvk);
             let rseed = *note.rseed().as_bytes();
             let rho = note.rho().to_bytes();
-            return Some((note.value().inner(), note_nf.to_bytes(), rseed, rho, addr.to_raw_address_bytes()));
+            return Some((note.value().inner(), note_nf.to_bytes(), rseed, rho, addr.to_raw_address_bytes(), true));
         }
 
         None
@@ -420,6 +424,8 @@ pub struct FoundNote {
     pub value: u64,
     pub nullifier: String,
     pub cmx: String,
+    /// true if decrypted with internal IVK (change from our own send)
+    pub is_change: bool,
     /// rseed bytes for note reconstruction (hex, 32 bytes)
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rseed: Option<String>,
@@ -687,11 +693,12 @@ impl WatchOnlyWallet {
             .par_iter()
             .enumerate()
             .filter_map(|(idx, action)| {
-                self.try_decrypt_action(action).map(|(value, note_nf, rseed, rho, addr)| FoundNote {
+                self.try_decrypt_action(action).map(|(value, note_nf, rseed, rho, addr, is_change)| FoundNote {
                     index: idx as u32,
                     value,
                     nullifier: hex_encode(&note_nf),
                     cmx: hex_encode(&action.cmx),
+                    is_change,
                     rseed: Some(hex_encode(&rseed)),
                     rho: Some(hex_encode(&rho)),
                     recipient: Some(hex_encode(&addr)),
@@ -704,11 +711,12 @@ impl WatchOnlyWallet {
             .iter()
             .enumerate()
             .filter_map(|(idx, action)| {
-                self.try_decrypt_action(action).map(|(value, note_nf, rseed, rho, addr)| FoundNote {
+                self.try_decrypt_action(action).map(|(value, note_nf, rseed, rho, addr, is_change)| FoundNote {
                     index: idx as u32,
                     value,
                     nullifier: hex_encode(&note_nf),
                     cmx: hex_encode(&action.cmx),
+                    is_change,
                     rseed: Some(hex_encode(&rseed)),
                     rho: Some(hex_encode(&rho)),
                     recipient: Some(hex_encode(&addr)),
@@ -721,8 +729,8 @@ impl WatchOnlyWallet {
     }
 
     /// Try to decrypt a compact action
-    /// Returns (value, note_nullifier, rseed_bytes, rho_bytes, recipient_address_bytes)
-    fn try_decrypt_action(&self, action: &CompactActionBinary) -> Option<(u64, [u8; 32], [u8; 32], [u8; 32], [u8; 43])> {
+    /// Returns (value, note_nullifier, rseed_bytes, rho_bytes, recipient_address_bytes, is_change)
+    fn try_decrypt_action(&self, action: &CompactActionBinary) -> Option<(u64, [u8; 32], [u8; 32], [u8; 32], [u8; 43], bool)> {
         let nullifier = orchard::note::Nullifier::from_bytes(&action.nullifier);
         if nullifier.is_none().into() {
             return None;
@@ -749,20 +757,20 @@ impl WatchOnlyWallet {
             ciphertext: action.ciphertext,
         };
 
-        // Try external scope first
+        // Try external scope first (incoming payment)
         if let Some((note, addr)) = try_compact_note_decryption(&domain, &self.prepared_ivk_external, &output) {
             let note_nf = note.nullifier(&self.fvk);
             let rseed = *note.rseed().as_bytes();
             let rho = note.rho().to_bytes();
-            return Some((note.value().inner(), note_nf.to_bytes(), rseed, rho, addr.to_raw_address_bytes()));
+            return Some((note.value().inner(), note_nf.to_bytes(), rseed, rho, addr.to_raw_address_bytes(), false));
         }
 
-        // Try internal scope (change addresses)
+        // Try internal scope (change from our own send)
         if let Some((note, addr)) = try_compact_note_decryption(&domain, &self.prepared_ivk_internal, &output) {
             let note_nf = note.nullifier(&self.fvk);
             let rseed = *note.rseed().as_bytes();
             let rho = note.rho().to_bytes();
-            return Some((note.value().inner(), note_nf.to_bytes(), rseed, rho, addr.to_raw_address_bytes()));
+            return Some((note.value().inner(), note_nf.to_bytes(), rseed, rho, addr.to_raw_address_bytes(), true));
         }
 
         None
@@ -2615,7 +2623,7 @@ fn test_user_seed_with_real_action() {
 
     // Try to decrypt with External scope
     let result = keys.try_decrypt_action_binary(&action);
-    println!("Decryption result (External scope): {:?}", result.map(|(v, nf, _, _)| (v, hex_encode(&nf))));
+    println!("Decryption result (External scope): {:?}", result.map(|(v, nf, _, _, _, is_change)| (v, hex_encode(&nf), is_change)));
 
     // Also try Internal scope
     let mnemonic = bip39::Mnemonic::parse(seed_phrase).unwrap();
