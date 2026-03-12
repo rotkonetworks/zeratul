@@ -226,18 +226,19 @@ pub enum SignerError {
     Timeout,
 }
 
-/// managed account signer (placeholder - actual impl uses OPRF)
+/// managed account signer (OPRF-recovered key)
 pub struct ManagedSigner {
-    /// reconstructed signing key (temporary, cleared after use)
-    signing_key: [u8; 32],
-    /// public key
+    /// ed25519 signing key (reconstructed from OPRF)
+    signing_key: ed25519_dalek::SigningKey,
+    /// public key bytes
     pub public_key: [u8; 32],
 }
 
 impl ManagedSigner {
-    /// create from reconstructed key (from OPRF)
-    pub fn from_reconstructed(signing_key: [u8; 32]) -> Self {
-        let public_key = *blake3::hash(&signing_key).as_bytes();
+    /// create from reconstructed key bytes (from OPRF)
+    pub fn from_reconstructed(key_bytes: [u8; 32]) -> Self {
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&key_bytes);
+        let public_key = signing_key.verifying_key().to_bytes();
         Self {
             signing_key,
             public_key,
@@ -247,20 +248,8 @@ impl ManagedSigner {
 
 impl Signer for ManagedSigner {
     fn sign(&self, message: &[u8]) -> Result<[u8; 64], SignerError> {
-        // simplified signing for now - real impl uses sr25519
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"poker.sign.v1");
-        hasher.update(&self.signing_key);
-        hasher.update(message);
-        let sig_hash = hasher.finalize();
-
-        let mut signature = [0u8; 64];
-        signature[..32].copy_from_slice(sig_hash.as_bytes());
-
-        let msg_hash = blake3::hash(message);
-        signature[32..].copy_from_slice(msg_hash.as_bytes());
-
-        Ok(signature)
+        use ed25519_dalek::Signer as _;
+        Ok(self.signing_key.sign(message).to_bytes())
     }
 
     fn public_key(&self) -> [u8; 32] {
@@ -268,23 +257,32 @@ impl Signer for ManagedSigner {
     }
 
     fn scheme(&self) -> SignatureScheme {
-        SignatureScheme::Sr25519
+        SignatureScheme::Ed25519
     }
+}
+
+/// verify an ed25519 signature
+pub fn verify_ed25519(pubkey: &[u8; 32], message: &[u8], signature: &[u8; 64]) -> bool {
+    use ed25519_dalek::{VerifyingKey, Verifier, Signature};
+    let Ok(vk) = VerifyingKey::from_bytes(pubkey) else { return false };
+    let sig = Signature::from_bytes(signature);
+    vk.verify(message, &sig).is_ok()
 }
 
 /// self-custody signer (local key)
 pub struct LocalSigner {
-    secret_key: [u8; 32],
+    signing_key: ed25519_dalek::SigningKey,
     pub public_key: [u8; 32],
     pub scheme: SignatureScheme,
 }
 
 impl LocalSigner {
-    /// create from secret key
+    /// create from secret key bytes
     pub fn from_secret(secret_key: [u8; 32], scheme: SignatureScheme) -> Self {
-        let public_key = *blake3::hash(&secret_key).as_bytes();
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&secret_key);
+        let public_key = signing_key.verifying_key().to_bytes();
         Self {
-            secret_key,
+            signing_key,
             public_key,
             scheme,
         }
@@ -293,19 +291,8 @@ impl LocalSigner {
 
 impl Signer for LocalSigner {
     fn sign(&self, message: &[u8]) -> Result<[u8; 64], SignerError> {
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(b"poker.sign.v1");
-        hasher.update(&self.secret_key);
-        hasher.update(message);
-        let sig_hash = hasher.finalize();
-
-        let mut signature = [0u8; 64];
-        signature[..32].copy_from_slice(sig_hash.as_bytes());
-
-        let msg_hash = blake3::hash(message);
-        signature[32..].copy_from_slice(msg_hash.as_bytes());
-
-        Ok(signature)
+        use ed25519_dalek::Signer as _;
+        Ok(self.signing_key.sign(message).to_bytes())
     }
 
     fn public_key(&self) -> [u8; 32] {
@@ -792,9 +779,22 @@ mod tests {
 
     #[test]
     fn test_signer() {
-        let signer = LocalSigner::from_secret([0x42u8; 32], SignatureScheme::Sr25519);
+        let signer = LocalSigner::from_secret([0x42u8; 32], SignatureScheme::Ed25519);
         let message = b"test message";
         let sig = signer.sign(message).unwrap();
         assert_eq!(sig.len(), 64);
+
+        // verify round-trip
+        let pubkey = signer.public_key();
+        assert!(verify_ed25519(&pubkey, message, &sig));
+        assert!(!verify_ed25519(&pubkey, b"wrong message", &sig));
+    }
+
+    #[test]
+    fn test_managed_signer() {
+        let signer = ManagedSigner::from_reconstructed([0x33u8; 32]);
+        let message = b"test managed";
+        let sig = signer.sign(message).unwrap();
+        assert!(verify_ed25519(&signer.public_key, message, &sig));
     }
 }

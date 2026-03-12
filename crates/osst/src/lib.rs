@@ -44,6 +44,7 @@ use sha2::{Digest, Sha512};
 
 pub mod curve;
 mod error;
+pub mod frost;
 mod lagrange;
 pub mod liveness;
 pub mod reshare;

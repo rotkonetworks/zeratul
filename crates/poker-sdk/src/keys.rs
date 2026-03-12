@@ -199,15 +199,30 @@ fn prf_expand_idx(domain: &[u8; 16], key: &[u8; 32], idx: u8) -> [u8; 32] {
 pub struct MasterSeed([u8; 32]);
 
 impl MasterSeed {
-    /// create from raw bytes (test mode: hash of email+pin)
+    /// create from raw bytes
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
 
+    /// create from OPRF-recovered seed (production mode)
+    ///
+    /// the `oprf_output` is the reconstructed secret from the ghettobox
+    /// OPRF protocol — the client evaluates PIN against threshold operators
+    /// and combines their responses to recover the original seed.
+    pub fn from_oprf(oprf_output: &[u8; 32]) -> Self {
+        Self(*oprf_output)
+    }
+
     /// derive from email and pin (test mode - NOT secure for production)
+    #[cfg(any(test, feature = "test-keys"))]
     pub fn from_email_pin(email: &str, pin: &str) -> Self {
         let hash = blake3::hash(format!("{}:{}", email, pin).as_bytes());
         Self(*hash.as_bytes())
+    }
+
+    /// get raw seed bytes
+    pub fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
     }
 
     /// derive spend key
@@ -242,26 +257,27 @@ impl SpendKey {
         FullViewingKey::derive(&self.ak, &self.nk)
     }
 
-    /// sign a message (requires spend authority)
+    /// sign a message using ed25519 (requires spend authority)
     pub fn sign(&self, message: &[u8]) -> [u8; 64] {
-        let mut hasher = Hasher::new();
-        hasher.update(b"poker.sign.v1");
-        hasher.update(&self.ak);
-        hasher.update(message);
-        let sig_hash = hasher.finalize();
-
-        let mut signature = [0u8; 64];
-        signature[..32].copy_from_slice(sig_hash.as_bytes());
-
-        let msg_hash = blake3::hash(message);
-        signature[32..].copy_from_slice(msg_hash.as_bytes());
-
-        signature
+        use ed25519_dalek::Signer as _;
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&self.ak);
+        signing_key.sign(message).to_bytes()
     }
 
-    /// get account address (public key hash)
+    /// verify a signature against this key's public address
+    pub fn verify(&self, message: &[u8], signature: &[u8; 64]) -> bool {
+        use ed25519_dalek::{VerifyingKey, Verifier, Signature};
+        let signing_key = ed25519_dalek::SigningKey::from_bytes(&self.ak);
+        let vk = signing_key.verifying_key();
+        let sig = Signature::from_bytes(signature);
+        vk.verify(message, &sig).is_ok()
+    }
+
+    /// get account address (ed25519 public key)
     pub fn address(&self) -> [u8; 32] {
-        *blake3::hash(&self.ak).as_bytes()
+        ed25519_dalek::SigningKey::from_bytes(&self.ak)
+            .verifying_key()
+            .to_bytes()
     }
 }
 
