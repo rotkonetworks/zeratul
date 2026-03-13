@@ -1036,6 +1036,8 @@ pub struct FoundNoteWithMemo {
     pub memo: String,
     /// Whether the memo appears to be text (UTF-8)
     pub memo_is_text: bool,
+    /// Whether this note was decrypted via OVK (outgoing/sent)
+    pub is_outgoing: bool,
 }
 
 /// Full action data for decryption (includes full 580-byte ciphertext)
@@ -1046,6 +1048,7 @@ struct FullOrchardAction {
     epk: [u8; 32],
     enc_ciphertext: [u8; 580], // full ciphertext including memo
     out_ciphertext: [u8; 80],   // for outgoing note decryption
+    cv: [u8; 32],               // value commitment for OVK decryption
 }
 
 /// Full shielded output for use with zcash_note_encryption
@@ -1105,12 +1108,16 @@ fn parse_orchard_actions_from_tx(tx_bytes: &[u8]) -> Result<Vec<FullOrchardActio
         // Get out_ciphertext for potential outgoing decryption
         let out_ciphertext = action.encrypted_note().out_ciphertext;
 
+        // Get value commitment for OVK decryption
+        let cv = action.cv_net().to_bytes();
+
         actions.push(FullOrchardAction {
             nullifier: nullifier_bytes,
             cmx: cmx_bytes,
             epk: epk_bytes,
             enc_ciphertext,
             out_ciphertext,
+            cv,
         });
     }
 
@@ -1125,10 +1132,13 @@ impl WalletKeys {
     /// and returns any notes that belong to this wallet, including memos.
     #[wasm_bindgen]
     pub fn decrypt_transaction_memos(&self, tx_bytes: &[u8]) -> Result<JsValue, JsError> {
-        use zcash_note_encryption::try_note_decryption;
+        use zcash_note_encryption::{try_note_decryption, try_output_recovery_with_ovk};
 
         let actions = parse_orchard_actions_from_tx(tx_bytes)
             .map_err(|e| JsError::new(&format!("Failed to parse transaction: {}", e)))?;
+
+        let ovk_external = self.fvk.to_ovk(Scope::External);
+        let ovk_internal = self.fvk.to_ovk(Scope::Internal);
 
         let mut found: Vec<FoundNoteWithMemo> = Vec::new();
 
@@ -1163,7 +1173,7 @@ impl WalletKeys {
                 enc_ciphertext: action.enc_ciphertext,
             };
 
-            // Try external scope first
+            // Try external scope first (incoming)
             if let Some((note, _addr, memo)) = try_note_decryption(&domain, &self.prepared_ivk_external, &output) {
                 let note_nf = note.nullifier(&self.fvk);
                 let (memo_str, is_text) = parse_memo_bytes(&memo);
@@ -1175,6 +1185,7 @@ impl WalletKeys {
                     cmx: hex_encode(&action.cmx),
                     memo: memo_str,
                     memo_is_text: is_text,
+                    is_outgoing: false,
                 });
                 continue;
             }
@@ -1191,6 +1202,46 @@ impl WalletKeys {
                     cmx: hex_encode(&action.cmx),
                     memo: memo_str,
                     memo_is_text: is_text,
+                    is_outgoing: false,
+                });
+                continue;
+            }
+
+            // Try OVK decryption (outgoing/sent notes)
+            let cv_opt = orchard::value::ValueCommitment::from_bytes(&action.cv);
+            if !bool::from(cv_opt.is_some()) {
+                continue;
+            }
+            let cv = cv_opt.unwrap();
+
+            if let Some((_note, _addr, memo)) = try_output_recovery_with_ovk(
+                &domain, &ovk_external, &output, &cv, &action.out_ciphertext,
+            ) {
+                let (memo_str, is_text) = parse_memo_bytes(&memo);
+                found.push(FoundNoteWithMemo {
+                    index: idx as u32,
+                    value: _note.value().inner(),
+                    nullifier: hex_encode(&action.nullifier),
+                    cmx: hex_encode(&action.cmx),
+                    memo: memo_str,
+                    memo_is_text: is_text,
+                    is_outgoing: true,
+                });
+                continue;
+            }
+
+            if let Some((_note, _addr, memo)) = try_output_recovery_with_ovk(
+                &domain, &ovk_internal, &output, &cv, &action.out_ciphertext,
+            ) {
+                let (memo_str, is_text) = parse_memo_bytes(&memo);
+                found.push(FoundNoteWithMemo {
+                    index: idx as u32,
+                    value: _note.value().inner(),
+                    nullifier: hex_encode(&action.nullifier),
+                    cmx: hex_encode(&action.cmx),
+                    memo: memo_str,
+                    memo_is_text: is_text,
+                    is_outgoing: true,
                 });
             }
         }
@@ -1205,10 +1256,13 @@ impl WatchOnlyWallet {
     /// Decrypt full notes with memos from a raw transaction (watch-only version)
     #[wasm_bindgen]
     pub fn decrypt_transaction_memos(&self, tx_bytes: &[u8]) -> Result<JsValue, JsError> {
-        use zcash_note_encryption::try_note_decryption;
+        use zcash_note_encryption::{try_note_decryption, try_output_recovery_with_ovk};
 
         let actions = parse_orchard_actions_from_tx(tx_bytes)
             .map_err(|e| JsError::new(&format!("Failed to parse transaction: {}", e)))?;
+
+        let ovk_external = self.fvk.to_ovk(Scope::External);
+        let ovk_internal = self.fvk.to_ovk(Scope::Internal);
 
         let mut found: Vec<FoundNoteWithMemo> = Vec::new();
 
@@ -1241,7 +1295,7 @@ impl WatchOnlyWallet {
                 enc_ciphertext: action.enc_ciphertext,
             };
 
-            // Try external scope
+            // Try external scope (incoming)
             if let Some((note, _addr, memo)) = try_note_decryption(&domain, &self.prepared_ivk_external, &output) {
                 let note_nf = note.nullifier(&self.fvk);
                 let (memo_str, is_text) = parse_memo_bytes(&memo);
@@ -1253,11 +1307,12 @@ impl WatchOnlyWallet {
                     cmx: hex_encode(&action.cmx),
                     memo: memo_str,
                     memo_is_text: is_text,
+                    is_outgoing: false,
                 });
                 continue;
             }
 
-            // Try internal scope
+            // Try internal scope (change)
             if let Some((note, _addr, memo)) = try_note_decryption(&domain, &self.prepared_ivk_internal, &output) {
                 let note_nf = note.nullifier(&self.fvk);
                 let (memo_str, is_text) = parse_memo_bytes(&memo);
@@ -1269,6 +1324,46 @@ impl WatchOnlyWallet {
                     cmx: hex_encode(&action.cmx),
                     memo: memo_str,
                     memo_is_text: is_text,
+                    is_outgoing: false,
+                });
+                continue;
+            }
+
+            // Try OVK decryption (outgoing/sent notes)
+            let cv_opt = orchard::value::ValueCommitment::from_bytes(&action.cv);
+            if !bool::from(cv_opt.is_some()) {
+                continue;
+            }
+            let cv = cv_opt.unwrap();
+
+            if let Some((_note, _addr, memo)) = try_output_recovery_with_ovk(
+                &domain, &ovk_external, &output, &cv, &action.out_ciphertext,
+            ) {
+                let (memo_str, is_text) = parse_memo_bytes(&memo);
+                found.push(FoundNoteWithMemo {
+                    index: idx as u32,
+                    value: _note.value().inner(),
+                    nullifier: hex_encode(&action.nullifier),
+                    cmx: hex_encode(&action.cmx),
+                    memo: memo_str,
+                    memo_is_text: is_text,
+                    is_outgoing: true,
+                });
+                continue;
+            }
+
+            if let Some((_note, _addr, memo)) = try_output_recovery_with_ovk(
+                &domain, &ovk_internal, &output, &cv, &action.out_ciphertext,
+            ) {
+                let (memo_str, is_text) = parse_memo_bytes(&memo);
+                found.push(FoundNoteWithMemo {
+                    index: idx as u32,
+                    value: _note.value().inner(),
+                    nullifier: hex_encode(&action.nullifier),
+                    cmx: hex_encode(&action.cmx),
+                    memo: memo_str,
+                    memo_is_text: is_text,
+                    is_outgoing: true,
                 });
             }
         }
