@@ -26,8 +26,8 @@ sha2 = { workspace = true }
 blake2 = { workspace = true }
 
 # Ligerito on-chain verification - uses SCALE codec for WASM compatibility
-ligerito = { path = "../../../ligerito", default-features = false, features = ["verifier-only", "scale"], optional = true }
-ligerito-binary-fields = { path = "../../../ligerito-binary-fields", default-features = false, features = ["scale"], optional = true }
+ligerito = { version = "0.6", default-features = false, features = ["verifier-only", "scale"], optional = true }
+ligerito-binary-fields = { version = "0.6", default-features = false, features = ["scale"], optional = true }
 
 [dev-dependencies]
 sp-io = { workspace = true, default-features = true }

@@ -23,8 +23,8 @@ testnet = ["polkavm", "networking"]
 
 [dependencies]
 # Core proving
-ligerito = { path = "../ligerito", default-features = false, features = ["prover", "parallel"] }
-ligerito-binary-fields = { path = "../ligerito-binary-fields", default-features = false }
+ligerito = { version = "0.6", default-features = false, features = ["prover", "parallel"] }
+ligerito-binary-fields = { version = "0.6", default-features = false }
 
 # WIM (Witness Indistinguishable Machine) - ZK signing
 # wim = { path = "../wim", optional = true }  # TODO: uncommitted

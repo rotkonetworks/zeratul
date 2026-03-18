@@ -46,8 +46,8 @@ path = "examples/test_frost_dkg.rs"
 [dependencies]
 # Local dependencies
 zeratul-circuit = { path = "../zeratul-circuit" }
-ligerito = { path = "../ligerito", features = ["prover"] }
-ligerito-binary-fields = { path = "../ligerito-binary-fields" }
+ligerito = { version = "0.6", features = ["prover"] }
+ligerito-binary-fields = { version = "0.6" }
 ligerito-shielded-pool = { path = "../ligerito-shielded-pool" }
 golden-rs = { path = "../golden-rs" }
 

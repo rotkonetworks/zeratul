@@ -60,11 +60,11 @@ impl LigeritoProofSystem {
         match log_size {
             16 => Ok(Self::new()),
             20 => {
-                let prover_config_20 = configs::hardcoded_config_20(
+                let _prover_config_20 = configs::hardcoded_config_20(
                     PhantomData::<BinaryElem32>,
                     PhantomData::<BinaryElem128>,
                 );
-                let verifier_config_20 = configs::hardcoded_config_20_verifier();
+                let _verifier_config_20 = configs::hardcoded_config_20_verifier();
 
                 // Note: This won't compile with current struct definition
                 // We'd need to make the configs generic or use enum
@@ -149,7 +149,7 @@ impl LigeritoProofSystem {
     /// Convert swap plaintext to polynomial for proving
     fn swap_to_polynomial(
         &self,
-        swap_plaintext: &SwapPlaintext,
+        _swap_plaintext: &SwapPlaintext,
         fee_blinding: &[u8; 32],
     ) -> Result<Vec<BinaryElem32>> {
         // Simple encoding for now:
@@ -191,9 +191,9 @@ impl LigeritoProofSystem {
     /// - Value balance correct
     pub fn prove_spend(
         &self,
-        note: &Note,
-        position: u64,
-        auth_path: &[MerkleProofNode],
+        _note: &Note,
+        _position: u64,
+        _auth_path: &[MerkleProofNode],
     ) -> Result<LigeritoProof> {
         unimplemented!("Ligerito spend proof generation")
     }
@@ -201,9 +201,9 @@ impl LigeritoProofSystem {
     /// Verify a spend proof
     pub fn verify_spend(
         &self,
-        proof: &LigeritoProof,
-        nullifier: &[u8; 32],
-        anchor: &[u8; 32],
+        _proof: &LigeritoProof,
+        _nullifier: &[u8; 32],
+        _anchor: &[u8; 32],
     ) -> Result<()> {
         unimplemented!("Ligerito spend proof verification")
     }
@@ -215,8 +215,8 @@ impl LigeritoProofSystem {
     /// - Encrypted payload contains correct data
     pub fn prove_output(
         &self,
-        note: &Note,
-        balance_blinding: &[u8; 32],
+        _note: &Note,
+        _balance_blinding: &[u8; 32],
     ) -> Result<LigeritoProof> {
         unimplemented!("Ligerito output proof generation")
     }
@@ -224,9 +224,9 @@ impl LigeritoProofSystem {
     /// Verify an output proof
     pub fn verify_output(
         &self,
-        proof: &LigeritoProof,
-        note_commitment: &[u8; 32],
-        balance_commitment: &[u8; 32],
+        _proof: &LigeritoProof,
+        _note_commitment: &[u8; 32],
+        _balance_commitment: &[u8; 32],
     ) -> Result<()> {
         unimplemented!("Ligerito output proof verification")
     }
@@ -256,7 +256,7 @@ impl LigeritoProof {
 }
 
 /// Hash swap plaintext for public inputs binding
-fn hash_swap_public_inputs(swap: &SwapPlaintext) -> [u8; 32] {
+fn hash_swap_public_inputs(_swap: &SwapPlaintext) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"swap_public");
     // TODO: Add actual swap public data
@@ -264,7 +264,7 @@ fn hash_swap_public_inputs(swap: &SwapPlaintext) -> [u8; 32] {
 }
 
 /// Hash swap proof public inputs
-fn hash_swap_public_inputs_from_public(public: &SwapProofPublic) -> [u8; 32] {
+fn hash_swap_public_inputs_from_public(_public: &SwapProofPublic) -> [u8; 32] {
     let mut hasher = Sha256::new();
     hasher.update(b"swap_public");
     // TODO: Add actual public inputs

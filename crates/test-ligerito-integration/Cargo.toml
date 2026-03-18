@@ -7,7 +7,7 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
-ligerito = { path = "../ligerito", features = ["prover"] }
-ligerito-binary-fields = { path = "../ligerito-binary-fields" }
+ligerito = { version = "0.6", features = ["prover"] }
+ligerito-binary-fields = { version = "0.6" }
 anyhow = "1.0"
 sha2 = "0.10"

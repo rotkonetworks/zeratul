@@ -32,8 +32,8 @@ blake2 = { version = "0.10", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 
 # Ligerito for proving
-ligerito = { path = "../ligerito", default-features = false, features = ["prover", "std"], optional = true }
-ligerito-binary-fields = { path = "../ligerito-binary-fields", default-features = false, optional = true }
+ligerito = { version = "0.6", default-features = false, features = ["prover", "std"], optional = true }
+ligerito-binary-fields = { version = "0.6", default-features = false, optional = true }
 bytemuck = { version = "1.14", optional = true }
 
 [dev-dependencies]

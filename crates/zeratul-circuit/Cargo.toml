@@ -10,8 +10,8 @@ prover = ["ligerito/prover", "bincode"]
 
 [dependencies]
 # Local dependencies
-ligerito = { path = "../ligerito", default-features = false }
-ligerito-binary-fields = { path = "../ligerito-binary-fields", default-features = false }
+ligerito = { version = "0.6", default-features = false }
+ligerito-binary-fields = { version = "0.6", default-features = false }
 
 # Commonware dependencies for ZODA encoding
 commonware-coding = { git = "https://github.com/commonwarexyz/monorepo" }

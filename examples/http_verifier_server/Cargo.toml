@@ -11,8 +11,8 @@ name = "http-verifier-server"
 path = "src/main.rs"
 
 [dependencies]
-ligerito = { path = "../../crates/ligerito", default-features = false, features = ["std", "verifier-only"] }
-ligerito-binary-fields = { path = "../../crates/ligerito-binary-fields", features = ["serde"] }
+ligerito = { version = "0.6", default-features = false, features = ["std", "verifier-only"] }
+ligerito-binary-fields = { version = "0.6", features = ["serde"] }
 
 # HTTP server
 axum = "0.7"

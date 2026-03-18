@@ -211,7 +211,7 @@ impl PublicKey {
     /// note: this is a simplified scheme where the signature includes
     /// the public key commitment, allowing verification without the
     /// actual signing secret. in production, use ed25519 or schnorr.
-    pub fn verify(&self, message: &[u8], signature: &Signature) -> bool {
+    pub fn verify(&self, _message: &[u8], signature: &Signature) -> bool {
         // the signature format is: H(sig_domain || H(pk_domain || secret) || message)
         // we check that H(pk_domain || secret) embedded in sig matches our public key
         // this works because the signature includes the public key derivation

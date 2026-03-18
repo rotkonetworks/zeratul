@@ -9,8 +9,8 @@ name = "polkavm_verifier"
 path = "main.rs"
 
 [dependencies]
-ligerito = { path = "../../crates/ligerito", default-features = false, features = ["std", "verifier-only"] }
-ligerito-binary-fields = { path = "../../crates/ligerito-binary-fields", features = ["std"] }
+ligerito = { version = "0.6", default-features = false, features = ["std", "verifier-only"] }
+ligerito-binary-fields = { version = "0.6", features = ["std"] }
 bincode = "1.3"
 
 [profile.release]

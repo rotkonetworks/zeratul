@@ -7,6 +7,6 @@ edition = "2021"
 
 [dependencies]
 polkavm = { path = "/home/alice/rotko/polkavm/crates/polkavm" }
-ligerito = { path = "/home/alice/rotko/zeratul/crates/ligerito" }
-ligerito-binary-fields = { path = "/home/alice/rotko/zeratul/crates/ligerito-binary-fields" }
+ligerito = { version = "0.6" }
+ligerito-binary-fields = { version = "0.6" }
 env_logger = "0.11"

@@ -16,8 +16,8 @@ frost-penumbra = ["decaf377-frost", "decaf377-rdsa", "frost-core", "frost-rerand
 frost-zcash = ["frost-ristretto255"]
 
 [dependencies]
-ligerito-binary-fields = { path = "../ligerito-binary-fields", default-features = false }
-ligerito-merkle = { path = "../ligerito-merkle", default-features = false }
+ligerito-binary-fields = { version = "0.6", default-features = false }
+ligerito-merkle = { version = "0.6", default-features = false }
 rand = { version = "0.8", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 blake2 = { version = "0.10", default-features = false }

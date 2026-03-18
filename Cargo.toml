@@ -1,13 +1,10 @@
 [workspace]
 members = [
-    # Core Ligerito libraries
-    "crates/ligerito-binary-fields",
-    "crates/ligerito-reed-solomon",
-    "crates/ligerito-merkle",
-    "crates/ligerito",
+    # Ligerito extensions (core ligerito, binary-fields, merkle, reed-solomon on crates.io)
     "crates/ligerito-beefy",
     "crates/ligerito-escrow",
     "crates/ligerito-shielded-pool",
+    "crates/test-ligerito-integration",
     # IBP monitoring probes
     "crates/ibp-probe-host",
     # Zeratul blockchain primitives
@@ -16,15 +13,10 @@ members = [
     "crates/zeratul-server",
     "crates/zeratul-p2p",
     "crates/zeratul-mvp",
-    "crates/test-ligerito-integration",
     # Binaries
-    "crates/bin/zidecar",
     "crates/bin/zafu",
     "crates/bin/ibp-probe",
-    # zcli moved to https://github.com/rotkonetworks/zcli
-    # Zync (light client)
-    "crates/zync-core",
-    "crates/zafu-wasm",
+    # zync-core, zafu-wasm, zidecar moved to https://github.com/rotkonetworks/zcli
     # OSST (One-Step Schnorr Threshold)
     "crates/osst",
     # Narsil (private syndicate consensus)
@@ -36,6 +28,10 @@ members = [
     "crates/ghettobox-vault",
     # Mental poker shuffle proofs
     "crates/zk-shuffle",
+    # WIM (Witness Indistinguishable Machine) - PVM execution proofs
+    "crates/wim",
+    # Poker PVM (deterministic game engine, provable via WIM)
+    "crates/poker-pvm",
 ]
 # Excluded from workspace (different build targets, incomplete, or uncommitted)
 exclude = [
@@ -52,7 +48,6 @@ exclude = [
     "crates/chain-client",         # uncommitted
     "crates/poker-channel-revive", # polkavm contract
     "crates/poker-chain-wasm",    # wasm target, different build
-    "crates/wim",                  # uncommitted
     "crates/zeratul-blockchain",   # depends on uncommitted crates
 ]
 resolver = "2"
@@ -65,10 +60,11 @@ license = "MIT"
 repository = "https://github.com/rotkonetworks/zeratul"
 
 [workspace.dependencies]
-# workspace crates
-ligerito = { path = "crates/ligerito" }
-ligerito-binary-fields = { path = "crates/ligerito-binary-fields" }
-ligerito-merkle = { path = "crates/ligerito-merkle" }
+# ligerito (published via zcli repo)
+ligerito = { version = "0.6", default-features = false }
+ligerito-binary-fields = { version = "0.6", default-features = false }
+ligerito-merkle = { version = "0.6", default-features = false }
+ligerito-reed-solomon = { version = "0.6", default-features = false }
 
 # Core dependencies
 sha2 = { version = "0.10", default-features = false }
