@@ -384,9 +384,9 @@ mod tests {
         assert!(!batch.is_finalized(total_stake));
         assert!(batch.stake_support(total_stake) < 67.0);
 
-        // Validator 2 signs (3000 stake) - now 4000/6000 = finalized!
+        // Validator 2 signs (3000 stake) - now 4000/6000 = 2/3 = finalized!
         batch.sign(&validators[2].0, validators[2].1).unwrap();
         assert!(batch.is_finalized(total_stake));
-        assert!(batch.stake_support(total_stake) >= 67.0);
+        assert!(batch.stake_support(total_stake) >= 66.0); // exactly 2/3
     }
 }

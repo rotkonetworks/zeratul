@@ -632,13 +632,13 @@ async fn run_domain_check(
 
 async fn run_prepare_submit(
     endpoint: String,
-    network: String,
+    _network: String,
     relay_rpc: String,
     include_extended: bool,
     output_format: String,
 ) -> Result<()> {
     use ibp_probe_host::substrate_types::{
-        self, ProbeReport, ExtendedReport, node_id_from_endpoint, hash_extended_report,
+        ProbeReport, ExtendedReport, node_id_from_endpoint, hash_extended_report,
     };
     use parity_scale_codec::Encode;
 

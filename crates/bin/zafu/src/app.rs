@@ -2080,7 +2080,7 @@ impl Zafu {
 
                 // drag-drop zone hint
                 ui.add_space(4.0);
-                let drop_zone = ui.allocate_response(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
+                let _drop_zone = ui.allocate_response(egui::vec2(ui.available_width(), 30.0), egui::Sense::hover());
                 let is_hovering = ui.ctx().input(|i| !i.raw.dropped_files.is_empty() || !i.raw.hovered_files.is_empty());
 
                 egui::Frame::none()
@@ -2171,7 +2171,7 @@ impl Zafu {
             let path = path.clone();
 
             // spawn async task to get wormhole code
-            let (code_tx, mut code_rx) = mpsc::channel::<Result<(String, mpsc::Receiver<TransferProgress>), String>>(1);
+            let (code_tx, _code_rx) = mpsc::channel::<Result<(String, mpsc::Receiver<TransferProgress>), String>>(1);
 
             self.runtime.spawn(async move {
                 match WormholeTransfer::send_file(path).await {

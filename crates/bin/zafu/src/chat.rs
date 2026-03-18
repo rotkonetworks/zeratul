@@ -1,7 +1,6 @@
 //! encrypted chat over zcash shielded memos
 //! messages sent as dust transactions (0.0001 ZEC) with memo field
 
-use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -84,7 +83,7 @@ impl ChatMessage {
     /// format timestamp for display
     pub fn format_time(&self) -> String {
         use std::time::{Duration, UNIX_EPOCH};
-        let datetime = UNIX_EPOCH + Duration::from_secs(self.timestamp);
+        let _datetime = UNIX_EPOCH + Duration::from_secs(self.timestamp);
         // simple time formatting
         let now = std::time::SystemTime::now()
             .duration_since(UNIX_EPOCH)

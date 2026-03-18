@@ -56,7 +56,8 @@ impl JamCertificate {
 
         // Encode 52 base32 characters
         for _ in 0..52 {
-            let digit = (&n % 32u32).to_u32_digits()[0] as usize;
+            let digits = (&n % 32u32).to_u32_digits();
+            let digit = if digits.is_empty() { 0 } else { digits[0] as usize };
             result.push(BASE32_ALPHABET[digit] as char);
             n /= 32u32;
         }

@@ -113,7 +113,7 @@ impl WormholeTransfer {
             // wait for process to complete
             match child.wait().await {
                 Ok(status) if status.success() => {
-                    if let Some(code) = code_found {
+                    if let Some(_code) = code_found {
                         tx_clone.send(TransferProgress::Complete(PathBuf::from(&path_str))).await.ok();
                     }
                 }

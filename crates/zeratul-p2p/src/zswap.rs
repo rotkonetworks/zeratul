@@ -567,8 +567,9 @@ mod tests {
         assert!((alice_per_dot - charlie_per_dot).abs() < 0.01);
         assert!((bob_per_dot - charlie_per_dot).abs() < 0.01);
 
-        // Total outputs should equal lambda_2
-        assert_eq!(alice_output + bob_output + charlie_output, batch.lambda_2);
+        // Total outputs should approximate lambda_2 (rounding from integer division)
+        let total_output = alice_output + bob_output + charlie_output;
+        assert!(batch.lambda_2 - total_output <= 3, "rounding loss too large");
 
         println!("\n✅ MEV-PROOF:");
         println!("   - Leader can reorder swaps however");

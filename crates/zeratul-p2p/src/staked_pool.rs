@@ -78,11 +78,7 @@
 //! - ❌ Share slashing risk (can't avoid bad validators)
 //! - ❌ Can't optimize commission (pool average)
 
-use crate::{
-    consensus::BlockNumber,
-    delegation_tokens::{ValidatorId, DelegationState},
-    staking_rewards::StakingRewards,
-};
+use crate::delegation_tokens::ValidatorId;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 

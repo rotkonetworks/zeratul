@@ -36,10 +36,6 @@
 //!          Now only 9.09% of supply ❌ Lost value
 //! ```
 
-use crate::{
-    consensus::BlockNumber,
-    zswap::{DexState, TOTAL_SUPPLY_ZT},
-};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -337,14 +333,15 @@ mod tests {
         let alice_delzt = state.delegate(validator, 10_000_000).unwrap();
         assert_eq!(alice_delzt, 10_000_000); // 1:1 at genesis
 
-        // Epoch 1: Supply grows to 110M
-        state.new_epoch(110_000_000, 1);
+        // Epoch 1: 1M inflation minted, Alice's pool gets all of it (sole delegator)
+        // Exchange rate: (10M + 1M) / 10M = 1.1
+        state.new_epoch_with_inflation(1_000_000, 1);
 
-        // Alice undelegates - should get back 11M ZT
+        // Alice undelegates - should get back ~11M ZT
         let alice_zt = state.undelegate(validator, alice_delzt).unwrap();
         assert!(alice_zt >= 10_900_000 && alice_zt <= 11_100_000); // ~11M
 
-        println!("Alice delegated 10M, got back {} (supply grew 10%)", alice_zt);
+        println!("Alice delegated 10M, got back {} (10% inflation)", alice_zt);
     }
 
     #[test]

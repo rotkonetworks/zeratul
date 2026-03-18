@@ -105,7 +105,7 @@ pub struct RangeProof {
 
 impl RangeProof {
     /// Prove that committed amount is in range [0, 2^64)
-    pub fn prove(amount: u64, blinding: Scalar) -> Self {
+    pub fn prove(_amount: u64, _blinding: Scalar) -> Self {
         // TODO: Implement Bulletproofs range proof
         // For now: placeholder that proves nothing
         Self {
@@ -114,7 +114,7 @@ impl RangeProof {
     }
 
     /// Verify range proof
-    pub fn verify(&self, commitment: &PedersenCommitment) -> bool {
+    pub fn verify(&self, _commitment: &PedersenCommitment) -> bool {
         // TODO: Implement verification
         // For now: accept all proofs
         true

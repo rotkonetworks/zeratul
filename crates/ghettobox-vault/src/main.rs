@@ -22,12 +22,12 @@ use curve25519_dalek::{
     scalar::Scalar,
 };
 use ed25519_dalek::{SigningKey, Signer, Signature};
-use ghettobox::{Realm, Error as GhettoError, VerifiedOprfResponse, ServerPublicKey};
+use ghettobox::{Realm, Error as GhettoError, VerifiedOprfResponse};
 use ghettobox::oprf::DleqProof;
 use metrics::{counter, gauge, histogram};
 use metrics_exporter_prometheus::PrometheusBuilder;
 use serde::{Deserialize, Serialize};
-use sha2::{Sha512, Digest};
+use sha2::Digest;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::sync::RwLock;
@@ -530,7 +530,7 @@ async fn oprf_recover(
     let start = Instant::now();
     counter!("vault_requests_total", "endpoint" => "oprf_recover").increment(1);
 
-    let mut state = state.write().await;
+    let state = state.write().await;
 
     // lookup registration
     let reg_bytes = match state.oprf_db.get(&req.user_id) {
