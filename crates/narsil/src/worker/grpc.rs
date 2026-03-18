@@ -4,17 +4,8 @@
 //! all use tonic for grpc transport.
 
 use alloc::string::String;
-use alloc::vec::Vec;
 
-#[cfg(feature = "std")]
-use std::sync::Arc;
 
-use crate::worker::{
-    ChainQuery, ChainResponse, ChainEvent, EventFilter,
-    SubmitRequest, SubmitResponse, OffchainWorker,
-    TxStatusResponse, WorkerError,
-};
-use crate::wire::Hash32;
 
 /// grpc worker configuration
 #[derive(Clone, Debug)]

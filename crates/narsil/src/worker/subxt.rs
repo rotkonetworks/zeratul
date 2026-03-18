@@ -6,11 +6,6 @@
 use alloc::string::String;
 use alloc::vec::Vec;
 
-use crate::worker::{
-    ChainQuery, ChainResponse, ChainEvent, EventFilter,
-    SubmitRequest, SubmitResponse, OffchainWorker,
-    TxStatusResponse, WorkerError,
-};
 
 /// subxt worker configuration
 #[derive(Clone, Debug)]

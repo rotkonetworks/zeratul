@@ -89,6 +89,12 @@
 extern crate alloc;
 
 pub mod aggregator;
+pub mod ballot;
+pub mod election;
+pub mod escrow;
+pub mod poker;
+pub mod staking;
+pub mod tiers;
 pub mod bft;
 pub mod ceremony;
 pub mod client;

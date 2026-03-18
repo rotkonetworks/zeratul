@@ -60,7 +60,7 @@ base64 = { version = "0.22", optional = true }
 serde_json = { version = "1.0", optional = true }
 
 # shielded chain scanning (optional)
-zync-core = { path = "../zync-core", default-features = false, optional = true }
+zync-core = { version = "0.6", default-features = false, optional = true }
 
 # penumbra integration (optional)
 decaf377 = { version = "0.10", optional = true }

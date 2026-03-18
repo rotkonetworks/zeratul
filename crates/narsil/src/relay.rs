@@ -233,7 +233,7 @@ impl MultiRelayClient {
     }
 
     /// post to first available relay
-    pub fn post(&self, mailbox: &Hash32, data: &[u8]) -> Result<Hash32, RelayError> {
+    pub fn post(&self, _mailbox: &Hash32, data: &[u8]) -> Result<Hash32, RelayError> {
         if data.len() > self.config.max_message_size {
             return Err(RelayError::TooLarge);
         }
