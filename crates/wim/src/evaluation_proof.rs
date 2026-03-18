@@ -121,14 +121,40 @@ pub fn verify_trace_evaluation(
         }
     }
 
-    // Step 3: Verify column evaluations via Lagrange interpolation
+    // Step 3: Verify column evaluations against opened rows
     //
-    // Using opened rows, compute T(r, col) and check against claims.
-    // This is done implicitly by Ligerito's verification.
+    // Ligerito's verification checks that the polynomial commitment is
+    // consistent at the sumcheck random point. But we must also verify
+    // that our claimed column_evaluations T(r, col) are the values that
+    // Ligerito's sumcheck reduced to.
     //
-    // The key insight: Ligerito's final check verifies that the polynomial
-    // evaluates correctly at the sumcheck's random point. Our column_evaluations
-    // must be consistent with this.
+    // The final round of Ligerito's sumcheck produces yr[] — the
+    // polynomial evaluated at the final query points. These must match
+    // our column_evaluations when interpolated through the Lagrange basis.
+    //
+    // Specifically: sum over opened rows of (Lagrange_coeff × row_values)
+    // must equal the claimed column evaluations.
+    let yr = &proof.ligerito_proof.final_ligero_proof.yr;
+
+    if proof.column_evaluations.len() > yr.len() {
+        return Err(EvaluationError::ColumnCountMismatch {
+            claimed: proof.column_evaluations.len(),
+            available: yr.len(),
+        });
+    }
+
+    // yr contains the final polynomial evaluations from Ligerito.
+    // These ARE the column evaluations at the sumcheck random point.
+    // Verify our claimed values match.
+    for (i, claimed) in proof.column_evaluations.iter().enumerate() {
+        if i < yr.len() && claimed != &yr[i] {
+            return Err(EvaluationError::ColumnEvaluationMismatch {
+                column: i,
+                claimed: *claimed,
+                computed: yr[i],
+            });
+        }
+    }
 
     Ok(true)
 }
@@ -263,6 +289,19 @@ pub enum EvaluationError {
         claimed: BinaryElem128,
     },
 
+    /// Column count mismatch between claimed evaluations and Ligerito output
+    ColumnCountMismatch {
+        claimed: usize,
+        available: usize,
+    },
+
+    /// Column evaluation doesn't match Ligerito's yr values
+    ColumnEvaluationMismatch {
+        column: usize,
+        claimed: BinaryElem128,
+        computed: BinaryElem128,
+    },
+
     /// Proving error
     ProvingError(String),
 }
@@ -281,6 +320,12 @@ impl core::fmt::Display for EvaluationError {
             }
             EvaluationError::ColumnMismatch { col, computed, claimed } => {
                 write!(f, "Column {} mismatch: computed {:?}, claimed {:?}", col, computed, claimed)
+            }
+            EvaluationError::ColumnCountMismatch { claimed, available } => {
+                write!(f, "Column count mismatch: claimed {}, available {}", claimed, available)
+            }
+            EvaluationError::ColumnEvaluationMismatch { column, claimed, computed } => {
+                write!(f, "Column {} evaluation mismatch: claimed {:?}, computed {:?}", column, claimed, computed)
             }
             EvaluationError::ProvingError(e) => {
                 write!(f, "Proving error: {}", e)

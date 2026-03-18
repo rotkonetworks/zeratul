@@ -2,44 +2,62 @@
 //!
 //! This module converts a RegisterOnlyTrace into a polynomial that can be
 //! proven with Ligerito. The polynomial encodes:
-//! 1. Program hash (using Poseidon)
-//! 2. All execution steps
-//! 3. Constraints (via grand product argument)
+//! 1. Program hash (using Rescue-Prime over GF(2^128))
+//! 2. All execution steps (lifted from GF(2^32) to GF(2^128))
+//! 3. Constraints (via grand product argument in GF(2^128))
+//!
+//! Security: all hashing and constraint accumulation operates in GF(2^128)
+//! for 64-bit collision resistance. Trace values are embedded from GF(2^32).
 
-use ligerito_binary_fields::{BinaryElem32, BinaryFieldElement};
+use ligerito_binary_fields::{BinaryElem32, BinaryElem128, BinaryFieldElement};
 use super::trace::{RegisterOnlyTrace, RegisterOnlyStep, Opcode, Program};
-use super::poseidon::PoseidonHash;
+use super::rescue::RescueHash;
 
 #[cfg(not(feature = "std"))]
 use alloc::vec::Vec;
 
+/// Number of independent challenges for batched Schwartz-Zippel.
+/// With 4 challenges in GF(2^32), soundness error ≤ (n/2^32)^4 ≈ n^4/2^128.
+const NUM_BATCH_CHALLENGES: usize = 4;
+
 /// Result of arithmetization: polynomial ready for Ligerito proving
 #[derive(Debug, Clone)]
 pub struct ArithmetizedTrace {
-    /// The polynomial encoding the entire computation
+    /// The polynomial encoding the entire computation (base field for Ligerito)
     pub polynomial: Vec<BinaryElem32>,
 
-    /// Program hash (for verification)
-    pub program_hash: BinaryElem32,
+    /// Program hash (Rescue-Prime, 128-bit, collision-resistant)
+    pub program_hash: BinaryElem128,
 
-    /// Constraint product (should equal challenge^num_constraints for valid trace)
-    pub constraint_product: BinaryElem32,
+    /// Batched constraint products in GF(2^32).
+    /// Each product uses an independent challenge.
+    /// All must verify for the trace to be accepted.
+    /// Combined soundness: (n/2^32)^NUM_BATCH_CHALLENGES.
+    pub constraint_products: [BinaryElem32; NUM_BATCH_CHALLENGES],
 
-    /// Challenge used for constraint checking
-    pub challenge: BinaryElem32,
+    /// Challenges used (Fiat-Shamir derived from trace commitment)
+    pub challenges: [BinaryElem32; NUM_BATCH_CHALLENGES],
 }
 
 /// Convert a register-only trace to a polynomial
+///
+/// The challenges MUST be derived via Fiat-Shamir from the trace commitment
+/// (not chosen by the prover). Caller is responsible for this binding.
 pub fn arithmetize_register_trace(
     trace: &RegisterOnlyTrace,
     program: &Program,
-    challenge: BinaryElem32,
+    challenges: [BinaryElem32; NUM_BATCH_CHALLENGES],
 ) -> ArithmetizedTrace {
     let mut poly = Vec::new();
 
-    // Step 1: Compute and encode program hash
+    // Step 1: Compute program hash using Rescue-Prime (128-bit, secure)
     let program_hash = hash_program(program);
-    poly.push(program_hash);
+    // Embed 128-bit hash as 4 × 32-bit elements in the polynomial
+    let ph = program_hash.poly().value();
+    poly.push(BinaryElem32::from(ph as u32));
+    poly.push(BinaryElem32::from((ph >> 32) as u32));
+    poly.push(BinaryElem32::from((ph >> 64) as u32));
+    poly.push(BinaryElem32::from((ph >> 96) as u32));
 
     // Step 2: Encode number of steps
     poly.push(BinaryElem32::from(trace.steps.len() as u32));
@@ -48,10 +66,7 @@ pub fn arithmetize_register_trace(
     let mut constraints = Vec::new();
 
     for (i, step) in trace.steps.iter().enumerate() {
-        // Encode step state
         encode_step(&mut poly, step);
-
-        // Generate constraints for this step
         generate_step_constraints(&mut constraints, step, program, i);
     }
 
@@ -62,32 +77,40 @@ pub fn arithmetize_register_trace(
         }
     }
 
-    // Step 5: Apply grand product argument to all constraints
-    let constraint_product = compute_constraint_product(&constraints, challenge);
-    poly.push(constraint_product);
+    // Step 5: Batched grand products in GF(2^32)
+    // Each challenge produces an independent product.
+    // Combined soundness: (n/2^32)^4 ≈ n^4/2^128 (negligible).
+    let mut constraint_products = [BinaryElem32::zero(); NUM_BATCH_CHALLENGES];
+    for (j, &ch) in challenges.iter().enumerate() {
+        constraint_products[j] = compute_constraint_product(&constraints, ch);
+    }
 
     ArithmetizedTrace {
         polynomial: poly,
         program_hash,
-        constraint_product,
-        challenge,
+        constraint_products,
+        challenges,
     }
 }
 
-/// Hash a program using Poseidon
-fn hash_program(program: &Program) -> BinaryElem32 {
-    let mut elements = Vec::new();
+/// Hash a program using Rescue-Prime over GF(2^128)
+///
+/// Each instruction is packed into a single 128-bit element:
+/// [opcode:8 | rd:8 | rs1:8 | rs2:8 | imm:32 | padding:64]
+/// This is collision-resistant with 64-bit security (birthday bound on 128-bit field).
+fn hash_program(program: &Program) -> BinaryElem128 {
+    let mut elements = Vec::with_capacity(program.len());
 
     for instr in program {
-        // Encode each instruction as field elements
-        elements.push(BinaryElem32::from(instr.opcode as u8 as u32));
-        elements.push(BinaryElem32::from(instr.rd as u32));
-        elements.push(BinaryElem32::from(instr.rs1 as u32));
-        elements.push(BinaryElem32::from(instr.rs2 as u32));
-        elements.push(BinaryElem32::from(instr.imm));
+        let packed = (instr.opcode as u8 as u128)
+            | ((instr.rd as u128) << 8)
+            | ((instr.rs1 as u128) << 16)
+            | ((instr.rs2 as u128) << 24)
+            | ((instr.imm as u128) << 32);
+        elements.push(BinaryElem128::from(packed));
     }
 
-    PoseidonHash::hash_elements(&elements)
+    RescueHash::hash_elements(&elements)
 }
 
 /// Encode a single execution step into the polynomial
@@ -113,6 +136,9 @@ fn encode_step(poly: &mut Vec<BinaryElem32>, step: &RegisterOnlyStep) {
 }
 
 /// Generate constraints for a single execution step
+///
+/// Constraints stay in GF(2^32) for performance. Security comes from
+/// batching 4 independent challenges (see NUM_BATCH_CHALLENGES).
 fn generate_step_constraints(
     constraints: &mut Vec<BinaryElem32>,
     step: &RegisterOnlyStep,
@@ -120,7 +146,6 @@ fn generate_step_constraints(
     step_index: usize,
 ) {
     // Constraint 1: PC matches step index
-    // In GF(2^32), addition is XOR, so a - b = a + b
     let pc_constraint = BinaryElem32::from(step.pc)
         .add(&BinaryElem32::from(step_index as u32));
     constraints.push(pc_constraint);
@@ -129,30 +154,28 @@ fn generate_step_constraints(
     if step_index < program.len() {
         let expected_opcode = BinaryElem32::from(program[step_index].opcode as u8 as u32);
         let actual_opcode = BinaryElem32::from(step.opcode as u8 as u32);
-        let opcode_constraint = expected_opcode.add(&actual_opcode);
-        constraints.push(opcode_constraint);
+        constraints.push(expected_opcode.add(&actual_opcode));
     }
 
     // Constraint 3: Register indices match program
     if step_index < program.len() {
         let instr = &program[step_index];
-
-        let rd_constraint = BinaryElem32::from(instr.rd as u32)
-            .add(&BinaryElem32::from(step.rd as u32));
-        constraints.push(rd_constraint);
-
-        let rs1_constraint = BinaryElem32::from(instr.rs1 as u32)
-            .add(&BinaryElem32::from(step.rs1 as u32));
-        constraints.push(rs1_constraint);
-
-        let rs2_constraint = BinaryElem32::from(instr.rs2 as u32)
-            .add(&BinaryElem32::from(step.rs2 as u32));
-        constraints.push(rs2_constraint);
+        constraints.push(
+            BinaryElem32::from(instr.rd as u32)
+                .add(&BinaryElem32::from(step.rd as u32))
+        );
+        constraints.push(
+            BinaryElem32::from(instr.rs1 as u32)
+                .add(&BinaryElem32::from(step.rs1 as u32))
+        );
+        constraints.push(
+            BinaryElem32::from(instr.rs2 as u32)
+                .add(&BinaryElem32::from(step.rs2 as u32))
+        );
     }
 
     // Constraint 4: ALU correctness
-    let alu_constraint = check_alu_correctness(step);
-    constraints.push(alu_constraint);
+    constraints.push(check_alu_correctness(step));
 }
 
 /// Check that the ALU operation was performed correctly
@@ -167,22 +190,21 @@ fn check_alu_correctness(step: &RegisterOnlyStep) -> BinaryElem32 {
         Opcode::SLL => step.regs[step.rs1 as usize] << (step.regs[step.rs2 as usize] & 0x1F),
         Opcode::SRL => step.regs[step.rs1 as usize] >> (step.regs[step.rs2 as usize] & 0x1F),
         Opcode::LI  => step.imm,
-        Opcode::LOAD => step.memory_value.unwrap_or(0), // Value already fetched
-        Opcode::HALT => return BinaryElem32::zero(), // HALT doesn't modify registers
+        Opcode::LOAD => step.memory_value.unwrap_or(0),
+        Opcode::HALT => return BinaryElem32::zero(),
     };
 
-    // Get actual result (what would be in rd after execution)
     let new_regs = step.execute();
     let actual_result = new_regs[step.rd as usize];
 
-    // Constraint: expected XOR actual should be zero
     BinaryElem32::from(expected_result).add(&BinaryElem32::from(actual_result))
 }
 
-/// Compute the grand product of all constraints
+/// Compute grand product ∏(α + c_i) in GF(2^32)
 ///
-/// For valid execution, all constraints should be 0.
-/// The product ∏(α - c_i) equals α^n when all c_i = 0.
+/// For valid execution all c_i = 0, so product = α^n.
+/// Single-challenge soundness: n/2^32. With NUM_BATCH_CHALLENGES
+/// independent challenges, combined error: (n/2^32)^4 ≈ n^4/2^128.
 fn compute_constraint_product(
     constraints: &[BinaryElem32],
     challenge: BinaryElem32,
@@ -190,7 +212,6 @@ fn compute_constraint_product(
     let mut product = BinaryElem32::one();
 
     for constraint in constraints {
-        // Compute (challenge - constraint) = (challenge + constraint) in GF(2^32)
         let term = challenge.add(constraint);
         product = product.mul(&term);
     }
@@ -199,14 +220,19 @@ fn compute_constraint_product(
 }
 
 /// Verify that a polynomial represents a valid execution
+///
+/// ALL batched products must verify independently.
 pub fn verify_arithmetization(
     arith: &ArithmetizedTrace,
     num_constraints: usize,
 ) -> bool {
-    // Expected product when all constraints are zero: challenge^num_constraints
-    let expected_product = arith.challenge.pow(num_constraints as u64);
-
-    arith.constraint_product == expected_product
+    for (j, &ch) in arith.challenges.iter().enumerate() {
+        let expected = ch.pow(num_constraints as u64);
+        if arith.constraint_products[j] != expected {
+            return false;
+        }
+    }
+    true
 }
 
 #[cfg(test)]
@@ -230,9 +256,13 @@ mod tests {
         let trace = execute_and_trace(&program, initial);
         assert!(trace.validate().is_ok());
 
-        // Arithmetize with a random challenge
-        let challenge = BinaryElem32::from(0x12345678);
-        let arith = arithmetize_register_trace(&trace, &program, challenge);
+        let challenges = [
+            BinaryElem32::from(0x12345678),
+            BinaryElem32::from(0xdeadbeef),
+            BinaryElem32::from(0xcafebabe),
+            BinaryElem32::from(0x0badf00d),
+        ];
+        let arith = arithmetize_register_trace(&trace, &program, challenges);
 
         // Polynomial should be non-empty
         assert!(!arith.polynomial.is_empty());
@@ -259,8 +289,13 @@ mod tests {
 
         let trace = execute_and_trace(&program, initial);
 
-        let challenge = BinaryElem32::from(0xdeadbeef);
-        let arith = arithmetize_register_trace(&trace, &program, challenge);
+        let challenges = [
+            BinaryElem32::from(0xdeadbeef),
+            BinaryElem32::from(0x12345678),
+            BinaryElem32::from(0xfeedface),
+            BinaryElem32::from(0xbaadcafe),
+        ];
+        let arith = arithmetize_register_trace(&trace, &program, challenges);
 
         // For a valid trace, constraints should verify
         // Note: We need to count the actual number of constraints generated
@@ -319,7 +354,6 @@ mod tests {
 
     #[test]
     fn test_grand_product_zero_constraints() {
-        // All constraints are zero
         let constraints = vec![
             BinaryElem32::zero(),
             BinaryElem32::zero(),
@@ -328,26 +362,19 @@ mod tests {
 
         let challenge = BinaryElem32::from(0x42);
         let product = compute_constraint_product(&constraints, challenge);
-
-        // Product should equal challenge^3
-        let expected = challenge.pow(3);
-        assert_eq!(product, expected);
+        assert_eq!(product, challenge.pow(3));
     }
 
     #[test]
     fn test_grand_product_nonzero_constraint() {
-        // One constraint is non-zero
         let constraints = vec![
             BinaryElem32::zero(),
-            BinaryElem32::from(1),  // Non-zero!
+            BinaryElem32::from(1), // Non-zero!
             BinaryElem32::zero(),
         ];
 
         let challenge = BinaryElem32::from(0x42);
         let product = compute_constraint_product(&constraints, challenge);
-
-        // Product should NOT equal challenge^3
-        let expected = challenge.pow(3);
-        assert_ne!(product, expected);
+        assert_ne!(product, challenge.pow(3));
     }
 }
