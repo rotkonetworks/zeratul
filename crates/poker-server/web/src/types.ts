@@ -16,4 +16,8 @@ export type ServerMsg =
   | { type: 'Showdown'; hands: [number, [CardJson, CardJson]][] }
   | { type: 'PotAwarded'; seat: number; amount: number }
   | { type: 'HandComplete'; stacks: number[] }
+  | { type: 'JuryVote'; node: number; total: number; payload_hash: string }
+  | { type: 'JurySettlement'; verified: boolean; threshold: number; contributions: number }
+  | { type: 'RoomInfo'; code: string; jury_nodes: number; jury_threshold: number; escrow: string }
+  | { type: 'InviteLink'; url: string }
   | { type: 'Error'; message: string }

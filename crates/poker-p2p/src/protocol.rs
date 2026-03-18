@@ -351,6 +351,38 @@ pub struct HandResult {
     pub winning_hand: Option<Vec<u8>>,
 }
 
+// === Co-Signed Transcript (for narsil dispute resolution) ===
+
+/// a player action with counter-signature from the other player.
+/// both players attest that this action happened — neither can deny
+/// or fabricate it later. the witness signature makes the transcript
+/// self-authenticating for jury replay.
+#[derive(Clone, Debug, Encode, Decode)]
+pub struct CoSignedAction {
+    pub action: PlayerAction,
+    /// counter-signature from the non-acting player
+    pub witness_sig: [u8; 64],
+}
+
+/// complete transcript of a single hand, co-signed by both players.
+/// this is the evidence structure submitted to narsil for disputes
+/// and to the on-chain high court for appeals.
+#[derive(Clone, Debug, Encode, Decode)]
+pub struct HandTranscript {
+    pub hand_number: u64,
+    pub button: u8,
+    /// starting chip stacks for each seat
+    pub starting_stacks: Vec<u64>,
+    /// deck commitment from mental poker shuffle (hash of deck + randomness)
+    pub deck_commitment: [u8; 32],
+    /// ordered sequence of co-signed actions
+    pub actions: Vec<CoSignedAction>,
+    /// card reveals (for showdown verification)
+    pub reveals: Vec<CardReveal>,
+    /// final result agreed upon (or disputed)
+    pub result: Option<HandResult>,
+}
+
 /// signed state update for channel
 #[derive(Clone, Debug, Encode, Decode)]
 pub struct StateUpdate {

@@ -32,7 +32,10 @@
 
 pub mod keys;
 pub mod encrypt;
+pub mod escrow;
 pub mod proof;
+pub mod shuffle;
+pub mod transcript;
 pub mod types;
 pub mod hand;
 

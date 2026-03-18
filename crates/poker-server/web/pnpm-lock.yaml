@@ -8,6 +8,9 @@ importers:
 
   .:
     dependencies:
+      '@unocss/reset':
+        specifier: ^66.6.7
+        version: 66.6.7
       solid-js:
         specifier: ^1.9.11
         version: 1.9.11
@@ -649,6 +652,9 @@ packages:
 
   '@unocss/preset-wind@66.6.6':
     resolution: {integrity: sha512-TMy3lZ35FP/4QqDHOLWZmV+RoOGWUDqnDEOTjOKI1CQARGta0ppUmq+IZMuI1ZJLuOa4OZ9V6SfnwMXwRLgXmw==}
+
+  '@unocss/reset@66.6.7':
+    resolution: {integrity: sha512-+OjpLDEaPmhTQ3Gj7EaKApNM92TM9f9gLgHNa79+66wIll9IfhKfEmJXnF9y1SE725n4PmPIQgC9k313HztMLA==}
 
   '@unocss/rule-utils@66.6.6':
     resolution: {integrity: sha512-krWtQKGshOaqQMuxeGq1NOA8NL35VdpYlmQEWOe39BY6TACT51bgQFu40MRfsAIMZZtoGS2YYTrnHojgR92omw==}
@@ -1569,6 +1575,8 @@ snapshots:
     dependencies:
       '@unocss/core': 66.6.6
       '@unocss/preset-wind3': 66.6.6
+
+  '@unocss/reset@66.6.7': {}
 
   '@unocss/rule-utils@66.6.6':
     dependencies:

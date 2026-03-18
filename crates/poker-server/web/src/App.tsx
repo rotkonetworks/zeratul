@@ -21,6 +21,10 @@ export default function App() {
   const [acting, setActing] = createSignal(-1)
   const [logs, setLogs] = createSignal<{ text: string; cls: string }[]>([])
   const [raiseVal, setRaiseVal] = createSignal(0)
+  const [roomCode, setRoomCode] = createSignal('')
+  const [inviteUrl, setInviteUrl] = createSignal('')
+  const [juryProgress, setJuryProgress] = createSignal('')
+  const [escrow, setEscrow] = createSignal('')
 
   const opp = () => mySeat() === 0 ? 1 : 0
   const myStack = () => stacks()[mySeat()] ?? 0
@@ -123,6 +127,26 @@ export default function App() {
         setActions([])
         setActing(-1)
         break
+      case 'JuryVote':
+        setJuryProgress(`jury ${msg.node}/${msg.total}`)
+        log(`jury node ${msg.node}/${msg.total} voted [${msg.payload_hash}]`, 'c-green')
+        break
+      case 'JurySettlement':
+        setJuryProgress('')
+        log(`settlement ${msg.verified ? 'verified' : 'FAILED'} (${msg.threshold}/${msg.contributions} OSST)`, msg.verified ? 'c-green font-500' : 'c-red')
+        break
+      case 'RoomInfo':
+        if (msg.code && msg.code !== roomCode()) {
+          setRoomCode(msg.code)
+          log(`table: ${msg.code}`, 'c-green')
+        }
+        if (msg.escrow && msg.escrow.length > 5) {
+          setEscrow(msg.escrow)
+        }
+        break
+      case 'InviteLink':
+        setInviteUrl(window.location.origin + msg.url)
+        break
       case 'Error':
         log(`err: ${msg.message}`)
         break
@@ -132,8 +156,14 @@ export default function App() {
   const { connected, connect, send } = createSocket(onMsg)
 
   function sit() {
-    const n = name().trim() || 'anon'
+    const n = name().trim() || 'anon' + String(Math.random() * 100000 | 0).padStart(5, '0')
     connect(n)
+  }
+
+  // auto-connect if we have a room code or /new in the URL
+  if (location.pathname.length > 1) {
+    // small delay for DOM to settle
+    setTimeout(() => sit(), 100)
   }
 
   function act(action: string, amount?: number) {
@@ -165,21 +195,38 @@ export default function App() {
               <div class="text-zec-yellow text-10px font-semibold uppercase tracking-3px mb-5">
                 heads-up no-limit hold'em
               </div>
-              <div class="text-neutral-500 text-11px tracking-wider mb-6">
+              <div class="text-neutral-500 text-11px tracking-wider mb-3">
                 5 / 10 blinds &middot; 1,000 buy-in
               </div>
-              <div class="flex items-center justify-center gap-2">
-                <input
-                  class="input-field w-48 text-center"
-                  placeholder="name"
-                  maxLength={16}
-                  spellcheck={false}
-                  value={name()}
-                  onInput={e => setName(e.currentTarget.value)}
-                  onKeyDown={e => e.key === 'Enter' && sit()}
-                  autofocus
-                />
-                <button class="btn btn-primary" onClick={sit}>sit down</button>
+              <div class="text-neutral-600 text-9px tracking-wider mb-6">
+                3-of-5 OSST jury &middot; co-signed action log
+              </div>
+              <div class="flex flex-col items-center gap-4">
+                <div class="flex items-center justify-center gap-2">
+                  <input
+                    class="input-field w-48 text-center"
+                    placeholder="name"
+                    maxLength={16}
+                    spellcheck={false}
+                    value={name()}
+                    onInput={e => setName(e.currentTarget.value)}
+                    onKeyDown={e => {
+                      if (e.key === 'Enter') {
+                        if (location.pathname.length > 1) sit()
+                        else window.location.href = '/new'
+                      }
+                    }}
+                    autofocus
+                  />
+                  <Show when={location.pathname.length > 1}
+                    fallback={
+                      <button class="btn btn-primary" onClick={() => window.location.href = '/new'}>
+                        create table
+                      </button>
+                    }>
+                    <button class="btn btn-primary" onClick={sit}>sit down</button>
+                  </Show>
+                </div>
               </div>
             </div>
           </Show>
@@ -190,6 +237,19 @@ export default function App() {
               <div class="text-zec-yellow text-11px uppercase tracking-2px mb-4">
                 waiting for opponent
               </div>
+              <Show when={inviteUrl()}>
+                <div class="mb-4">
+                  <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">share invite link</div>
+                  <div
+                    class="input-field text-11px text-center cursor-pointer select-all"
+                    onClick={() => navigator.clipboard?.writeText(inviteUrl())}
+                    title="click to copy"
+                  >
+                    {inviteUrl()}
+                  </div>
+                  <div class="text-neutral-600 text-8px mt-1">click to copy</div>
+                </div>
+              </Show>
               <div class="flex items-end justify-center gap-1 h-6">
                 <For each={[0,.07,.14,.21,.28,.35]}>
                   {d => <div class="w-1 rounded-sm bg-zec-yellow animate-pulse" style={`animation-delay:${d}s; height: 60%`} />}
@@ -204,6 +264,9 @@ export default function App() {
               {/* status bar */}
               <div class="flex justify-between px-2 py-1.5 text-9px text-neutral-500 uppercase tracking-wider">
                 <span>hand #{handNum()}</span>
+                <Show when={juryProgress()}>
+                  <span class="text-zec-yellow animate-pulse">{juryProgress()}</span>
+                </Show>
                 <span>{button() === mySeat() ? 'you deal' : 'opp deals'}</span>
               </div>
 
@@ -319,7 +382,7 @@ export default function App() {
             </div>
           </Show>
 
-          <div class="text-center py-1.5 text-8px text-neutral-600 uppercase tracking-widest">rotko networks</div>
+          <div class="text-center py-1.5 text-8px text-neutral-600 uppercase tracking-widest">poker.zk.bot</div>
         </div>
       </div>
     </div>

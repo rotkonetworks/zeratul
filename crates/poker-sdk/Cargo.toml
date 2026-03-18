@@ -3,18 +3,17 @@ name = "poker-sdk"
 version = "0.1.0"
 edition = "2021"
 description = "client SDK for ghettobox mental poker - proof generation, encryption, chain integration"
-authors.workspace = true
-license.workspace = true
-repository.workspace = true
+authors = ["Rotko Networks"]
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/rotkonetworks/zeratul"
 
 [features]
 default = ["std"]
 std = [
     "blake3/std",
     "chacha20poly1305/std",
-    "ligerito/std",
-    "ligerito/prover",
 ]
+ligerito-proofs = ["dep:ligerito"]
 wasm = [
     "std",
     "getrandom/js",
@@ -24,13 +23,13 @@ decaf377 = ["dep:decaf377", "dep:decaf377-ka"]
 
 [dependencies]
 # crypto - x25519 default, decaf377 optional
-blake3 = { workspace = true, default-features = false }
-sha2 = { workspace = true, default-features = false }
+blake3 = { version = "1", default-features = false }
+sha2 = { version = "0.10", default-features = false }
 chacha20poly1305 = { version = "0.10", default-features = false, features = ["alloc"] }
 x25519-dalek = { version = "2.0", default-features = false, features = ["static_secrets"] }
 ed25519-dalek = { version = "2", default-features = false, features = ["alloc"] }
-rand = { workspace = true }
-rand_chacha = { workspace = true }
+rand = "0.8"
+rand_chacha = "0.3"
 rand_core = "0.6"
 
 # optional: decaf377 curve (for BLS12-377 SNARKs)
@@ -38,16 +37,24 @@ decaf377 = { version = "0.10", optional = true }
 decaf377-ka = { version = "2.1", optional = true }
 
 # proof generation
-ligerito = { path = "../ligerito", default-features = false }
+ligerito = { path = "../../../zcli/crates/ligerito", default-features = false, optional = true }
+
+# frostito: nested FROST + OSST for escrow
+osst = { path = "../osst", features = ["pallas"] }
+pasta_curves = { version = "0.5", default-features = false, features = ["alloc"] }
+
+# mental poker: zk shuffle proofs (ristretto255)
+zk-shuffle = { path = "../zk-shuffle", default-features = false, features = ["std"] }
+curve25519-dalek = { version = "4.1", default-features = false, features = ["digest", "rand_core", "group"] }
 
 # encoding
 parity-scale-codec = { version = "3.6", default-features = false, features = ["derive"] }
 
 # errors
-thiserror = { workspace = true }
+thiserror = "1"
 
 # wasm support
 getrandom = { version = "0.2", optional = true }
 
 [dev-dependencies]
-hex = { workspace = true }
+hex = "0.4"

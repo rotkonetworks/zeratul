@@ -10,5 +10,8 @@ export default defineConfig({
   build: {
     outDir: '../static',
     emptyOutDir: true,
+    rollupOptions: {
+      external: ['/assets/poker_pvm.js'],
+    },
   },
 })

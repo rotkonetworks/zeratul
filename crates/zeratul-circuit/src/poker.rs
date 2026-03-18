@@ -932,7 +932,7 @@ impl PotWithdrawalCircuit {
         poseidon: &PoseidonGadget,
         domain: WireId,
         commitment: &[WireId; 8],
-        position: &[WireId; 2],
+        _position: &[WireId; 2],
         merkle_path: &[[WireId; 8]],
         anchor: &[WireId; 8],
     ) {
@@ -941,7 +941,7 @@ impl PotWithdrawalCircuit {
         let mut position_bits = Vec::with_capacity(depth);
 
         // extract position bits from position[0] (low 32 bits)
-        for i in 0..core::cmp::min(depth, 32) {
+        for _i in 0..core::cmp::min(depth, 32) {
             let bit = builder.add_witness();
             // constrain bit to be 0 or 1
             builder.assert_range(bit, 1);

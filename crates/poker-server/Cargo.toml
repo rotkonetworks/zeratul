@@ -7,6 +7,7 @@ description = "WebSocket poker server for browser-based heads-up play"
 [dependencies]
 poker-p2p = { path = "../poker-p2p" }
 zk-shuffle = { path = "../zk-shuffle" }
+osst = { path = "../osst", features = ["pallas"] }
 
 # web server
 axum = { version = "0.8", features = ["ws"] }
@@ -20,7 +21,12 @@ serde_json = "1"
 # async
 futures = "0.3"
 
+# crypto
+sha2 = "0.10"
+pasta_curves = "0.5"
+
 # utils
 rand = "0.8"
+hex = "0.4"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
