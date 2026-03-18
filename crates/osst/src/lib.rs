@@ -43,10 +43,13 @@ use alloc::vec::Vec;
 use sha2::{Digest, Sha512};
 
 pub mod curve;
+pub mod dkg;
 mod error;
 pub mod frost;
 mod lagrange;
 pub mod liveness;
+pub mod nested;
+pub mod redpallas;
 pub mod reshare;
 mod types;
 

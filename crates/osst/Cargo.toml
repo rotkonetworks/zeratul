@@ -3,7 +3,7 @@ name = "osst"
 version = "0.1.1"
 edition = "2021"
 license = "MIT OR Apache-2.0"
-description = "one-step schnorr threshold identification with proactive resharing"
+description = "frostito: nested FROST with OSST identification, DKG, and proactive resharing"
 repository = "https://github.com/rotkonetworks/zeratul"
 documentation = "https://docs.rs/osst"
 readme = "README.md"
@@ -18,7 +18,7 @@ std = [
 ]
 # Curve backends
 ristretto255 = ["dep:curve25519-dalek"]
-pallas = ["dep:pasta_curves"]
+pallas = ["dep:pasta_curves", "dep:blake2b_simd"]
 secp256k1 = ["dep:k256"]
 decaf377 = ["dep:decaf377"]
 
@@ -41,6 +41,9 @@ pasta_curves = { version = "0.5", default-features = false, features = ["alloc"]
 
 # secp256k1 - for Bitcoin compatibility
 k256 = { version = "0.13", default-features = false, features = ["arithmetic", "ecdsa"], optional = true }
+
+# blake2b for Zcash RedPallas challenge hash
+blake2b_simd = { version = "1.0", default-features = false, optional = true }
 
 # for zeroize implementations on external scalar types
 generic-array = { version = "0.14", default-features = false, optional = true }

@@ -84,6 +84,22 @@ pub struct Nonces<S: OsstScalar> {
     binding: S,
 }
 
+impl<S: OsstScalar> Nonces<S> {
+    /// Compute FROST Round 2 response: z_i = d_i + (rho_i * e_i) + (lambda_i * c * s_i)
+    pub fn compute_response(
+        self,
+        rho: &S,
+        lambda: &S,
+        challenge: &S,
+        secret: &S,
+    ) -> S {
+        // z_i = d_i + rho_i * e_i + lambda_i * c * s_i
+        let rho_e = rho.mul(&self.binding);
+        let lcs = lambda.mul(&challenge.mul(secret));
+        self.hiding.add(&rho_e).add(&lcs)
+    }
+}
+
 impl<S: OsstScalar> Drop for Nonces<S> {
     fn drop(&mut self) {
         self.hiding.zeroize();
