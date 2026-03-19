@@ -69,6 +69,10 @@ parking_lot = "0.12"
 # local paths
 dirs = "5.0"
 
+# relay transport (WebSocket)
+tokio-tungstenite = { version = "0.21", features = ["native-tls"] }
+futures-util = "0.3"
+
 # shielded state storage (native only)
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
 nomt = { path = "../../../nomt/nomt" }

@@ -12,6 +12,7 @@ mod friends;
 mod lobby;
 mod multitable;
 mod p2p;
+mod relay_transport;
 mod settings;
 mod signing;
 mod storage;
