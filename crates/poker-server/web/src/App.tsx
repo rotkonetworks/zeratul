@@ -151,8 +151,7 @@ export default function App() {
             autoFired = true
           }
           if (autoFired) break
-          // no auto-action matched — show buttons
-          if (aa !== 'none') setAutoAction('none')
+          // auto-action didn't match this prompt — keep it active for next turn
           setActions(msg.valid_actions)
           const r = msg.valid_actions.find(a => a.kind === 'raise' || a.kind === 'bet')
           if (r) setRaiseVal(r.min_amount)
