@@ -15,6 +15,15 @@ use crate::{GameState, Rules, Phase, Action, SignedAction, eval_5};
 use super::abstraction::*;
 use super::strategy::*;
 
+/// CFR variant to use
+#[derive(Clone, Copy, Debug)]
+pub enum CfrVariant {
+    /// vanilla CFR (no discounting)
+    Vanilla,
+    /// DCFR+ (Xu et al. 2022): discount + clip negatives
+    DcfrPlus { alpha: f64, gamma: f64 },
+}
+
 /// MCCFR solver state
 pub struct Solver {
     /// strategy table: info set → regrets + strategy sums
@@ -23,6 +32,8 @@ pub struct Solver {
     pub rules: Rules,
     /// total iterations completed
     pub iterations: u64,
+    /// CFR variant
+    pub variant: CfrVariant,
     /// RNG state (xorshift)
     rng_state: u64,
 }
@@ -77,10 +88,15 @@ impl InfoNode {
 
 impl Solver {
     pub fn new(rules: Rules) -> Self {
+        Self::with_variant(rules, CfrVariant::DcfrPlus { alpha: 2.0, gamma: 2.0 })
+    }
+
+    pub fn with_variant(rules: Rules, variant: CfrVariant) -> Self {
         Self {
             nodes: HashMap::new(),
             rules,
             iterations: 0,
+            variant,
             rng_state: 0xdeadbeefcafe1234,
         }
     }
@@ -250,10 +266,24 @@ impl Solver {
                 node_value += strategy[a] * action_values[a];
             }
 
-            // update regrets
+            // update regrets with DCFR+ discounting + clipping
             let node = self.nodes.get_mut(&key).unwrap();
-            for a in 0..num_actions {
-                node.regret_sum[a] += action_values[a] - node_value;
+            let t = self.iterations as f64 + 1.0;
+            match self.variant {
+                CfrVariant::Vanilla => {
+                    for a in 0..num_actions {
+                        node.regret_sum[a] += action_values[a] - node_value;
+                    }
+                }
+                CfrVariant::DcfrPlus { alpha, .. } => {
+                    // DCFR+: R^t = max(R^{t-1} * discount + r^t, 0)
+                    let tm1 = (t - 1.0).max(1.0);
+                    let discount = tm1.powf(alpha) / (tm1.powf(alpha) + 1.0);
+                    for a in 0..num_actions {
+                        let prev = node.regret_sum[a].max(0.0); // clip negatives (CFR+)
+                        node.regret_sum[a] = (prev * discount + (action_values[a] - node_value)).max(0.0);
+                    }
+                }
             }
 
             node_value
@@ -270,10 +300,22 @@ impl Solver {
                 }
             }
 
-            // accumulate strategy sums for average strategy
+            // accumulate strategy sums (with DCFR+ discounting)
             let node = self.nodes.get_mut(&key).unwrap();
-            for a in 0..num_actions {
-                node.strategy_sum[a] += strategy[a];
+            let t = self.iterations as f64 + 1.0;
+            match self.variant {
+                CfrVariant::Vanilla => {
+                    for a in 0..num_actions {
+                        node.strategy_sum[a] += strategy[a];
+                    }
+                }
+                CfrVariant::DcfrPlus { gamma, .. } => {
+                    let tm1 = (t - 1.0).max(1.0);
+                    let discount = (tm1 / t).powf(gamma);
+                    for a in 0..num_actions {
+                        node.strategy_sum[a] = node.strategy_sum[a] * discount + strategy[a];
+                    }
+                }
             }
 
             let (action, amount) = actions[chosen];
