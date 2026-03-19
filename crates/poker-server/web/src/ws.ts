@@ -14,6 +14,8 @@ import { createGame, loadWasmEngine } from './game'
 import { createSessionIdentity, signKeyExchange } from './identity'
 import type { SessionIdentity } from './identity'
 import type { WireMessage } from './transport'
+import { createMedia } from './media'
+import type { MediaState } from './media'
 
 export type SendFn = (data: Record<string, unknown>) => void
 
@@ -24,6 +26,7 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
   let game: ReturnType<typeof createGame> | null = null
   let transport: ReturnType<typeof createRelayTransport> | null = null
   let announced = false
+  let media: MediaState | null = null
 
   async function connect(name: string, customRules?: { smallBlind: number; bigBlind: number; buyin: number }) {
     onMsg({ type: 'Status', phase: 'connecting', message: 'loading game engine...' })
@@ -40,7 +43,14 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
     if (sess.mode === 'zafu') name = sess.nick
 
     transport = createRelayTransport(
-      (msg: WireMessage) => game?.onPeerMessage(msg),
+      (msg: WireMessage) => {
+        // media signaling filter: intercept _sdp/_ice before game
+        if (msg.t === '_sdp' || msg.t === '_ice') {
+          media?.handleSignal(msg)
+          return
+        }
+        game?.onPeerMessage(msg)
+      },
       (event, data) => {
         switch (event) {
           case 'joined':
@@ -88,6 +98,9 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
       sess, // pass identity for authenticated key exchange
     )
 
+    // media: WebRTC voice/video (opt-in, signaling through encrypted relay)
+    media = createMedia((msg) => transport!.send(msg))
+
     game = createGame(transport, isHost, name, {
       onMsg,
       onLog: (t) => console.log('[game]', t),
@@ -122,5 +135,5 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
     }
   }
 
-  return { connected, connect, send, identity, encrypted: encSignal }
+  return { connected, connect, send, identity, encrypted: encSignal, media: () => media }
 }

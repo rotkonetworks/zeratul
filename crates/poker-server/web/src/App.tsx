@@ -232,7 +232,7 @@ export default function App() {
     }
   }
 
-  const { connected, connect, send, identity, encrypted } = createSocket(onMsg)
+  const { connected, connect, send, identity, encrypted, media } = createSocket(onMsg)
 
   function sit() {
     const n = name().trim() || 'anon' + String(Math.random() * 100000 | 0).padStart(5, '0')
@@ -559,6 +559,36 @@ export default function App() {
                     {mode}
                   </button>
                 )}
+              </div>
+
+              {/* media controls + video */}
+              <div class="flex items-center justify-between px-1 py-1">
+                <div class="flex gap-1">
+                  <button
+                    class={`text-9px px-2 py-0.5 rounded border ${media()?.micEnabled() ? 'border-green-500 text-green-400' : 'border-neutral-700 text-neutral-600 hover:text-neutral-400'}`}
+                    onClick={() => media()?.toggleMic()}
+                  >{media()?.micEnabled() ? 'mic on' : 'mic'}</button>
+                  <button
+                    class={`text-9px px-2 py-0.5 rounded border ${media()?.camEnabled() ? 'border-green-500 text-green-400' : 'border-neutral-700 text-neutral-600 hover:text-neutral-400'}`}
+                    onClick={() => media()?.toggleCam()}
+                  >{media()?.camEnabled() ? 'cam on' : 'cam'}</button>
+                </div>
+                <div class="flex gap-1">
+                  <Show when={media()?.remoteStream()}>
+                    <video
+                      class="w-16 h-12 rounded border border-neutral-700 object-cover"
+                      autoplay playsinline
+                      ref={(el: HTMLVideoElement) => { el.srcObject = media()!.remoteStream() }}
+                    />
+                  </Show>
+                  <Show when={media()?.localStream() && media()?.camEnabled()}>
+                    <video
+                      class="w-12 h-9 rounded border border-neutral-800 object-cover opacity-60"
+                      autoplay playsinline muted
+                      ref={(el: HTMLVideoElement) => { el.srcObject = media()!.localStream() }}
+                    />
+                  </Show>
+                </div>
               </div>
 
               {/* log */}
