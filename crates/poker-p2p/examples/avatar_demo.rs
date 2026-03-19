@@ -283,9 +283,7 @@ impl AvatarDemo {
         let frame = AvatarFrame::from_floats(
             1, 0, &self.shapes, self.head_rotation, [0.0; 3],
         );
-        let encoded = parity_scale_codec::Encode::encode(
-            &poker_p2p::protocol::Message::AvatarFrame(frame),
-        );
+        let encoded = poker_p2p::protocol::Message::AvatarFrame(frame).encode_to_vec();
         ui.label(egui::RichText::new(format!(
             "wire: {} bytes/frame, {:.1} KB/s at 30fps",
             encoded.len(),

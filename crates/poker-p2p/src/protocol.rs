@@ -3,10 +3,103 @@
 //! defines all messages exchanged between peers during table discovery,
 //! game setup, and gameplay.
 
-use parity_scale_codec::{Decode, Encode};
+use serde::{Deserialize, Serialize};
+
+/// serde helper: serialize [u8; 64] as hex string
+mod hex64 {
+    use serde::{self, Deserialize, Serializer, Deserializer};
+    pub fn serialize<S: Serializer>(bytes: &[u8; 64], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(bytes))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 64], D::Error> {
+        let s = String::deserialize(d)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        bytes.try_into().map_err(|_| serde::de::Error::custom("expected 64 bytes"))
+    }
+}
+
+/// serde helper: serialize [u8; 32] as hex string
+mod hex32 {
+    use serde::{self, Deserialize, Serializer, Deserializer};
+    pub fn serialize<S: Serializer>(bytes: &[u8; 32], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(bytes))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 32], D::Error> {
+        let s = String::deserialize(d)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        bytes.try_into().map_err(|_| serde::de::Error::custom("expected 32 bytes"))
+    }
+}
+
+/// serde helper: serialize [u8; 24] as hex string
+mod hex24 {
+    use serde::{self, Deserialize, Serializer, Deserializer};
+    pub fn serialize<S: Serializer>(bytes: &[u8; 24], s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&hex::encode(bytes))
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<[u8; 24], D::Error> {
+        let s = String::deserialize(d)?;
+        let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+        bytes.try_into().map_err(|_| serde::de::Error::custom("expected 24 bytes"))
+    }
+}
+
+/// serde helper: serialize Option<[u8; 32]> as optional hex string
+mod hex32_opt {
+    use serde::{self, Serializer, Deserializer};
+    pub fn serialize<S: Serializer>(val: &Option<[u8; 32]>, s: S) -> Result<S::Ok, S::Error> {
+        match val {
+            Some(bytes) => s.serialize_some(&hex::encode(bytes)),
+            None => s.serialize_none(),
+        }
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Option<[u8; 32]>, D::Error> {
+        let opt: Option<String> = serde::Deserialize::deserialize(d)?;
+        match opt {
+            Some(s) => {
+                let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+                let arr: [u8; 32] = bytes.try_into().map_err(|_| serde::de::Error::custom("expected 32 bytes"))?;
+                Ok(Some(arr))
+            }
+            None => Ok(None),
+        }
+    }
+}
+
+/// serde helper: serialize Vec<[u8; 32]> as vec of hex strings
+mod hex32_vec {
+    use serde::{self, Serialize, Deserialize, Serializer, Deserializer};
+    pub fn serialize<S: Serializer>(val: &Vec<[u8; 32]>, s: S) -> Result<S::Ok, S::Error> {
+        let hex_strings: Vec<String> = val.iter().map(|b| hex::encode(b)).collect();
+        hex_strings.serialize(s)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<[u8; 32]>, D::Error> {
+        let strings: Vec<String> = Vec::deserialize(d)?;
+        strings.into_iter().map(|s| {
+            let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+            bytes.try_into().map_err(|_| serde::de::Error::custom("expected 32 bytes"))
+        }).collect()
+    }
+}
+
+/// serde helper: serialize Vec<[u8; 64]> as vec of hex strings
+mod hex64_vec {
+    use serde::{self, Serialize, Deserialize, Serializer, Deserializer};
+    pub fn serialize<S: Serializer>(val: &Vec<[u8; 64]>, s: S) -> Result<S::Ok, S::Error> {
+        let hex_strings: Vec<String> = val.iter().map(|b| hex::encode(b)).collect();
+        hex_strings.serialize(s)
+    }
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<[u8; 64]>, D::Error> {
+        let strings: Vec<String> = Vec::deserialize(d)?;
+        strings.into_iter().map(|s| {
+            let bytes = hex::decode(&s).map_err(serde::de::Error::custom)?;
+            bytes.try_into().map_err(|_| serde::de::Error::custom("expected 64 bytes"))
+        }).collect()
+    }
+}
 
 /// participant role at the table
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Role {
     /// active player with channel and buy-in
     Player,
@@ -15,7 +108,7 @@ pub enum Role {
 }
 
 /// security tier (mirrors ghettobox-primitives)
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SecurityTier {
     Training,
     Casual,
@@ -47,7 +140,7 @@ impl SecurityTier {
 }
 
 /// table rules - defined by host, must be accepted by all participants
-#[derive(Clone, Debug, PartialEq, Eq, Encode, Decode)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TableRules {
     /// small blind amount (planck)
     pub small_blind: u128,
@@ -120,7 +213,7 @@ impl TableRules {
 
     /// compute rules hash for verification
     pub fn hash(&self) -> [u8; 32] {
-        let encoded = self.encode();
+        let encoded = serde_json::to_vec(self).expect("rules serialization should not fail");
         *blake3::hash(&encoded).as_bytes()
     }
 
@@ -155,7 +248,7 @@ pub enum RulesError {
 }
 
 /// p2p message types
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum Message {
     // === Table Discovery ===
     /// host announces table rules after PAKE auth
@@ -233,26 +326,30 @@ pub enum Message {
 }
 
 /// table announcement from host
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TableAnnounce {
     pub rules: TableRules,
+    #[serde(with = "hex32")]
     pub host_pubkey: [u8; 32],
+    #[serde(with = "hex64")]
     pub signature: [u8; 64],
 }
 
 /// join request from participant
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JoinRequest {
     pub role: Role,
+    #[serde(with = "hex32")]
     pub pubkey: [u8; 32],
     /// for Player: proof of tier eligibility
     pub tier_proof: Option<Vec<u8>>,
     /// signature over rules hash
+    #[serde(with = "hex64")]
     pub rules_acceptance_sig: [u8; 64],
 }
 
 /// join acceptance from host
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JoinAccept {
     pub role: Role,
     /// seat number (1-indexed, 0 for spectator)
@@ -260,27 +357,30 @@ pub struct JoinAccept {
     /// for Player: channel parameters to open
     pub channel_params: Option<ChannelParams>,
     /// for Spectator: viewing key for delayed reveals
+    #[serde(with = "hex32_opt")]
     pub view_key: Option<[u8; 32]>,
 }
 
 /// channel parameters for player
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelParams {
     /// channel id (derived from participants)
+    #[serde(with = "hex32")]
     pub channel_id: [u8; 32],
     /// required deposit
     pub deposit: u128,
     /// other participants' pubkeys
+    #[serde(with = "hex32_vec")]
     pub participants: Vec<[u8; 32]>,
 }
 
 /// join rejection from host
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct JoinReject {
     pub reason: RejectReason,
 }
 
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum RejectReason {
     TableFull,
     SpectatorsFull,
@@ -291,18 +391,20 @@ pub enum RejectReason {
 }
 
 /// channel confirmation from player
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChannelConfirm {
     /// on-chain tx hash
+    #[serde(with = "hex32")]
     pub tx_hash: [u8; 32],
     /// channel id
+    #[serde(with = "hex32")]
     pub channel_id: [u8; 32],
     /// deposit amount
     pub deposit: u128,
 }
 
 /// game start notification
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct GameStart {
     /// hand number
     pub hand_number: u64,
@@ -311,21 +413,23 @@ pub struct GameStart {
     /// player order for this hand
     pub player_order: Vec<u8>,
     /// deck commitment from shuffle protocol
+    #[serde(with = "hex32")]
     pub deck_commitment: [u8; 32],
 }
 
 /// player action
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PlayerAction {
     pub hand_number: u64,
     pub seat: u8,
     pub action: ActionType,
     /// monotonically increasing per-seat counter for replay protection
     pub sequence: u64,
+    #[serde(with = "hex64")]
     pub signature: [u8; 64],
 }
 
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum ActionType {
     Fold,
     Check,
@@ -336,19 +440,20 @@ pub enum ActionType {
 }
 
 /// card reveal in mental poker
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CardReveal {
     pub hand_number: u64,
     /// card indices being revealed
     pub cards: Vec<u8>,
     /// decryption keys for each card
+    #[serde(with = "hex32_vec")]
     pub keys: Vec<[u8; 32]>,
     /// proof of correct decryption
     pub proof: Vec<u8>,
 }
 
 /// hand result
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HandResult {
     pub hand_number: u64,
     /// pot awarded to each seat
@@ -363,23 +468,25 @@ pub struct HandResult {
 /// both players attest that this action happened — neither can deny
 /// or fabricate it later. the witness signature makes the transcript
 /// self-authenticating for jury replay.
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CoSignedAction {
     pub action: PlayerAction,
     /// counter-signature from the non-acting player
+    #[serde(with = "hex64")]
     pub witness_sig: [u8; 64],
 }
 
 /// complete transcript of a single hand, co-signed by both players.
 /// this is the evidence structure submitted to narsil for disputes
 /// and to the on-chain high court for appeals.
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct HandTranscript {
     pub hand_number: u64,
     pub button: u8,
     /// starting chip stacks for each seat
     pub starting_stacks: Vec<u64>,
     /// deck commitment from mental poker shuffle (hash of deck + randomness)
+    #[serde(with = "hex32")]
     pub deck_commitment: [u8; 32],
     /// ordered sequence of co-signed actions
     pub actions: Vec<CoSignedAction>,
@@ -391,18 +498,19 @@ pub struct HandTranscript {
 
 /// witness acknowledgement: opponent signs the action they received.
 /// once both action.signature + witness_sig exist, the action is co-signed.
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct WitnessAck {
     pub hand_number: u64,
     pub sequence: u64,
     /// ed25519 signature over (hand_number || sequence || action_hash)
+    #[serde(with = "hex64")]
     pub signature: [u8; 64],
 }
 
 /// timeout claim: asserts the opponent failed to act within the window.
 /// includes the last co-signed state so narsil can verify the game position
 /// and confirm no action was received.
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TimeoutClaim {
     pub hand_number: u64,
     /// sequence number of the last co-signed action
@@ -416,31 +524,37 @@ pub struct TimeoutClaim {
     /// action_timeout from TableRules (seconds)
     pub timeout_secs: u32,
     /// ed25519 signature from the claiming player over this claim
+    #[serde(with = "hex64")]
     pub signature: [u8; 64],
     /// state hash at the point of timeout (engine deterministic)
+    #[serde(with = "hex32")]
     pub state_hash: [u8; 32],
 }
 
 /// signed state update for channel
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StateUpdate {
+    #[serde(with = "hex32")]
     pub channel_id: [u8; 32],
     pub nonce: u64,
+    #[serde(with = "hex32")]
     pub state_hash: [u8; 32],
     /// balances per seat
     pub balances: Vec<u128>,
+    #[serde(with = "hex64_vec")]
     pub signatures: Vec<[u8; 64]>,
 }
 
 /// cooperative close request
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CloseRequest {
+    #[serde(with = "hex32")]
     pub channel_id: [u8; 32],
     pub final_state: StateUpdate,
 }
 
 /// error message
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ErrorMsg {
     pub code: u16,
     pub message: String,
@@ -449,7 +563,7 @@ pub struct ErrorMsg {
 // === Chat Types ===
 
 /// table chat message (visible to all at table)
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ChatMessage {
     /// sender seat (0 = spectator)
     pub seat: u8,
@@ -481,22 +595,25 @@ impl ChatMessage {
 }
 
 /// private message (direct between two players)
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PrivateMessage {
     /// sender pubkey
+    #[serde(with = "hex32")]
     pub from: [u8; 32],
     /// recipient pubkey
+    #[serde(with = "hex32")]
     pub to: [u8; 32],
     /// encrypted content (x25519 + chacha20poly1305)
     pub ciphertext: Vec<u8>,
     /// nonce for decryption
+    #[serde(with = "hex24")]
     pub nonce: [u8; 24],
     /// unix timestamp ms
     pub timestamp: u64,
 }
 
 /// typing indicator
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TypingIndicator {
     pub seat: u8,
     pub is_typing: bool,
@@ -505,7 +622,7 @@ pub struct TypingIndicator {
 // === Voice Types ===
 
 /// opus-encoded voice packet
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VoiceData {
     /// sender seat
     pub seat: u8,
@@ -518,13 +635,13 @@ pub struct VoiceData {
 }
 
 /// voice state change
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct VoiceState {
     pub seat: u8,
     pub state: VoiceStateType,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum VoiceStateType {
     /// player muted themselves
     Muted,
@@ -545,7 +662,7 @@ pub enum VoiceStateType {
 /// face blend shape frame for avatar animation
 /// compact: 52 blend shapes (u8 each, 0-255 mapped to 0.0-1.0) + head pose = ~60 bytes
 /// at 30fps over WebRTC data channel = ~1.8 KB/s per player
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct AvatarFrame {
     /// sender seat
     pub seat: u8,
@@ -676,7 +793,7 @@ pub mod blend_shape {
 // === WebRTC Signaling Types ===
 
 /// WebRTC media capabilities
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Encode, Decode)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum MediaKind {
     /// voice only (opus)
     Voice,
@@ -687,7 +804,7 @@ pub enum MediaKind {
 }
 
 /// request to establish WebRTC media session
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RtcMediaRequest {
     /// requesting seat
     pub seat: u8,
@@ -698,7 +815,7 @@ pub struct RtcMediaRequest {
 }
 
 /// response to media request
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RtcMediaResponse {
     /// responding seat
     pub seat: u8,
@@ -711,7 +828,7 @@ pub struct RtcMediaResponse {
 }
 
 /// SDP session description (offer or answer)
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RtcSessionDescription {
     /// sender seat
     pub seat: u8,
@@ -722,7 +839,7 @@ pub struct RtcSessionDescription {
 }
 
 /// ICE candidate for WebRTC NAT traversal
-#[derive(Clone, Debug, Encode, Decode)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RtcIceCandidate {
     /// sender seat
     pub seat: u8,
@@ -737,14 +854,14 @@ pub struct RtcIceCandidate {
 }
 
 impl Message {
-    /// encode message to bytes
+    /// encode message to bytes (JSON)
     pub fn encode_to_vec(&self) -> Vec<u8> {
-        self.encode()
+        serde_json::to_vec(self).expect("message serialization should not fail")
     }
 
-    /// decode message from bytes
-    pub fn decode_from_slice(data: &[u8]) -> Result<Self, parity_scale_codec::Error> {
-        Self::decode(&mut &data[..])
+    /// decode message from bytes (JSON)
+    pub fn decode_from_slice(data: &[u8]) -> Result<Self, serde_json::Error> {
+        serde_json::from_slice(data)
     }
 }
 
@@ -818,7 +935,7 @@ mod tests {
         let frame = AvatarFrame::from_floats(1, 0, &vec![0.5; blend_shape::COUNT], [0.0; 3], [0.0; 3]);
         let msg = Message::AvatarFrame(frame);
         let encoded = msg.encode_to_vec();
-        // should be compact — well under 200 bytes
-        assert!(encoded.len() < 200, "avatar frame too large: {} bytes", encoded.len());
+        // should be compact — well under 500 bytes (JSON is larger than binary)
+        assert!(encoded.len() < 500, "avatar frame too large: {} bytes", encoded.len());
     }
 }

@@ -664,7 +664,7 @@ fn action_sign_payload(action: &PlayerAction) -> Vec<u8> {
     msg.extend_from_slice(&action.hand_number.to_le_bytes());
     msg.push(action.seat);
     msg.extend_from_slice(&action.sequence.to_le_bytes());
-    msg.extend_from_slice(&parity_scale_codec::Encode::encode(&action.action));
+    msg.extend_from_slice(&serde_json::to_vec(&action.action).unwrap_or_default());
     msg
 }
 

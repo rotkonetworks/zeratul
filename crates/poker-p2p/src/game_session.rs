@@ -359,7 +359,7 @@ fn unix_now() -> u64 {
 fn witness_payload(hand_number: u64, sequence: u64, action: &PlayerAction) -> Vec<u8> {
     let action_hash = {
         let mut h = Sha256::new();
-        h.update(parity_scale_codec::Encode::encode(action));
+        h.update(&serde_json::to_vec(action).unwrap_or_default());
         h.finalize()
     };
     let mut payload = Vec::new();

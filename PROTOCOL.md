@@ -347,7 +347,13 @@ the game client should display:
 
 ## 8. wire format
 
-all structured messages use **SCALE codec** (parity-scale-codec). signatures are raw 64-byte ed25519. public keys are 32-byte compressed. Pallas points are 32-byte compressed. scalars are 32-byte little-endian.
+all structured messages use **JSON**. byte arrays (signatures, public keys, hashes) are hex-encoded strings. this makes the protocol human-readable and inspectable from any browser console.
+
+- signatures: 64-byte ed25519, hex-encoded (128 chars)
+- public keys: 32-byte compressed, hex-encoded (64 chars)
+- Pallas points: 32-byte compressed, hex-encoded (64 chars)
+- scalars: 32-byte little-endian, hex-encoded (64 chars)
+- card data: JSON arrays of rank/suit strings
 
 ## 9. security model
 
