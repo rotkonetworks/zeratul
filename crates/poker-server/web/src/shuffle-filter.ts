@@ -161,12 +161,25 @@ export function createShuffle(
   // ── share exchange ────────────────────────────────────────
 
   function sendShares(positions: number[]) {
+    // C5 FIX: for hole cards (positions 0-3), only send shares for
+    // the OPPONENT's cards. Never send your own hole card shares.
+    // Each player keeps their own shares private.
+    const mySeatPositions = isHost ? [0, 1] : [2, 3]
+
     const shares: Record<number, string> = {}
     for (const pos of positions) {
       const share = shuffleKeys.decrypt_share(shuffleState, pos)
-      if (share) { shares[pos] = share; myShares.set(pos, share) }
+      if (share) {
+        myShares.set(pos, share) // always store locally
+        // only SEND if it's not our own hole card position
+        if (!mySeatPositions.includes(pos)) {
+          shares[pos] = share
+        }
+      }
     }
-    send({ t: 'reveal', d: { shares } })
+    if (Object.keys(shares).length > 0) {
+      send({ t: 'reveal', d: { shares } })
+    }
   }
 
   function onRevealShares(d: any) {
@@ -195,18 +208,27 @@ export function createShuffle(
 
   function tryRevealHoleCards() {
     if (shuffleReady) return
-    const revealed = revealPositions([0, 1, 2, 3])
-    if (!revealed) return
+
+    // C5 FIX: only reveal OUR hole cards, not opponent's
+    // we have both shares for our positions (our own + opponent sent theirs)
+    // we do NOT have both shares for opponent's positions (we only have our own)
+    const myPositions: [number, number] = isHost ? [0, 1] : [2, 3]
+
+    // check if we have both shares for our positions
+    for (const p of myPositions) {
+      if (!myShares.has(p) || !oppShares.has(p)) return
+    }
+
+    const myRevealed = revealPositions(myPositions)
+    if (!myRevealed) return
     shuffleReady = true
 
-    const seat0Cards: [number, number] = [revealed[0]!, revealed[1]!]
-    const seat1Cards: [number, number] = [revealed[2]!, revealed[3]!]
-    const myCards = isHost ? seat0Cards : seat1Cards
-    const oppCards = isHost ? seat1Cards : seat0Cards
+    const myCards: [number, number] = [myRevealed[0]!, myRevealed[1]!]
+    // opponent's cards are UNKNOWN until showdown — as it should be
+    const oppCards: [number, number] = [255, 255] // sentinel: unknown
 
     cb.onLog('shuffle: hole cards revealed (zk)')
     cb.onMsg({ type: 'Status', phase: 'dealing', message: 'deck verified — dealing...' })
-    // show "verified" state for 1.5s so the player actually sees it
     setTimeout(() => cb.onDeal(myCards, oppCards, communityCards), 1500)
   }
 

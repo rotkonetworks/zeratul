@@ -199,9 +199,9 @@ export function createGame(
     actionSeq = 0
     handGeneration++
     transcript.reset()
-    console.log('[deal] pre-deal stacks=', engineApi!.stacks(), 'btn=', engineApi!.button())
+    console.log('[deal] pre-deal stacks=', JSON.stringify(engineApi!.stacks()), 'btn=', engineApi!.button())
     engineApi!.deal(myCards, oppCards, community, isHost)
-    console.log('[deal] post-deal stacks=', engineApi!.stacks(), 'pot=', engineApi!.pot())
+    console.log('[deal] post-deal stacks=', JSON.stringify(engineApi!.stacks()), 'pot=', engineApi!.pot())
 
     const btn = engineApi!.button()
     cb.onMsg({ type: 'HandStarted', hand_number: handNum, button: btn,
@@ -486,7 +486,6 @@ export function createGame(
 
       case 'action': {
         if (!engineApi) break
-        clearOppTimer() // opponent acted — cancel their timeout
         const d = msg.d as any
         // C1: validate opponent action before applying
         const events = engineApi.apply(oppSeat, d.action, d.amount ?? 0)
@@ -495,6 +494,7 @@ export function createGame(
           cb.onLog(`opponent sent invalid: ${d.action}`)
           break
         }
+        clearOppTimer() // M4: only clear after valid action
         // transcript filter: record opponent's signed action
         if (d.sig && d.seq) {
           transcript.record({ seq: d.seq, seat: oppSeat, action: d.action, amount: d.amount ?? 0, sig: d.sig, sessionPub: '', relayTs: msg.relayTs ?? 0 })
@@ -519,25 +519,48 @@ export function createGame(
         cb.onMsg({ type: 'Showdown', hands: [[oppSeat, [cardToJson(d.cards[0]), cardToJson(d.cards[1])]]] })
 
         if (isHost && engineApi) {
+          // CRITICAL: get community from shuffle filter (may be revealed async)
           const sc = shuffle.community()
-          if (sc.some(c => c > 0)) community = sc
-          engineApi.updateCommunity(community)
-          engineApi.updateOppCards(oppCards)
-          const potBefore = engineApi.pot()
-          const stacksBefore = engineApi.stacks()
-          console.log('[showdown] BEFORE: pot=', potBefore, 'stacks=', stacksBefore, 'phase=', engineApi.phase())
-          const winner = engineApi.showdown()
-          const stacks = engineApi.stacks()
-          const pot = potBefore // use pre-showdown pot value
-          lastStacks = [...stacks] as [number, number]
-          console.log('[showdown] AFTER: winner=', winner, 'stacks=', stacks, 'pot awarded=', pot)
-          cb.onMsg({ type: 'PotAwarded', seat: winner, amount: pot })
-          cb.onMsg({ type: 'HandComplete', stacks: [...stacks] })
-          send({ t: 'result', d: { winner, pot, stacks: [...stacks], button: engineApi.button() } })
-          handComplete()
+          if (sc.some(c => c > 0)) community = [...sc]
+          // if community is still zeros, the all-in reveal shares haven't arrived yet
+          // delay showdown until community is populated
+          if (!community.some(c => c > 0)) {
+            console.warn('[showdown] community is zeros — waiting for reveal shares')
+            // retry after a short delay
+            const retryShowdown = () => {
+              const sc2 = shuffle.community()
+              if (sc2.some(c => c > 0)) {
+                community = [...sc2]
+                evaluateShowdown(oppCards)
+              } else {
+                setTimeout(retryShowdown, 100)
+              }
+            }
+            setTimeout(retryShowdown, 100)
+            break
+          }
+          evaluateShowdown(oppCards)
         }
         // button rotated by engine in showdown()/fold
         break
+      }
+
+      // helper: extracted so it can be called after async community reveal
+      function evaluateShowdown(oCards: [number, number]) {
+        if (!engineApi) return
+        console.log('[showdown] community=', JSON.stringify(community))
+        engineApi.updateCommunity(community)
+        engineApi.updateOppCards(oCards)
+        const potBefore = engineApi.pot()
+        console.log('[showdown] BEFORE: pot=', potBefore, 'stacks=', JSON.stringify(engineApi.stacks()), 'phase=', engineApi.phase())
+        const winner = engineApi.showdown()
+        const stacks = engineApi.stacks()
+        lastStacks = [...stacks] as [number, number]
+        console.log('[showdown] AFTER: winner=', winner, 'stacks=', JSON.stringify(stacks), 'pot=', potBefore)
+        cb.onMsg({ type: 'PotAwarded', seat: winner, amount: potBefore })
+        cb.onMsg({ type: 'HandComplete', stacks: [...stacks] })
+        send({ t: 'result', d: { winner, pot: potBefore, stacks: [...stacks], button: engineApi.button() } })
+        handComplete()
       }
 
       case 'timeout_claim': {

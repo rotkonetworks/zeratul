@@ -45,6 +45,7 @@ export function createNegotiation(
 ): NegotiateApi {
   let rules: GameRules = { ...DEFAULT_RULES, ...initialRules }
   let agreed = false
+  let gameStarted = false
 
   function proposeRules(proposed: Partial<GameRules>) {
     rules = { ...DEFAULT_RULES, ...proposed }
@@ -72,11 +73,14 @@ export function createNegotiation(
   function handle(msg: WireMsg): boolean {
     switch (msg.t) {
       case 'propose_rules':
+        if (gameStarted) return true // M8: ignore mid-game rule changes
         rules = msg.d as GameRules
         cb.onRulesProposed(rules, false)
         return true
       case 'accept_rules':
+        if (gameStarted) return true
         agreed = true
+        gameStarted = true
         cb.onRulesAccepted(rules)
         initEngine()
         return true

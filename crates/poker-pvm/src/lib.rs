@@ -343,6 +343,10 @@ impl GameState {
                 self.stacks[seat] -= amount;
                 self.bets[seat] += amount;
                 self.pot += amount;
+                // H6: if stack hits 0 from a bet/raise, mark as all-in
+                if self.stacks[seat] == 0 {
+                    self.seat_state[seat] = SeatState::AllIn;
+                }
             }
 
             Action::AllIn => {
