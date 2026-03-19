@@ -49,9 +49,117 @@ Y == Y_1 + Y_2 + Y_3
 
 where `Y_i = g^(s_i)` are the verification shares broadcast during setup. each `Y_i` is a point on the Pallas curve. no secret material is needed for this check.
 
-## 2. game protocol
+## 2. mental poker shuffle
 
-### 2.1 setup
+### 2.1 the problem
+
+in online poker, someone must deal the cards. if the server deals, the server sees all cards and can cheat. if one player deals, they see the deck and can cheat.
+
+mental poker solves this: both players collaboratively shuffle and encrypt the deck so that **neither player** knows the card order, and cards are only revealed to the intended recipient via partial decryption.
+
+### 2.2 ElGamal encryption on ristretto255
+
+each card is encoded as a point on the ristretto255 curve. encryption uses ElGamal:
+
+```
+encrypt(M, pk) = (r * G, r * pk + M)
+```
+
+where `r` is a random scalar, `G` is the generator, `pk` is the recipient's public key, and `M` is the card point. decryption requires the secret key `sk` where `pk = sk * G`:
+
+```
+decrypt(c0, c1, sk) = c1 - sk * c0 = M
+```
+
+### 2.3 shuffle protocol
+
+both players hold ElGamal key pairs `(sk_A, pk_A)` and `(sk_B, pk_B)`. the joint encryption key is `pk = pk_A + pk_B`. a card encrypted under `pk` requires both `sk_A` and `sk_B` to decrypt.
+
+the shuffle proceeds in two rounds:
+
+**round 1 — player A shuffles:**
+
+1. start with the initial deck `D_0`: 52 card points encrypted under `pk`
+2. player A picks a secret permutation `π_A` and remasking scalars `r_i`
+3. player A computes `D_1[i] = D_0[π_A(i)] + (r_i * G, r_i * pk)` for each card
+4. player A produces a **shuffle proof** `P_A` (see 2.4)
+5. player A sends `(D_1, P_A)` to player B
+
+**round 2 — player B shuffles:**
+
+6. player B verifies `P_A` against `(D_0, D_1, pk)`
+7. player B picks a secret permutation `π_B` and remasking scalars `r_j`
+8. player B computes `D_2[j] = D_1[π_B(j)] + (r_j * G, r_j * pk)` for each card
+9. player B produces a shuffle proof `P_B`
+10. player B sends `(D_2, P_B)` to player A
+
+the final deck `D_2` is encrypted under `pk` and shuffled by both `π_A ∘ π_B`. neither player knows the full permutation.
+
+**deck commitment:** `SHA256(D_2)` is the `deck_commitment` in the `HandTranscript`.
+
+### 2.4 shuffle proof (batch Chaum-Pedersen + grand product)
+
+each shuffle must prove two things:
+
+1. **valid remasking**: each output card is the encryption of some input card with fresh randomness (no card was replaced or fabricated)
+2. **permutation**: the mapping from input to output is a bijection (every card appears exactly once)
+
+**valid remasking** is proven via **batch Chaum-Pedersen**: for each card `i`, the delta `δ_i = output[i] - input[π(i)]` must have the form `(r_i * G, r_i * pk)`. this is a DLOG equality proof between the two components, batched across all 52 cards.
+
+**permutation** is proven via **scalar grand product**: using a random challenge `γ`, the prover shows:
+
+```
+∏_i (x_i + γ) == ∏_i (y_i + γ)
+```
+
+where `x_i` and `y_i` are derived from input and output cards. this holds if and only if `{x_i}` and `{y_i}` are the same multiset (i.e., a permutation).
+
+the proof is **zero-knowledge**: the verifier learns nothing about the permutation or remasking scalars.
+
+### 2.5 card reveal
+
+to deal a card to a specific player, the other player provides a **partial decryption** (their share of the ElGamal decryption):
+
+**dealing to player A:**
+1. player B sends `reveal_B = sk_B * c0` for the target card
+2. player A computes `M = c1 - sk_A * c0 - reveal_B`
+3. the card point `M` is decoded to a card (rank + suit)
+
+**dealing to player B:** symmetric, player A sends their reveal.
+
+**community cards:** both players send reveals, both can decode.
+
+each reveal is accompanied by a **Chaum-Pedersen proof** that `reveal = sk * c0` (proves the player used their actual secret key, not a fabricated value).
+
+```
+CardReveal {
+    hand_number: u64,
+    cards: [u8],           // card indices being revealed
+    keys: [[u8; 32]],      // partial decryption points
+    proof: [u8],            // Chaum-Pedersen proof of correct decryption
+}
+```
+
+### 2.6 shuffle verification summary
+
+| step | what is proven | proof type |
+|------|----------------|------------|
+| shuffle round 1 | A's output is a valid remasking + permutation of input | batch Chaum-Pedersen + grand product |
+| shuffle round 2 | B's output is a valid remasking + permutation of A's output | batch Chaum-Pedersen + grand product |
+| card reveal | reveal is computed with the correct secret key | Chaum-Pedersen |
+| deck integrity | final deck matches commitment in transcript | SHA-256 |
+
+### 2.7 security properties
+
+- **no information leak**: neither player learns the permutation or any card not dealt to them
+- **no card fabrication**: the shuffle proof guarantees every card in the original deck appears exactly once
+- **no selective dealing**: the deck order is fixed after both shuffles; neither player can choose which card comes next
+- **verifiable reveals**: Chaum-Pedersen proofs ensure correct decryption; a player cannot lie about a card's value
+- **no trusted dealer**: the shuffle is collaborative; security requires only one honest shuffler
+
+## 3. game protocol
+
+### 3.1 setup
 
 1. player A creates a room, receives an invite code
 2. player B joins via invite code
@@ -60,13 +168,13 @@ where `Y_i = g^(s_i)` are the verification shares broadcast during setup. each `
 5. both players verify the escrow address
 6. both deposit to the escrow address
 
-### 2.2 hand flow
+### 3.2 hand flow
 
 a hand proceeds through phases: **preflop, flop, turn, river, showdown**.
 
 the game engine is **deterministic**: given the same `(rules, stacks, button, deck, actions)`, both peers produce the same state. there is no server authority.
 
-### 2.3 actions
+### 3.3 actions
 
 every action is a signed message:
 
@@ -82,7 +190,7 @@ PlayerAction {
 
 the signature domain is `"poker.action.v1" || hand_number || seat || sequence || SCALE(action)`.
 
-### 2.4 witness acknowledgement
+### 3.4 witness acknowledgement
 
 after receiving a valid action, the opponent produces a **witness ack**:
 
@@ -98,7 +206,7 @@ the witness signature domain is `"poker.witness.v1" || hand_number || sequence |
 
 once both signatures exist, the action is **co-signed**: neither party can deny it happened, and neither can fabricate it.
 
-### 2.5 transcript
+### 3.5 transcript
 
 a completed hand produces a `HandTranscript`:
 
@@ -116,13 +224,13 @@ HandTranscript {
 
 both players retain the transcript. it is the evidence for disputes.
 
-## 3. timeouts
+## 4. timeouts
 
-### 3.1 the problem
+### 4.1 the problem
 
 in P2P, there is no server clock. if a player stops responding, the opponent needs a way to claim timeout that the jury can verify.
 
-### 3.2 timeout claim
+### 4.2 timeout claim
 
 ```
 TimeoutClaim {
@@ -139,7 +247,7 @@ TimeoutClaim {
 
 signature domain: `"poker.timeout.v1" || hand_number || last_sequence || seat || action_required_at || claimed_at || timeout_secs || state_hash`.
 
-### 3.3 resolution
+### 4.3 resolution
 
 a timeout claim alone is not sufficient (the claimant controls the timestamps). resolution requires the jury as relay:
 
@@ -152,13 +260,13 @@ a timeout claim alone is not sufficient (the claimant controls the timestamps). 
 
 the jury's receipt timestamps are the only clock that matters.
 
-## 4. dispute resolution
+## 5. dispute resolution
 
-### 4.1 cooperative settlement (no dispute)
+### 5.1 cooperative settlement (no dispute)
 
 after the session, both players sign a final `StateUpdate` with agreed balances. this requires only positions 1 + 2 (no jury). the FROST signature unlocks the escrow.
 
-### 4.2 disputed settlement
+### 5.2 disputed settlement
 
 if players disagree:
 
@@ -169,7 +277,7 @@ if players disagree:
 
 the dishonest player's funds go to the honest player per the engine's outcome.
 
-### 4.3 jury signing
+### 5.3 jury signing
 
 the jury produces its FROST signature share via nested signing:
 
@@ -183,9 +291,9 @@ the jury produces its FROST signature share via nested signing:
 
 the jury's secret `s_3` is never reconstructed at any point.
 
-## 5. verification
+## 6. verification
 
-### 5.1 what players can verify
+### 6.1 what players can verify
 
 | claim | how to verify |
 |-------|---------------|
@@ -197,7 +305,7 @@ the jury's secret `s_3` is never reconstructed at any point.
 | jury signature is valid | verify Schnorr signature against group public key `Y` |
 | jury didn't reconstruct key | verify inner signing used threshold protocol (public commitments visible) |
 
-### 5.2 what players must trust
+### 6.2 what players must trust
 
 | assumption | why |
 |------------|-----|
@@ -207,7 +315,7 @@ the jury's secret `s_3` is never reconstructed at any point.
 | `t` validators don't collude | economic: validators are staked, collusion is slashable |
 | deterministic engine has no bugs | engine is open for review, same code runs on both peers |
 
-### 5.3 frontend verification
+### 6.3 frontend verification
 
 the game client should display:
 
@@ -218,11 +326,12 @@ the game client should display:
 - hand transcript hash (for dispute reference)
 - jury group public key and validator count
 
-## 6. cryptographic parameters
+## 7. cryptographic parameters
 
 | parameter | value |
 |-----------|-------|
-| curve | Pallas (y^2 = x^3 + 5 over Fp, p = 2^254 + ...) |
+| escrow curve | Pallas (y^2 = x^3 + 5 over Fp, p = 2^254 + ...) |
+| shuffle curve | ristretto255 (Curve25519 quotient group) |
 | outer FROST | 2-of-3 |
 | inner FROST | t-of-n (configurable per deployment) |
 | action signatures | ed25519 |
@@ -230,14 +339,17 @@ the game client should display:
 | hash (FROST challenge) | SHA-512 with domain separation |
 | hash (inner binding) | SHA-512 with domain `"frostito-inner-bind"` |
 | hash (outer binding) | SHA-512 with domain `"frost-binding-v1"` |
-| deck commitment | SHA-256 over shuffled deck + randomness |
+| shuffle encryption | ElGamal on ristretto255 (joint key: pk_A + pk_B) |
+| shuffle proof | batch Chaum-Pedersen + scalar grand product |
+| card reveal proof | Chaum-Pedersen (DLOG equality) |
+| deck commitment | SHA-256 over final encrypted deck |
 | state hash | SHA-256 over `"poker.state.v1" || hand_number || sequence || stacks || phase || action_on` |
 
-## 7. wire format
+## 8. wire format
 
 all structured messages use **SCALE codec** (parity-scale-codec). signatures are raw 64-byte ed25519. public keys are 32-byte compressed. Pallas points are 32-byte compressed. scalars are 32-byte little-endian.
 
-## 8. security model
+## 9. security model
 
 the protocol is secure under the following threat model:
 
