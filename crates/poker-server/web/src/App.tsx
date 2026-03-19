@@ -25,10 +25,11 @@ export default function App() {
   const [inviteUrl, setInviteUrl] = createSignal('')
   const [juryProgress, setJuryProgress] = createSignal('')
   const [escrow, setEscrow] = createSignal('')
-  const [pendingRules, setPendingRules] = createSignal<{ buyin: number; smallBlind: number; bigBlind: number; fromSelf: boolean } | null>(null)
+  const [pendingRules, setPendingRules] = createSignal<{ buyin: number; smallBlind: number; bigBlind: number; turnTimeout: number; fromSelf: boolean } | null>(null)
   const [oppDisconnected, setOppDisconnected] = createSignal(false)
   const [reconnectCountdown, setReconnectCountdown] = createSignal(0)
   const [actionTimer, setActionTimer] = createSignal(0)
+  const [autoAction, setAutoAction] = createSignal<'none' | 'check/fold' | 'check' | 'fold' | 'call any'>('none')
 
   const opp = () => mySeat() === 0 ? 1 : 0
   const myStack = () => stacks()[mySeat()] ?? 0
@@ -54,7 +55,7 @@ export default function App() {
         setOppName(msg.name)
         break
       case 'RulesProposed':
-        setPendingRules({ buyin: msg.buyin, smallBlind: msg.smallBlind, bigBlind: msg.bigBlind, fromSelf: msg.fromSelf })
+        setPendingRules({ buyin: msg.buyin, smallBlind: msg.smallBlind, bigBlind: msg.bigBlind, turnTimeout: (msg as any).turnTimeout ?? 30, fromSelf: msg.fromSelf })
         if (msg.fromSelf) {
           log(`proposed: ${msg.smallBlind}/${msg.bigBlind} blinds, ${msg.buyin} buyin`)
         } else {
@@ -91,6 +92,9 @@ export default function App() {
         setReconnectCountdown(0)
         log('opponent reconnected', 'c-green')
         break
+      case 'TimerTick':
+        setActionTimer(msg.secondsLeft)
+        break
       case 'ActionTimeout':
         log(`${msg.seat === mySeat() ? 'you' : 'opp'} timed out (auto-fold)`, 'c-red')
         setActionTimer(0)
@@ -120,9 +124,35 @@ export default function App() {
         })
         break
       case 'ActionRequired':
+        if (msg.seat < 0) { setActions([]); setActing(-1); break } // clear stale
         setActing(msg.seat)
-        setActionTimer(30)
         if (msg.seat === mySeat()) {
+          // check auto-action first
+          const aa = autoAction()
+          const hasCheck = msg.valid_actions.some(a => a.kind === 'check')
+          const hasCall = msg.valid_actions.find(a => a.kind === 'call')
+          let autoFired = false
+          if (aa === 'check/fold') {
+            setAutoAction('none')
+            // T3: use setTimeout(0) to let UI update before action
+            setTimeout(() => { if (hasCheck) act('check'); else act('fold') }, 0)
+            autoFired = true
+          } else if (aa === 'check' && hasCheck) {
+            setAutoAction('none')
+            setTimeout(() => act('check'), 0)
+            autoFired = true
+          } else if (aa === 'fold') {
+            setAutoAction('none')
+            setTimeout(() => act('fold'), 0)
+            autoFired = true
+          } else if (aa === 'call any' && hasCall) {
+            setAutoAction('none')
+            setTimeout(() => act('call', hasCall.min_amount), 0)
+            autoFired = true
+          }
+          if (autoFired) break
+          // no auto-action matched — show buttons
+          if (aa !== 'none') setAutoAction('none')
           setActions(msg.valid_actions)
           const r = msg.valid_actions.find(a => a.kind === 'raise' || a.kind === 'bet')
           if (r) setRaiseVal(r.min_amount)
@@ -203,10 +233,12 @@ export default function App() {
     const sbEl = document.getElementById('sb-input') as HTMLInputElement | null
     const bbEl = document.getElementById('bb-input') as HTMLInputElement | null
     const buyinEl = document.getElementById('buyin-input') as HTMLInputElement | null
+    const timeoutEl = document.getElementById('timeout-input') as HTMLInputElement | null
     const customRules = sbEl ? {
       smallBlind: parseInt(sbEl.value) || 5,
       bigBlind: parseInt(bbEl?.value ?? '10') || 10,
       buyin: parseInt(buyinEl?.value ?? '1000') || 1000,
+      turnTimeout: parseInt(timeoutEl?.value ?? '30') || 30,
     } : undefined
     connect(n, customRules)
   }
@@ -218,14 +250,7 @@ export default function App() {
     setActions([])
   }
 
-  // action timer countdown
-  createEffect(() => {
-    if (acting() < 0) { setActionTimer(0); return }
-    const iv = setInterval(() => {
-      setActionTimer(t => t > 0 ? t - 1 : 0)
-    }, 1000)
-    onCleanup(() => clearInterval(iv))
-  })
+  // action timer countdown — driven by game.ts authoritative timer (T1 fix)
 
   // auto-scroll log
   let logEl!: HTMLDivElement
@@ -241,7 +266,7 @@ export default function App() {
           {/* titlebar */}
           <div class="titlebar">
             <span class="text-zec-yellow text-14px">{'\u2666'}</span>
-            <span class="flex-1 text-center text-zec-yellow">zk.poker</span>
+            <span class="flex-1 text-center text-zec-yellow">poker.zk.bot</span>
             <Show when={encrypted()}>
               <span class="text-8px text-green-400 mr-1">enc</span>
             </Show>
@@ -260,33 +285,29 @@ export default function App() {
               <div class="text-zec-yellow text-10px font-semibold uppercase tracking-3px mb-5">
                 heads-up no-limit hold'em
               </div>
-              <Show when={!location.pathname.match(/^\/[a-z]/)}>
-                {/* host: editable rules */}
-                <div class="flex items-center justify-center gap-3 text-11px text-neutral-400 mb-3">
-                  <label class="flex items-center gap-1">
-                    <span class="text-neutral-600">sb</span>
-                    <input class="input-field w-14 text-center text-10px" value="5"
-                      onInput={e => (e.target as HTMLInputElement).dataset.sb = (e.target as HTMLInputElement).value}
-                      id="sb-input" />
-                  </label>
-                  <label class="flex items-center gap-1">
-                    <span class="text-neutral-600">bb</span>
-                    <input class="input-field w-14 text-center text-10px" value="10"
-                      onInput={e => (e.target as HTMLInputElement).dataset.bb = (e.target as HTMLInputElement).value}
-                      id="bb-input" />
-                  </label>
-                  <label class="flex items-center gap-1">
-                    <span class="text-neutral-600">buyin</span>
-                    <input class="input-field w-20 text-center text-10px" value="1000"
-                      onInput={e => (e.target as HTMLInputElement).dataset.buyin = (e.target as HTMLInputElement).value}
-                      id="buyin-input" />
-                  </label>
+              {/* game parameters — only for host (creating table) */}
+              <Show when={location.pathname.length <= 1} fallback={
+                <div class="text-neutral-500 text-11px tracking-wider mb-4">
+                  joining table &middot; host sets rules
                 </div>
-              </Show>
-              <Show when={location.pathname.match(/^\/[a-z]/)}>
-                {/* guest: will see host's rules after joining */}
-                <div class="text-neutral-500 text-11px tracking-wider mb-3">
-                  joining table...
+              }>
+                <div class="flex items-center justify-center gap-4 mb-3">
+                  <label class="flex flex-col items-center gap-1">
+                    <span class="text-neutral-500 text-9px uppercase tracking-wider">small blind</span>
+                    <input class="input-field w-16 text-center" value="5" id="sb-input" />
+                  </label>
+                  <label class="flex flex-col items-center gap-1">
+                    <span class="text-neutral-500 text-9px uppercase tracking-wider">big blind</span>
+                    <input class="input-field w-16 text-center" value="10" id="bb-input" />
+                  </label>
+                  <label class="flex flex-col items-center gap-1">
+                    <span class="text-neutral-500 text-9px uppercase tracking-wider">buy-in</span>
+                    <input class="input-field w-20 text-center" value="1000" id="buyin-input" />
+                  </label>
+                  <label class="flex flex-col items-center gap-1">
+                    <span class="text-neutral-500 text-9px uppercase tracking-wider">turn (sec)</span>
+                    <input class="input-field w-16 text-center" value="30" id="timeout-input" />
+                  </label>
                 </div>
               </Show>
               <div class="text-neutral-600 text-9px tracking-wider mb-6">
@@ -482,6 +503,18 @@ export default function App() {
                     }}
                   </For>
                 </Show>
+              </div>
+
+              {/* auto-action presets */}
+              <div class="flex gap-1 justify-center py-1 flex-wrap">
+                {(['check/fold', 'check', 'fold', 'call any'] as const).map(mode =>
+                  <button
+                    class={`text-8px px-2 py-0.5 rounded border ${autoAction() === mode ? 'border-zec-yellow text-zec-yellow bg-zec-yellow/10' : 'border-neutral-700 text-neutral-600 hover:text-neutral-400'}`}
+                    onClick={() => setAutoAction(autoAction() === mode ? 'none' : mode)}
+                  >
+                    {mode}
+                  </button>
+                )}
               </div>
 
               {/* log */}

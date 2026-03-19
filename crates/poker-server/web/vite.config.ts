@@ -11,7 +11,7 @@ export default defineConfig({
     outDir: '../static',
     emptyOutDir: true,
     rollupOptions: {
-      external: ['/assets/poker_pvm.js'],
+      external: ['/assets/poker_pvm.js', '/assets/poker_shuffle_wasm.js'],
     },
   },
 })

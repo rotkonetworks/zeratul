@@ -4,11 +4,16 @@
  * the game engine emits ServerMsg locally. the transport sends actions
  * to the peer and receives their actions. the relay is just a pipe.
  *
+ * encryption: ephemeral x25519 DH key exchange on connect.
+ * all game messages encrypted with AES-256-GCM (Web Crypto).
+ * the relay sees opaque base64 blobs. anon or zafu — always encrypted.
+ *
  * swappable: WebSocket relay, WebRTC, iroh, nym.
  */
 
 import { createSignal } from 'solid-js'
-import type { ServerMsg } from './types'
+import type { SessionIdentity } from './identity'
+import { signKeyExchange } from './identity'
 
 /** what we send over the wire (opaque to relay) */
 export interface WireMessage {
@@ -16,6 +21,8 @@ export interface WireMessage {
   t: string
   /** JSON payload */
   d: unknown
+  /** relay-assigned timestamp (ms since epoch). neutral clock for disputes. */
+  relayTs?: number
 }
 
 /** transport provider interface */
@@ -24,67 +31,180 @@ export interface TransportProvider {
   send(msg: WireMessage): void
   disconnect(): void
   readonly connected: () => boolean
+  readonly encrypted: () => boolean
 }
 
 /** callback for incoming peer messages */
 export type OnPeerMessage = (msg: WireMessage) => void
 
 /** callback for room events */
-export type OnRoomEvent = (event: 'joined' | 'opponent_joined' | 'opponent_left' | 'error', data?: string) => void
+export type OnRoomEvent = (event: 'joined' | 'opponent_joined' | 'opponent_left' | 'opponent_disconnected' | 'opponent_reconnected' | 'error' | 'encrypted', data?: string) => void
 
-/** WebSocket relay transport (relay.zk.bot) */
+// ============================================================================
+// Ephemeral encryption (x25519 ECDH → AES-256-GCM)
+// ============================================================================
+
+interface SessionCrypto {
+  myPublicKey: string   // base64
+  sharedKey: CryptoKey | null
+  ready: boolean
+}
+
+async function generateEphemeralKey(): Promise<{ publicKeyB64: string; keyPair: CryptoKeyPair }> {
+  const keyPair = await crypto.subtle.generateKey({ name: 'X25519' }, false, ['deriveBits'])
+  const pubRaw = await crypto.subtle.exportKey('raw', keyPair.publicKey)
+  return { publicKeyB64: toB64(new Uint8Array(pubRaw)), keyPair }
+}
+
+async function deriveSharedKey(myPrivate: CryptoKey, theirPublicB64: string): Promise<CryptoKey> {
+  const theirRaw = fromB64(theirPublicB64)
+  const theirKey = await crypto.subtle.importKey('raw', theirRaw, { name: 'X25519' }, false, [])
+  const bits = await crypto.subtle.deriveBits({ name: 'X25519', public: theirKey }, myPrivate, 256)
+  // HKDF to derive AES key from the raw DH output
+  const hkdfKey = await crypto.subtle.importKey('raw', bits, 'HKDF', false, ['deriveKey'])
+  return crypto.subtle.deriveKey(
+    { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('poker-session') },
+    hkdfKey,
+    { name: 'AES-GCM', length: 256 },
+    false,
+    ['encrypt', 'decrypt'],
+  )
+}
+
+async function encryptPayload(key: CryptoKey, plaintext: string): Promise<string> {
+  const iv = crypto.getRandomValues(new Uint8Array(12))
+  const ct = new Uint8Array(await crypto.subtle.encrypt(
+    { name: 'AES-GCM', iv },
+    key,
+    new TextEncoder().encode(plaintext),
+  ))
+  // pack as iv:ct (both base64)
+  return toB64(iv) + '.' + toB64(ct)
+}
+
+async function decryptPayload(key: CryptoKey, encrypted: string): Promise<string> {
+  const dot = encrypted.indexOf('.')
+  if (dot < 0) throw new Error('bad envelope')
+  const iv = fromB64(encrypted.slice(0, dot))
+  const ct = fromB64(encrypted.slice(dot + 1))
+  const plain = await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, key, ct)
+  return new TextDecoder().decode(plain)
+}
+
+function toB64(bytes: Uint8Array): string {
+  return btoa(String.fromCharCode(...bytes))
+}
+function fromB64(s: string): Uint8Array {
+  return Uint8Array.from(atob(s), c => c.charCodeAt(0))
+}
+
+// ============================================================================
+// WebSocket relay transport (relay.zk.bot)
+// ============================================================================
+
+/** configurable reconnection settings */
+export interface ReconnectConfig {
+  /** how long to wait for opponent reconnection (seconds) */
+  opponentTimeout: number
+  /** how quickly to retry our own reconnection (ms) */
+  retryDelay: number
+  /** max reconnect attempts before giving up */
+  maxRetries: number
+}
+
+const DEFAULT_RECONNECT: ReconnectConfig = {
+  opponentTimeout: 60,
+  retryDelay: 2000,
+  maxRetries: 10,
+}
+
 export function createRelayTransport(
   onPeer: OnPeerMessage,
   onRoom: OnRoomEvent,
+  sessionIdentity?: SessionIdentity,
+  reconnectConfig?: Partial<ReconnectConfig>,
 ): TransportProvider {
+  const config = { ...DEFAULT_RECONNECT, ...reconnectConfig }
   const [connected, setConnected] = createSignal(false)
+  const [encrypted, setEncrypted] = createSignal(false)
   let ws: WebSocket | null = null
   let currentRoom: string | null = null
   let currentNick = 'anon'
   let isCreator = false
   let hasJoined = false
+  let reconnectAttempts = 0
+  let intentionalClose = false
+  let opponentSeen = false
+
+  // session encryption state
+  let ephemeral: { publicKeyB64: string; keyPair: CryptoKeyPair } | null = null
+  let sessionKey: CryptoKey | null = null
+  let pendingMessages: WireMessage[] = []
 
   function connect(room: string, nick: string) {
     currentNick = nick
-
-    // if room is empty, we're creating; otherwise joining
     isCreator = !room
-    const relayUrl = 'wss://relay.zk.bot/ws'
+    intentionalClose = false
+    reconnectAttempts = 0
+    doConnect(room)
+  }
 
+  function doConnect(room: string) {
+    const relayUrl = 'wss://relay.zk.bot/ws'
     ws = new WebSocket(relayUrl)
 
-    ws.onopen = () => {
+    ws.onopen = async () => {
       setConnected(true)
-      if (isCreator) {
-        // create room
-        ws!.send(JSON.stringify({ t: 'create', nick }))
+      reconnectAttempts = 0
+      console.log('[relay] connected', currentRoom ? '(reconnect)' : '(new)')
+
+      try {
+        ephemeral = await generateEphemeralKey()
+        console.log('[crypto] ephemeral key generated')
+      } catch (e) {
+        console.warn('[crypto] X25519 not available:', e)
+      }
+
+      if (isCreator && !currentRoom) {
+        ws!.send(JSON.stringify({ t: 'create', nick: currentNick }))
       } else {
-        // join existing room
-        currentRoom = room
-        ws!.send(JSON.stringify({ t: 'join', room, nick }))
+        const r = currentRoom || room
+        hasJoined = false // reset for reconnect
+        ws!.send(JSON.stringify({ t: 'join', room: r, nick: currentNick }))
       }
     }
 
     ws.onmessage = (ev) => {
       try {
-        const msg = JSON.parse(ev.data)
-        handleRelayMsg(msg)
+        handleRelayMsg(JSON.parse(ev.data))
       } catch {}
     }
 
     ws.onclose = () => {
       setConnected(false)
-      // reconnect after 3s
-      setTimeout(() => { if (currentRoom) connect(currentRoom, currentNick) }, 3000)
+      if (intentionalClose) return
+
+      // auto-reconnect if we have a room
+      if (currentRoom && reconnectAttempts < config.maxRetries) {
+        reconnectAttempts++
+        const delay = config.retryDelay * Math.min(reconnectAttempts, 3)
+        console.log(`[relay] disconnected, reconnecting in ${delay}ms (attempt ${reconnectAttempts})`)
+        // preserve session key — peer might still have it
+        setTimeout(() => doConnect(currentRoom!), delay)
+      } else {
+        console.log('[relay] disconnected, giving up')
+        sessionKey = null
+        ephemeral = null
+        setEncrypted(false)
+      }
     }
   }
 
   function handleRelayMsg(msg: Record<string, unknown>) {
-    console.log('[relay]', msg['t'], msg)
+    console.log('[relay]', msg['t'], msg['t'] === 'msg' ? '' : msg)
     switch (msg['t']) {
       case 'created':
         currentRoom = msg['room'] as string
-        // auto-join the room we created
         ws?.send(JSON.stringify({ t: 'join', room: currentRoom, nick: currentNick }))
         break
 
@@ -92,45 +212,73 @@ export function createRelayTransport(
         currentRoom = msg['room'] as string
         const count = msg['count'] as number
         if (!hasJoined) {
-          // this is US joining
           hasJoined = true
           onRoom('joined', currentRoom)
-          if (count >= 2) {
-            // opponent was already here
-            onRoom('opponent_joined')
+          // send our ephemeral public key + session identity signature
+          if (ephemeral) {
+            if (sessionIdentity) {
+              signKeyExchange(sessionIdentity, ephemeral.publicKeyB64).then(sig => {
+                sendRaw({ t: '_keyex', d: {
+                  pk: ephemeral!.publicKeyB64,
+                  sessionPub: sessionIdentity!.sessionPubKey,
+                  sig,
+                  mode: sessionIdentity!.mode,
+                  zafuPub: sessionIdentity!.zafuPubKey,
+                  delegation: sessionIdentity!.delegation,
+                }})
+              })
+            } else {
+              sendRaw({ t: '_keyex', d: { pk: ephemeral.publicKeyB64 } })
+            }
           }
+          if (count >= 2) onRoom('opponent_joined')
         } else {
-          // we already joined — this is a replay of someone else joining
-          if (count >= 2) {
-            onRoom('opponent_joined')
-          }
+          if (count >= 2) onRoom('opponent_joined')
         }
         break
       }
 
       case 'msg': {
-        // ignore replayed messages from before we joined
         if (!hasJoined) break
         const text = msg['text'] as string
         const nick = msg['nick'] as string
-        // ignore own messages (relay echoes everything)
+        const relayTs = msg['ts'] as number | undefined
         if (nick === currentNick) break
-        console.log('[relay] peer:', nick, text.slice(0, 60))
-        try {
-          const wireMsg: WireMessage = JSON.parse(text)
-          onPeer(wireMsg)
-        } catch { /* not structured */ }
+        handlePeerText(text, relayTs)
         break
       }
 
-      case 'system':
+      case 'system': {
         const text = msg['text'] as string
         if (text.includes('joined')) {
-          onRoom('opponent_joined')
+          if (opponentSeen) {
+            onRoom('opponent_reconnected')
+          } else {
+            opponentSeen = true
+            onRoom('opponent_joined')
+          }
+          // re-send key exchange in case they missed it
+          if (ephemeral && sessionIdentity) {
+            signKeyExchange(sessionIdentity, ephemeral.publicKeyB64).then(sig => {
+              sendRaw({ t: '_keyex', d: {
+                pk: ephemeral!.publicKeyB64,
+                sessionPub: sessionIdentity!.sessionPubKey,
+                sig,
+                mode: sessionIdentity!.mode,
+                zafuPub: sessionIdentity!.zafuPubKey,
+                delegation: sessionIdentity!.delegation,
+              }})
+            })
+          } else if (ephemeral) {
+            sendRaw({ t: '_keyex', d: { pk: ephemeral.publicKeyB64 } })
+          }
         } else if (text.includes('left') || text.includes('closed')) {
-          onRoom('opponent_left')
+          // opponent disconnected — give them time to reconnect
+          onRoom('opponent_disconnected', String(config.opponentTimeout))
+          // don't wipe session key yet — they might reconnect
         }
         break
+      }
 
       case 'error':
         onRoom('error', msg['msg'] as string)
@@ -138,27 +286,136 @@ export function createRelayTransport(
     }
   }
 
+  async function handlePeerText(text: string, relayTs?: number) {
+    // try to parse as wire message
+    let wireMsg: WireMessage
+    try {
+      wireMsg = JSON.parse(text)
+    } catch {
+      return
+    }
+    wireMsg.relayTs = relayTs
+
+    // key exchange message (unencrypted, special)
+    if (wireMsg.t === '_keyex') {
+      const d = wireMsg.d as any
+      const theirPk = d.pk as string
+
+      // verify the x25519 pubkey is signed by the sender's session key
+      // prevents MITM by the relay (Eriksen §3: auth filter)
+      if (d.sig && d.sessionPub && sessionIdentity) {
+        try {
+          const msg = `keyex:${theirPk}`
+          const valid = await sessionIdentity.verify(
+            new TextEncoder().encode(msg), d.sig, d.sessionPub,
+          )
+          if (!valid) {
+            console.warn('[crypto] keyex signature INVALID — possible MITM')
+            return // reject unsigned key exchange
+          }
+          console.log('[crypto] keyex signature verified:', d.mode, d.sessionPub?.slice(0, 12))
+        } catch (e) {
+          console.warn('[crypto] keyex sig verification error:', e)
+          // proceed anyway if verification not available (e.g. no Web Crypto Ed25519)
+        }
+      }
+
+      if (ephemeral) {
+        try {
+          const newKey = await deriveSharedKey(ephemeral.keyPair.privateKey, theirPk)
+          if (sessionKey) {
+            console.log('[crypto] re-keyed (opponent reconnected)')
+          } else {
+            console.log('[crypto] session key derived (AES-256-GCM)')
+          }
+          const wasRekey = !!sessionKey
+          sessionKey = newKey
+          setEncrypted(true)
+          onRoom('encrypted')
+          // M1: only flush pending on initial key exchange, not re-key
+          // stale messages from before reconnect could corrupt peer state
+          if (!wasRekey) {
+            for (const m of pendingMessages) send(m)
+          } else {
+            if (pendingMessages.length > 0) {
+              console.log('[crypto] dropped', pendingMessages.length, 'stale pending messages after re-key')
+            }
+          }
+          pendingMessages = []
+        } catch (e) {
+          console.warn('[crypto] DH failed:', e)
+        }
+      }
+      return
+    }
+
+    // encrypted message
+    if (wireMsg.t === '_enc') {
+      if (!sessionKey) {
+        console.warn('[crypto] encrypted msg but no session key')
+        return
+      }
+      try {
+        const plaintext = await decryptPayload(sessionKey, (wireMsg.d as any).p)
+        const inner: WireMessage = JSON.parse(plaintext)
+        inner.relayTs = relayTs // propagate relay timestamp through encryption
+        console.log('[relay] peer (dec):', inner.t)
+        onPeer(inner)
+      } catch (e) {
+        console.warn('[crypto] decrypt failed:', e)
+      }
+      return
+    }
+
+    // plaintext message (pre-encryption or fallback)
+    console.log('[relay] peer:', wireMsg.t)
+    onPeer(wireMsg)
+  }
+
+  /** send raw (unencrypted) through relay */
+  function sendRaw(msg: WireMessage) {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !currentRoom) return
+    ws.send(JSON.stringify({ t: 'msg', text: JSON.stringify(msg) }))
+  }
+
+  /** send game message — encrypted if session key available */
   function send(msg: WireMessage) {
     if (!ws || ws.readyState !== WebSocket.OPEN || !currentRoom) return
-    // pack as relay message: nick\0json inside the relay payload
-    const payload = JSON.stringify(msg)
-    ws.send(JSON.stringify({ t: 'msg', text: payload }))
+
+    if (sessionKey) {
+      // encrypt
+      const plaintext = JSON.stringify(msg)
+      encryptPayload(sessionKey, plaintext).then(encrypted => {
+        sendRaw({ t: '_enc', d: { p: encrypted } })
+      }).catch(e => {
+        // C2: NEVER fall back to plaintext — drop the message
+        console.error('[crypto] encrypt failed, message DROPPED:', e)
+      })
+    } else if (ephemeral) {
+      // key exchange in progress, queue
+      pendingMessages.push(msg)
+    } else {
+      // no crypto available, plaintext
+      sendRaw(msg)
+    }
   }
 
   function disconnect() {
+    intentionalClose = true
     ws?.send(JSON.stringify({ t: 'part' }))
     ws?.close()
     ws = null
     currentRoom = null
+    sessionKey = null
+    setEncrypted(false)
   }
 
-  return { connect, send, disconnect, connected }
+  return { connect, send, disconnect, connected, encrypted }
 }
 
 /** get room code from URL path (empty = create new) */
 export function getRoomFromUrl(): string {
   const path = location.pathname.replace(/^\/+|\/+$/g, '')
-  // 'new' means create, not join
   if (!path || path === 'new') return ''
   return path
 }
