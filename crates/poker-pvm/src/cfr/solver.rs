@@ -150,14 +150,23 @@ impl Solver {
 
         let hand_bucket = match state.phase {
             Phase::Preflop => preflop_bucket(hole[0], hole[1]),
+            #[cfg(feature = "gpu")]
+            Phase::Flop => hand_strength_bucket_gpu(hole, &community[..3], FLOP_BUCKETS),
+            #[cfg(feature = "gpu")]
+            Phase::Turn => hand_strength_bucket_gpu(hole, &community[..4], TURN_BUCKETS),
+            #[cfg(feature = "gpu")]
+            Phase::River => hand_strength_bucket_gpu(hole, &community[..5], RIVER_BUCKETS),
+            #[cfg(not(feature = "gpu"))]
             Phase::Flop => {
                 let board = &community[..3];
                 hand_strength_bucket(hole, board, FLOP_BUCKETS, 200, &mut || self.rng())
             }
+            #[cfg(not(feature = "gpu"))]
             Phase::Turn => {
                 let board = &community[..4];
                 hand_strength_bucket(hole, board, TURN_BUCKETS, 200, &mut || self.rng())
             }
+            #[cfg(not(feature = "gpu"))]
             Phase::River => {
                 let board = &community[..5];
                 hand_strength_bucket(hole, board, RIVER_BUCKETS, 300, &mut || self.rng())

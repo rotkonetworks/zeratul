@@ -13,6 +13,11 @@ crate-type = ["cdylib", "rlib"]
 name = "poker-guest"
 path = "src/guest.rs"
 
+[[bin]]
+name = "cfr-train"
+path = "src/cfr/train.rs"
+required-features = ["std"]
+
 [features]
 default = ["std"]
 std = []
@@ -20,6 +25,8 @@ std = []
 pvm = []
 # for WASM browser (std, wasm-bindgen)
 wasm = ["std", "dep:wasm-bindgen", "dep:serde", "dep:serde-wasm-bindgen"]
+# GPU-accelerated hand evaluation via ROCm HIP
+gpu = ["std"]
 
 [dependencies]
 # optional: WASM bindings

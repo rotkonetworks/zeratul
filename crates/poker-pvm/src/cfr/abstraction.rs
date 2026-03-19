@@ -8,13 +8,30 @@
 //! The key insight from Pluribus: you don't need fine-grained abstraction
 //! everywhere. Coarse buckets + depth-limited search at play time.
 
-use crate::{GameState, Rules, Phase, Action, SignedAction, MAX_SEATS};
+use crate::Action;
 
 /// number of hand strength buckets per street
 pub const PREFLOP_BUCKETS: usize = 169;  // canonical hole card combos
 pub const FLOP_BUCKETS: usize = 10;      // hand strength deciles
 pub const TURN_BUCKETS: usize = 10;
 pub const RIVER_BUCKETS: usize = 10;
+
+// GPU FFI for hand equity (ROCm HIP)
+#[cfg(feature = "gpu")]
+extern "C" {
+    fn gpu_hand_equity(hole0: u8, hole1: u8, board: *const u8, num_board: i32, num_rollouts: i32) -> i32;
+}
+
+/// compute hand strength bucket using GPU (10K rollouts in ~2ms)
+#[cfg(feature = "gpu")]
+pub fn hand_strength_bucket_gpu(hole: [u8; 2], board: &[u8], num_buckets: usize) -> u16 {
+    let equity = unsafe {
+        gpu_hand_equity(hole[0], hole[1], board.as_ptr(), board.len() as i32, 10000)
+    };
+    // equity is 0-10000 (basis points). map to bucket.
+    let bucket = (equity as f64 / 10000.0 * num_buckets as f64).min(num_buckets as f64 - 1.0) as u16;
+    bucket
+}
 
 /// number of action abstraction buckets
 pub const ACTION_BUCKETS: usize = 4; // fold, check/call, bet_small, bet_big/allin
