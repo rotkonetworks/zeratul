@@ -17,6 +17,7 @@
 //! - **Spectator**: watches game, receives delayed card reveals
 
 pub mod engine;
+pub mod game_session;
 pub mod rendezvous;
 pub mod protocol;
 pub mod table;

@@ -187,6 +187,12 @@ pub enum Message {
     /// request cooperative close
     CloseRequest(CloseRequest),
 
+    // === Co-signing ===
+    /// witness acknowledgement: opponent signs the action they just saw
+    WitnessAck(WitnessAck),
+    /// timeout claim: peer asserts opponent failed to act in time
+    TimeoutClaim(TimeoutClaim),
+
     // === Utility ===
     /// ping for keepalive
     Ping(u64),
@@ -381,6 +387,38 @@ pub struct HandTranscript {
     pub reveals: Vec<CardReveal>,
     /// final result agreed upon (or disputed)
     pub result: Option<HandResult>,
+}
+
+/// witness acknowledgement: opponent signs the action they received.
+/// once both action.signature + witness_sig exist, the action is co-signed.
+#[derive(Clone, Debug, Encode, Decode)]
+pub struct WitnessAck {
+    pub hand_number: u64,
+    pub sequence: u64,
+    /// ed25519 signature over (hand_number || sequence || action_hash)
+    pub signature: [u8; 64],
+}
+
+/// timeout claim: asserts the opponent failed to act within the window.
+/// includes the last co-signed state so narsil can verify the game position
+/// and confirm no action was received.
+#[derive(Clone, Debug, Encode, Decode)]
+pub struct TimeoutClaim {
+    pub hand_number: u64,
+    /// sequence number of the last co-signed action
+    pub last_sequence: u64,
+    /// seat that was supposed to act
+    pub timed_out_seat: u8,
+    /// unix timestamp (seconds) when ActionRequired was observed
+    pub action_required_at: u64,
+    /// unix timestamp (seconds) when timeout was declared
+    pub claimed_at: u64,
+    /// action_timeout from TableRules (seconds)
+    pub timeout_secs: u32,
+    /// ed25519 signature from the claiming player over this claim
+    pub signature: [u8; 64],
+    /// state hash at the point of timeout (engine deterministic)
+    pub state_hash: [u8; 32],
 }
 
 /// signed state update for channel
