@@ -44,9 +44,15 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
 
     transport = createRelayTransport(
       (msg: WireMessage) => {
-        // media signaling filter: intercept _sdp/_ice before game
+        // media signaling filter
         if (msg.t === '_sdp' || msg.t === '_ice') {
           media?.handleSignal(msg)
+          return
+        }
+        // chat filter
+        if (msg.t === 'chat') {
+          const text = (msg.d as any)?.text
+          if (text) onMsg({ type: 'Chat', from: 'opp', text })
           return
         }
         game?.onPeerMessage(msg)
@@ -132,6 +138,8 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
       game?.proposeRules(data as any)
     } else if (data['type'] === 'AcceptRules') {
       game?.acceptRules()
+    } else if (data['type'] === 'Chat') {
+      transport?.send({ t: 'chat', d: { text: data['text'] } })
     }
   }
 

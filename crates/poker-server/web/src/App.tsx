@@ -226,6 +226,9 @@ export default function App() {
         if (msg.message.includes('verified')) setDeckVerified(true)
         if (msg.phase === 'dealing') setDeckVerified(false) // reset for new hand
         break
+      case 'Chat':
+        log(`${msg.from}: ${msg.text}`, 'text-cyan-400')
+        break
       case 'Error':
         log(`err: ${msg.message}`)
         break
@@ -267,8 +270,8 @@ export default function App() {
   })
 
   return (
-    <div class="min-h-screen flex items-center justify-center p-4 bg-zec-dark font-sans text-white">
-      <div class="w-full max-w-160">
+    <div class="min-h-screen min-h-[100dvh] flex items-center justify-center p-1 sm:p-4 bg-zec-dark font-sans text-white">
+      <div class="w-full max-w-160 sm:max-w-160">
         <div class="panel">
           {/* titlebar */}
           <div class="titlebar">
@@ -398,7 +401,7 @@ export default function App() {
               </div>
 
               {/* felt */}
-              <div class="bg-zec-felt border-2 border-zec-feltb rounded-25 px-5 py-6 relative" style="min-height: 260px; box-shadow: inset 0 2px 20px rgba(0,0,0,0.4)">
+              <div class="bg-zec-felt border-2 border-zec-feltb rounded-15 sm:rounded-25 px-2 sm:px-5 py-4 sm:py-6 relative" style="min-height: 220px; box-shadow: inset 0 2px 20px rgba(0,0,0,0.4)">
 
                 {/* disconnect overlay */}
                 <Show when={oppDisconnected()}>
@@ -511,7 +514,7 @@ export default function App() {
               </div>
 
               {/* actions */}
-              <div class="flex gap-1.5 justify-center items-center py-3 min-h-12 flex-wrap">
+              <div class="flex gap-1 sm:gap-1.5 justify-center items-center py-2 sm:py-3 min-h-11 flex-wrap">
                 <Show when={isMyTurn() && actions().length > 0} fallback={
                   <Show when={acting() >= 0 && !isMyTurn()}>
                     <span class="text-neutral-600 text-10px uppercase tracking-wider">opponent to act</span>
@@ -520,29 +523,29 @@ export default function App() {
                   <For each={actions()}>
                     {a => {
                       if (a.kind === 'fold')
-                        return <button class="btn btn-danger" onClick={() => act('fold')}>fold</button>
+                        return <button class="btn btn-danger min-h-9 sm:min-h-auto px-3 sm:px-2" onClick={() => act('fold')}>fold</button>
                       if (a.kind === 'check')
-                        return <button class="btn" onClick={() => act('check')}>check</button>
+                        return <button class="btn min-h-9 sm:min-h-auto px-3 sm:px-2" onClick={() => act('check')}>check</button>
                       if (a.kind === 'call')
-                        return <button class="btn btn-primary" onClick={() => act('call')}>call {a.min_amount}</button>
+                        return <button class="btn btn-primary min-h-9 sm:min-h-auto px-3 sm:px-2" onClick={() => act('call')}>call {a.min_amount}</button>
                       if (a.kind === 'bet')
-                        return <>
-                          <input class="input-field w-20 text-center" type="number"
+                        return <div class="flex items-center gap-1">
+                          <input class="input-field w-16 sm:w-20 text-center text-11px" type="number"
                             min={a.min_amount} max={a.max_amount}
                             value={raiseVal()} onInput={e => setRaiseVal(+e.currentTarget.value)} />
-                          <button class="btn" onClick={() => act('bet', raiseVal())}>bet</button>
-                        </>
+                          <button class="btn min-h-9 sm:min-h-auto px-3 sm:px-2" onClick={() => act('bet', raiseVal())}>bet</button>
+                        </div>
                       if (a.kind === 'raise')
-                        return <>
+                        return <div class="flex items-center gap-1">
                           <Show when={!actions().some(x => x.kind === 'bet')}>
-                            <input class="input-field w-20 text-center" type="number"
+                            <input class="input-field w-16 sm:w-20 text-center text-11px" type="number"
                               min={a.min_amount} max={a.max_amount}
                               value={raiseVal()} onInput={e => setRaiseVal(+e.currentTarget.value)} />
                           </Show>
-                          <button class="btn" onClick={() => act('raise', raiseVal())}>raise</button>
-                        </>
+                          <button class="btn min-h-9 sm:min-h-auto px-3 sm:px-2" onClick={() => act('raise', raiseVal())}>raise</button>
+                        </div>
                       if (a.kind === 'allin')
-                        return <button class="btn btn-allin" onClick={() => act('allin')}>all in</button>
+                        return <button class="btn btn-allin min-h-9 sm:min-h-auto px-3 sm:px-2" onClick={() => act('allin')}>all in</button>
                       return null
                     }}
                   </For>
@@ -591,12 +594,28 @@ export default function App() {
                 </div>
               </div>
 
-              {/* log */}
-              <div ref={logEl!} class="bg-zec-surface border border-neutral-800 p-2 max-h-28 overflow-y-auto font-mono text-10px mb-2 leading-relaxed">
+              {/* log + chat */}
+              <div ref={logEl!} class="bg-zec-surface border border-neutral-800 p-2 max-h-28 overflow-y-auto font-mono text-10px mb-1 leading-relaxed">
                 <For each={logs()}>
                   {l => <div class={`text-neutral-600 ${l.cls}`}>{l.text}</div>}
                 </For>
               </div>
+              <form class="flex gap-1 mb-2" onSubmit={(e) => {
+                e.preventDefault()
+                const input = e.currentTarget.querySelector('input') as HTMLInputElement
+                const msg = input.value.trim()
+                if (!msg) return
+                input.value = ''
+                send({ type: 'Chat', text: msg })
+                log(`you: ${msg}`, 'text-white')
+              }}>
+                <input
+                  class="input-field flex-1 text-10px py-0.5 px-2"
+                  placeholder="chat..."
+                  maxLength={200}
+                />
+                <button type="submit" class="text-8px px-2 py-0.5 rounded border border-neutral-700 text-neutral-600 hover:text-neutral-400">send</button>
+              </form>
             </div>
           </Show>
 

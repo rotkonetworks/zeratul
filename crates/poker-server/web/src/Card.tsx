@@ -5,9 +5,10 @@ const red = (s: string) => s === 'h' || s === 'd'
 
 export function Card(p: { card?: CardJson; size?: 'sm' | 'lg' }) {
   const lg = p.size === 'lg'
-  const w = lg ? 'w-12' : 'w-10'
-  const h = lg ? 'h-17' : 'h-14'
-  const text = lg ? 'text-17px' : 'text-14px'
+  // responsive: smaller on mobile
+  const w = lg ? 'w-10 sm:w-12' : 'w-8 sm:w-10'
+  const h = lg ? 'h-14 sm:h-17' : 'h-11 sm:h-14'
+  const text = lg ? 'text-14px sm:text-17px' : 'text-11px sm:text-14px'
 
   if (!p.card) {
     return (
