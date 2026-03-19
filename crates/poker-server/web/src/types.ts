@@ -7,6 +7,9 @@ export type ServerMsg =
   | { type: 'Waiting' }
   | { type: 'OpponentJoined'; seat: number; name: string }
   | { type: 'OpponentLeft'; seat: number }
+  | { type: 'OpponentDisconnected'; seat: number; reconnect_secs: number }
+  | { type: 'OpponentReconnected'; seat: number }
+  | { type: 'ActionTimeout'; seat: number }
   | { type: 'HandStarted'; hand_number: number; button: number; your_cards: [CardJson, CardJson] | null; stacks: number[] }
   | { type: 'BlindsPosted'; small_blind: [number, number]; big_blind: [number, number] }
   | { type: 'ActionRequired'; seat: number; valid_actions: ValidAction[] }
@@ -18,6 +21,8 @@ export type ServerMsg =
   | { type: 'HandComplete'; stacks: number[] }
   | { type: 'JuryVote'; node: number; total: number; payload_hash: string }
   | { type: 'JurySettlement'; verified: boolean; threshold: number; contributions: number }
+  | { type: 'RulesProposed'; buyin: number; smallBlind: number; bigBlind: number; fromSelf: boolean }
+  | { type: 'RulesAccepted' }
   | { type: 'RoomInfo'; code: string; jury_nodes: number; jury_threshold: number; escrow: string }
   | { type: 'InviteLink'; url: string }
   | { type: 'Error'; message: string }

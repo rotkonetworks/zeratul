@@ -1,9 +1,10 @@
-//! poker-server: websocket game server with OSST jury
+//! poker-server: websocket game server with nested FROST jury
 //!
-//! each room has a wormhole-style invite code. the server holds a 3-of-5
-//! OSST jury internally — on settlement, jury nodes "vote" with staggered
-//! delays to simulate distributed consensus. every action is logged into
-//! a HandTranscript for dispute resolution.
+//! jury signing has two modes (selected by NARSIL_ENDPOINT env var):
+//! - local: all jury shares in-process (demo/testing)
+//! - narsil: calls live narsild validators over HTTP (production)
+
+mod jury;
 
 use axum::{
     Router,
@@ -26,12 +27,10 @@ use tower_http::services::ServeDir;
 use zk_shuffle::poker::{Card, Rank, Suit};
 
 // frostito imports (Pallas curve — Zcash Orchard compatible)
-use osst::{SecretShare, Contribution, verify as osst_verify};
-use osst::curve::{OsstPoint, OsstScalar};
+use osst::SecretShare;
+use osst::curve::OsstPoint;
 use osst::redpallas::zcash as redpallas;
-use osst::nested;
-use osst::frost;
-use pasta_curves::pallas::{Point as PallasPoint, Scalar as PallasScalar};
+use pasta_curves::pallas::Scalar as PallasScalar;
 
 // ---------------------------------------------------------------------------
 // JSON protocol (browser ↔ server)
@@ -53,6 +52,9 @@ enum ServerMsg {
     Seated { seat: u8, name: String },
     OpponentJoined { seat: u8, name: String },
     OpponentLeft { seat: u8 },
+    OpponentDisconnected { seat: u8, reconnect_secs: u64 },
+    OpponentReconnected { seat: u8 },
+    ActionTimeout { seat: u8 },
     HandStarted {
         hand_number: u64,
         button: u8,
@@ -95,175 +97,6 @@ struct PotJson { amount: u64, eligible: Vec<u8> }
 const JURY_N: u32 = 5;
 const JURY_T: u32 = 3;
 const JURY_OUTER_INDEX: u32 = 3; // jury is position 3 in outer 2-of-3
-
-struct Jury {
-    shares: Vec<SecretShare<PallasScalar>>,
-    /// jury's verification share in the outer protocol (g^{s₃})
-    /// s₃ never existed as a scalar — born distributed via interleaved DKG
-    group_pubkey: PallasPoint,
-    /// outer group public key (the escrow address)
-    outer_group_pubkey: PallasPoint,
-}
-
-impl Jury {
-    /// OSST authorization: jury nodes prove threshold control (async, non-interactive)
-    fn prepare_contributions(&self, payload: &[u8]) -> Vec<(Contribution<PallasPoint>, u64)> {
-        let mut rng = rand::thread_rng();
-        (0..self.shares.len()).map(|i| {
-            let contrib = self.shares[i].contribute(&mut rng, payload);
-            let delay_ms = rng.gen_range(800..2500u64);
-            (contrib, delay_ms)
-        }).collect()
-    }
-
-    /// verify OSST proof
-    fn verify_osst(&self, contributions: &[Contribution<PallasPoint>], payload: &[u8]) -> bool {
-        osst_verify(&self.group_pubkey, &contributions[..JURY_T as usize], JURY_T, payload)
-            .unwrap_or(false)
-    }
-
-    /// produce the jury's nested FROST signature share for the outer protocol.
-    ///
-    /// s₃ is NEVER reconstructed. each jury node computes its partial signature
-    /// using its share σₖ, and the relay sums the partials into z₃.
-    ///
-    /// returns: (outer_signature_share, inner_commitments_for_outer_package)
-    fn nested_sign(
-        &self,
-        message: &[u8],
-        buyer_share: &SecretShare<PallasScalar>,
-    ) -> Option<frost::Signature<PallasPoint>> {
-        let mut rng = rand::thread_rng();
-
-        // pick which jury nodes participate (first t)
-        let active_indices: Vec<u32> = self.shares[..JURY_T as usize]
-            .iter()
-            .map(|s| s.index)
-            .collect();
-
-        // inner commitment round (with inner binding factors)
-        let mut inner_nonces = Vec::new();
-        let mut inner_commitments = Vec::new();
-        for &k in &active_indices {
-            let (nonces, commitments) = nested::inner_commit::<PallasPoint, _>(k, &mut rng);
-            inner_nonces.push(nonces);
-            inner_commitments.push(commitments);
-        }
-
-        // aggregate inner commitments with inner binding
-        let r_nested = nested::aggregate_inner_commitments(&inner_commitments, message);
-
-        // buyer commits for outer FROST
-        let (buyer_nonces, buyer_frost_commits) =
-            frost::commit::<PallasPoint, _>(buyer_share.index, &mut rng);
-
-        // jury's outer commitment: r_nested as hiding, identity as binding
-        let jury_outer_commits = frost::SigningCommitments {
-            index: JURY_OUTER_INDEX,
-            hiding: r_nested,
-            binding: PallasPoint::identity(),
-        };
-
-        // build outer signing package
-        let outer_package = frost::SigningPackage::new(
-            message.to_vec(),
-            vec![buyer_frost_commits, jury_outer_commits],
-        ).ok()?;
-
-        // buyer signs
-        let buyer_sig = frost::sign::<PallasPoint>(
-            &outer_package, buyer_nonces, buyer_share, &self.outer_group_pubkey,
-        ).ok()?;
-
-        // compute outer params for inner holders
-        let outer_indices = outer_package.signer_indices();
-        let outer_lambda = osst::compute_lagrange_coefficients::<PallasScalar>(&outer_indices).ok()?;
-        let nested_pos = outer_indices.iter().position(|&i| i == JURY_OUTER_INDEX)?;
-
-        // outer group commitment
-        let outer_gc = {
-            let mut r = PallasPoint::identity();
-            for &idx in &outer_indices {
-                let c = outer_package.get_commitments(idx)?;
-                let rho = compute_outer_binding::<PallasPoint>(idx, message, &outer_package);
-                r = r.add(&c.hiding).add(&c.binding.mul_scalar(&rho));
-            }
-            r
-        };
-
-        // outer challenge (RedPallas uses BLAKE2b in production, SHA-512 here for demo)
-        let outer_challenge = {
-            use sha2::{Sha512, Digest};
-            let mut h = Sha512::new();
-            h.update(b"frost-challenge-v1");
-            h.update(OsstPoint::compress(&outer_gc));
-            h.update(OsstPoint::compress(&self.outer_group_pubkey));
-            h.update(message);
-            let hash: [u8; 64] = h.finalize().into();
-            PallasScalar::from_bytes_wide(&hash)
-        };
-
-        let params = nested::InnerSigningParams {
-            outer_challenge,
-            outer_lambda: outer_lambda[nested_pos],
-        };
-
-        // inner holders sign — s₃ never reconstructed
-        let mut inner_sigs = Vec::new();
-        for (nonces, &k) in inner_nonces.into_iter().zip(active_indices.iter()) {
-            let share = &self.shares[(k - 1) as usize];
-            let sig = nested::inner_sign::<PallasPoint>(
-                nonces, share, &params, &inner_commitments, &active_indices, message,
-            ).ok()?;
-            inner_sigs.push(sig);
-        }
-
-        // aggregate inner shares → z₃
-        let z_nested = nested::aggregate_inner_shares(&inner_sigs);
-        let jury_sig_share = frost::SignatureShare {
-            index: JURY_OUTER_INDEX,
-            response: z_nested,
-        };
-
-        // outer aggregation → standard Schnorr signature
-        let signature = frost::aggregate::<PallasPoint>(
-            &outer_package,
-            &[buyer_sig, jury_sig_share],
-            &self.outer_group_pubkey,
-            None,
-        ).ok()?;
-
-        // verify before returning
-        if frost::verify_signature(&self.outer_group_pubkey, message, &signature) {
-            Some(signature)
-        } else {
-            None
-        }
-    }
-}
-
-/// helper: compute outer FROST binding factor
-fn compute_outer_binding<P: OsstPoint>(
-    index: u32,
-    message: &[u8],
-    package: &frost::SigningPackage<P>,
-) -> P::Scalar {
-    use sha2::{Sha512, Digest};
-    let mut encoded = Vec::new();
-    for idx in package.signer_indices() {
-        let c = package.get_commitments(idx).unwrap();
-        encoded.extend_from_slice(&c.index.to_le_bytes());
-        encoded.extend_from_slice(&c.hiding.compress());
-        encoded.extend_from_slice(&c.binding.compress());
-    }
-    let mut h = Sha512::new();
-    h.update(b"frost-binding-v1");
-    h.update(index.to_le_bytes());
-    h.update((message.len() as u64).to_le_bytes());
-    h.update(message);
-    h.update(&encoded);
-    P::Scalar::from_bytes_wide(&h.finalize().into())
-}
 
 // ---------------------------------------------------------------------------
 // Action log (co-signed transcript)
@@ -328,7 +161,14 @@ struct Player {
     name: String,
     seat: u8,
     tx: mpsc::UnboundedSender<ServerMsg>,
+    /// if set, player disconnected at this instant — reconnect window is open
+    disconnected_at: Option<tokio::time::Instant>,
 }
+
+/// how long a disconnected player can reclaim their seat
+const RECONNECT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// how long a player has to act before auto-fold
+const ACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 struct Room {
     code: String,
@@ -338,7 +178,7 @@ struct Room {
     button: u8,
     hole_cards: Vec<Option<[Card; 2]>>,
     community_cards: Vec<Card>,
-    jury: Jury,
+    jury: Arc<dyn jury::JuryService>,
     action_log: ActionLog,
     /// real Pallas escrow from 2-of-3 nested DKG (player A + player B + jury)
     /// s₃ never existed — born distributed via interleaved DKG
@@ -347,6 +187,8 @@ struct Room {
     player_a_share: SecretShare<PallasScalar>,
     /// player B's outer FROST share (for dispute signing)
     player_b_share: SecretShare<PallasScalar>,
+    /// who must act and when they time out (seat, deadline)
+    action_deadline: Option<(u8, tokio::time::Instant)>,
 }
 
 impl Room {
@@ -376,10 +218,25 @@ impl Room {
             code, JURY_T, JURY_N, hex::encode(&escrow_address[..8])
         );
 
-        let jury = Jury {
-            shares: jury_network.node_shares,
-            group_pubkey: jury_network.outer_verification_share,
-            outer_group_pubkey: jury_network.outer_group_pubkey,
+        let jury: Arc<dyn jury::JuryService> = match std::env::var("NARSIL_ENDPOINT") {
+            Ok(endpoint) => {
+                tracing::info!("room {}: using narsil jury at {}", code, endpoint);
+                Arc::new(jury::NarsilJury::new(
+                    &endpoint,
+                    jury_network.outer_group_pubkey,
+                    JURY_OUTER_INDEX,
+                ))
+            }
+            Err(_) => {
+                tracing::info!("room {}: using local jury (demo mode)", code);
+                Arc::new(jury::LocalJury {
+                    shares: jury_network.node_shares,
+                    threshold: JURY_T,
+                    group_pubkey: jury_network.outer_verification_share,
+                    outer_group_pubkey: jury_network.outer_group_pubkey,
+                    outer_index: JURY_OUTER_INDEX,
+                })
+            }
         };
 
         Room {
@@ -389,11 +246,12 @@ impl Room {
             jury, action_log: ActionLog::new(),
             escrow_address,
             player_a_share, player_b_share,
+            action_deadline: None,
         }
     }
 
     fn player_count(&self) -> usize {
-        self.players.iter().filter(|p| p.is_some()).count()
+        self.players.iter().filter(|p| matches!(p, Some(p) if p.disconnected_at.is_none())).count()
     }
 
     fn broadcast(&self, msg: &ServerMsg) {
@@ -456,6 +314,7 @@ impl Room {
                     });
                 }
                 EngineEvent::ActionRequired { seat, valid_actions } => {
+                    self.action_deadline = Some((*seat, tokio::time::Instant::now() + ACTION_TIMEOUT));
                     self.broadcast(&ServerMsg::ActionRequired {
                         seat: *seat,
                         valid_actions: valid_actions.iter().map(|va| ValidActionJson {
@@ -497,6 +356,7 @@ impl Room {
                     self.broadcast(&ServerMsg::PotAwarded { seat: *seat, amount: *amount });
                 }
                 EngineEvent::HandComplete { stacks } => {
+                    self.action_deadline = None;
                     self.broadcast(&ServerMsg::HandComplete { stacks: stacks.clone() });
                 }
             }
@@ -664,6 +524,53 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
         });
     }
 
+    // spawn action timeout watcher
+    let timeout_room = room.clone();
+    let timeout_handle = tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let mut r = timeout_room.lock().await;
+
+            // check action timeout
+            let mut hand_ended = false;
+            if let Some((seat, deadline)) = r.action_deadline {
+                if tokio::time::Instant::now() >= deadline {
+                    tracing::info!("room: seat {} timed out, auto-folding", seat);
+                    r.broadcast(&ServerMsg::ActionTimeout { seat });
+                    r.apply_action(seat, ActionType::Fold);
+                    hand_ended = r.engine.hand_state().is_none();
+                }
+            }
+
+            // check reconnect window expiry
+            for seat_idx in 0..r.players.len() {
+                if let Some(ref p) = r.players[seat_idx] {
+                    if let Some(disc_at) = p.disconnected_at {
+                        if disc_at.elapsed() > RECONNECT_WINDOW {
+                            let seat = seat_idx as u8;
+                            tracing::info!("room: seat {} reconnect window expired, removing", seat);
+                            r.players[seat_idx] = None;
+                            r.broadcast(&ServerMsg::OpponentLeft { seat });
+                        }
+                    }
+                }
+            }
+
+            // start next hand after timeout fold ended the hand
+            if hand_ended {
+                drop(r);
+                let rc = timeout_room.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+                    let mut r = rc.lock().await;
+                    if r.engine.hand_state().is_none() && r.player_count() == 2 {
+                        r.start_hand();
+                    }
+                });
+            }
+        }
+    });
+
     let mut my_seat: Option<u8> = None;
 
     while let Some(Ok(msg)) = ws_rx.next().await {
@@ -681,10 +588,54 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
         match client_msg {
             ClientMsg::Join { name } => {
                 let mut r = room.lock().await;
+
+                // check for reconnect: same name, seat has disconnected_at set
+                let reconnect_seat = r.players.iter().position(|p| {
+                    matches!(p, Some(p) if p.name == name && p.disconnected_at.is_some())
+                });
+
+                if let Some(seat_idx) = reconnect_seat {
+                    // reconnect to existing seat
+                    let seat = seat_idx as u8;
+                    let p = r.players[seat_idx].as_mut().unwrap();
+                    p.tx = tx.clone();
+                    p.disconnected_at = None;
+                    my_seat = Some(seat);
+
+                    tracing::info!("room {}: seat {} ({}) reconnected", r.code, seat, name);
+                    let _ = tx.send(ServerMsg::Seated { seat, name: name.clone() });
+
+                    // send current game state to reconnecting player
+                    let _ = tx.send(ServerMsg::HandStarted {
+                        hand_number: r.hand_number as u64,
+                        button: r.button,
+                        your_cards: r.hole_cards[seat as usize].as_ref().map(|c| {
+                            [card_json(&c[0]), card_json(&c[1])]
+                        }),
+                        stacks: r.engine.stacks().to_vec(),
+                    });
+                    if !r.community_cards.is_empty() {
+                        let phase = r.engine.hand_state().map(|h| format!("{:?}", h.phase).to_lowercase())
+                            .unwrap_or_else(|| "unknown".into());
+                        let _ = tx.send(ServerMsg::CommunityCards {
+                            phase,
+                            cards: r.community_cards.iter().map(card_json).collect(),
+                        });
+                    }
+
+                    let other = 1 - seat;
+                    r.send_to(other, ServerMsg::OpponentReconnected { seat });
+                    continue;
+                }
+
+                // fresh join
                 let seat = r.players.iter().position(|p| p.is_none());
                 if let Some(seat_idx) = seat {
                     let seat = seat_idx as u8;
-                    r.players[seat_idx] = Some(Player { name: name.clone(), seat, tx: tx.clone() });
+                    r.players[seat_idx] = Some(Player {
+                        name: name.clone(), seat, tx: tx.clone(),
+                        disconnected_at: None,
+                    });
                     my_seat = Some(seat);
                     let _ = tx.send(ServerMsg::Seated { seat, name: name.clone() });
 
@@ -741,54 +692,37 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                 }
             }
             ClientMsg::Dispute => {
-                let r = room.lock().await;
-                let stacks = r.engine.stacks().to_vec();
-                let payload = r.action_log.settlement_payload(&stacks);
-
-                // phase 1: OSST authorization (async, non-interactive)
-                let prepared = r.jury.prepare_contributions(&payload);
-                let osst_verified = r.jury.verify_osst(
-                    &prepared.iter().map(|(c, _)| c.clone()).collect::<Vec<_>>(),
-                    &payload,
-                );
-                let payload_hash = hex::encode(&Sha256::digest(&payload)[..8]);
-
-                // phase 2: nested FROST signing (s₃ never reconstructed)
-                // disputing player (seat 0 = player A) + jury → 2-of-3
-                let signature = if osst_verified {
-                    r.jury.nested_sign(&payload, &r.player_a_share)
-                } else {
-                    None
+                let (jury, payload, player_a_share, txs, payload_hash) = {
+                    let r = room.lock().await;
+                    let stacks = r.engine.stacks().to_vec();
+                    let payload = r.action_log.settlement_payload(&stacks);
+                    let payload_hash = hex::encode(&Sha256::digest(&payload)[..8]);
+                    let txs: Vec<_> = r.players.iter()
+                        .filter_map(|p| p.as_ref().map(|p| p.tx.clone()))
+                        .collect();
+                    (r.jury.clone(), payload, r.player_a_share.clone(), txs, payload_hash)
                 };
 
-                let frost_verified = signature.is_some();
-                if let Some(ref sig) = signature {
-                    tracing::info!(
-                        "room {}: nested FROST signature produced (R={})",
-                        r.code, hex::encode(&OsstPoint::compress(&sig.r)[..8])
-                    );
-                }
-
-                let txs: Vec<_> = r.players.iter()
-                    .filter_map(|p| p.as_ref().map(|p| p.tx.clone()))
-                    .collect();
-
-                drop(r);
-
                 tokio::spawn(async move {
-                    // stream jury votes with staggered delays
-                    for (i, (_, delay_ms)) in prepared.iter().enumerate() {
-                        tokio::time::sleep(std::time::Duration::from_millis(*delay_ms)).await;
-                        let msg = ServerMsg::JuryVote {
-                            node: i as u8 + 1,
-                            total: JURY_N as u8,
-                            payload_hash: payload_hash.clone(),
-                        };
-                        for tx in &txs { let _ = tx.send(msg.clone()); }
+                    // notify: signing in progress
+                    let msg = ServerMsg::JuryVote {
+                        node: 0, total: JURY_N as u8,
+                        payload_hash: payload_hash.clone(),
+                    };
+                    for tx in &txs { let _ = tx.send(msg.clone()); }
+
+                    // call jury service (local or narsil)
+                    let result = jury.sign(&payload, &player_a_share).await;
+
+                    let verified = result.as_ref().map(|r| r.verified).unwrap_or(false);
+                    if let Some(ref sig) = result {
+                        tracing::info!("jury signature: verified={}, R={}",
+                            sig.verified,
+                            hex::encode(&OsstPoint::compress(&sig.r)[..8]));
                     }
 
                     let msg = ServerMsg::JurySettlement {
-                        verified: osst_verified && frost_verified,
+                        verified,
                         threshold: JURY_T as u8,
                         contributions: JURY_N as u8,
                     };
@@ -798,13 +732,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
         }
     }
 
-    // cleanup on disconnect
+    // disconnect: mark seat as disconnected (keep for reconnect window)
     if let Some(seat) = my_seat {
         let mut r = room.lock().await;
-        r.players[seat as usize] = None;
-        r.broadcast(&ServerMsg::OpponentLeft { seat });
+        let code = r.code.clone();
+        if let Some(ref mut p) = r.players[seat as usize] {
+            let pname = p.name.clone();
+            p.disconnected_at = Some(tokio::time::Instant::now());
+            tracing::info!("room {}: seat {} ({}) disconnected, {}s reconnect window",
+                code, seat, pname, RECONNECT_WINDOW.as_secs());
+        }
+        r.broadcast(&ServerMsg::OpponentDisconnected {
+            seat,
+            reconnect_secs: RECONNECT_WINDOW.as_secs(),
+        });
     }
     send_task.abort();
+    timeout_handle.abort();
 }
 
 // ---------------------------------------------------------------------------

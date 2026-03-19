@@ -25,6 +25,10 @@ export default function App() {
   const [inviteUrl, setInviteUrl] = createSignal('')
   const [juryProgress, setJuryProgress] = createSignal('')
   const [escrow, setEscrow] = createSignal('')
+  const [pendingRules, setPendingRules] = createSignal<{ buyin: number; smallBlind: number; bigBlind: number; fromSelf: boolean } | null>(null)
+  const [oppDisconnected, setOppDisconnected] = createSignal(false)
+  const [reconnectCountdown, setReconnectCountdown] = createSignal(0)
+  const [actionTimer, setActionTimer] = createSignal(0)
 
   const opp = () => mySeat() === 0 ? 1 : 0
   const myStack = () => stacks()[mySeat()] ?? 0
@@ -49,11 +53,47 @@ export default function App() {
       case 'OpponentJoined':
         setOppName(msg.name)
         break
+      case 'RulesProposed':
+        setPendingRules({ buyin: msg.buyin, smallBlind: msg.smallBlind, bigBlind: msg.bigBlind, fromSelf: msg.fromSelf })
+        if (msg.fromSelf) {
+          log(`proposed: ${msg.smallBlind}/${msg.bigBlind} blinds, ${msg.buyin} buyin`)
+        } else {
+          log(`opponent proposes: ${msg.smallBlind}/${msg.bigBlind} blinds, ${msg.buyin} buyin`, 'c-zec-yellow')
+        }
+        break
+      case 'RulesAccepted':
+        setPendingRules(null)
+        log('rules accepted', 'c-green')
+        break
       case 'OpponentLeft':
         setOppName('\u2014')
+        setOppDisconnected(false)
+        setReconnectCountdown(0)
         setActions([])
         setView('waiting')
         log('opponent left')
+        break
+      case 'OpponentDisconnected': {
+        setOppDisconnected(true)
+        setReconnectCountdown(msg.reconnect_secs)
+        log(`opponent disconnected (${msg.reconnect_secs}s to reconnect)`, 'c-red')
+        // countdown timer
+        const iv = setInterval(() => {
+          setReconnectCountdown(c => {
+            if (c <= 1) { clearInterval(iv); return 0 }
+            return c - 1
+          })
+        }, 1000)
+        break
+      }
+      case 'OpponentReconnected':
+        setOppDisconnected(false)
+        setReconnectCountdown(0)
+        log('opponent reconnected', 'c-green')
+        break
+      case 'ActionTimeout':
+        log(`${msg.seat === mySeat() ? 'you' : 'opp'} timed out (auto-fold)`, 'c-red')
+        setActionTimer(0)
         break
       case 'HandStarted':
         setView('game')
@@ -81,6 +121,7 @@ export default function App() {
         break
       case 'ActionRequired':
         setActing(msg.seat)
+        setActionTimer(30)
         if (msg.seat === mySeat()) {
           setActions(msg.valid_actions)
           const r = msg.valid_actions.find(a => a.kind === 'raise' || a.kind === 'bet')
@@ -99,7 +140,8 @@ export default function App() {
         if (msg.action === 'bet' || msg.action === 'raise') b[msg.seat] = msg.amount
         else if (msg.action === 'call') b[msg.seat] = Math.max(...b)
         setBets(b)
-        const who = msg.seat === mySeat() ? 'you' : 'opp'
+        const pos = msg.seat === button() ? 'BTN' : 'BB'
+        const who = msg.seat === mySeat() ? `you(${pos})` : `opp(${pos})`
         const amt = msg.amount > 0 && (msg.action === 'bet' || msg.action === 'raise') ? ` ${msg.amount}` : ''
         log(`${who}: ${msg.action}${amt}`)
         break
@@ -119,7 +161,7 @@ export default function App() {
         log('showdown', 'c-green')
         break
       case 'PotAwarded':
-        log(`${msg.seat === mySeat() ? 'you' : 'opp'} wins ${msg.amount}`, 'c-zec-yellow font-500')
+        log(`${msg.seat === mySeat() ? 'you' : 'opp'} wins ${msg.amount}${msg.amount === 0 ? ' (split)' : ''}`, 'c-zec-yellow font-500')
         break
       case 'HandComplete':
         setStacks(msg.stacks)
@@ -153,23 +195,37 @@ export default function App() {
     }
   }
 
-  const { connected, connect, send } = createSocket(onMsg)
+  const { connected, connect, send, identity, encrypted } = createSocket(onMsg)
 
   function sit() {
     const n = name().trim() || 'anon' + String(Math.random() * 100000 | 0).padStart(5, '0')
-    connect(n)
+    // read custom rules from inputs (host only)
+    const sbEl = document.getElementById('sb-input') as HTMLInputElement | null
+    const bbEl = document.getElementById('bb-input') as HTMLInputElement | null
+    const buyinEl = document.getElementById('buyin-input') as HTMLInputElement | null
+    const customRules = sbEl ? {
+      smallBlind: parseInt(sbEl.value) || 5,
+      bigBlind: parseInt(bbEl?.value ?? '10') || 10,
+      buyin: parseInt(buyinEl?.value ?? '1000') || 1000,
+    } : undefined
+    connect(n, customRules)
   }
 
-  // auto-connect if we have a room code or /new in the URL
-  if (location.pathname.length > 1) {
-    // small delay for DOM to settle
-    setTimeout(() => sit(), 100)
-  }
+  // no auto-connect — always show lobby so user can enter name
 
   function act(action: string, amount?: number) {
     send({ type: 'Action', action, ...(amount !== undefined && { amount }) })
     setActions([])
   }
+
+  // action timer countdown
+  createEffect(() => {
+    if (acting() < 0) { setActionTimer(0); return }
+    const iv = setInterval(() => {
+      setActionTimer(t => t > 0 ? t - 1 : 0)
+    }, 1000)
+    onCleanup(() => clearInterval(iv))
+  })
 
   // auto-scroll log
   let logEl!: HTMLDivElement
@@ -186,6 +242,15 @@ export default function App() {
           <div class="titlebar">
             <span class="text-zec-yellow text-14px">{'\u2666'}</span>
             <span class="flex-1 text-center text-zec-yellow">zk.poker</span>
+            <Show when={encrypted()}>
+              <span class="text-8px text-green-400 mr-1">enc</span>
+            </Show>
+            <Show when={identity()}>
+              <span class={`text-8px mr-1 ${identity()!.mode === 'zafu' ? 'text-zec-yellow' : 'text-neutral-500'}`}
+                title={identity()!.sessionPubKey}>
+                {identity()!.mode === 'zafu' ? 'zafu' : 'anon'}
+              </span>
+            </Show>
             <span class={`w-2 h-2 rounded-full ${connected() ? 'bg-green-500' : 'bg-neutral-600'}`} />
           </div>
 
@@ -195,11 +260,37 @@ export default function App() {
               <div class="text-zec-yellow text-10px font-semibold uppercase tracking-3px mb-5">
                 heads-up no-limit hold'em
               </div>
-              <div class="text-neutral-500 text-11px tracking-wider mb-3">
-                5 / 10 blinds &middot; 1,000 buy-in
-              </div>
+              <Show when={!location.pathname.match(/^\/[a-z]/)}>
+                {/* host: editable rules */}
+                <div class="flex items-center justify-center gap-3 text-11px text-neutral-400 mb-3">
+                  <label class="flex items-center gap-1">
+                    <span class="text-neutral-600">sb</span>
+                    <input class="input-field w-14 text-center text-10px" value="5"
+                      onInput={e => (e.target as HTMLInputElement).dataset.sb = (e.target as HTMLInputElement).value}
+                      id="sb-input" />
+                  </label>
+                  <label class="flex items-center gap-1">
+                    <span class="text-neutral-600">bb</span>
+                    <input class="input-field w-14 text-center text-10px" value="10"
+                      onInput={e => (e.target as HTMLInputElement).dataset.bb = (e.target as HTMLInputElement).value}
+                      id="bb-input" />
+                  </label>
+                  <label class="flex items-center gap-1">
+                    <span class="text-neutral-600">buyin</span>
+                    <input class="input-field w-20 text-center text-10px" value="1000"
+                      onInput={e => (e.target as HTMLInputElement).dataset.buyin = (e.target as HTMLInputElement).value}
+                      id="buyin-input" />
+                  </label>
+                </div>
+              </Show>
+              <Show when={location.pathname.match(/^\/[a-z]/)}>
+                {/* guest: will see host's rules after joining */}
+                <div class="text-neutral-500 text-11px tracking-wider mb-3">
+                  joining table...
+                </div>
+              </Show>
               <div class="text-neutral-600 text-9px tracking-wider mb-6">
-                3-of-5 OSST jury &middot; co-signed action log
+                zk-shuffle &middot; co-signed action log &middot; encrypted
               </div>
               <div class="flex flex-col items-center gap-4">
                 <div class="flex items-center justify-center gap-2">
@@ -210,22 +301,12 @@ export default function App() {
                     spellcheck={false}
                     value={name()}
                     onInput={e => setName(e.currentTarget.value)}
-                    onKeyDown={e => {
-                      if (e.key === 'Enter') {
-                        if (location.pathname.length > 1) sit()
-                        else window.location.href = '/new'
-                      }
-                    }}
+                    onKeyDown={e => { if (e.key === 'Enter') sit() }}
                     autofocus
                   />
-                  <Show when={location.pathname.length > 1}
-                    fallback={
-                      <button class="btn btn-primary" onClick={() => window.location.href = '/new'}>
-                        create table
-                      </button>
-                    }>
-                    <button class="btn btn-primary" onClick={sit}>sit down</button>
-                  </Show>
+                  <button class="btn btn-primary" onClick={sit}>
+                    {location.pathname.length > 1 ? 'sit down' : 'create table'}
+                  </button>
                 </div>
               </div>
             </div>
@@ -250,11 +331,24 @@ export default function App() {
                   <div class="text-neutral-600 text-8px mt-1">click to copy</div>
                 </div>
               </Show>
-              <div class="flex items-end justify-center gap-1 h-6">
-                <For each={[0,.07,.14,.21,.28,.35]}>
-                  {d => <div class="w-1 rounded-sm bg-zec-yellow animate-pulse" style={`animation-delay:${d}s; height: 60%`} />}
-                </For>
-              </div>
+              <Show when={pendingRules() && !pendingRules()?.fromSelf}>
+                <div class="mt-4 p-4 border border-neutral-700 rounded">
+                  <div class="text-neutral-400 text-10px uppercase tracking-wider mb-2">opponent proposes</div>
+                  <div class="text-white text-12px font-mono mb-3">
+                    {pendingRules()!.smallBlind}/{pendingRules()!.bigBlind} blinds · {pendingRules()!.buyin} buyin
+                  </div>
+                  <button class="btn btn-primary text-11px px-6" onClick={() => send({ type: 'AcceptRules' })}>
+                    accept
+                  </button>
+                </div>
+              </Show>
+              <Show when={!pendingRules()}>
+                <div class="flex items-end justify-center gap-1 h-6">
+                  <For each={[0,.07,.14,.21,.28,.35]}>
+                    {d => <div class="w-1 rounded-sm bg-zec-yellow animate-pulse" style={`animation-delay:${d}s; height: 60%`} />}
+                  </For>
+                </div>
+              </Show>
             </div>
           </Show>
 
@@ -267,19 +361,33 @@ export default function App() {
                 <Show when={juryProgress()}>
                   <span class="text-zec-yellow animate-pulse">{juryProgress()}</span>
                 </Show>
-                <span>{button() === mySeat() ? 'you deal' : 'opp deals'}</span>
+                <span>you: {button() === mySeat() ? 'BTN/SB' : 'BB'}</span>
               </div>
 
               {/* felt */}
               <div class="bg-zec-felt border-2 border-zec-feltb rounded-25 px-5 py-6 relative" style="min-height: 260px; box-shadow: inset 0 2px 20px rgba(0,0,0,0.4)">
 
+                {/* disconnect overlay */}
+                <Show when={oppDisconnected()}>
+                  <div class="absolute inset-0 bg-black/60 z-10 flex items-center justify-center rounded-25">
+                    <div class="text-center">
+                      <div class="text-red-400 text-11px uppercase tracking-wider mb-1">opponent disconnected</div>
+                      <div class="font-mono text-18px text-white">{reconnectCountdown()}s</div>
+                      <div class="text-neutral-500 text-9px">waiting for reconnect</div>
+                    </div>
+                  </div>
+                </Show>
+
                 {/* opponent (top) */}
                 <div class="absolute top--4 left-50% -translate-x-50% text-center w-44">
-                  <div class={`inline-block px-3 py-1 bg-zec-surface border ${acting() === opp() ? 'border-zec-yellow shadow-[0_0_8px_rgba(244,183,40,0.3)]' : 'border-neutral-800'}`}>
-                    <div class={`text-9px font-semibold uppercase tracking-wider ${acting() === opp() ? 'text-zec-yellow' : 'text-neutral-500'}`}>
-                      {oppName()}
+                  <div class={`inline-block px-3 py-1 bg-zec-surface border ${acting() === opp() ? 'border-zec-yellow shadow-[0_0_8px_rgba(244,183,40,0.3)]' : oppDisconnected() ? 'border-red-800' : 'border-neutral-800'}`}>
+                    <div class={`text-9px font-semibold uppercase tracking-wider ${acting() === opp() ? 'text-zec-yellow' : oppDisconnected() ? 'text-red-400' : 'text-neutral-500'}`}>
+                      {oppName()} <span class="text-neutral-600">{button() === opp() ? 'BTN/SB' : 'BB'}</span> {oppDisconnected() ? '(dc)' : ''}
                     </div>
                     <div class="font-mono text-13px text-zec-yellow">{oppStack()}</div>
+                    <Show when={acting() === opp() && actionTimer() > 0}>
+                      <div class={`font-mono text-9px ${actionTimer() <= 10 ? 'text-red-400' : 'text-neutral-500'}`}>{actionTimer()}s</div>
+                    </Show>
                   </div>
                   <div class="flex gap-1 justify-center mt-1.5">
                     <Show when={oppRevealed() && oppCards()} fallback={
@@ -326,9 +434,12 @@ export default function App() {
                     </Show>
                   </div>
                   <div class={`inline-block px-3 py-1 bg-zec-surface border ${acting() === mySeat() ? 'border-zec-yellow shadow-[0_0_8px_rgba(244,183,40,0.3)]' : 'border-neutral-800'}`}>
+                    <Show when={acting() === mySeat() && actionTimer() > 0}>
+                      <div class={`font-mono text-9px ${actionTimer() <= 10 ? 'text-red-400 animate-pulse' : 'text-neutral-500'}`}>{actionTimer()}s</div>
+                    </Show>
                     <div class="font-mono text-13px text-zec-yellow">{myStack()}</div>
                     <div class={`text-9px font-semibold uppercase tracking-wider ${acting() === mySeat() ? 'text-zec-yellow' : 'text-neutral-500'}`}>
-                      {name() || 'you'}
+                      {name() || 'you'} <span class="text-neutral-600">{button() === mySeat() ? 'BTN/SB' : 'BB'}</span>
                     </div>
                   </div>
                 </div>
