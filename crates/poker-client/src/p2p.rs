@@ -336,6 +336,8 @@ pub struct TableManager {
     hand_number: u64,
     /// our seat at the table
     our_seat: u8,
+    /// action sequence counter for current hand
+    action_count: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -358,6 +360,7 @@ impl TableManager {
             participants: Vec::new(),
             hand_number: 0,
             our_seat: 0,
+            action_count: 0,
         }
     }
 
@@ -486,6 +489,7 @@ impl TableManager {
             seat: self.our_seat,
             action: p2p_action,
             signature,
+            sequence: self.action_count,
         };
 
         let msg = poker_p2p::protocol::Message::Action(player_action);

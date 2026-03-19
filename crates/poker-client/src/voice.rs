@@ -294,11 +294,19 @@ fn poll_rtc_events(
     mut voice_state: ResMut<VoiceState>,
     mut events: EventWriter<VoiceEvent>,
 ) {
-    let Some(ref mut rx) = rtc_state.event_rx else {
-        return;
+    // collect events first, then process (avoids double-mutable-borrow)
+    let received_events: Vec<_> = {
+        let Some(ref mut rx) = rtc_state.event_rx else {
+            return;
+        };
+        let mut evts = Vec::new();
+        while let Ok(event) = rx.try_recv() {
+            evts.push(event);
+        }
+        evts
     };
 
-    while let Ok(event) = rx.try_recv() {
+    for event in received_events {
         match event {
             RtcEvent::Connected { seat } => {
                 let player = voice_state.players.entry(seat).or_default();
@@ -331,7 +339,6 @@ fn poll_rtc_events(
                 }
             }
             RtcEvent::Signal(msg) => {
-                // queue for sending via iroh QUIC
                 rtc_state.outgoing_signals.push(msg);
             }
             _ => {}

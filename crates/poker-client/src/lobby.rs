@@ -200,6 +200,7 @@ fn handle_p2p_notifications(
                 lobby.error = Some(message.clone());
                 warn!("lobby: p2p error - {}", message);
             }
+            _ => {} // handle new notification types gracefully
         }
     }
 }

@@ -522,10 +522,12 @@ pub fn render_avatar_settings(
 
     ui.horizontal(|ui| {
         ui.label("expression intensity:");
+        let intensity = manager.expression_intensity;
+        let label = if intensity < 0.3 { "poker face" }
+                    else if intensity > 1.5 { "dramatic" }
+                    else { "natural" };
         ui.add(egui::Slider::new(&mut manager.expression_intensity, 0.0..=2.0)
-            .text(if manager.expression_intensity < 0.3 { "poker face" }
-                  else if manager.expression_intensity > 1.5 { "dramatic" }
-                  else { "natural" }));
+            .text(label));
     });
 
     ui.separator();

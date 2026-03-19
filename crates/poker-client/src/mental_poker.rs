@@ -560,7 +560,7 @@ impl MentalPokerManager {
                             if next_player == table_mp.context.player_id {
                                 if let Ok((deck, proof)) = table_mp.context.shuffle_deck() {
                                     let deck_bytes: Vec<Vec<u8>> = deck.iter().map(|c| c.to_bytes()).collect();
-                                    let proof_bytes = parity_scale_codec::Encode::encode(&proof);
+                                    let proof_bytes = proof.to_bytes();
                                     self.outgoing.push((table_id, MentalPokerMessage::ShuffleResult {
                                         player_id: table_mp.context.player_id,
                                         deck: deck_bytes,
@@ -742,7 +742,7 @@ pub fn process_mental_poker_messages(
                 let new_deck: Vec<MaskedCard> = deck.iter()
                     .filter_map(|bytes| MaskedCard::from_bytes(bytes))
                     .collect();
-                if let Ok(proof) = parity_scale_codec::Decode::decode(&mut &proof_bytes[..]) {
+                if let Some(proof) = zk_shuffle::proof::ShuffleProof::from_bytes(&proof_bytes) {
                     match table_mp.context.receive_shuffle(player_id, new_deck, proof) {
                         Ok(()) => info!("mental poker: verified shuffle from player {}", player_id),
                         Err(e) => warn!("mental poker: shuffle verification failed: {}", e),
