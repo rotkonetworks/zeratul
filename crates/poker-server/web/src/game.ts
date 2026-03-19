@@ -571,14 +571,6 @@ export function createGame(
         break
       }
 
-      case 'result': {
-        // LEGACY: kept for backwards compat with old clients.
-        // In P2P model, both sides evaluate showdown independently.
-        // This message is no longer sent by new clients.
-        const d = msg.d as { winner: number; pot: number; stacks: number[]; button?: number }
-        console.log('[game] received legacy result message — ignoring (P2P model)')
-        break
-      }
     }
   }
 

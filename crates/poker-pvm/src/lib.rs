@@ -332,6 +332,10 @@ impl GameState {
                 self.stacks[seat] -= actual;
                 self.bets[seat] += actual;
                 self.pot += actual;
+                // if calling puts us all-in, mark it
+                if self.stacks[seat] == 0 {
+                    self.seat_state[seat] = SeatState::AllIn;
+                }
             }
 
             Action::Bet | Action::Raise => {
@@ -401,12 +405,19 @@ impl GameState {
 
     /// check if the current betting round is complete
     fn is_round_complete(&self, last_action: &SignedAction) -> bool {
-        let max_bet = self.bets.iter().take(self.num_players as usize).copied().max().unwrap_or(0);
-        let all_equal = (0..self.num_players as usize)
+        // all ACTIVE (not all-in, not folded) players must have equal bets
+        let active_bets: Vec<u32> = (0..self.num_players as usize)
             .filter(|&i| self.seat_state[i] == SeatState::Active)
-            .all(|i| self.bets[i] == max_bet);
+            .map(|i| self.bets[i])
+            .collect();
+        if active_bets.is_empty() { return true; } // everyone all-in or folded
+        let all_equal = active_bets.iter().all(|&b| b == active_bets[0]);
         let was_passive = matches!(last_action.action, Action::Check | Action::Call);
-        all_equal && was_passive && self.round_actions >= self.active_count()
+        // count only active players (not all-in) for round completion
+        let active_non_allin = (0..self.num_players as usize)
+            .filter(|&i| self.seat_state[i] == SeatState::Active && self.stacks[i] > 0)
+            .count() as u8;
+        all_equal && was_passive && self.round_actions >= active_non_allin.max(2)
     }
 
     /// next active player who can still act (not folded, not all-in)
@@ -446,13 +457,11 @@ impl GameState {
         self.bets = [0; MAX_SEATS];
         self.round_actions = 0;
         self.last_aggressor = 255;
-        self.acting_seat = self.first_postflop();
-        // skip to next active player who has chips
-        if self.seat_state[self.acting_seat as usize] != SeatState::Active
-            || self.stacks[self.acting_seat as usize] == 0
-        {
-            self.acting_seat = self.next_active_in_round(self.acting_seat.wrapping_sub(1));
-        }
+
+        // how many players can still act?
+        let active_with_chips = (0..self.num_players as usize)
+            .filter(|&i| self.seat_state[i] == SeatState::Active && self.stacks[i] > 0)
+            .count();
 
         match self.phase {
             Phase::Preflop => { self.phase = Phase::Flop; self.community_count = 3; }
@@ -460,6 +469,23 @@ impl GameState {
             Phase::Turn => { self.phase = Phase::River; self.community_count = 5; }
             Phase::River => { self.phase = Phase::Showdown; }
             _ => {}
+        }
+
+        // if ≤1 player can act (rest all-in/folded), skip all remaining phases to showdown
+        if active_with_chips <= 1 && self.phase != Phase::Showdown {
+            self.equalize_bets();
+            self.phase = Phase::Showdown;
+            self.community_count = 5;
+            return;
+        }
+
+        // set first to act postflop
+        self.acting_seat = self.first_postflop();
+        // skip to next active player who has chips
+        if self.seat_state[self.acting_seat as usize] != SeatState::Active
+            || self.stacks[self.acting_seat as usize] == 0
+        {
+            self.acting_seat = self.next_active_in_round(self.acting_seat.wrapping_sub(1));
         }
     }
 
