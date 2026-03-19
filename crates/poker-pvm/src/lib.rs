@@ -15,6 +15,8 @@
 
 #[cfg(test)]
 mod fuzz;
+#[cfg(test)]
+mod hand_tests;
 
 #[cfg(not(feature = "std"))]
 extern crate alloc;
