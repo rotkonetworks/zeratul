@@ -26,4 +26,5 @@ export type ServerMsg =
   | { type: 'RulesAccepted' }
   | { type: 'RoomInfo'; code: string; jury_nodes: number; jury_threshold: number; escrow: string }
   | { type: 'InviteLink'; url: string }
+  | { type: 'Status'; phase: 'connecting' | 'encrypting' | 'shuffling' | 'dealing' | 'playing' | 'showdown' | 'settling'; message: string }
   | { type: 'Error'; message: string }

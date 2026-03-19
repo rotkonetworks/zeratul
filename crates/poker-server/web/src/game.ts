@@ -199,7 +199,9 @@ export function createGame(
     actionSeq = 0
     handGeneration++
     transcript.reset()
+    console.log('[deal] pre-deal stacks=', engineApi!.stacks(), 'btn=', engineApi!.button())
     engineApi!.deal(myCards, oppCards, community, isHost)
+    console.log('[deal] post-deal stacks=', engineApi!.stacks(), 'pot=', engineApi!.pot())
 
     const btn = engineApi!.button()
     cb.onMsg({ type: 'HandStarted', hand_number: handNum, button: btn,
@@ -517,15 +519,18 @@ export function createGame(
         cb.onMsg({ type: 'Showdown', hands: [[oppSeat, [cardToJson(d.cards[0]), cardToJson(d.cards[1])]]] })
 
         if (isHost && engineApi) {
-          // update engine with final community + opponent cards (preserves pot)
           const sc = shuffle.community()
           if (sc.some(c => c > 0)) community = sc
           engineApi.updateCommunity(community)
           engineApi.updateOppCards(oppCards)
-          const pot = engineApi.pot() // read BEFORE showdown awards it
+          const potBefore = engineApi.pot()
+          const stacksBefore = engineApi.stacks()
+          console.log('[showdown] BEFORE: pot=', potBefore, 'stacks=', stacksBefore, 'phase=', engineApi.phase())
           const winner = engineApi.showdown()
           const stacks = engineApi.stacks()
+          const pot = potBefore // use pre-showdown pot value
           lastStacks = [...stacks] as [number, number]
+          console.log('[showdown] AFTER: winner=', winner, 'stacks=', stacks, 'pot awarded=', pot)
           cb.onMsg({ type: 'PotAwarded', seat: winner, amount: pot })
           cb.onMsg({ type: 'HandComplete', stacks: [...stacks] })
           send({ t: 'result', d: { winner, pot, stacks: [...stacks], button: engineApi.button() } })

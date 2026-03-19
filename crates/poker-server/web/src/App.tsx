@@ -30,6 +30,8 @@ export default function App() {
   const [reconnectCountdown, setReconnectCountdown] = createSignal(0)
   const [actionTimer, setActionTimer] = createSignal(0)
   const [autoAction, setAutoAction] = createSignal<'none' | 'check/fold' | 'check' | 'fold' | 'call any'>('none')
+  const [deckVerified, setDeckVerified] = createSignal(false)
+  const [gameStatus, setGameStatus] = createSignal('')
 
   const opp = () => mySeat() === 0 ? 1 : 0
   const myStack = () => stacks()[mySeat()] ?? 0
@@ -108,6 +110,7 @@ export default function App() {
         setBoard([])
         setPot(0)
         setActions([])
+        setGameStatus('') // clear shuffle overlay
         setOppRevealed(false)
         setOppCards(null)
         if (msg.your_cards) {
@@ -217,6 +220,11 @@ export default function App() {
         break
       case 'InviteLink':
         setInviteUrl(window.location.origin + msg.url)
+        break
+      case 'Status':
+        setGameStatus(msg.message)
+        if (msg.message.includes('verified')) setDeckVerified(true)
+        if (msg.phase === 'dealing') setDeckVerified(false) // reset for new hand
         break
       case 'Error':
         log(`err: ${msg.message}`)
@@ -377,7 +385,12 @@ export default function App() {
             <div class="px-2">
               {/* status bar */}
               <div class="flex justify-between px-2 py-1.5 text-9px text-neutral-500 uppercase tracking-wider">
-                <span>hand #{handNum()}</span>
+                <span>
+                  hand #{handNum()}
+                  <Show when={deckVerified()}>
+                    <span class="text-green-400 ml-1" title="deck verified via Chaum-Pedersen proof">✓</span>
+                  </Show>
+                </span>
                 <Show when={juryProgress()}>
                   <span class="text-zec-yellow animate-pulse">{juryProgress()}</span>
                 </Show>
@@ -394,6 +407,20 @@ export default function App() {
                       <div class="text-red-400 text-11px uppercase tracking-wider mb-1">opponent disconnected</div>
                       <div class="font-mono text-18px text-white">{reconnectCountdown()}s</div>
                       <div class="text-neutral-500 text-9px">waiting for reconnect</div>
+                    </div>
+                  </div>
+                </Show>
+
+                {/* shuffle/status overlay */}
+                <Show when={gameStatus() && !gameStatus().includes('verified') && acting() < 0}>
+                  <div class="absolute inset-0 bg-black/40 z-10 flex items-center justify-center rounded-25">
+                    <div class="text-center">
+                      <div class="text-zec-yellow text-11px uppercase tracking-wider mb-2 animate-pulse">{gameStatus()}</div>
+                      <div class="flex items-end justify-center gap-1 h-4">
+                        {[0,.08,.16,.24,.32].map(d =>
+                          <div class="w-1 rounded-sm bg-zec-yellow animate-pulse" style={`animation-delay:${d}s; height: 60%`} />
+                        )}
+                      </div>
                     </div>
                   </div>
                 </Show>
@@ -432,8 +459,26 @@ export default function App() {
                     style="left: calc(50% + 55px)">D</div>
                 </Show>
 
-                {/* board */}
-                <div class="flex gap-1.5 justify-center my-13">
+                {/* deck + board */}
+                <div class="flex gap-1.5 justify-center items-center my-13">
+                  {/* deck on table — shows shuffle status */}
+                  <Show when={board().length === 0}>
+                    <div class="relative w-12 h-17 mr-2" title={deckVerified() ? 'deck verified (Chaum-Pedersen)' : gameStatus() || 'deck'}>
+                      {/* stacked card backs */}
+                      <div class="absolute inset-0 rounded-sm border border-neutral-700 bg-zec-surface"
+                        style="transform: rotate(-2deg); background-image: repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(244,183,40,0.05) 3px,rgba(244,183,40,0.05) 4px)" />
+                      <div class="absolute inset-0 rounded-sm border border-neutral-700 bg-zec-surface"
+                        style="transform: rotate(1deg); background-image: repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(244,183,40,0.05) 3px,rgba(244,183,40,0.05) 4px)" />
+                      <div class={`absolute inset-0 rounded-sm border bg-zec-surface flex items-center justify-center text-9px font-bold ${
+                        gameStatus().includes('shuffl') || gameStatus().includes('key') ? 'border-zec-yellow animate-pulse text-zec-yellow' :
+                        deckVerified() ? 'border-green-500 text-green-400' :
+                        'border-neutral-700 text-neutral-600'
+                      }`} style="background-image: repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(244,183,40,0.05) 3px,rgba(244,183,40,0.05) 4px)">
+                        {gameStatus().includes('shuffl') || gameStatus().includes('key') || gameStatus().includes('prov') ? '...' :
+                         deckVerified() ? '✓' : '52'}
+                      </div>
+                    </div>
+                  </Show>
                   <For each={board()}>
                     {c => <Card card={c} size="lg" />}
                   </For>

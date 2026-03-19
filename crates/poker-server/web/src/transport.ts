@@ -135,6 +135,7 @@ export function createRelayTransport(
   let reconnectAttempts = 0
   let intentionalClose = false
   let opponentSeen = false
+  let peerSessionPub: string | null = null // lock to first peer's identity
 
   // session encryption state
   let ephemeral: { publicKeyB64: string; keyPair: CryptoKeyPair } | null = null
@@ -302,8 +303,12 @@ export function createRelayTransport(
       const theirPk = d.pk as string
 
       // verify the x25519 pubkey is signed by the sender's session key
-      // prevents MITM by the relay (Eriksen §3: auth filter)
       if (d.sig && d.sessionPub && sessionIdentity) {
+        // lock to first peer — reject keyex from different session keys
+        if (peerSessionPub && d.sessionPub !== peerSessionPub) {
+          console.warn('[crypto] keyex from unknown peer', d.sessionPub?.slice(0, 12), '— ignoring (locked to', peerSessionPub.slice(0, 12), ')')
+          return
+        }
         try {
           const msg = `keyex:${theirPk}`
           const valid = await sessionIdentity.verify(
@@ -311,12 +316,12 @@ export function createRelayTransport(
           )
           if (!valid) {
             console.warn('[crypto] keyex signature INVALID — possible MITM')
-            return // reject unsigned key exchange
+            return
           }
-          console.log('[crypto] keyex signature verified:', d.mode, d.sessionPub?.slice(0, 12))
+          peerSessionPub = d.sessionPub // lock to this peer
+          console.log('[crypto] keyex verified:', d.mode, d.sessionPub?.slice(0, 12))
         } catch (e) {
           console.warn('[crypto] keyex sig verification error:', e)
-          // proceed anyway if verification not available (e.g. no Web Crypto Ed25519)
         }
       }
 

@@ -288,4 +288,111 @@ mod tests {
             assert_eq!(point_to_card(&point), Some(i));
         }
     }
+
+    #[test]
+    fn test_full_ceremony_with_verification() {
+        // simulate the full 2-player shuffle ceremony
+        let sk_a = Scalar::random(&mut OsRng);
+        let pk_a = sk_a * G;
+        let sk_b = Scalar::random(&mut OsRng);
+        let pk_b = sk_b * G;
+        let aggregate_pk = pk_a + pk_b;
+        let config = ShuffleConfig::custom(DECK_SIZE);
+
+        // 1. host creates initial deck
+        let mut deck = Vec::with_capacity(DECK_SIZE);
+        for i in 0..DECK_SIZE as u8 {
+            let (ct, _) = ElGamalCiphertext::encrypt(&card_to_point(i), &aggregate_pk, &mut OsRng);
+            deck.push(ct);
+        }
+
+        let initial_commitment = zk_shuffle::proof::compute_deck_commitment(&deck);
+
+        // 2. host creates transcript, binds initial deck, shuffles
+        let mut host_transcript = ShuffleTranscript::new(b"poker-mental", 2);
+        host_transcript.bind_initial_deck(&initial_commitment);
+
+        let mut host_deck = deck.clone();
+
+        // host shuffles
+        let n = host_deck.len();
+        let mut mapping: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            let j = (OsRng.next_u32() as usize) % (i + 1);
+            mapping.swap(i, j);
+        }
+        let permutation = Permutation::new(mapping).unwrap();
+        let mut output_deck = Vec::with_capacity(n);
+        let mut randomness = Vec::with_capacity(n);
+        for i in 0..n {
+            let pi_i = permutation.get(i);
+            let (remasked, r) = host_deck[pi_i].remask(&aggregate_pk, &mut OsRng);
+            output_deck.push(remasked);
+            randomness.push(r);
+        }
+
+        let host_proof = prove_shuffle(
+            &config, 0, &aggregate_pk, &host_deck, &output_deck,
+            &permutation, &randomness, &mut host_transcript, &mut OsRng,
+        ).unwrap();
+
+        let host_shuffled = output_deck.clone();
+
+        // 3. guest creates transcript from initial deck, verifies host's shuffle
+        let mut guest_transcript = ShuffleTranscript::new(b"poker-mental", 2);
+        guest_transcript.bind_initial_deck(&initial_commitment);
+
+        let guest_verify = verify_shuffle(
+            &config, &aggregate_pk, &host_proof,
+            &deck, &host_shuffled, &mut guest_transcript,
+        );
+
+        assert!(guest_verify.is_ok(), "host proof verification failed: {:?}", guest_verify.err());
+        assert!(guest_verify.unwrap(), "host proof did not verify");
+
+        println!("host proof VERIFIED");
+
+        // 4. guest shuffles on top
+        let mut guest_deck = host_shuffled.clone();
+        let mut mapping2: Vec<usize> = (0..n).collect();
+        for i in (1..n).rev() {
+            let j = (OsRng.next_u32() as usize) % (i + 1);
+            mapping2.swap(i, j);
+        }
+        let perm2 = Permutation::new(mapping2).unwrap();
+        let mut output2 = Vec::with_capacity(n);
+        let mut rand2 = Vec::with_capacity(n);
+        for i in 0..n {
+            let pi_i = perm2.get(i);
+            let (remasked, r) = guest_deck[pi_i].remask(&aggregate_pk, &mut OsRng);
+            output2.push(remasked);
+            rand2.push(r);
+        }
+
+        let guest_proof = prove_shuffle(
+            &config, 1, &aggregate_pk, &guest_deck, &output2,
+            &perm2, &rand2, &mut guest_transcript, &mut OsRng,
+        ).unwrap();
+
+        let final_deck = output2;
+
+        // 5. host verifies guest's shuffle
+        let host_verify = verify_shuffle(
+            &config, &aggregate_pk, &guest_proof,
+            &host_shuffled, &final_deck, &mut host_transcript,
+        );
+
+        assert!(host_verify.is_ok(), "guest proof verification failed: {:?}", host_verify.err());
+        assert!(host_verify.unwrap(), "guest proof did not verify");
+
+        println!("guest proof VERIFIED");
+
+        // 6. reveal a card
+        let share_a = sk_a * final_deck[0].c0;
+        let share_b = sk_b * final_deck[0].c0;
+        let card_point = final_deck[0].c1 - share_a - share_b;
+        let card = point_to_card(&card_point);
+        assert!(card.is_some(), "card reveal failed");
+        println!("card 0 = {}", card.unwrap());
+    }
 }

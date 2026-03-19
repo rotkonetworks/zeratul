@@ -26,10 +26,9 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
   let announced = false
 
   async function connect(name: string, customRules?: { smallBlind: number; bigBlind: number; buyin: number }) {
-    // load WASM engines (game + shuffle)
+    onMsg({ type: 'Status', phase: 'connecting', message: 'loading game engine...' })
     const wasmOk = await loadWasmEngine()
-    if (wasmOk) console.log('[poker] WASM engine loaded')
-    else console.log('[poker] JS fallback')
+    if (!wasmOk) onMsg({ type: 'Error', message: 'game engine failed to load — using fallback' })
 
     const room = getRoomFromUrl()
     const isHost = !room
@@ -79,6 +78,7 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
             break
           case 'encrypted':
             setEncSignal(true)
+            onMsg({ type: 'Status', phase: 'encrypting', message: 'encrypted channel established' })
             break
           case 'error':
             onMsg({ type: 'Error', message: data ?? 'unknown error' })

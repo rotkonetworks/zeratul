@@ -1,6 +1,13 @@
 /* @ts-self-types="./poker_pvm.d.ts" */
 
 export class WasmGame {
+    static __wrap(ptr) {
+        ptr = ptr >>> 0;
+        const obj = Object.create(WasmGame.prototype);
+        obj.__wbg_ptr = ptr;
+        WasmGameFinalization.register(obj, obj.__wbg_ptr, obj);
+        return obj;
+    }
     __destroy_into_raw() {
         const ptr = this.__wbg_ptr;
         this.__wbg_ptr = 0;
@@ -19,9 +26,6 @@ export class WasmGame {
         return ret;
     }
     /**
-     * returns: [valid, hand_over, winner, payout, advance_phase] as packed u32
-     * apply action. pass seq=0 to auto-assign sequence.
-     * returns [valid, hand_over, winner, payout, advance_phase]
      * @param {number} seat
      * @param {number} action
      * @param {number} amount
@@ -35,7 +39,6 @@ export class WasmGame {
         return v1;
     }
     /**
-     * apply action with error message returned
      * @param {number} seat
      * @param {number} action
      * @param {number} amount
@@ -124,6 +127,25 @@ export class WasmGame {
         return this;
     }
     /**
+     * @param {number} buyin
+     * @param {number} small_blind
+     * @param {number} big_blind
+     * @param {number} rake_bps
+     * @param {number} rake_cap
+     * @returns {WasmGame}
+     */
+    static new_with_rake(buyin, small_blind, big_blind, rake_bps, rake_cap) {
+        const ret = wasm.wasmgame_new_with_rake(buyin, small_blind, big_blind, rake_bps, rake_cap);
+        return WasmGame.__wrap(ret);
+    }
+    /**
+     * @returns {number}
+     */
+    num_players() {
+        const ret = wasm.wasmgame_num_players(this.__wbg_ptr);
+        return ret;
+    }
+    /**
      * @returns {number}
      */
     phase() {
@@ -140,12 +162,26 @@ export class WasmGame {
     /**
      * @returns {number}
      */
+    rake() {
+        const ret = wasm.wasmgame_rake(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @returns {number}
+     */
     round_actions() {
         const ret = wasm.wasmgame_round_actions(this.__wbg_ptr);
         return ret;
     }
     /**
-     * set stacks and button for next hand (sync guest with host)
+     * @param {number} seat
+     * @returns {number}
+     */
+    seat_state(seat) {
+        const ret = wasm.wasmgame_seat_state(this.__wbg_ptr, seat);
+        return ret;
+    }
+    /**
      * @param {number} stack0
      * @param {number} stack1
      * @param {number} btn
@@ -162,6 +198,18 @@ export class WasmGame {
     }
     /**
      * @param {number} seat
+     */
+    sit_in(seat) {
+        wasm.wasmgame_sit_in(this.__wbg_ptr, seat);
+    }
+    /**
+     * @param {number} seat
+     */
+    sit_out(seat) {
+        wasm.wasmgame_sit_out(this.__wbg_ptr, seat);
+    }
+    /**
+     * @param {number} seat
      * @returns {number}
      */
     stack(seat) {
@@ -169,8 +217,6 @@ export class WasmGame {
         return ret >>> 0;
     }
     /**
-     * update community cards without resetting hand state.
-     * used when shuffle reveals cards incrementally.
      * @param {number} c0
      * @param {number} c1
      * @param {number} c2
@@ -181,7 +227,6 @@ export class WasmGame {
         wasm.wasmgame_update_community(this.__wbg_ptr, c0, c1, c2, c3, c4);
     }
     /**
-     * update opponent's hole cards (for showdown eval on host side)
      * @param {number} c0
      * @param {number} c1
      */

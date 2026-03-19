@@ -121,8 +121,8 @@ fn main() {
 
     println!("poker-pvm guest (native mode)\n");
 
-    let mut state = GameState::new(Rules::default());
-    state.deal([12, 25], [0, 13], [4, 5, 6, 7, 8]);
+    let mut state = GameState::new(Rules::default(), 2);
+    state.deal(&[[12, 25], [0, 13]], [4, 5, 6, 7, 8]);
     println!("dealt: phase={:?} pot={} stacks={:?}", state.phase, state.pot, state.stacks);
 
     // play a full hand

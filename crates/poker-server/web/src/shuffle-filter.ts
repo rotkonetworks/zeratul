@@ -85,7 +85,8 @@ export function createShuffle(
     reset()
     shuffleKeys = new ShuffleKeysClass()
     myPkHex = shuffleKeys.public_key_hex()
-    cb.onLog('shuffle: key exchange')
+    cb.onLog('shuffling deck...')
+    cb.onMsg({ type: 'Status', phase: 'shuffling', message: 'exchanging keys...' })
     send({ t: 'shuffle_pk', d: { pk: myPkHex, hand: handId } })
     maybeContinue()
   }
@@ -98,9 +99,9 @@ export function createShuffle(
   function hostShuffle() {
     shuffleState = new ShuffleStateClass(myPkHex, oppPkHex)
     const preDeck = shuffleState.deck_hex()
-    cb.onLog('shuffle: host shuffling...')
+    cb.onMsg({ type: 'Status', phase: 'shuffling', message: 'shuffling deck...' })
     const result = JSON.parse(shuffleState.shuffle_and_prove(0))
-    cb.onLog('shuffle: host done')
+    cb.onMsg({ type: 'Status', phase: 'shuffling', message: 'proving shuffle...' })
     send({ t: 'shuffle_init', d: { pk_a: myPkHex, pk_b: oppPkHex, pre_deck: preDeck, deck: result.deck, proof: result.proof } })
   }
 
@@ -113,15 +114,18 @@ export function createShuffle(
     try {
       const valid = shuffleState.verify_and_apply(d.deck, d.proof)
       if (valid) {
-        cb.onLog('shuffle: host proof VERIFIED')
+        cb.onMsg({ type: 'Status', phase: 'shuffling', message: 'host shuffle verified' })
+        cb.onLog('shuffle: host proof VERIFIED ✓')
       } else {
-        cb.onLog('shuffle: host proof unverified (transcript WIP)')
-        // accept deck anyway — shuffle is still fair, proof binding needs work
-        shuffleState = ShuffleStateClass.from_deck_unverified(d.pk_a, d.pk_b, d.deck)
+        cb.onMsg({ type: 'Error', message: 'deck verification failed — opponent may be cheating' })
+        cb.onLog('shuffle: host proof FAILED — deck rejected')
+        return // abort hand
       }
     } catch (e: any) {
-      cb.onLog(`shuffle: verification pending: ${e}`)
-      shuffleState = ShuffleStateClass.from_deck_unverified(d.pk_a, d.pk_b, d.deck)
+      // verification threw — log the actual error for debugging
+      cb.onLog(`shuffle: verify error: ${e}`)
+      cb.onMsg({ type: 'Error', message: `shuffle verification error: ${e}` })
+      return // abort hand
     }
 
     cb.onLog('shuffle: guest shuffling...')
@@ -137,14 +141,17 @@ export function createShuffle(
     try {
       const valid = shuffleState.verify_and_apply(d.deck, d.proof)
       if (valid) {
-        cb.onLog('shuffle: guest proof VERIFIED')
+        cb.onMsg({ type: 'Status', phase: 'shuffling', message: 'guest shuffle verified' })
+        cb.onLog('shuffle: guest proof VERIFIED ✓')
       } else {
-        cb.onLog('shuffle: guest proof unverified (transcript WIP)')
-        shuffleState = ShuffleStateClass.from_deck_unverified(myPkHex, oppPkHex, d.deck)
+        cb.onMsg({ type: 'Error', message: 'deck verification failed — opponent may be cheating' })
+        cb.onLog('shuffle: guest proof FAILED — deck rejected')
+        return // abort hand
       }
     } catch (e: any) {
-      cb.onLog(`shuffle: verification pending: ${e}`)
-      shuffleState = ShuffleStateClass.from_deck_unverified(myPkHex, oppPkHex, d.deck)
+      cb.onLog(`shuffle: verify error: ${e}`)
+      cb.onMsg({ type: 'Error', message: `shuffle verification error: ${e}` })
+      return // abort hand
     }
 
     sendShares([0, 1, 2, 3])
@@ -198,7 +205,9 @@ export function createShuffle(
     const oppCards = isHost ? seat1Cards : seat0Cards
 
     cb.onLog('shuffle: hole cards revealed (zk)')
-    cb.onDeal(myCards, oppCards, communityCards)
+    cb.onMsg({ type: 'Status', phase: 'dealing', message: 'deck verified — dealing...' })
+    // show "verified" state for 1.5s so the player actually sees it
+    setTimeout(() => cb.onDeal(myCards, oppCards, communityCards), 1500)
   }
 
   // ── community card reveals (per phase) ────────────────────
