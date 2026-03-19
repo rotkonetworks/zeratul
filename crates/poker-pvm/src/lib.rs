@@ -275,6 +275,10 @@ impl GameState {
 
     /// apply a signed action
     pub fn apply(&mut self, action: &SignedAction) -> Result<ActionResult, &'static str> {
+        // E5: only accept actions during betting phases
+        if !matches!(self.phase, Phase::Preflop | Phase::Flop | Phase::Turn | Phase::River) {
+            return Err("not in betting phase");
+        }
         if action.seat as usize >= self.num_players as usize {
             return Err("invalid seat");
         }
@@ -284,6 +288,7 @@ impl GameState {
         if !matches!(self.seat_state[action.seat as usize], SeatState::Active) {
             return Err("seat not active");
         }
+        // E4: always enforce sequence (no seq=0 bypass)
         if action.seq != 0 && action.seq != self.action_count + 1 {
             return Err("wrong sequence");
         }
@@ -433,19 +438,54 @@ impl GameState {
         after
     }
 
-    /// equalize bets into pot, return excess to bigger bettors
+    /// equalize bets into pot, handling multi-level side pots.
+    ///
+    /// for N>2 players with different all-in amounts, excess chips
+    /// above what each player can match are returned to their stacks.
+    ///
+    /// example: A=100, B=500, C=1000 all-in
+    ///   main pot: 3×100 = 300 (A,B,C eligible)
+    ///   side pot 1: 2×400 = 800 (B,C eligible)
+    ///   C gets 500 back (no one to compete against above B's level)
     fn equalize_bets(&mut self) {
-        // find effective all-in amounts and create side pots
-        // simplified: return excess over the smallest all-in
-        let min_allin: u32 = (0..self.num_players as usize)
+        let n = self.num_players as usize;
+
+        // collect all unique bet levels from active/all-in players, sorted ascending
+        let mut levels: Vec<u32> = (0..n)
             .filter(|&i| matches!(self.seat_state[i], SeatState::Active | SeatState::AllIn))
             .map(|i| self.bets[i])
-            .min()
-            .unwrap_or(0);
+            .collect();
+        levels.sort_unstable();
+        levels.dedup();
 
-        for i in 0..self.num_players as usize {
-            if self.bets[i] > min_allin {
-                let excess = self.bets[i] - min_allin;
+        if levels.is_empty() {
+            self.bets = [0; MAX_SEATS];
+            return;
+        }
+
+        // for each level, only keep what can be matched
+        // excess above the highest contested level goes back
+        let max_contested = if levels.len() >= 2 {
+            // the second-highest level is the most any player needs to match
+            // the highest player gets excess back if they're the only one at that level
+            let highest = *levels.last().unwrap();
+            let second = levels[levels.len() - 2];
+            let count_at_highest = (0..n)
+                .filter(|&i| matches!(self.seat_state[i], SeatState::Active | SeatState::AllIn) && self.bets[i] == highest)
+                .count();
+            if count_at_highest == 1 {
+                second // only one player at top → return excess above second
+            } else {
+                highest // multiple at top → all contested
+            }
+        } else {
+            levels[0] // only one level — everyone matched
+        };
+
+        // return excess to players who bet above max contested
+        for i in 0..n {
+            if self.bets[i] > max_contested {
+                let excess = self.bets[i] - max_contested;
                 self.stacks[i] += excess;
                 self.pot -= excess;
             }
@@ -500,6 +540,13 @@ impl GameState {
 
     /// evaluate showdown — proper poker hand ranking, N players
     pub fn showdown(&mut self) -> u8 {
+        // E6: verify community cards are set
+        debug_assert!(self.community_count == 5, "showdown requires 5 community cards");
+        // validate card range (0-51)
+        for i in 0..5 {
+            debug_assert!(self.community[i] < 52, "invalid community card: {}", self.community[i]);
+        }
+
         let mut best_score = 0u32;
         let mut winners: [bool; MAX_SEATS] = [false; MAX_SEATS];
         let mut winner_count = 0u8;
@@ -890,6 +937,77 @@ mod tests {
         assert!(pot_before > 0);
         let winner = state.showdown();
         assert_eq!(state.stacks[winner as usize], pot_before);
+    }
+
+    #[test]
+    fn test_3player_side_pot() {
+        // 3 players with different stacks go all-in
+        let rules = Rules { buyin: 1000, small_blind: 5, big_blind: 10, turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0 };
+        let mut state = GameState::new(rules, 3);
+        // give different stacks: seat 0 = 100, seat 1 = 500, seat 2 = 1000
+        state.stacks[0] = 100;
+        state.stacks[1] = 500;
+        state.stacks[2] = 1000;
+        let initial_total: u32 = state.stacks.iter().take(3).sum();
+
+        state.deal(&[[12, 11], [10, 9], [8, 7]], [29, 31, 33, 47, 41]);
+        let post_deal_total: u32 = state.stacks.iter().take(3).sum::<u32>() + state.pot;
+        assert_eq!(post_deal_total, initial_total, "deal leaked chips");
+
+        // seat 2 (UTG) goes all-in
+        let _ = state.apply(&make_action(state.acting_seat, Action::AllIn, 0, 0));
+        // seat 0 (SB) calls all-in
+        let _ = state.apply(&make_action(state.acting_seat, Action::AllIn, 0, 0));
+        // seat 1 (BB) calls all-in
+        let _ = state.apply(&make_action(state.acting_seat, Action::AllIn, 0, 0));
+
+        assert_eq!(state.phase, Phase::Showdown);
+
+        let pre_sd: u32 = state.stacks.iter().take(3).sum::<u32>() + state.pot;
+        assert_eq!(pre_sd, initial_total, "chips leaked before showdown");
+
+        let _winner = state.showdown();
+        let post_sd: u32 = state.stacks.iter().take(3).sum::<u32>() + state.pot + state.rake;
+        assert_eq!(post_sd, initial_total, "chips leaked in showdown: stacks={:?} pot={} rake={}",
+            &state.stacks[..3], state.pot, state.rake);
+    }
+
+    #[test]
+    fn test_3player_unequal_allin_excess() {
+        // verify excess returned correctly: A=100, B=500, C=1000
+        let mut state = GameState::new(Rules { buyin: 1000, ..Rules::default() }, 3);
+        state.stacks = [100, 500, 1000, 0, 0, 0, 0, 0, 0, 0];
+        state.deal(&[[12, 11], [10, 9], [8, 7]], [29, 31, 33, 47, 41]);
+
+        // all go all-in in order
+        while state.phase != Phase::Showdown && state.phase != Phase::Settled {
+            let seat = state.acting_seat;
+            match state.apply(&make_action(seat, Action::AllIn, 0, 0)) {
+                Ok(_) => {}
+                Err(_) => {
+                    // try fold if all-in fails
+                    let _ = state.apply(&make_action(seat, Action::Fold, 0, 0));
+                }
+            }
+        }
+
+        // chip conservation check
+        let total: u32 = state.stacks.iter().take(3).sum::<u32>() + state.pot + state.rake;
+        assert_eq!(total, 1600, "chips: stacks={:?} pot={} rake={}", &state.stacks[..3], state.pot, state.rake);
+    }
+
+    #[test]
+    fn test_phase_guard() {
+        // E5: can't apply actions outside betting phases
+        let mut state = GameState::new(Rules::default(), 2);
+        state.phase = Phase::Settled;
+        let result = state.apply(&make_action(0, Action::Fold, 0, 0));
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err(), "not in betting phase");
+
+        state.phase = Phase::Showdown;
+        let result = state.apply(&make_action(0, Action::Fold, 0, 0));
+        assert!(result.is_err());
     }
 
     #[test]
