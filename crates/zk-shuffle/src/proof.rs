@@ -65,6 +65,62 @@ impl ShuffleProof {
 
         bytes
     }
+
+    /// deserialize a proof from bytes (inverse of to_bytes)
+    pub fn from_bytes(bytes: &[u8]) -> Option<Self> {
+        use crate::remasking::{BatchRemaskingProof, RemaskingDelta};
+        use curve25519_dalek::ristretto::CompressedRistretto;
+        use curve25519_dalek::scalar::Scalar;
+
+        let mut pos = 0;
+        if bytes.len() < 1 { return None; }
+        let player_id = bytes[pos];
+        pos += 1;
+
+        if bytes.len() < pos + 4 { return None; }
+        let commit_len = u32::from_le_bytes(bytes[pos..pos+4].try_into().ok()?) as usize;
+        pos += 4;
+
+        if bytes.len() < pos + commit_len { return None; }
+        let shuffled_deck_commitment = bytes[pos..pos+commit_len].to_vec();
+        pos += commit_len;
+
+        if bytes.len() < pos + 4 { return None; }
+        let delta_count = u32::from_le_bytes(bytes[pos..pos+4].try_into().ok()?) as usize;
+        pos += 4;
+
+        let mut deltas = Vec::with_capacity(delta_count);
+        for _ in 0..delta_count {
+            if bytes.len() < pos + 64 { return None; }
+            let mut c0_bytes = [0u8; 32];
+            let mut c1_bytes = [0u8; 32];
+            c0_bytes.copy_from_slice(&bytes[pos..pos+32]);
+            c1_bytes.copy_from_slice(&bytes[pos+32..pos+64]);
+            let delta_c0 = CompressedRistretto(c0_bytes).decompress()?;
+            let delta_c1 = CompressedRistretto(c1_bytes).decompress()?;
+            deltas.push(RemaskingDelta { delta_c0, delta_c1 });
+            pos += 64;
+        }
+
+        if bytes.len() < pos + 96 { return None; }
+        let mut cg_bytes = [0u8; 32];
+        let mut cpk_bytes = [0u8; 32];
+        let mut resp_bytes = [0u8; 32];
+        cg_bytes.copy_from_slice(&bytes[pos..pos+32]);
+        cpk_bytes.copy_from_slice(&bytes[pos+32..pos+64]);
+        resp_bytes.copy_from_slice(&bytes[pos+64..pos+96]);
+
+        let commitment_g = CompressedRistretto(cg_bytes).decompress()?;
+        let commitment_pk = CompressedRistretto(cpk_bytes).decompress()?;
+        let response = Scalar::from_canonical_bytes(resp_bytes).into_option()?;
+
+        Some(Self {
+            remasking_proof: BatchRemaskingProof { commitment_g, commitment_pk, response },
+            deltas,
+            shuffled_deck_commitment,
+            player_id,
+        })
+    }
 }
 
 /// prove shuffle (permutation + remasking)

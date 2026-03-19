@@ -48,6 +48,7 @@ exclude = [
     "crates/chain-client",         # uncommitted
     "crates/poker-channel-revive", # polkavm contract
     "crates/poker-chain-wasm",    # wasm target, different build
+    "crates/poker-shuffle-wasm",  # wasm target, mental poker shuffle
     "crates/zeratul-blockchain",   # depends on uncommitted crates
 ]
 resolver = "2"

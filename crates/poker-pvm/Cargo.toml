@@ -1,0 +1,28 @@
+[package]
+name = "poker-pvm"
+version = "0.1.0"
+edition = "2021"
+description = "deterministic poker game engine for PolkaVM (provable via WIM)"
+
+[lib]
+name = "poker_pvm"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[[bin]]
+name = "poker-guest"
+path = "src/guest.rs"
+
+[features]
+default = ["std"]
+std = []
+# for PolkaVM guest (no_std, no_main)
+pvm = []
+# for WASM browser (std, wasm-bindgen)
+wasm = ["std", "dep:wasm-bindgen", "dep:serde", "dep:serde-wasm-bindgen"]
+
+[dependencies]
+# optional: WASM bindings
+wasm-bindgen = { version = "0.2", optional = true }
+serde = { version = "1", features = ["derive"], optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
