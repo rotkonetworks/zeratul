@@ -644,17 +644,38 @@ mod wasm {
             }
         }
 
-        pub fn new_with_rake(buyin: u32, small_blind: u32, big_blind: u32, rake_bps: u16, rake_cap: u32) -> Self {
+        /// create N-player game
+        pub fn new_table(num_players: u8, buyin: u32, small_blind: u32, big_blind: u32, rake_bps: u16, rake_cap: u32) -> Self {
             Self {
                 state: GameState::new(Rules {
                     buyin, small_blind, big_blind,
                     turn_timeout_blocks: 6, rake_bps, rake_cap,
-                }, 2),
+                }, num_players),
             }
         }
 
+        pub fn new_with_rake(buyin: u32, small_blind: u32, big_blind: u32, rake_bps: u16, rake_cap: u32) -> Self {
+            Self::new_table(2, buyin, small_blind, big_blind, rake_bps, rake_cap)
+        }
+
+        /// deal for 2 players (backwards compatible)
         pub fn deal(&mut self, a0: u8, a1: u8, b0: u8, b1: u8, c0: u8, c1: u8, c2: u8, c3: u8, c4: u8) {
             self.state.deal(&[[a0, a1], [b0, b1]], [c0, c1, c2, c3, c4]);
+        }
+
+        /// deal for N players. cards is a flat array [p0c0, p0c1, p1c0, p1c1, ...]
+        pub fn deal_n(&mut self, cards: &[u8], c0: u8, c1: u8, c2: u8, c3: u8, c4: u8) {
+            let n = self.state.num_players as usize;
+            let mut all_cards = Vec::with_capacity(n);
+            for i in 0..n {
+                let idx = i * 2;
+                if idx + 1 < cards.len() {
+                    all_cards.push([cards[idx], cards[idx + 1]]);
+                } else {
+                    all_cards.push([0, 0]);
+                }
+            }
+            self.state.deal(&all_cards, [c0, c1, c2, c3, c4]);
         }
 
         pub fn apply_action(&mut self, seat: u8, action: u8, amount: u32, seq: u32) -> Vec<u32> {
@@ -712,6 +733,38 @@ mod wasm {
             self.state.cards[1] = [c0, c1];
         }
 
+        /// update any seat's cards
+        pub fn update_seat_cards(&mut self, seat: u8, c0: u8, c1: u8) {
+            self.state.cards[seat as usize] = [c0, c1];
+        }
+
+        /// get all stacks as flat array
+        pub fn all_stacks(&self) -> Vec<u32> {
+            self.state.stacks[..self.state.num_players as usize].to_vec()
+        }
+
+        /// get all bets as flat array
+        pub fn all_bets(&self) -> Vec<u32> {
+            self.state.bets[..self.state.num_players as usize].to_vec()
+        }
+
+        /// get all seat states as flat array
+        pub fn all_seat_states(&self) -> Vec<u8> {
+            self.state.seat_state[..self.state.num_players as usize]
+                .iter().map(|s| *s as u8).collect()
+        }
+
+        /// set stacks + button for N players
+        pub fn set_state_n(&mut self, stacks: &[u32], btn: u8) {
+            for (i, &s) in stacks.iter().enumerate() {
+                if i < self.state.num_players as usize {
+                    self.state.stacks[i] = s;
+                }
+            }
+            self.state.button = btn;
+        }
+
+        /// 2-player backwards compat
         pub fn set_state(&mut self, stack0: u32, stack1: u32, btn: u8) {
             self.state.stacks[0] = stack0;
             self.state.stacks[1] = stack1;

@@ -26,6 +26,36 @@ export class WasmGame {
         return ret;
     }
     /**
+     * get all bets as flat array
+     * @returns {Uint32Array}
+     */
+    all_bets() {
+        const ret = wasm.wasmgame_all_bets(this.__wbg_ptr);
+        var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * get all seat states as flat array
+     * @returns {Uint8Array}
+     */
+    all_seat_states() {
+        const ret = wasm.wasmgame_all_seat_states(this.__wbg_ptr);
+        var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        return v1;
+    }
+    /**
+     * get all stacks as flat array
+     * @returns {Uint32Array}
+     */
+    all_stacks() {
+        const ret = wasm.wasmgame_all_stacks(this.__wbg_ptr);
+        var v1 = getArrayU32FromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
      * @param {number} seat
      * @param {number} action
      * @param {number} amount
@@ -80,6 +110,7 @@ export class WasmGame {
         return ret;
     }
     /**
+     * deal for 2 players (backwards compatible)
      * @param {number} a0
      * @param {number} a1
      * @param {number} b0
@@ -92,6 +123,20 @@ export class WasmGame {
      */
     deal(a0, a1, b0, b1, c0, c1, c2, c3, c4) {
         wasm.wasmgame_deal(this.__wbg_ptr, a0, a1, b0, b1, c0, c1, c2, c3, c4);
+    }
+    /**
+     * deal for N players. cards is a flat array [p0c0, p0c1, p1c0, p1c1, ...]
+     * @param {Uint8Array} cards
+     * @param {number} c0
+     * @param {number} c1
+     * @param {number} c2
+     * @param {number} c3
+     * @param {number} c4
+     */
+    deal_n(cards, c0, c1, c2, c3, c4) {
+        const ptr0 = passArray8ToWasm0(cards, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wasmgame_deal_n(this.__wbg_ptr, ptr0, len0, c0, c1, c2, c3, c4);
     }
     /**
      * @returns {string}
@@ -125,6 +170,20 @@ export class WasmGame {
         this.__wbg_ptr = ret >>> 0;
         WasmGameFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * create N-player game
+     * @param {number} num_players
+     * @param {number} buyin
+     * @param {number} small_blind
+     * @param {number} big_blind
+     * @param {number} rake_bps
+     * @param {number} rake_cap
+     * @returns {WasmGame}
+     */
+    static new_table(num_players, buyin, small_blind, big_blind, rake_bps, rake_cap) {
+        const ret = wasm.wasmgame_new_table(num_players, buyin, small_blind, big_blind, rake_bps, rake_cap);
+        return WasmGame.__wrap(ret);
     }
     /**
      * @param {number} buyin
@@ -182,12 +241,23 @@ export class WasmGame {
         return ret;
     }
     /**
+     * 2-player backwards compat
      * @param {number} stack0
      * @param {number} stack1
      * @param {number} btn
      */
     set_state(stack0, stack1, btn) {
         wasm.wasmgame_set_state(this.__wbg_ptr, stack0, stack1, btn);
+    }
+    /**
+     * set stacks + button for N players
+     * @param {Uint32Array} stacks
+     * @param {number} btn
+     */
+    set_state_n(stacks, btn) {
+        const ptr0 = passArray32ToWasm0(stacks, wasm.__wbindgen_malloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wasmgame_set_state_n(this.__wbg_ptr, ptr0, len0, btn);
     }
     /**
      * @returns {number}
@@ -233,6 +303,15 @@ export class WasmGame {
     update_opp_cards(c0, c1) {
         wasm.wasmgame_update_opp_cards(this.__wbg_ptr, c0, c1);
     }
+    /**
+     * update any seat's cards
+     * @param {number} seat
+     * @param {number} c0
+     * @param {number} c1
+     */
+    update_seat_cards(seat, c0, c1) {
+        wasm.wasmgame_update_seat_cards(this.__wbg_ptr, seat, c0, c1);
+    }
 }
 if (Symbol.dispose) WasmGame.prototype[Symbol.dispose] = WasmGame.prototype.free;
 
@@ -267,6 +346,11 @@ function getArrayU32FromWasm0(ptr, len) {
     return getUint32ArrayMemory0().subarray(ptr / 4, ptr / 4 + len);
 }
 
+function getArrayU8FromWasm0(ptr, len) {
+    ptr = ptr >>> 0;
+    return getUint8ArrayMemory0().subarray(ptr / 1, ptr / 1 + len);
+}
+
 function getStringFromWasm0(ptr, len) {
     ptr = ptr >>> 0;
     return decodeText(ptr, len);
@@ -288,6 +372,20 @@ function getUint8ArrayMemory0() {
     return cachedUint8ArrayMemory0;
 }
 
+function passArray32ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 4, 4) >>> 0;
+    getUint32ArrayMemory0().set(arg, ptr / 4);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
+function passArray8ToWasm0(arg, malloc) {
+    const ptr = malloc(arg.length * 1, 1) >>> 0;
+    getUint8ArrayMemory0().set(arg, ptr / 1);
+    WASM_VECTOR_LEN = arg.length;
+    return ptr;
+}
+
 let cachedTextDecoder = new TextDecoder('utf-8', { ignoreBOM: true, fatal: true });
 cachedTextDecoder.decode();
 const MAX_SAFARI_DECODE_BYTES = 2146435072;
@@ -301,6 +399,8 @@ function decodeText(ptr, len) {
     }
     return cachedTextDecoder.decode(getUint8ArrayMemory0().subarray(ptr, ptr + len));
 }
+
+let WASM_VECTOR_LEN = 0;
 
 let wasmModule, wasm;
 function __wbg_finalize_init(instance, module) {

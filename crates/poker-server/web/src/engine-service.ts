@@ -54,26 +54,34 @@ export interface EngineApi {
   updateCommunity: (community: number[]) => void
   /** update opponent cards for showdown eval */
   updateOppCards: (cards: [number, number]) => void
-  /** sync stacks and button (guest catches up to host after showdown) */
-  syncState: (stacks: [number, number], button: number) => void
+  /** sync stacks and button */
+  syncState: (stacks: number[], button: number) => void
   /** evaluate showdown, returns winner */
   showdown: () => number
   /** get current pot */
   pot: () => number
-  /** get stacks */
-  stacks: () => [number, number]
+  /** get stacks for all players */
+  stacks: () => number[]
   /** get phase */
   phase: () => number
-  /** get button position (0 or 1) */
+  /** get button position */
   button: () => number
+  /** number of players */
+  numPlayers: () => number
+  /** seat state (0=empty, 1=active, 2=sitting_out, 3=folded, 4=allin) */
+  seatState: (seat: number) => number
   /** has WASM engine */
   hasEngine: () => boolean
 }
 
-export function createEngineApi(WasmGameClass: any, buyin: number, sb: number, bb: number): EngineApi {
+export function createEngineApi(WasmGameClass: any, buyin: number, sb: number, bb: number, numPlayers: number = 2, rakeBps: number = 0, rakeCap: number = 0): EngineApi {
   let engine: any = null
   if (WasmGameClass) {
-    engine = new WasmGameClass(buyin, sb, bb)
+    if (numPlayers > 2 || rakeBps > 0) {
+      engine = WasmGameClass.new_table(numPlayers, buyin, sb, bb, rakeBps, rakeCap)
+    } else {
+      engine = new WasmGameClass(buyin, sb, bb)
+    }
   }
 
   function apply(seat: number, action: string, amount: number): EngineEvent[] {
@@ -173,10 +181,16 @@ export function createEngineApi(WasmGameClass: any, buyin: number, sb: number, b
     engine.update_opp_cards(cards[0], cards[1])
   }
 
-  function syncState(stacks: [number, number], button: number) {
+  function syncState(stacks: number[], button: number) {
     if (!engine) return
-    engine.set_state(stacks[0], stacks[1], button)
+    if (stacks.length === 2) {
+      engine.set_state(stacks[0], stacks[1], button)
+    } else {
+      engine.set_state_n(new Uint32Array(stacks), button)
+    }
   }
+
+  const np = numPlayers
 
   return {
     apply,
@@ -187,9 +201,15 @@ export function createEngineApi(WasmGameClass: any, buyin: number, sb: number, b
     syncState,
     showdown: () => engine?.showdown() ?? 0,
     pot: () => engine?.pot() ?? 0,
-    stacks: () => engine ? [engine.stack(0), engine.stack(1)] : [buyin, buyin],
+    stacks: () => {
+      if (!engine) return Array(np).fill(buyin)
+      try { return Array.from(engine.all_stacks()) }
+      catch { return Array.from({ length: np }, (_, i) => engine.stack(i)) }
+    },
     phase: () => engine?.phase() ?? 0,
     button: () => engine?.button() ?? 0,
+    numPlayers: () => engine?.num_players() ?? np,
+    seatState: (seat: number) => engine?.seat_state(seat) ?? 0,
     hasEngine: () => !!engine,
   }
 }
