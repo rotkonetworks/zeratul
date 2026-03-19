@@ -514,53 +514,46 @@ export function createGame(
       }
 
       case 'showdown': {
+        // P2P: BOTH sides evaluate showdown through the engine.
+        // no "host evaluates and tells guest" — both are equal peers.
+        if (!engineApi) break
         const d = msg.d as { cards: [number, number] }
         oppCards = d.cards
         cb.onMsg({ type: 'Showdown', hands: [[oppSeat, [cardToJson(d.cards[0]), cardToJson(d.cards[1])]]] })
 
-        if (isHost && engineApi) {
-          // CRITICAL: get community from shuffle filter (may be revealed async)
+        // wait for community cards if not yet revealed (all-in async path)
+        const doShowdown = () => {
           const sc = shuffle.community()
           if (sc.some(c => c > 0)) community = [...sc]
-          // if community is still zeros, the all-in reveal shares haven't arrived yet
-          // delay showdown until community is populated
-          if (!community.some(c => c > 0)) {
-            console.warn('[showdown] community is zeros — waiting for reveal shares')
-            // retry after a short delay
-            const retryShowdown = () => {
-              const sc2 = shuffle.community()
-              if (sc2.some(c => c > 0)) {
-                community = [...sc2]
-                evaluateShowdown(oppCards)
-              } else {
-                setTimeout(retryShowdown, 100)
-              }
-            }
-            setTimeout(retryShowdown, 100)
-            break
-          }
-          evaluateShowdown(oppCards)
-        }
-        // button rotated by engine in showdown()/fold
-        break
-      }
 
-      // helper: extracted so it can be called after async community reveal
-      function evaluateShowdown(oCards: [number, number]) {
-        if (!engineApi) return
-        console.log('[showdown] community=', JSON.stringify(community))
-        engineApi.updateCommunity(community)
-        engineApi.updateOppCards(oCards)
-        const potBefore = engineApi.pot()
-        console.log('[showdown] BEFORE: pot=', potBefore, 'stacks=', JSON.stringify(engineApi.stacks()), 'phase=', engineApi.phase())
-        const winner = engineApi.showdown()
-        const stacks = engineApi.stacks()
-        lastStacks = [...stacks] as [number, number]
-        console.log('[showdown] AFTER: winner=', winner, 'stacks=', JSON.stringify(stacks), 'pot=', potBefore)
-        cb.onMsg({ type: 'PotAwarded', seat: winner, amount: potBefore })
-        cb.onMsg({ type: 'HandComplete', stacks: [...stacks] })
-        send({ t: 'result', d: { winner, pot: potBefore, stacks: [...stacks], button: engineApi.button() } })
-        handComplete()
+          if (!community.some(c => c > 0)) {
+            // community not revealed yet — retry
+            if (showdownRetries++ < 100) {
+              setTimeout(doShowdown, 100)
+              return
+            }
+            cb.onLog('showdown timeout — community cards unavailable')
+          }
+
+          // update engine with final state
+          engineApi!.updateCommunity(community)
+          engineApi!.updateOppCards(oppCards)
+
+          const pot = engineApi!.pot()
+          const winner = engineApi!.showdown()
+          const stacks = engineApi!.stacks()
+          lastStacks = [...stacks] as [number, number]
+
+          console.log('[showdown] community=', JSON.stringify(community),
+            'winner=', winner, 'pot=', pot, 'stacks=', JSON.stringify(stacks))
+
+          cb.onMsg({ type: 'PotAwarded', seat: winner, amount: pot })
+          cb.onMsg({ type: 'HandComplete', stacks: [...stacks] })
+          handComplete()
+        }
+        let showdownRetries = 0
+        doShowdown()
+        break
       }
 
       case 'timeout_claim': {
@@ -579,16 +572,11 @@ export function createGame(
       }
 
       case 'result': {
+        // LEGACY: kept for backwards compat with old clients.
+        // In P2P model, both sides evaluate showdown independently.
+        // This message is no longer sent by new clients.
         const d = msg.d as { winner: number; pot: number; stacks: number[]; button?: number }
-        lastStacks = [d.stacks[0] ?? 0, d.stacks[1] ?? 0]
-        // sync guest engine with host's authoritative state
-        if (engineApi) {
-          const btn = d.button ?? (engineApi.button() === 0 ? 1 : 0)
-          engineApi.syncState(lastStacks, btn)
-        }
-        cb.onMsg({ type: 'PotAwarded', seat: d.winner, amount: d.pot })
-        cb.onMsg({ type: 'HandComplete', stacks: d.stacks })
-        handComplete()
+        console.log('[game] received legacy result message — ignoring (P2P model)')
         break
       }
     }
