@@ -37,3 +37,5 @@ pub mod range;
 pub mod brain;
 #[cfg(feature = "std")]
 pub mod ctm;
+#[cfg(feature = "onnx")]
+pub mod inference;

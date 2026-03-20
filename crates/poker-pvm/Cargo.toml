@@ -18,6 +18,11 @@ name = "cfr-train"
 path = "src/cfr/train.rs"
 required-features = ["std"]
 
+[[bin]]
+name = "cfr-bench"
+path = "src/cfr/bench.rs"
+required-features = ["std"]
+
 [features]
 default = ["std"]
 std = []
@@ -27,12 +32,23 @@ pvm = []
 wasm = ["std", "dep:wasm-bindgen", "dep:serde", "dep:serde-wasm-bindgen"]
 # GPU-accelerated hand evaluation via ROCm HIP
 gpu = ["std"]
+# parallel CFR training (for multi-core servers)
+parallel = ["std", "dep:rayon", "dep:dashmap", "dep:parking_lot"]
+# ONNX inference for CTM-MoE bot
+onnx = ["std", "dep:ort", "dep:ndarray"]
 
 [dependencies]
 # optional: WASM bindings
 wasm-bindgen = { version = "0.2", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde-wasm-bindgen = { version = "0.6", optional = true }
+# parallel CFR training
+rayon = { version = "1.10", optional = true }
+dashmap = { version = "6", optional = true }
+parking_lot = { version = "0.12", optional = true }
+# ONNX runtime for CTM-MoE inference
+ort = { version = "2.0.0-rc.12", optional = true }
+ndarray = { version = "0.16", optional = true }
 
 [dev-dependencies]
 rand = "0.8"
