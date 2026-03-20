@@ -1,15 +1,26 @@
 // GPU-accelerated Monte Carlo hand strength evaluation
-// compiled with hipcc for AMD ROCm (gfx1102 / RX 7600)
+// works on both NVIDIA (nvcc) and AMD (hipcc)
 //
-// each thread:
-//   1. generate random opponent cards + remaining board
-//   2. evaluate both 7-card hands
-//   3. write win/tie/loss to output buffer
-//
-// launched with N threads per hand strength query.
-// CPU reads back win count → equity percentile.
+// compile:
+//   nvcc -shared -o libgpu_eval.so gpu_eval.hip -Xcompiler -fPIC    # NVIDIA
+//   hipcc -shared -o libgpu_eval.so gpu_eval.hip -fPIC               # AMD ROCm
 
+#ifdef __NVCC__
+#include <cuda_runtime.h>
+#define gpuMalloc       cudaMalloc
+#define gpuFree         cudaFree
+#define gpuMemcpy       cudaMemcpy
+#define gpuMemcpyH2D    cudaMemcpyHostToDevice
+#define gpuMemcpyD2H    cudaMemcpyDeviceToHost
+#else
 #include <hip/hip_runtime.h>
+#define gpuMalloc       gpuMalloc
+#define gpuFree         gpuFree
+#define gpuMemcpy       hipMemcpy
+#define gpuMemcpyH2D    hipMemcpyHostToDevice
+#define gpuMemcpyD2H    hipMemcpyDeviceToHost
+#endif
+
 #include <stdint.h>
 
 // ============================================================================
@@ -180,9 +191,9 @@ int gpu_hand_equity(
     uint8_t* d_results;
     uint8_t* h_results = (uint8_t*)malloc(num_rollouts);
 
-    hipMalloc(&d_board, 5);
-    hipMalloc(&d_results, num_rollouts);
-    hipMemcpy(d_board, board, num_board, hipMemcpyHostToDevice);
+    gpuMalloc(&d_board, 5);
+    gpuMalloc(&d_results, num_rollouts);
+    gpuMemcpy(d_board, board, num_board, gpuMemcpyH2D);
 
     int threads_per_block = 256;
     int blocks = (num_rollouts + threads_per_block - 1) / threads_per_block;
@@ -194,7 +205,7 @@ int gpu_hand_equity(
         hole0, hole1, d_board, num_board, d_results, seed, num_rollouts
     );
 
-    hipMemcpy(h_results, d_results, num_rollouts, hipMemcpyDeviceToHost);
+    gpuMemcpy(h_results, d_results, num_rollouts, gpuMemcpyD2H);
 
     int wins = 0, ties = 0;
     for (int i = 0; i < num_rollouts; i++) {
@@ -202,8 +213,8 @@ int gpu_hand_equity(
         else if (h_results[i] == 1) ties++;
     }
 
-    hipFree(d_board);
-    hipFree(d_results);
+    gpuFree(d_board);
+    gpuFree(d_results);
     free(h_results);
 
     // equity in basis points (0-10000)
