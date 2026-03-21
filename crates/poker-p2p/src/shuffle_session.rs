@@ -12,14 +12,10 @@ use zk_shuffle::{
     remasking::ElGamalCiphertext,
     proof::prove_shuffle,
     verify::verify_shuffle,
+    dalek::{CompressedRistretto, RistrettoPoint, Scalar, RISTRETTO_BASEPOINT_POINT as G},
 };
-use curve25519_dalek::ristretto::RistrettoPoint;
-use curve25519_dalek::scalar::Scalar;
-use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT as G;
 use rand_core::OsRng;
 use sha2::{Sha256, Digest};
-
-use crate::protocol::Message;
 
 /// state of the shuffle protocol
 #[derive(Clone, Debug)]
@@ -61,6 +57,10 @@ pub struct ShuffleSession {
     pub state: ShuffleState,
     /// deck config
     config: ShuffleConfig,
+    /// whether we have performed our shuffle
+    we_shuffled: bool,
+    /// whether peer has performed their shuffle
+    peer_shuffled: bool,
 }
 
 impl ShuffleSession {
@@ -81,6 +81,8 @@ impl ShuffleSession {
             is_host,
             state: ShuffleState::WaitingForKey,
             config: ShuffleConfig::standard_deck(),
+            we_shuffled: false,
+            peer_shuffled: false,
         }
     }
 
@@ -91,20 +93,23 @@ impl ShuffleSession {
 
     /// receive peer's public key, compute joint key, create initial encrypted deck
     pub fn receive_peer_key(&mut self, peer_pk_bytes: &[u8; 32]) -> Result<(), String> {
-        let peer_pk = curve25519_dalek::ristretto::CompressedRistretto::from_slice(peer_pk_bytes)
-            .map_err(|_| "invalid peer pk")?
+        let peer_pk = CompressedRistretto::from_slice(peer_pk_bytes)
+            .map_err(|_| "invalid peer pk".to_string())?
             .decompress()
-            .ok_or("failed to decompress peer pk")?;
+            .ok_or_else(|| "failed to decompress peer pk".to_string())?;
 
         self.peer_pk = Some(peer_pk);
         let joint = self.our_pk + peer_pk;
         self.joint_pk = Some(joint);
 
-        // create initial deck: 52 cards encrypted under joint key
+        // create initial deck: 52 cards as trivial encryptions (r=0)
+        // both parties must derive the same initial deck deterministically;
+        // the shuffle+remask steps will randomize the ciphertexts
+        let identity = Scalar::ZERO * G;
         self.deck = (0..52).map(|i| {
             let card_point = card_to_point(i);
-            let (ct, _) = ElGamalCiphertext::encrypt(&card_point, &joint, &mut OsRng);
-            ct
+            // trivial encryption: (0*G, 0*PK + M) = (identity, M)
+            ElGamalCiphertext::new(identity, card_point)
         }).collect();
 
         Ok(())
@@ -115,9 +120,9 @@ impl ShuffleSession {
         let joint = self.joint_pk.ok_or("no joint key")?;
         let mut rng = OsRng;
 
-        let perm = zk_shuffle::Permutation::random(&mut rand::thread_rng(), 52);
-        let (shuffled, randomness) = zk_shuffle::remasking::shuffle_and_remask(
-            &joint, &self.deck, &perm,
+        let perm = zk_shuffle::Permutation::random(&mut rng, 52);
+        let (shuffled, randomness) = zk_shuffle::shuffle_and_remask(
+            &joint, &self.deck, &perm, &mut rng,
         );
 
         let mut transcript = ShuffleTranscript::new(b"zk.poker", self.hand_number as u32);
@@ -142,6 +147,8 @@ impl ShuffleSession {
         self.our_shuffle = Some(shuffled.clone());
         self.our_proof = Some(proof);
         self.deck = shuffled;
+        self.we_shuffled = true;
+        self.try_complete();
 
         Ok((deck_bytes, proof_bytes))
     }
@@ -153,7 +160,7 @@ impl ShuffleSession {
         let output_deck = deserialize_deck(deck_bytes)?;
 
         let proof = ShuffleProof::from_bytes(proof_bytes)
-            .map_err(|e| format!("bad proof: {}", e))?;
+            .ok_or_else(|| "bad proof: deserialization failed".to_string())?;
 
         let mut transcript = ShuffleTranscript::new(b"zk.poker", self.hand_number as u32);
         transcript.bind_aggregate_key(joint.compress().as_bytes());
@@ -172,16 +179,24 @@ impl ShuffleSession {
             return Err("shuffle proof INVALID — peer cheated".into());
         }
 
-        self.deck = output_deck.clone();
-
-        // if we've both shuffled, compute commitment
-        let commitment = deck_commitment(&self.deck);
-        self.state = ShuffleState::Complete {
-            deck: self.deck.clone(),
-            commitment,
-        };
+        self.deck = output_deck;
+        self.peer_shuffled = true;
+        self.try_complete();
 
         Ok(())
+    }
+
+    /// check if both parties have shuffled; if so, mark complete
+    fn try_complete(&mut self) {
+        if self.we_shuffled && self.peer_shuffled {
+            let commitment = deck_commitment(&self.deck);
+            self.state = ShuffleState::Complete {
+                deck: self.deck.clone(),
+                commitment,
+            };
+        } else {
+            self.state = ShuffleState::WaitingForPeerShuffle;
+        }
     }
 
     /// reveal a card (partial decryption with our key)
@@ -266,12 +281,12 @@ fn deserialize_deck(bytes: &[u8]) -> Result<Vec<ElGamalCiphertext>, String> {
     }
     let mut deck = Vec::new();
     for chunk in bytes.chunks(64) {
-        let c0 = curve25519_dalek::ristretto::CompressedRistretto::from_slice(&chunk[..32])
-            .map_err(|_| "bad c0")?
-            .decompress().ok_or("bad c0 decompress")?;
-        let c1 = curve25519_dalek::ristretto::CompressedRistretto::from_slice(&chunk[32..])
-            .map_err(|_| "bad c1")?
-            .decompress().ok_or("bad c1 decompress")?;
+        let c0 = CompressedRistretto::from_slice(&chunk[..32])
+            .map_err(|_| "bad c0".to_string())?
+            .decompress().ok_or_else(|| "bad c0 decompress".to_string())?;
+        let c1 = CompressedRistretto::from_slice(&chunk[32..])
+            .map_err(|_| "bad c1".to_string())?
+            .decompress().ok_or_else(|| "bad c1 decompress".to_string())?;
         deck.push(ElGamalCiphertext::new(c0, c1));
     }
     Ok(deck)

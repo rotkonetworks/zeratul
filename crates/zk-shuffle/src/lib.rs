@@ -35,6 +35,57 @@ pub use remasking::ElGamalCiphertext;
 pub use transcript::ShuffleTranscript;
 pub use verify::verify_shuffle;
 
+/// re-export curve25519-dalek types for downstream crates
+pub mod dalek {
+    pub use curve25519_dalek::ristretto::{CompressedRistretto, RistrettoPoint};
+    pub use curve25519_dalek::scalar::Scalar;
+    pub use curve25519_dalek::constants::RISTRETTO_BASEPOINT_POINT;
+}
+
+use curve25519_dalek::{
+    constants::RISTRETTO_BASEPOINT_POINT as G,
+    ristretto::RistrettoPoint,
+    scalar::Scalar,
+};
+use rand_core::{CryptoRng, RngCore};
+
+/// create an encrypted deck of `n` cards under the given public key
+pub fn make_deck<R: RngCore + CryptoRng>(
+    pk: &RistrettoPoint,
+    n: usize,
+    rng: &mut R,
+) -> Vec<ElGamalCiphertext> {
+    (0..n)
+        .map(|i| {
+            let msg = Scalar::from(i as u64) * G;
+            let (ct, _) = ElGamalCiphertext::encrypt(&msg, pk, rng);
+            ct
+        })
+        .collect()
+}
+
+/// shuffle and remask a deck according to a permutation
+///
+/// returns the shuffled deck and the remasking randomness (needed for proving)
+pub fn shuffle_and_remask<R: RngCore + CryptoRng>(
+    pk: &RistrettoPoint,
+    deck: &[ElGamalCiphertext],
+    perm: &Permutation,
+    rng: &mut R,
+) -> (Vec<ElGamalCiphertext>, Vec<Scalar>) {
+    let mut output = Vec::with_capacity(deck.len());
+    let mut randomness = Vec::with_capacity(deck.len());
+
+    for i in 0..deck.len() {
+        let pi_i = perm.get(i);
+        let (remasked, r) = deck[pi_i].remask(pk, rng);
+        output.push(remasked);
+        randomness.push(r);
+    }
+
+    (output, randomness)
+}
+
 /// shuffle proof errors
 #[derive(Debug, Clone)]
 pub enum ShuffleError {
