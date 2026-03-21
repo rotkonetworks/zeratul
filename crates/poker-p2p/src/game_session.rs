@@ -9,10 +9,12 @@
 
 use crate::engine::*;
 use crate::protocol::*;
+use crate::shuffle_session::{ShuffleSession, ShuffleState};
 use crate::table::{sign_action, verify_action};
 use ed25519_dalek::{SigningKey, Signer, VerifyingKey, Verifier, Signature};
 use sha2::{Sha256, Digest};
 use zk_shuffle::poker::Card;
+use zk_shuffle::dalek::CompressedRistretto;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 /// co-signed game session between two peers
@@ -31,6 +33,18 @@ pub struct GameSession {
     action_required_at: Option<u64>,
     /// completed hand transcripts (for dispute submission)
     completed_hands: Vec<HandTranscript>,
+    /// mental poker shuffle session (None = plaintext mode)
+    shuffle: Option<ShuffleSession>,
+    /// button position for the current shuffle (stored until shuffle completes)
+    shuffle_button: u8,
+    /// whether we are the first shuffler (host)
+    shuffle_is_host: bool,
+    /// whether we have performed our shuffle step
+    shuffle_we_did: bool,
+    /// cards revealed so far during shuffle deal (card_index → Card)
+    revealed_cards: Vec<(usize, Card)>,
+    /// our pending partial decryptions sent for card reveals
+    our_partials_sent: Vec<(usize, [u8; 32])>,
 }
 
 /// events emitted by GameSession to the transport layer
@@ -48,6 +62,19 @@ pub enum SessionEvent {
     TimeoutReady(TimeoutClaim),
     /// error
     Error(String),
+
+    // --- shuffle protocol events ---
+
+    /// send our ElGamal public key to peer
+    ShuffleKeyExchange { our_pk: [u8; 32] },
+    /// send shuffled+remasked deck with ZK proof to peer
+    ShuffleDeck { deck_bytes: Vec<u8>, proof_bytes: Vec<u8> },
+    /// both shuffles verified, deck committed
+    ShuffleComplete { commitment: [u8; 32] },
+    /// partial decryption for card reveals (sent to peer)
+    CardRevealPartial { card_indices: Vec<usize>, partials: Vec<[u8; 32]> },
+    /// cards fully decrypted and mapped, hand ready to start
+    CardsRevealed { cards: Vec<(usize, Card)> },
 }
 
 impl GameSession {
@@ -73,6 +100,12 @@ impl GameSession {
             pending_witness: None,
             action_required_at: None,
             completed_hands: Vec::new(),
+            shuffle: None,
+            shuffle_button: 0,
+            shuffle_is_host: false,
+            shuffle_we_did: false,
+            revealed_cards: Vec::new(),
+            our_partials_sent: Vec::new(),
         })
     }
 
@@ -298,6 +331,193 @@ impl GameSession {
         &self.transcript
     }
 
+    // --- shuffle protocol ---
+
+    /// begin a mental poker shuffle for a new hand.
+    /// creates a ShuffleSession, returns our ElGamal public key for the peer.
+    pub fn start_shuffle(&mut self, button: u8) -> Vec<SessionEvent> {
+        self.hand_number += 1;
+        self.sequence = 0;
+        self.transcript.clear();
+        self.pending_witness = None;
+        self.action_required_at = None;
+        self.revealed_cards.clear();
+        self.our_partials_sent.clear();
+        self.shuffle_button = button;
+
+        let is_host = self.my_seat == 0;
+        self.shuffle_is_host = is_host;
+        self.shuffle_we_did = false;
+        let session = ShuffleSession::new(self.hand_number, is_host);
+        let our_pk = session.our_public_key();
+        self.shuffle = Some(session);
+
+        vec![SessionEvent::ShuffleKeyExchange { our_pk }]
+    }
+
+    /// receive peer's ElGamal public key.
+    /// if we're host, immediately perform our shuffle and return the deck+proof.
+    pub fn receive_shuffle_key(&mut self, peer_pk: [u8; 32]) -> Result<Vec<SessionEvent>, String> {
+        let shuffle = self.shuffle.as_mut().ok_or("no shuffle session")?;
+        shuffle.receive_peer_key(&peer_pk)?;
+
+        if self.shuffle_is_host {
+            // host shuffles first
+            let (deck_bytes, proof_bytes) = shuffle.shuffle()?;
+            self.shuffle_we_did = true;
+            Ok(vec![SessionEvent::ShuffleDeck { deck_bytes, proof_bytes }])
+        } else {
+            // guest waits for host's shuffle
+            Ok(vec![])
+        }
+    }
+
+    /// receive peer's shuffled deck + proof.
+    /// verifies the proof, then:
+    /// - if we haven't shuffled yet, shuffle on top and return our deck+proof
+    /// - if both have shuffled, emit ShuffleComplete and begin dealing hole cards
+    pub fn receive_shuffle(&mut self, deck_bytes: &[u8], proof_bytes: &[u8]) -> Result<Vec<SessionEvent>, String> {
+        let shuffle = self.shuffle.as_mut().ok_or("no shuffle session")?;
+        shuffle.receive_shuffle(deck_bytes, proof_bytes)?;
+
+        let mut out = Vec::new();
+
+        if !self.shuffle_we_did {
+            // our turn to shuffle on top
+            let (our_deck, our_proof) = shuffle.shuffle()?;
+            self.shuffle_we_did = true;
+            out.push(SessionEvent::ShuffleDeck {
+                deck_bytes: our_deck,
+                proof_bytes: our_proof,
+            });
+        }
+
+        if let ShuffleState::Complete { commitment, .. } = &shuffle.state {
+            let commitment = *commitment;
+            out.push(SessionEvent::ShuffleComplete { commitment });
+            // begin dealing: reveal hole cards (indices 0-3 for heads-up)
+            out.extend(self.reveal_hole_cards()?);
+        }
+
+        Ok(out)
+    }
+
+    /// after shuffle completes, send partial decryptions for opponent's hole cards.
+    /// in heads-up: cards 0,1 go to seat 0; cards 2,3 go to seat 1.
+    /// we send partials for the opponent's cards (they need our partial to decrypt).
+    /// we also compute our own partials for our cards (we need theirs).
+    fn reveal_hole_cards(&mut self) -> Result<Vec<SessionEvent>, String> {
+        let shuffle = self.shuffle.as_ref().ok_or("no shuffle session")?;
+
+        // heads-up deal: card 0,1 → seat 0; card 2,3 → seat 1
+        let my_indices: Vec<usize> = if self.my_seat == 0 {
+            vec![0, 1]
+        } else {
+            vec![2, 3]
+        };
+        let peer_indices: Vec<usize> = if self.my_seat == 0 {
+            vec![2, 3]
+        } else {
+            vec![0, 1]
+        };
+
+        // compute and store our partials for our own cards (we'll need peer's to decrypt)
+        for &idx in &my_indices {
+            let (partial, _proof) = shuffle.reveal_card(idx)?;
+            self.our_partials_sent.push((idx, partial));
+        }
+
+        // compute partials for opponent's cards and send them (with proofs)
+        let mut partials = Vec::new();
+        for &idx in &peer_indices {
+            let (partial, _proof) = shuffle.reveal_card(idx)?;
+            // TODO: send proof alongside partial for verification
+            partials.push(partial);
+        }
+
+        Ok(vec![SessionEvent::CardRevealPartial {
+            card_indices: peer_indices,
+            partials,
+        }])
+    }
+
+    /// receive peer's partial decryptions for our hole cards.
+    /// combine with our partial to fully decrypt, map to Card values,
+    /// then start the hand via the engine.
+    pub fn receive_card_reveal(
+        &mut self,
+        card_indices: &[usize],
+        peer_partials: &[[u8; 32]],
+    ) -> Result<Vec<SessionEvent>, String> {
+        if card_indices.len() != peer_partials.len() {
+            return Err("card_indices/partials length mismatch".into());
+        }
+
+        let shuffle = self.shuffle.as_ref().ok_or("no shuffle session")?;
+
+        // decrypt each card using both partials
+        for (i, &card_idx) in card_indices.iter().enumerate() {
+            // find our partial for this card index
+            let our_partial_bytes = self.our_partials_sent.iter()
+                .find(|(idx, _)| *idx == card_idx)
+                .map(|(_, p)| *p)
+                .ok_or_else(|| format!("no our partial for card {}", card_idx))?;
+
+            let our_partial = CompressedRistretto::from_slice(&our_partial_bytes)
+                .map_err(|_| "bad our partial")?
+                .decompress()
+                .ok_or("failed to decompress our partial")?;
+
+            let peer_partial = CompressedRistretto::from_slice(&peer_partials[i])
+                .map_err(|_| "bad peer partial")?
+                .decompress()
+                .ok_or("failed to decompress peer partial")?;
+
+            let ct = match &shuffle.state {
+                ShuffleState::Complete { deck, .. } => {
+                    deck.get(card_idx).ok_or("card index out of range")?
+                }
+                _ => return Err("shuffle not complete".into()),
+            };
+
+            let card_index = ShuffleSession::decrypt_card(ct, &our_partial, &peer_partial)?;
+            let card = index_to_card(card_index);
+            self.revealed_cards.push((card_idx, card));
+        }
+
+        let mut out = Vec::new();
+        let revealed: Vec<(usize, Card)> = self.revealed_cards.clone();
+        out.push(SessionEvent::CardsRevealed { cards: revealed.clone() });
+
+        // once all 4 hole cards are revealed, start the hand
+        if self.revealed_cards.len() >= 4 {
+            // build the deck in shuffle order: revealed cards first, then placeholders
+            // for community cards (which will be revealed later as needed)
+            let mut deck = Vec::with_capacity(52);
+            for idx in 0..52 {
+                if let Some((_, card)) = self.revealed_cards.iter().find(|(i, _)| *i == idx) {
+                    deck.push(*card);
+                } else {
+                    // placeholder — community cards will be revealed later
+                    // for now use a deterministic placeholder
+                    deck.push(index_to_card(idx as u8));
+                }
+            }
+
+            let engine_events = self.engine.new_hand(self.shuffle_button, &deck)
+                .map_err(|e| format!("{}", e))?;
+
+            for e in &engine_events {
+                if let EngineEvent::ActionRequired { .. } = e {
+                    self.action_required_at = Some(unix_now());
+                }
+                out.push(SessionEvent::Engine(e.clone()));
+            }
+        }
+
+        Ok(out)
+    }
+
     // --- private ---
 
     fn finalize_hand(&mut self) -> Vec<SessionEvent> {
@@ -368,6 +588,20 @@ fn witness_payload(hand_number: u64, sequence: u64, action: &PlayerAction) -> Ve
     payload.extend_from_slice(&sequence.to_le_bytes());
     payload.extend_from_slice(&action_hash);
     payload
+}
+
+/// map a card index (0-51) to a Card value.
+/// standard ordering: clubs, diamonds, hearts, spades × 2..A
+fn index_to_card(index: u8) -> Card {
+    use zk_shuffle::poker::{Rank, Suit};
+    let suit = match index / 13 {
+        0 => Suit::Clubs,
+        1 => Suit::Diamonds,
+        2 => Suit::Hearts,
+        _ => Suit::Spades,
+    };
+    let rank = Rank::ALL[(index % 13) as usize];
+    Card { rank, suit }
 }
 
 fn timeout_claim_payload(claim: &TimeoutClaim) -> Vec<u8> {

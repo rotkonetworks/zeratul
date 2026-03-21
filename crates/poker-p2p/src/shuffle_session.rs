@@ -15,7 +15,18 @@ use zk_shuffle::{
     dalek::{CompressedRistretto, RistrettoPoint, Scalar, RISTRETTO_BASEPOINT_POINT as G},
 };
 use rand_core::OsRng;
-use sha2::{Sha256, Digest};
+use sha2::{Sha256, Sha512, Digest};
+
+/// Chaum-Pedersen proof of correct partial decryption
+#[derive(Clone, Debug)]
+pub struct RevealProof {
+    /// commitment on generator G: k*G
+    pub r_g: [u8; 32],
+    /// commitment on ciphertext c0: k*c0
+    pub r_c0: [u8; 32],
+    /// response: k - challenge * sk
+    pub response: [u8; 32],
+}
 
 /// state of the shuffle protocol
 #[derive(Clone, Debug)]
@@ -199,15 +210,87 @@ impl ShuffleSession {
         }
     }
 
-    /// reveal a card (partial decryption with our key)
-    pub fn reveal_card(&self, card_index: usize) -> Result<[u8; 32], String> {
+    /// reveal a card with Chaum-Pedersen proof of correct decryption.
+    ///
+    /// proves DLOG equality: log_G(pk) == log_{c0}(partial)
+    /// i.e. the same secret key sk was used for both pk = sk*G and partial = sk*c0.
+    ///
+    /// returns (partial_decryption, proof) where proof = (commitment_g, commitment_c0, response)
+    pub fn reveal_card(&self, card_index: usize) -> Result<([u8; 32], RevealProof), String> {
         if card_index >= self.deck.len() {
             return Err("card index out of range".into());
         }
         let ct = &self.deck[card_index];
-        // our partial decryption: sk * c0
         let partial = self.our_sk * ct.c0;
-        Ok(partial.compress().to_bytes())
+
+        // Chaum-Pedersen proof: prove sk*G = pk AND sk*c0 = partial
+        let mut rng = OsRng;
+        let k = Scalar::random(&mut rng); // random nonce
+        let r_g = k * G;            // commitment on G
+        let r_c0 = k * ct.c0;       // commitment on c0
+
+        // challenge = H(pk || c0 || partial || r_g || r_c0)
+        let challenge = {
+            let mut h = sha2::Sha512::new();
+            h.update(b"zk.poker/reveal/v1");
+            h.update(self.our_pk.compress().as_bytes());
+            h.update(ct.c0.compress().as_bytes());
+            h.update(partial.compress().as_bytes());
+            h.update(r_g.compress().as_bytes());
+            h.update(r_c0.compress().as_bytes());
+            let hash: [u8; 64] = h.finalize().into();
+            Scalar::from_bytes_mod_order_wide(&hash)
+        };
+
+        // response = k - challenge * sk
+        let response = k - challenge * self.our_sk;
+
+        Ok((partial.compress().to_bytes(), RevealProof {
+            r_g: r_g.compress().to_bytes(),
+            r_c0: r_c0.compress().to_bytes(),
+            response: response.to_bytes(),
+        }))
+    }
+
+    /// verify a card reveal proof from peer
+    pub fn verify_reveal(
+        peer_pk: &RistrettoPoint,
+        c0: &RistrettoPoint,
+        partial: &RistrettoPoint,
+        proof: &RevealProof,
+    ) -> bool {
+        let r_g = match CompressedRistretto(proof.r_g).decompress() {
+            Some(p) => p, None => return false,
+        };
+        let r_c0 = match CompressedRistretto(proof.r_c0).decompress() {
+            Some(p) => p, None => return false,
+        };
+        let response = {
+            let ct = Scalar::from_canonical_bytes(proof.response);
+            if bool::from(ct.is_none()) { return false; }
+            ct.unwrap()
+        };
+
+        // recompute challenge
+        let challenge = {
+            let mut h = sha2::Sha512::new();
+            h.update(b"zk.poker/reveal/v1");
+            h.update(peer_pk.compress().as_bytes());
+            h.update(c0.compress().as_bytes());
+            h.update(partial.compress().as_bytes());
+            h.update(r_g.compress().as_bytes());
+            h.update(r_c0.compress().as_bytes());
+            let hash: [u8; 64] = h.finalize().into();
+            Scalar::from_bytes_mod_order_wide(&hash)
+        };
+
+        // verify: response*G + challenge*pk == r_g
+        let check_g = response * G + challenge * peer_pk;
+        if check_g != r_g { return false; }
+
+        // verify: response*c0 + challenge*partial == r_c0
+        let check_c0 = response * c0 + challenge * partial;
+        check_c0 == r_c0
     }
 
     /// decrypt a card given both partial decryptions
@@ -334,12 +417,37 @@ mod tests {
         assert_eq!(host.commitment(), guest.commitment());
         assert!(host.commitment().is_some());
 
-        // test card reveal
-        let host_reveal = host.reveal_card(0).unwrap();
-        let guest_reveal = guest.reveal_card(0).unwrap();
+        // test card reveal with Chaum-Pedersen proof
+        let (host_partial, host_proof) = host.reveal_card(0).unwrap();
+        let (guest_partial, guest_proof) = guest.reveal_card(0).unwrap();
 
-        // both reveals needed to decrypt
-        // (would need to decompress and call decrypt_card)
-        assert_ne!(host_reveal, guest_reveal); // different partial decryptions
+        // different partial decryptions (different keys)
+        assert_ne!(host_partial, guest_partial);
+
+        // verify proofs
+        let ct = &host.deck[0];
+        let host_pk = CompressedRistretto(host.our_public_key()).decompress().unwrap();
+        let guest_pk = CompressedRistretto(guest.our_public_key()).decompress().unwrap();
+        let host_p = CompressedRistretto(host_partial).decompress().unwrap();
+        let guest_p = CompressedRistretto(guest_partial).decompress().unwrap();
+
+        assert!(
+            ShuffleSession::verify_reveal(&host_pk, &ct.c0, &host_p, &host_proof),
+            "host reveal proof must verify"
+        );
+        assert!(
+            ShuffleSession::verify_reveal(&guest_pk, &ct.c0, &guest_p, &guest_proof),
+            "guest reveal proof must verify"
+        );
+
+        // tampered partial should fail
+        let mut bad_partial = host_partial;
+        bad_partial[0] ^= 0xFF;
+        if let Some(bad_p) = CompressedRistretto(bad_partial).decompress() {
+            assert!(
+                !ShuffleSession::verify_reveal(&host_pk, &ct.c0, &bad_p, &host_proof),
+                "tampered reveal must fail verification"
+            );
+        }
     }
 }
