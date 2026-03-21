@@ -4,6 +4,7 @@
 //! - local: all jury shares in-process (demo/testing)
 //! - narsil: calls live narsild validators over HTTP (production)
 
+mod bot;
 mod jury;
 
 use axum::{
@@ -191,6 +192,10 @@ struct Room {
     player_b_share: SecretShare<PallasScalar>,
     /// who must act and when they time out (seat, deadline)
     action_deadline: Option<(u8, tokio::time::Instant)>,
+    /// bot player (if BOT_STRATEGY env var is set)
+    bot: Option<bot::Bot>,
+    /// deferred bot action (applied after process_events returns)
+    bot_pending_action: Option<ActionType>,
 }
 
 impl Room {
@@ -241,6 +246,20 @@ impl Room {
             }
         };
 
+        // load bot if BOT_STRATEGY is set
+        let bot = std::env::var("BOT_STRATEGY").ok().and_then(|path| {
+            match std::fs::read(&path) {
+                Ok(data) => {
+                    tracing::info!("room {}: bot loaded from {} ({} bytes)", code, path, data.len());
+                    Some(bot::Bot::from_strategy(&data, 1)) // bot sits at seat 1
+                }
+                Err(e) => {
+                    tracing::warn!("room {}: failed to load bot from {}: {}", code, path, e);
+                    None
+                }
+            }
+        });
+
         Room {
             code, players: vec![None, None], engine,
             hand_number: 0, button: 0,
@@ -249,6 +268,8 @@ impl Room {
             escrow_address,
             player_a_share, player_b_share,
             action_deadline: None,
+            bot,
+            bot_pending_action: None,
         }
     }
 
@@ -291,7 +312,29 @@ impl Room {
             Ok(e) => e,
             Err(e) => { self.broadcast(&ServerMsg::Error { message: format!("{}", e) }); return; }
         };
+
+        // tell bot about new hand + its cards
+        if let Some(ref mut bot) = self.bot {
+            bot.new_hand(&bot::BotGameState {
+                stacks: self.engine.stacks().to_vec(),
+                pot: 0, community_cards: Vec::new(), bets: Vec::new(),
+                num_players: 2, phase: Phase::Preflop,
+                acting_seat: 0, hand_number: self.hand_number as u32,
+            });
+        }
+
         self.process_events(&events);
+        self.apply_bot_action();
+    }
+
+    /// if bot has a pending action, apply it with a small delay for UX
+    fn apply_bot_action(&mut self) {
+        if let Some(action) = self.bot_pending_action.take() {
+            // apply after a short "thinking" pause
+            self.apply_action(1, action);
+            // recurse in case bot action triggers another bot turn (e.g. preflop)
+            self.apply_bot_action();
+        }
     }
 
     fn apply_action(&mut self, seat: u8, action: ActionType) {
@@ -321,6 +364,12 @@ impl Room {
                         your_cards: Some([card_json(&cards[0]), card_json(&cards[1])]),
                         stacks: self.engine.stacks().to_vec(),
                     });
+                    // tell bot its cards
+                    if *seat == 1 {
+                        if let Some(ref mut bot) = self.bot {
+                            bot.set_cards([card_to_index(&cards[0]), card_to_index(&cards[1])]);
+                        }
+                    }
                 }
                 EngineEvent::ActionRequired { seat, valid_actions } => {
                     self.action_deadline = Some((*seat, tokio::time::Instant::now() + ACTION_TIMEOUT));
@@ -331,6 +380,30 @@ impl Room {
                             min_amount: va.min_amount, max_amount: va.max_amount,
                         }).collect(),
                     });
+
+                    // if it's the bot's turn, queue the bot action
+                    if *seat == 1 {
+                        if let Some(ref mut bot) = self.bot {
+                            let game_state = bot::BotGameState {
+                                stacks: self.engine.stacks().to_vec(),
+                                pot: self.engine.hand_state()
+                                    .map(|h| h.pots.iter().map(|p| p.amount).sum())
+                                    .unwrap_or(0),
+                                community_cards: self.community_cards.clone(),
+                                bets: self.engine.hand_state()
+                                    .map(|h| h.seats.iter().map(|s| s.bet_this_round).collect())
+                                    .unwrap_or_default(),
+                                num_players: 2,
+                                phase: self.engine.hand_state()
+                                    .map(|h| h.phase).unwrap_or(Phase::Preflop),
+                                acting_seat: *seat,
+                                hand_number: self.hand_number as u32,
+                            };
+                            let action = bot.decide(valid_actions, &game_state);
+                            // store for deferred application (can't call apply_action during process_events)
+                            self.bot_pending_action = Some(action);
+                        }
+                    }
                 }
                 EngineEvent::PlayerActed { seat, action, new_stack } => {
                     let (action_str, amount) = action_to_json(action);
@@ -391,6 +464,20 @@ fn card_json(c: &Card) -> CardJson {
             Suit::Hearts => "h", Suit::Spades => "s",
         }.to_string(),
     }
+}
+
+fn card_to_index(card: &Card) -> u8 {
+    let rank = match card.rank {
+        Rank::Two => 0, Rank::Three => 1, Rank::Four => 2,
+        Rank::Five => 3, Rank::Six => 4, Rank::Seven => 5,
+        Rank::Eight => 6, Rank::Nine => 7, Rank::Ten => 8,
+        Rank::Jack => 9, Rank::Queen => 10, Rank::King => 11,
+        Rank::Ace => 12,
+    };
+    let suit = match card.suit {
+        Suit::Clubs => 0, Suit::Diamonds => 1, Suit::Hearts => 2, Suit::Spades => 3,
+    };
+    rank + suit * 13
 }
 
 fn action_to_json(action: &ActionType) -> (String, u64) {
@@ -661,20 +748,29 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     my_seat = Some(seat);
                     let _ = tx.send(ServerMsg::Seated { seat, name: name.clone() });
 
-                    // send invite link to first player
-                    if r.player_count() == 1 {
+                    // if bot is enabled and we're the first human, auto-seat the bot
+                    if r.player_count() == 1 && r.bot.is_some() {
+                        let bot_seat = 1u8;
+                        let (bot_tx, _) = mpsc::unbounded_channel();
+                        r.players[bot_seat as usize] = Some(Player {
+                            name: "bot".into(), seat: bot_seat, tx: bot_tx,
+                            disconnected_at: None,
+                        });
+                        let _ = tx.send(ServerMsg::OpponentJoined { seat: bot_seat, name: "bot".into() });
+                        tracing::info!("room {}: bot auto-seated at seat {}", r.code, bot_seat);
+                        r.start_hand();
+                    } else if r.player_count() == 1 {
+                        // send invite link to first player
                         let _ = tx.send(ServerMsg::InviteLink {
                             url: format!("/{}", r.code),
                         });
-                    }
-
-                    let other = 1 - seat;
-                    r.send_to(other, ServerMsg::OpponentJoined { seat, name });
-
-                    if r.player_count() == 2 {
-                        r.start_hand();
-                    } else {
                         let _ = tx.send(ServerMsg::Waiting);
+                    } else {
+                        let other = 1 - seat;
+                        r.send_to(other, ServerMsg::OpponentJoined { seat, name });
+                        if r.player_count() == 2 {
+                            r.start_hand();
+                        }
                     }
                 } else {
                     let _ = tx.send(ServerMsg::Error { message: "table full".into() });
@@ -692,6 +788,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
 
                 let mut r = room.lock().await;
                 r.apply_action(seat, action);
+                r.apply_bot_action(); // bot responds if it's now their turn
 
                 // hand complete — happy path, no jury needed
                 if r.engine.hand_state().is_none() {

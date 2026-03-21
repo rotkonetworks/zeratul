@@ -6,6 +6,7 @@ description = "WebSocket poker server for browser-based heads-up play"
 
 [dependencies]
 poker-p2p = { path = "../poker-p2p" }
+poker-pvm = { path = "../poker-pvm", features = ["std"] }
 zk-shuffle = { path = "../zk-shuffle" }
 osst = { path = "../osst", features = ["pallas"] }
 
