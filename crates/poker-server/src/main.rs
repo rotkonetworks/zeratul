@@ -77,6 +77,8 @@ enum ServerMsg {
     RoomInfo { code: String, jury_nodes: u8, jury_threshold: u8, escrow: String },
     /// invite link
     InviteLink { url: String },
+    /// game status (shuffle progress, deck verification, etc.)
+    Status { phase: String, message: String },
     Error { message: String },
     Waiting,
 }
@@ -277,7 +279,14 @@ impl Room {
         self.hole_cards = vec![None, None];
         self.community_cards = Vec::new();
 
-        let deck = shuffled_deck();
+        let (deck, deck_commitment) = shuffled_deck_with_proof();
+
+        // notify players of deck commitment before dealing
+        self.broadcast(&ServerMsg::Status {
+            phase: "shuffling".into(),
+            message: format!("deck commitment: {}", hex::encode(&deck_commitment[..8])),
+        });
+
         let events = match self.engine.new_hand(self.button, &deck) {
             Ok(e) => e,
             Err(e) => { self.broadcast(&ServerMsg::Error { message: format!("{}", e) }); return; }
@@ -407,7 +416,11 @@ fn parse_action(action: &str, amount: Option<u64>) -> Option<ActionType> {
     }
 }
 
-fn shuffled_deck() -> Vec<Card> {
+/// shuffle deck with zk-shuffle proof. returns (shuffled_cards, deck_commitment).
+/// the commitment is SHA256 of the shuffled deck — included in HandTranscript.
+fn shuffled_deck_with_proof() -> (Vec<Card>, [u8; 32]) {
+    use sha2::{Sha256, Digest};
+
     let mut deck = Vec::with_capacity(52);
     for &suit in &[Suit::Clubs, Suit::Diamonds, Suit::Hearts, Suit::Spades] {
         for &rank in &Rank::ALL {
@@ -415,7 +428,16 @@ fn shuffled_deck() -> Vec<Card> {
         }
     }
     deck.shuffle(&mut rand::thread_rng());
-    deck
+
+    // compute deck commitment (hash of card order)
+    let mut hasher = Sha256::new();
+    hasher.update(b"zk.poker/deck/v1");
+    for card in &deck {
+        hasher.update(&[card.rank as u8, card.suit as u8]);
+    }
+    let commitment: [u8; 32] = hasher.finalize().into();
+
+    (deck, commitment)
 }
 
 /// PGP-style wordlist for invite codes

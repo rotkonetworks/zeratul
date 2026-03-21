@@ -18,6 +18,7 @@
 
 pub mod engine;
 pub mod game_session;
+pub mod shuffle_session;
 pub mod rendezvous;
 pub mod protocol;
 pub mod table;

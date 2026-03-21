@@ -25,8 +25,10 @@ spake2 = "0.4"
 
 # crypto
 ed25519-dalek = "2"
+curve25519-dalek = { version = "4.1", features = ["rand_core"] }
 sha2 = "0.10"
 blake3 = "1.5"
+rand_core = { version = "0.6", features = ["getrandom"] }
 
 # encoding
 serde = { version = "1", features = ["derive"] }
