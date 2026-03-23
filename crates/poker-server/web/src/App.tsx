@@ -33,7 +33,7 @@ export default function App() {
   const [oppDisconnected, setOppDisconnected] = createSignal(false)
   const [reconnectCountdown, setReconnectCountdown] = createSignal(0)
   const [actionTimer, setActionTimer] = createSignal(0)
-  const [autoAction, setAutoAction] = createSignal<'none' | 'check/fold' | 'check' | 'fold' | 'call any'>('none')
+  const [autoAction, setAutoAction] = createSignal<'none' | 'check/fold' | 'check' | 'fold' | 'call any'>('check/fold')
   const [deckVerified, setDeckVerified] = createSignal(false)
   const [gameStatus, setGameStatus] = createSignal('')
 
