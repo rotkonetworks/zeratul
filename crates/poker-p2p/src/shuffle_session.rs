@@ -8,10 +8,8 @@
 //! uses zk-shuffle crate for the cryptographic operations.
 
 use zk_shuffle::{
-    ShuffleConfig, ShuffleProof, ShuffleTranscript,
+    ZkShuffleProof, ShuffleParameters, prove_zk_shuffle, verify_zk_shuffle,
     remasking::ElGamalCiphertext,
-    proof::prove_shuffle,
-    verify::verify_shuffle,
     dalek::{CompressedRistretto, RistrettoPoint, Scalar, RISTRETTO_BASEPOINT_POINT as G},
 };
 use rand_core::OsRng;
@@ -58,8 +56,8 @@ pub struct ShuffleSession {
     deck: Vec<ElGamalCiphertext>,
     /// deck after our shuffle (before peer shuffles)
     our_shuffle: Option<Vec<ElGamalCiphertext>>,
-    /// our shuffle proof
-    our_proof: Option<ShuffleProof>,
+    /// our shuffle proof (ZK — does not leak permutation)
+    our_proof: Option<ZkShuffleProof>,
     /// hand number (for transcript binding)
     hand_number: u64,
     /// are we the first shuffler (host)?
@@ -67,7 +65,7 @@ pub struct ShuffleSession {
     /// current state
     pub state: ShuffleState,
     /// deck config
-    config: ShuffleConfig,
+    // config removed — ShuffleParameters created on-the-fly from joint_pk
     /// whether we have performed our shuffle
     we_shuffled: bool,
     /// whether peer has performed their shuffle
@@ -91,7 +89,7 @@ impl ShuffleSession {
             hand_number,
             is_host,
             state: ShuffleState::WaitingForKey,
-            config: ShuffleConfig::standard_deck(),
+            // ShuffleParameters created from joint_pk when needed
             we_shuffled: false,
             peer_shuffled: false,
         }
@@ -127,6 +125,7 @@ impl ShuffleSession {
     }
 
     /// perform our shuffle (host goes first, then guest)
+    /// uses ZK shuffle argument — proof does NOT leak the permutation
     pub fn shuffle(&mut self) -> Result<(Vec<u8>, Vec<u8>), String> {
         let joint = self.joint_pk.ok_or("no joint key")?;
         let mut rng = OsRng;
@@ -136,21 +135,19 @@ impl ShuffleSession {
             &joint, &self.deck, &perm, &mut rng,
         );
 
-        let mut transcript = ShuffleTranscript::new(b"zk.poker", self.hand_number as u32);
-        transcript.bind_aggregate_key(joint.compress().as_bytes());
-
-        let player_id = if self.is_host { 0 } else { 1 };
-        let proof = prove_shuffle(
-            &self.config,
-            player_id,
-            &joint,
+        // ZK shuffle proof (Bayer-Groth with Pedersen commitments)
+        let params = ShuffleParameters::new(joint, 52, b"zk.poker");
+        let mut transcript = zk_shuffle::transcript::Blake2Transcript::new(b"zk.poker.shuffle");
+        let perm_indices: Vec<usize> = (0..52).map(|i| perm.get(i)).collect();
+        let proof = prove_zk_shuffle(
+            &params,
             &self.deck,
             &shuffled,
-            &perm,
+            &perm_indices,
             &randomness,
             &mut transcript,
             &mut rng,
-        ).map_err(|e| format!("proof failed: {}", e))?;
+        );
 
         let proof_bytes = proof.to_bytes();
         let deck_bytes = serialize_deck(&shuffled);
@@ -164,26 +161,26 @@ impl ShuffleSession {
         Ok((deck_bytes, proof_bytes))
     }
 
-    /// receive peer's shuffle + proof, verify it
+    /// receive peer's shuffle + ZK proof, verify it
+    /// the proof does NOT reveal the permutation (Bayer-Groth with Pedersen commitments)
     pub fn receive_shuffle(&mut self, deck_bytes: &[u8], proof_bytes: &[u8]) -> Result<(), String> {
         let joint = self.joint_pk.ok_or("no joint key")?;
-        let input_deck = &self.deck; // deck before peer shuffled
+        let input_deck = &self.deck;
         let output_deck = deserialize_deck(deck_bytes)?;
 
-        let proof = ShuffleProof::from_bytes(proof_bytes)
+        let proof = ZkShuffleProof::from_bytes(proof_bytes)
             .ok_or_else(|| "bad proof: deserialization failed".to_string())?;
 
-        let mut transcript = ShuffleTranscript::new(b"zk.poker", self.hand_number as u32);
-        transcript.bind_aggregate_key(joint.compress().as_bytes());
+        let params = ShuffleParameters::new(joint, 52, b"zk.poker");
+        let mut transcript = zk_shuffle::transcript::Blake2Transcript::new(b"zk.poker.shuffle");
 
-        let valid = verify_shuffle(
-            &self.config,
-            &joint,
-            &proof,
+        let valid = verify_zk_shuffle(
+            &params,
             input_deck,
             &output_deck,
+            &proof,
             &mut transcript,
-        ).map_err(|e| format!("verify error: {}", e))?;
+        );
 
         if !valid {
             self.state = ShuffleState::Failed("shuffle proof invalid".into());

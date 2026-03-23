@@ -518,6 +518,138 @@ pub struct ProductArgumentProof {
     pub svp_proof: SingleValueProductProof,
 }
 
+impl ZkShuffleProof {
+    /// serialize proof to bytes
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let mut buf = Vec::new();
+        // a_commits
+        push_u32(&mut buf, self.a_commits.len() as u32);
+        for p in &self.a_commits { buf.extend_from_slice(p.compress().as_bytes()); }
+        // b_commits
+        push_u32(&mut buf, self.b_commits.len() as u32);
+        for p in &self.b_commits { buf.extend_from_slice(p.compress().as_bytes()); }
+        // product_proof
+        buf.extend_from_slice(self.product_proof.b_commit.compress().as_bytes());
+        self.product_proof.svp_proof.serialize_into(&mut buf);
+        // multi_exp_proof
+        self.multi_exp_proof.serialize_into(&mut buf);
+        buf
+    }
+
+    /// deserialize proof from bytes
+    pub fn from_bytes(data: &[u8]) -> Option<Self> {
+        let mut pos = 0;
+        let a_len = read_u32(data, &mut pos)? as usize;
+        let a_commits = read_points(data, &mut pos, a_len)?;
+        let b_len = read_u32(data, &mut pos)? as usize;
+        let b_commits = read_points(data, &mut pos, b_len)?;
+        let b_commit = read_point(data, &mut pos)?;
+        let svp_proof = SingleValueProductProof::deserialize_from(data, &mut pos)?;
+        let multi_exp_proof = MultiExpProof::deserialize_from(data, &mut pos)?;
+        Some(Self {
+            a_commits, b_commits,
+            product_proof: ProductArgumentProof { b_commit, svp_proof },
+            multi_exp_proof,
+        })
+    }
+}
+
+impl SingleValueProductProof {
+    fn serialize_into(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(self.d_commit.compress().as_bytes());
+        buf.extend_from_slice(self.delta_commit.compress().as_bytes());
+        buf.extend_from_slice(self.diff_commit.compress().as_bytes());
+        push_scalars(buf, &self.a_blinded);
+        push_scalars(buf, &self.b_blinded);
+        buf.extend_from_slice(self.r_blinded.as_bytes());
+        buf.extend_from_slice(self.s_blinded.as_bytes());
+    }
+
+    fn deserialize_from(data: &[u8], pos: &mut usize) -> Option<Self> {
+        let d_commit = read_point(data, pos)?;
+        let delta_commit = read_point(data, pos)?;
+        let diff_commit = read_point(data, pos)?;
+        let a_blinded = read_scalars(data, pos)?;
+        let b_blinded = read_scalars(data, pos)?;
+        let r_blinded = read_scalar(data, pos)?;
+        let s_blinded = read_scalar(data, pos)?;
+        Some(Self { d_commit, delta_commit, diff_commit, a_blinded, b_blinded, r_blinded, s_blinded })
+    }
+}
+
+impl MultiExpProof {
+    fn serialize_into(&self, buf: &mut Vec<u8>) {
+        buf.extend_from_slice(self.a_0_commit.compress().as_bytes());
+        push_u32(buf, self.commit_b_k.len() as u32);
+        for p in &self.commit_b_k { buf.extend_from_slice(p.compress().as_bytes()); }
+        push_u32(buf, self.vector_e_k.len() as u32);
+        for ct in &self.vector_e_k {
+            buf.extend_from_slice(ct.c0.compress().as_bytes());
+            buf.extend_from_slice(ct.c1.compress().as_bytes());
+        }
+        push_scalars(buf, &self.a_blinded);
+        buf.extend_from_slice(self.r_blinded.as_bytes());
+        buf.extend_from_slice(self.b_blinded.as_bytes());
+        buf.extend_from_slice(self.s_blinded.as_bytes());
+        buf.extend_from_slice(self.tau_blinded.as_bytes());
+    }
+
+    fn deserialize_from(data: &[u8], pos: &mut usize) -> Option<Self> {
+        let a_0_commit = read_point(data, pos)?;
+        let bk_len = read_u32(data, pos)? as usize;
+        let commit_b_k = read_points(data, pos, bk_len)?;
+        let ek_len = read_u32(data, pos)? as usize;
+        let mut vector_e_k = Vec::with_capacity(ek_len);
+        for _ in 0..ek_len {
+            let c0 = read_point(data, pos)?;
+            let c1 = read_point(data, pos)?;
+            vector_e_k.push(ElGamalCiphertext::new(c0, c1));
+        }
+        let a_blinded = read_scalars(data, pos)?;
+        let r_blinded = read_scalar(data, pos)?;
+        let b_blinded = read_scalar(data, pos)?;
+        let s_blinded = read_scalar(data, pos)?;
+        let tau_blinded = read_scalar(data, pos)?;
+        Some(Self { a_0_commit, commit_b_k, vector_e_k, a_blinded, r_blinded, b_blinded, s_blinded, tau_blinded })
+    }
+}
+
+// serialization helpers
+fn push_u32(buf: &mut Vec<u8>, v: u32) { buf.extend_from_slice(&v.to_le_bytes()); }
+fn push_scalars(buf: &mut Vec<u8>, scalars: &[Scalar]) {
+    push_u32(buf, scalars.len() as u32);
+    for s in scalars { buf.extend_from_slice(s.as_bytes()); }
+}
+fn read_u32(data: &[u8], pos: &mut usize) -> Option<u32> {
+    if *pos + 4 > data.len() { return None; }
+    let v = u32::from_le_bytes(data[*pos..*pos+4].try_into().ok()?);
+    *pos += 4; Some(v)
+}
+fn read_point(data: &[u8], pos: &mut usize) -> Option<RistrettoPoint> {
+    if *pos + 32 > data.len() { return None; }
+    let p = curve25519_dalek::ristretto::CompressedRistretto::from_slice(&data[*pos..*pos+32]).ok()?.decompress()?;
+    *pos += 32; Some(p)
+}
+fn read_scalar(data: &[u8], pos: &mut usize) -> Option<Scalar> {
+    if *pos + 32 > data.len() { return None; }
+    let mut arr = [0u8; 32];
+    arr.copy_from_slice(&data[*pos..*pos+32]);
+    *pos += 32;
+    let ct = Scalar::from_canonical_bytes(arr);
+    if bool::from(ct.is_some()) { Some(ct.unwrap()) } else { None }
+}
+fn read_points(data: &[u8], pos: &mut usize, n: usize) -> Option<Vec<RistrettoPoint>> {
+    let mut v = Vec::with_capacity(n);
+    for _ in 0..n { v.push(read_point(data, pos)?); }
+    Some(v)
+}
+fn read_scalars(data: &[u8], pos: &mut usize) -> Option<Vec<Scalar>> {
+    let n = read_u32(data, pos)? as usize;
+    let mut v = Vec::with_capacity(n);
+    for _ in 0..n { v.push(read_scalar(data, pos)?); }
+    Some(v)
+}
+
 /// parameters for the shuffle argument
 #[derive(Clone)]
 pub struct ShuffleParameters {

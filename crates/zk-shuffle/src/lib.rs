@@ -35,6 +35,9 @@ pub use proof::{ShuffleProof, prove_shuffle};
 pub use remasking::ElGamalCiphertext;
 pub use transcript::ShuffleTranscript;
 pub use verify::verify_shuffle;
+pub use shuffle_argument::{
+    ZkShuffleProof, ShuffleParameters, prove_zk_shuffle, verify_zk_shuffle,
+};
 
 /// re-export curve25519-dalek types for downstream crates
 pub mod dalek {
