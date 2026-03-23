@@ -71,7 +71,10 @@ async function zafuDelegate(sessionPubHex: string, room: string): Promise<{
     const [origin, provider] = entries[0] as [string, any]
     if (!provider) return null
 
-    await provider.connect()
+    await Promise.race([
+      provider.connect(),
+      new Promise((_, reject) => setTimeout(() => reject(new Error('zafu timeout')), 2000))
+    ])
 
     // the challenge is the delegation message itself
     const delegationMsg = `delegate:${sessionPubHex}:${room || 'new'}`

@@ -264,6 +264,85 @@ export default function App() {
     setActions([])
   }
 
+  // keybinding modes
+  const [keyMode, setKeyMode] = createSignal<'classic' | 'vim'>('classic')
+
+  // keyboard shortcuts
+  onCleanup((() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (view() !== 'game') return
+      if ((e.target as HTMLElement)?.tagName === 'INPUT') return
+
+      const a = actions()
+      const myTurn = isMyTurn() && a.length > 0
+      const hasBet = a.some(v => v.kind === 'bet' || v.kind === 'raise')
+      const betAction = a.find(v => v.kind === 'raise') || a.find(v => v.kind === 'bet')
+
+      if (!myTurn) return
+
+      const km = keyMode()
+
+      if (km === 'classic') {
+        // PokerStars-style: F1-F4, Space, Enter, Q, 1-4
+        switch (e.key) {
+          case 'F1': e.preventDefault(); if (a.some(v => v.kind === 'fold')) act('fold'); break
+          case 'F2': e.preventDefault()
+            if (a.some(v => v.kind === 'check')) act('check')
+            else if (a.some(v => v.kind === 'call')) act('call'); break
+          case 'F3': e.preventDefault()
+            if (betAction) act(betAction.kind, raiseVal() || betAction.min_amount); break
+          case 'F4': e.preventDefault()
+            if (hasBet && betAction) act(betAction.kind, pot()); break
+          case ' ': e.preventDefault()
+            if (a.some(v => v.kind === 'check')) act('check')
+            else if (a.some(v => v.kind === 'call')) act('call'); break
+          case 'Enter': e.preventDefault()
+            if (betAction && raiseVal() > 0) act(betAction.kind, raiseVal()); break
+          case 'q': case 'Q':
+            if (a.some(v => v.kind === 'allin')) act('allin'); break
+        }
+      } else {
+        // vim-style: hjkl movement metaphor
+        // f=fold  d=check(do nothing)  s=call(see)  r=raise  w=bet(wager)
+        // a=allin  e=enter(confirm raise)  x=check/fold preset
+        // gg=min raise  G=pot  H=½pot  L=2x  M=¾pot
+        switch (e.key) {
+          case 'f': if (a.some(v => v.kind === 'fold')) act('fold'); break
+          case 'd': if (a.some(v => v.kind === 'check')) act('check'); break
+          case 's': if (a.some(v => v.kind === 'call')) act('call')
+                    else if (a.some(v => v.kind === 'check')) act('check'); break
+          case 'w': if (betAction) act(betAction.kind, raiseVal() || betAction.min_amount); break
+          case 'r': if (betAction) act(betAction.kind, raiseVal() || betAction.min_amount); break
+          case 'a': if (a.some(v => v.kind === 'allin')) act('allin'); break
+          case 'e': case 'Enter':
+            if (betAction && raiseVal() > 0) act(betAction.kind, raiseVal()); break
+          case 'x': // check/fold toggle
+            setAutoAction(autoAction() === 'check/fold' ? 'none' : 'check/fold'); break
+          case 'G': if (hasBet) setRaiseVal(pot()); break
+          case 'H': if (hasBet && betAction) setRaiseVal(Math.max(Math.floor(pot() / 2), betAction.min_amount)); break
+          case 'M': if (hasBet && betAction) setRaiseVal(Math.max(Math.floor(pot() * 3 / 4), betAction.min_amount)); break
+          case 'L': if (hasBet && betAction) setRaiseVal(Math.max(pot() * 2, betAction.min_amount)); break
+          case 'j': if (hasBet) setRaiseVal(v => Math.max(v - (betAction?.min_amount || 10), betAction?.min_amount || 0)); break
+          case 'k': if (hasBet) setRaiseVal(v => v + (betAction?.min_amount || 10)); break
+        }
+      }
+
+      // number sizing works in both modes
+      if (hasBet && betAction) {
+        const p = pot() || 1
+        const min = betAction.min_amount || 0
+        switch (e.key) {
+          case '1': setRaiseVal(Math.max(Math.floor(p / 2), min)); break
+          case '2': setRaiseVal(Math.max(Math.floor(p * 3 / 4), min)); break
+          case '3': setRaiseVal(Math.max(p, min)); break
+          case '4': setRaiseVal(Math.max(p * 2, min)); break
+        }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  })())
+
   // action timer countdown — driven by game.ts authoritative timer (T1 fix)
 
   // auto-scroll log
@@ -592,6 +671,28 @@ export default function App() {
                     {mode}
                   </button>
                 )}
+              </div>
+
+              {/* hotkey legend + mode toggle */}
+              <div class="flex items-center justify-center gap-2 py-0.5">
+                <button
+                  class={`text-7px px-1.5 py-0.5 rounded border ${keyMode() === 'classic' ? 'border-zec-yellow text-zec-yellow' : 'border-neutral-800 text-neutral-700'}`}
+                  onClick={() => setKeyMode('classic')}
+                  title="PokerStars-style hotkeys"
+                >classic</button>
+                <button
+                  class={`text-7px px-1.5 py-0.5 rounded border ${keyMode() === 'vim' ? 'border-zec-yellow text-zec-yellow' : 'border-neutral-800 text-neutral-700'}`}
+                  onClick={() => setKeyMode('vim')}
+                  title="vim-style hotkeys"
+                >vim</button>
+              </div>
+              <div class="text-center text-6px text-neutral-700 pb-0.5">
+                <Show when={keyMode() === 'classic'}>
+                  F1 fold · F2 check/call · F3 raise · F4 pot · Space call · Q all-in · 1-4 sizing
+                </Show>
+                <Show when={keyMode() === 'vim'}>
+                  f fold · d check · s call · r/w raise · a all-in · j/k size ±  · H ½p · M ¾p · G pot · L 2x
+                </Show>
               </div>
 
               {/* media controls + video */}
