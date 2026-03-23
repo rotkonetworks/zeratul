@@ -1,204 +1,397 @@
-/**
- * Mobile-first lobby + multi-table menu.
- *
- * Mobile: one table at a time, swipe between tabs
- * Desktop: grid of 1-4 tables side by side
- *
- * This component handles:
- *   - Creating new tables (with rules config)
- *   - Joining tables (via room code or invite link)
- *   - Switching between active tables (tabs)
- *   - Table overview (stacks, blinds, status)
- */
+import { createSignal, For, Show, onMount, onCleanup } from 'solid-js'
 
-import { createSignal, For, Show } from 'solid-js'
-import type { TableManagerApi, TableInfo } from './table-manager'
-
-interface LobbyProps {
-  manager: TableManagerApi
-  onCreateTable: (opts: { numSeats: number; buyin: number; sb: number; bb: number }) => void
-  onJoinTable: (roomCode: string) => void
-  onSelectTable: (id: string) => void
+export type Table = {
+  id: number
+  name: string
+  blinds: string
+  sb: number
+  bb: number
+  buyin: number
+  speed: string
+  timeout: number
+  color: string
 }
 
-export function Lobby(props: LobbyProps) {
-  const [name, setName] = createSignal('')
-  const [joinCode, setJoinCode] = createSignal('')
-  const [numSeats, setNumSeats] = createSignal(2)
-  const [buyin, setBuyin] = createSignal(1000)
-  const [sb, setSb] = createSignal(5)
-  const [bb, setBb] = createSignal(10)
-  const [showCreate, setShowCreate] = createSignal(false)
+export const TABLES: Table[] = [
+  { id: 1, name: 'Chill',    blinds: '1/2',    sb: 1,  bb: 2,  buyin: 200,  speed: 'slow',   timeout: 60, color: '#2d5a3d' },
+  { id: 2, name: 'Standard', blinds: '5/10',   sb: 5,  bb: 10, buyin: 1000, speed: 'normal', timeout: 30, color: '#3d5a2d' },
+  { id: 3, name: 'Turbo',    blinds: '10/20',  sb: 10, bb: 20, buyin: 2000, speed: 'fast',   timeout: 15, color: '#5a3d2d' },
+  { id: 4, name: 'Hyper',    blinds: '25/50',  sb: 25, bb: 50, buyin: 5000, speed: 'hyper',  timeout: 8,  color: '#5a2d3d' },
+]
 
-  const canCreate = () => props.manager.tables().length < props.manager.maxTables
+type LiveTable = {
+  code: string
+  players: number
+  max_players: number
+  waiting: boolean
+  has_bot: boolean
+  blinds: string
+  hand_number: number
+}
+
+export default function Lobby(props: {
+  onJoin: (table: Table, name: string) => void
+  onJoinCode: (code: string, name: string) => void
+  hasWallet: boolean
+}) {
+  const [name, setName] = createSignal('')
+  const [inviteCode, setInviteCode] = createSignal('')
+  const [liveTables, setLiveTables] = createSignal<LiveTable[]>([])
+  const [tab, setTab] = createSignal<'play' | 'public' | 'invite'>('play')
+  const isMobile = window.innerWidth <= 640
+  const [mode, setMode] = createSignal<'casino' | 'list'>(isMobile ? 'list' : 'casino')
+
+  // casino walk state
+  const [px, setPx] = createSignal(180)
+  const [py, setPy] = createSignal(260)
+  const [target, setTarget] = createSignal<{x:number,y:number}|null>(null)
+  const [facing, setFacing] = createSignal<'d'|'u'|'l'|'r'>('d')
+
+  const tpos = [
+    { x: 90,  y: 80 },
+    { x: 270, y: 80 },
+    { x: 90,  y: 190 },
+    { x: 270, y: 190 },
+  ]
+
+  // poll public tables
+  let pollInterval: number
+  onMount(() => {
+    fetchTables()
+    pollInterval = setInterval(fetchTables, 5000)
+  })
+  onCleanup(() => clearInterval(pollInterval))
+
+  async function fetchTables() {
+    try {
+      const resp = await fetch('/api/tables')
+      if (resp.ok) setLiveTables(await resp.json())
+    } catch {}
+  }
+
+  // walk animation
+  let walkIv: number
+  onMount(() => {
+    walkIv = setInterval(() => {
+      const t = target()
+      if (!t) return
+      const dx = t.x - px(), dy = t.y - py()
+      const d = Math.sqrt(dx*dx + dy*dy)
+      if (d < 3) { setTarget(null); return }
+      const s = 2.5
+      setPx(x => x + dx/d*s)
+      setPy(y => y + dy/d*s)
+      if (Math.abs(dx) > Math.abs(dy)) setFacing(dx > 0 ? 'r' : 'l')
+      else setFacing(dy > 0 ? 'd' : 'u')
+    }, 25)
+  })
+  onCleanup(() => clearInterval(walkIv))
+
+  // keyboard
+  onMount(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (mode() !== 'casino' || tab() !== 'play') return
+      if ((e.target as HTMLElement)?.tagName === 'INPUT') return
+      const step = 8
+      if (e.key === 'ArrowUp' || e.key === 'w') { setPy(y => Math.max(15, y - step)); setFacing('u') }
+      if (e.key === 'ArrowDown' || e.key === 's') { setPy(y => Math.min(285, y + step)); setFacing('d') }
+      if (e.key === 'ArrowLeft' || e.key === 'a') { setPx(x => Math.max(15, x - step)); setFacing('l') }
+      if (e.key === 'ArrowRight' || e.key === 'd') { setPx(x => Math.min(345, x + step)); setFacing('r') }
+      if (e.key === 'Enter' || e.key === ' ') {
+        const nt = nearTable()
+        if (nt !== null) { e.preventDefault(); joinTable(nt) }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    onCleanup(() => window.removeEventListener('keydown', onKey))
+  })
+
+  const nearTable = () => {
+    for (let i = 0; i < tpos.length; i++) {
+      const dx = px() - tpos[i].x, dy = py() - tpos[i].y
+      if (Math.sqrt(dx*dx + dy*dy) < 45) return i
+    }
+    return null
+  }
+
+  function joinTable(i: number) {
+    if (!props.hasWallet) return // zafu required
+    const n = name().trim() || 'anon'
+    props.onJoin(TABLES[i], n)
+  }
+
+  function joinByCode() {
+    if (!props.hasWallet) return
+    const code = inviteCode().trim()
+    if (!code) return
+    const n = name().trim() || 'anon'
+    props.onJoinCode(code, n)
+  }
+
+  function joinLive(table: LiveTable) {
+    if (!props.hasWallet) return
+    const n = name().trim() || 'anon'
+    props.onJoinCode(table.code, n)
+  }
+
+  const waitingTables = () => liveTables().filter(t => t.waiting)
+  const activeTables = () => liveTables().filter(t => !t.waiting)
 
   return (
-    <div class="p-4 max-w-lg mx-auto">
-      {/* header */}
-      <div class="text-center mb-6">
-        <div class="text-zec-yellow text-14px font-bold tracking-wider">poker.zk.bot</div>
-        <div class="text-neutral-600 text-9px mt-1">encrypted P2P poker</div>
-      </div>
-
-      {/* active tables */}
-      <Show when={props.manager.tables().length > 0}>
-        <div class="mb-4">
-          <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">your tables</div>
-          <div class="flex flex-col gap-1">
-            <For each={props.manager.tables()}>
-              {(table) => (
-                <button
-                  class={`flex items-center justify-between px-3 py-2 rounded border text-left w-full ${
-                    table.isActive
-                      ? 'border-zec-yellow bg-zec-yellow/10 text-white'
-                      : 'border-neutral-800 bg-zec-surface text-neutral-400 hover:border-neutral-600'
-                  }`}
-                  onClick={() => props.onSelectTable(table.id)}
-                >
-                  <div>
-                    <span class="text-11px font-mono">{table.roomCode || 'new table'}</span>
-                    <span class="text-9px text-neutral-600 ml-2">{table.blinds} · {table.numSeats}max</span>
-                  </div>
-                  <div class="flex items-center gap-2">
-                    <span class="text-9px text-neutral-500">{table.playerCount} players</span>
-                    <span class={`w-2 h-2 rounded-full ${
-                      table.status === 'playing' ? 'bg-green-500' :
-                      table.status === 'waiting' ? 'bg-zec-yellow animate-pulse' :
-                      table.status === 'finished' ? 'bg-red-500' :
-                      'bg-neutral-600'
-                    }`} />
-                  </div>
-                </button>
-              )}
-            </For>
+    <div class="min-h-screen min-h-[100dvh] flex flex-col items-center justify-center p-2 bg-zec-dark font-sans text-white">
+      <div class="w-full max-w-md">
+        {/* header */}
+        <div class="text-center mb-3">
+          <div class="text-zec-yellow text-14px font-bold tracking-wider font-mono">poker.zk.bot</div>
+          <div class="text-neutral-600 text-8px uppercase tracking-widest mt-0.5">
+            zk-shuffle · co-signed · encrypted
           </div>
         </div>
-      </Show>
 
-      {/* join by code */}
-      <div class="mb-4">
-        <div class="flex gap-1">
-          <input
-            class="input-field flex-1 text-11px"
-            placeholder="room code or invite link"
-            value={joinCode()}
-            onInput={e => setJoinCode(e.currentTarget.value)}
-            onKeyDown={e => { if (e.key === 'Enter' && joinCode().trim()) props.onJoinTable(joinCode().trim()) }}
-          />
-          <button
-            class="btn btn-primary text-11px px-4"
-            disabled={!joinCode().trim()}
-            onClick={() => props.onJoinTable(joinCode().trim())}
-          >join</button>
+        {/* wallet gate */}
+        <Show when={!props.hasWallet}>
+          <div class="text-center p-6 border border-red-900/50 rounded-lg bg-red-900/10 mb-4">
+            <div class="text-red-400 text-11px uppercase tracking-wider mb-2">wallet required</div>
+            <div class="text-neutral-400 text-10px mb-3">
+              install the <span class="text-zec-yellow">zafu</span> browser extension to play.
+              every action is signed with your key.
+            </div>
+            <a href="https://github.com/niconicobar/zafu" target="_blank"
+              class="text-9px text-zec-yellow underline">get zafu extension</a>
+          </div>
+        </Show>
+
+        {/* name input */}
+        <Show when={props.hasWallet}>
+          <div class="flex items-center justify-center gap-2 mb-3">
+            <input
+              class="input-field w-36 text-center text-11px"
+              placeholder="name"
+              maxLength={16}
+              spellcheck={false}
+              value={name()}
+              onInput={e => setName(e.currentTarget.value)}
+              autofocus
+            />
+            <button
+              class="text-8px px-2 py-1 rounded border border-neutral-700 text-neutral-500 hover:text-neutral-300"
+              onClick={() => setMode(m => m === 'casino' ? 'list' : 'casino')}
+            >{mode() === 'casino' ? '☰' : '🎰'}</button>
+          </div>
+        </Show>
+
+        {/* tabs */}
+        <div class="flex gap-0 mb-3 border-b border-neutral-800">
+          {(['play', 'public', 'invite'] as const).map(t =>
+            <button
+              class={`flex-1 text-center py-2 text-9px uppercase tracking-wider transition-colors ${
+                tab() === t
+                  ? 'text-zec-yellow border-b-2 border-zec-yellow'
+                  : 'text-neutral-600 hover:text-neutral-400'
+              }`}
+              onClick={() => setTab(t)}
+            >
+              {t === 'play' ? 'play vs bot' : t === 'public' ? `public (${waitingTables().length})` : 'invite friend'}
+            </button>
+          )}
         </div>
-      </div>
 
-      {/* create table */}
-      <Show when={canCreate()}>
-        <Show when={showCreate()} fallback={
-          <button
-            class="w-full py-3 rounded border border-dashed border-neutral-700 text-neutral-500 text-11px hover:border-zec-yellow hover:text-zec-yellow"
-            onClick={() => setShowCreate(true)}
-          >
-            + create table
-          </button>
-        }>
-          <div class="border border-neutral-800 rounded p-3 bg-zec-surface">
-            <div class="text-neutral-500 text-9px uppercase tracking-wider mb-3">create table</div>
+        {/* ===== PLAY VS BOT ===== */}
+        <Show when={tab() === 'play' && props.hasWallet}>
+          <Show when={mode() === 'casino'}>
+            <div
+              class="relative border border-neutral-800 rounded overflow-hidden cursor-pointer select-none mx-auto"
+              style="width:360px; height:300px; background:#111113;"
+              onClick={e => {
+                const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                setTarget({x: e.clientX - r.left, y: e.clientY - r.top})
+              }}
+            >
+              <div class="absolute inset-0" style="background:repeating-conic-gradient(#18181c 0% 25%,#141417 0% 50%) 0 0/16px 16px" />
+              <div class="absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-16 opacity-30" style="background:linear-gradient(90deg,transparent,rgba(244,183,40,0.06),transparent)" />
+              <div class="absolute top-0 left-0 right-0 h-2" style="background:linear-gradient(180deg,#2a2a30,#1a1a1f)" />
+              <div class="absolute bottom-0 left-0 right-0 h-2 bg-neutral-800" />
+              <div class="absolute top-3 left-1/2 -translate-x-1/2 text-7px text-neutral-600 uppercase tracking-[0.3em] font-bold">poker room</div>
 
-            {/* seats selector */}
-            <div class="flex gap-1 mb-3">
-              <For each={[2, 3, 6, 9]}>
-                {n => (
+              <For each={TABLES}>
+                {(table, i) => {
+                  const p = tpos[i()]
+                  const near = () => nearTable() === i()
+                  return (
+                    <div class="absolute" style={`left:${p.x-24}px;top:${p.y-18}px`}>
+                      <div
+                        class={`w-12 h-9 rounded-lg border-2 flex flex-col items-center justify-center transition-all duration-150 ${near() ? 'border-zec-yellow scale-110' : 'border-neutral-700'}`}
+                        style={`background:${table.color};${near() ? 'box-shadow:0 0 16px rgba(244,183,40,0.3)' : ''}`}
+                      >
+                        <div class="text-7px font-bold text-white/90">{table.blinds}</div>
+                        <div class="text-5px text-white/50">{table.speed}</div>
+                      </div>
+                      {[[-3,-7],[15,-7],[-3,12],[15,12]].map(([cx,cy]) =>
+                        <div class="absolute w-2.5 h-2.5 rounded-sm bg-neutral-800 border border-neutral-700" style={`left:${cx+16}px;top:${cy+10}px`} />
+                      )}
+                      <div class={`text-center text-6px mt-0.5 uppercase tracking-wider ${near() ? 'text-zec-yellow' : 'text-neutral-700'}`}>{table.name}</div>
+                    </div>
+                  )
+                }}
+              </For>
+
+              {/* player avatar */}
+              <div class="absolute z-10 transition-none" style={`left:${px()-8}px;top:${py()-14}px`}>
+                <div class="w-4 h-5 rounded-t-full bg-zec-yellow border border-zec-gold relative">
+                  <div class="absolute w-1 h-1 bg-black rounded-full"
+                    style={`left:${facing()==='l'?2:facing()==='r'?6:3}px;top:${facing()==='u'?2:5}px`} />
+                  <div class="absolute w-1 h-1 bg-black rounded-full"
+                    style={`left:${facing()==='l'?4:facing()==='r'?8:7}px;top:${facing()==='u'?2:5}px`} />
+                </div>
+                <div class="flex justify-center gap-px">
+                  <div class="w-1.5 h-1.5 bg-neutral-600 rounded-b" />
+                  <div class="w-1.5 h-1.5 bg-neutral-600 rounded-b" />
+                </div>
+                <div class="absolute -top-3 left-1/2 -translate-x-1/2 text-6px text-zec-yellow whitespace-nowrap font-bold">{name() || '?'}</div>
+              </div>
+
+              <Show when={nearTable() !== null}>
+                <div class="absolute bottom-4 left-1/2 -translate-x-1/2 z-20">
                   <button
-                    class={`flex-1 py-1 rounded text-10px ${
-                      numSeats() === n
-                        ? 'bg-zec-yellow text-black font-bold'
-                        : 'bg-neutral-800 text-neutral-500'
-                    }`}
-                    onClick={() => setNumSeats(n)}
-                  >{n === 2 ? 'heads-up' : n === 3 ? '3-max' : n === 6 ? '6-max' : 'full ring'}</button>
+                    class="bg-zec-yellow text-black text-9px font-bold px-4 py-1 rounded animate-pulse"
+                    onClick={e => { e.stopPropagation(); joinTable(nearTable()!) }}
+                  >SIT · {TABLES[nearTable()!].name} ({TABLES[nearTable()!].blinds})</button>
+                </div>
+              </Show>
+
+              <div class="absolute top-20 right-6 w-1.5 h-24 bg-neutral-800 rounded-sm" />
+              <div class="absolute top-28 right-3 text-5px text-neutral-700" style="writing-mode:vertical-rl">BAR</div>
+            </div>
+            <div class="text-center text-neutral-700 text-7px mt-1">click or WASD · approach table · ENTER to sit</div>
+          </Show>
+
+          <Show when={mode() === 'list'}>
+            <div class="flex flex-col gap-2">
+              <For each={TABLES}>
+                {(table, i) => (
+                  <button
+                    class="flex items-center justify-between p-3 bg-zec-surface border border-neutral-800 rounded-lg active:border-zec-yellow transition-colors"
+                    onClick={() => joinTable(i())}
+                  >
+                    <div>
+                      <div class="text-12px font-semibold">{table.name}</div>
+                      <div class="text-9px text-neutral-500">{table.blinds} · {table.buyin} buy-in</div>
+                    </div>
+                    <div class="text-right">
+                      <div class={`text-9px px-2 py-0.5 rounded inline-block ${
+                        table.speed === 'slow' ? 'bg-green-900/30 text-green-400' :
+                        table.speed === 'normal' ? 'bg-blue-900/30 text-blue-400' :
+                        table.speed === 'fast' ? 'bg-orange-900/30 text-orange-400' :
+                        'bg-red-900/30 text-red-400'
+                      }`}>{table.timeout}s</div>
+                      <div class="text-7px text-neutral-600 mt-0.5">vs bot</div>
+                    </div>
+                  </button>
                 )}
               </For>
             </div>
+          </Show>
+        </Show>
 
-            {/* blinds + buyin */}
-            <div class="flex gap-2 mb-3">
-              <label class="flex-1">
-                <span class="text-neutral-600 text-8px">SB</span>
-                <input class="input-field w-full text-center text-11px" type="number"
-                  value={sb()} onInput={e => setSb(+e.currentTarget.value)} />
-              </label>
-              <label class="flex-1">
-                <span class="text-neutral-600 text-8px">BB</span>
-                <input class="input-field w-full text-center text-11px" type="number"
-                  value={bb()} onInput={e => setBb(+e.currentTarget.value)} />
-              </label>
-              <label class="flex-1">
-                <span class="text-neutral-600 text-8px">BUY-IN</span>
-                <input class="input-field w-full text-center text-11px" type="number"
-                  value={buyin()} onInput={e => setBuyin(+e.currentTarget.value)} />
-              </label>
+        {/* ===== PUBLIC TABLES ===== */}
+        <Show when={tab() === 'public' && props.hasWallet}>
+          <Show when={waitingTables().length > 0} fallback={
+            <div class="text-center py-8">
+              <div class="text-neutral-600 text-11px mb-2">no public tables waiting</div>
+              <div class="text-neutral-700 text-9px">create one from the "play vs bot" tab<br/>or invite a friend</div>
+            </div>
+          }>
+            <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">waiting for opponent</div>
+            <div class="flex flex-col gap-2">
+              <For each={waitingTables()}>
+                {table => (
+                  <button
+                    class="flex items-center justify-between p-3 bg-zec-surface border border-neutral-800 rounded-lg active:border-zec-yellow transition-colors"
+                    onClick={() => joinLive(table)}
+                  >
+                    <div>
+                      <div class="text-11px font-mono text-white">{table.code}</div>
+                      <div class="text-9px text-neutral-500">{table.blinds} blinds</div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                      <span class="text-9px text-neutral-500">{table.players}/{table.max_players}</span>
+                      <span class="w-2 h-2 rounded-full bg-zec-yellow animate-pulse" />
+                    </div>
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
+
+          <Show when={activeTables().length > 0}>
+            <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2 mt-4">in progress</div>
+            <div class="flex flex-col gap-1">
+              <For each={activeTables()}>
+                {table => (
+                  <div class="flex items-center justify-between p-2 bg-zec-surface/50 border border-neutral-800/50 rounded text-neutral-600">
+                    <span class="text-10px font-mono">{table.code}</span>
+                    <span class="text-8px">{table.blinds} · hand #{table.hand_number}</span>
+                    <span class="w-2 h-2 rounded-full bg-green-500" />
+                  </div>
+                )}
+              </For>
+            </div>
+          </Show>
+        </Show>
+
+        {/* ===== INVITE FRIEND ===== */}
+        <Show when={tab() === 'invite' && props.hasWallet}>
+          <div class="p-4">
+            <div class="text-neutral-400 text-10px mb-4">
+              share a room code with a friend. both players need the <span class="text-zec-yellow">zafu</span> extension.
             </div>
 
-            <div class="flex gap-2">
-              <button class="btn btn-primary flex-1 text-11px"
-                onClick={() => {
-                  props.onCreateTable({ numSeats: numSeats(), buyin: buyin(), sb: sb(), bb: bb() })
-                  setShowCreate(false)
-                }}
-              >create</button>
-              <button class="btn flex-1 text-11px" onClick={() => setShowCreate(false)}>cancel</button>
+            {/* create private game */}
+            <div class="mb-4">
+              <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">create private table</div>
+              <div class="flex gap-2">
+                <For each={TABLES}>
+                  {(table, i) => (
+                    <button
+                      class="flex-1 p-2 bg-zec-surface border border-neutral-800 rounded text-center active:border-zec-yellow"
+                      onClick={() => joinTable(i())}
+                    >
+                      <div class="text-10px font-semibold">{table.name}</div>
+                      <div class="text-7px text-neutral-600">{table.blinds}</div>
+                    </button>
+                  )}
+                </For>
+              </div>
+              <div class="text-neutral-700 text-8px mt-1 text-center">
+                creates a private table · share the code with your friend
+              </div>
+            </div>
+
+            {/* join by code */}
+            <div>
+              <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">join by code</div>
+              <div class="flex gap-2">
+                <input
+                  class="input-field flex-1 text-11px"
+                  placeholder="e.g. 42-ace-bluff"
+                  value={inviteCode()}
+                  onInput={e => setInviteCode(e.currentTarget.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') joinByCode() }}
+                />
+                <button
+                  class="btn btn-primary text-10px px-4"
+                  disabled={!inviteCode().trim()}
+                  onClick={joinByCode}
+                >join</button>
+              </div>
             </div>
           </div>
         </Show>
-      </Show>
 
-      <Show when={!canCreate()}>
-        <div class="text-neutral-600 text-9px text-center mt-2">
-          max {props.manager.maxTables} tables
+        <div class="text-center text-7px text-neutral-700 mt-3 uppercase tracking-widest">
+          heads-up nlhe · nested frost escrow · pallas
         </div>
-      </Show>
-    </div>
-  )
-}
-
-/**
- * Table tabs bar for multi-table.
- * Shows at the top on desktop, bottom on mobile.
- */
-export function TableTabs(props: {
-  tables: TableInfo[]
-  activeId: string | null
-  onSelect: (id: string) => void
-  onClose: (id: string) => void
-}) {
-  return (
-    <div class="flex gap-0.5 px-1 py-0.5 bg-zec-dark overflow-x-auto scrollbar-hide">
-      <For each={props.tables}>
-        {(table) => (
-          <div
-            class={`flex items-center gap-1 px-2 py-1 rounded-t text-9px cursor-pointer whitespace-nowrap ${
-              table.id === props.activeId
-                ? 'bg-zec-surface text-white border-t border-x border-zec-yellow/30'
-                : 'bg-transparent text-neutral-600 hover:text-neutral-400'
-            }`}
-            onClick={() => props.onSelect(table.id)}
-          >
-            <span class={`w-1.5 h-1.5 rounded-full ${
-              table.status === 'playing' ? 'bg-green-500' :
-              table.status === 'waiting' ? 'bg-zec-yellow' :
-              'bg-neutral-600'
-            }`} />
-            <span>{table.roomCode || 'new'}</span>
-            <span class="text-neutral-700">{table.blinds}</span>
-            <button
-              class="text-neutral-700 hover:text-red-400 ml-1"
-              onClick={(e) => { e.stopPropagation(); props.onClose(table.id) }}
-            >×</button>
-          </div>
-        )}
-      </For>
+      </div>
     </div>
   )
 }

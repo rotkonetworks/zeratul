@@ -1,10 +1,14 @@
 import { createSignal, For, Show, createEffect, onCleanup } from 'solid-js'
 import { createSocket } from './ws'
 import { Card } from './Card'
+import Lobby, { type Table } from './Lobby'
 import type { ServerMsg, CardJson, ValidAction } from './types'
 
 export default function App() {
-  const [view, setView] = createSignal<'lobby' | 'waiting' | 'game'>('lobby')
+  const [view, setView] = createSignal<'casino' | 'lobby' | 'waiting' | 'game'>(
+    location.pathname.length > 1 ? 'lobby' : 'casino'
+  )
+  const [selectedTable, setSelectedTable] = createSignal<Table | null>(null)
   const [name, setName] = createSignal('')
   const [mySeat, setMySeat] = createSignal(-1)
   const [oppName, setOppName] = createSignal('\u2014')
@@ -289,7 +293,33 @@ export default function App() {
             <span class={`w-2 h-2 rounded-full ${connected() ? 'bg-green-500' : 'bg-neutral-600'}`} />
           </div>
 
-          {/* lobby */}
+          {/* casino lobby */}
+          <Show when={view() === 'casino'}>
+            <Lobby
+              hasWallet={true /* TODO: detect zafu */}
+              onJoin={(table, playerName) => {
+                setSelectedTable(table)
+                setName(playerName)
+                fetch('/new', { redirect: 'follow' }).then(resp => {
+                  const url = resp.url || resp.headers.get('location') || ''
+                  const code = url.split('/').pop() || ''
+                  if (code) {
+                    history.pushState(null, '', '/' + code)
+                    setView('lobby')
+                    setTimeout(() => sit(), 200)
+                  }
+                })
+              }}
+              onJoinCode={(code, playerName) => {
+                setName(playerName)
+                history.pushState(null, '', '/' + code)
+                setView('lobby')
+                setTimeout(() => sit(), 200)
+              }}
+            />
+          </Show>
+
+          {/* old lobby (for direct room links) */}
           <Show when={view() === 'lobby'}>
             <div class="p-8 text-center">
               <div class="text-zec-yellow text-10px font-semibold uppercase tracking-3px mb-5">

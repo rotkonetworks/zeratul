@@ -14,6 +14,7 @@ use axum::{
         ws::{Message as WsMessage, WebSocket, WebSocketUpgrade},
     },
     response::IntoResponse,
+    Json,
 };
 use poker_p2p::engine::*;
 use poker_p2p::protocol::{ActionType, TableRules};
@@ -563,6 +564,28 @@ struct AppState {
 // Handlers
 // ---------------------------------------------------------------------------
 
+/// list public tables (for lobby)
+async fn list_tables(State(state): State<AppState>) -> impl IntoResponse {
+    let rooms = state.rooms.lock().await;
+    let mut tables = Vec::new();
+    for (code, room) in rooms.iter() {
+        let r = room.lock().await;
+        let player_count = r.player_count();
+        let has_bot = r.bot.is_some();
+        let waiting = player_count < 2;
+        tables.push(serde_json::json!({
+            "code": code,
+            "players": player_count,
+            "max_players": 2,
+            "waiting": waiting,
+            "has_bot": has_bot,
+            "blinds": format!("{}/{}", r.engine.rules.small_blind, r.engine.rules.big_blind),
+            "hand_number": r.hand_number,
+        }));
+    }
+    Json(tables)
+}
+
 /// create new room and redirect to it
 async fn create_room(State(state): State<AppState>) -> impl IntoResponse {
     let code = generate_room_code();
@@ -897,13 +920,15 @@ async fn main() {
     tracing::info!("jury config: {}-of-{} frostito nested FROST (pallas)", JURY_T, JURY_N);
 
     let app = Router::new()
+        .route("/api/tables", axum::routing::get(list_tables))
         .route("/new", axum::routing::get(create_room))
         .route("/{code}/ws", axum::routing::get(ws_handler))
         .route("/{code}", axum::routing::get(room_page))
         .fallback_service(ServeDir::new(&static_dir))
         .with_state(state);
 
-    let addr = "0.0.0.0:3000";
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
+    let addr = format!("0.0.0.0:{}", port);
     tracing::info!("poker server listening on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
