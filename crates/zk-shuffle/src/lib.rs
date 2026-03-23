@@ -17,6 +17,7 @@ pub mod audit;
 pub mod poker;
 pub mod proof;
 pub mod remasking;
+pub mod shuffle_argument;
 pub mod transcript;
 pub mod verify;
 
