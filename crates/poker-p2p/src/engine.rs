@@ -326,6 +326,10 @@ impl GameEngine {
                 let call_amount = call_action.min_amount;
                 apply_bet(hand, action_idx, call_amount);
                 hand.seats[action_idx].has_acted = true;
+                // if call used all chips, mark as all-in
+                if hand.seats[action_idx].chips == 0 {
+                    hand.seats[action_idx].status = SeatStatus::AllIn;
+                }
             }
             ActionType::Bet(amount) => {
                 let amount = *amount as u64;
@@ -340,7 +344,9 @@ impl GameEngine {
                 hand.betting.min_raise = amount + raise_size;
                 apply_bet(hand, action_idx, amount);
                 hand.seats[action_idx].has_acted = true;
-                // reset has_acted for others
+                if hand.seats[action_idx].chips == 0 {
+                    hand.seats[action_idx].status = SeatStatus::AllIn;
+                }
                 reset_acted_except(hand, action_idx);
             }
             ActionType::Raise(amount) => {
@@ -357,6 +363,9 @@ impl GameEngine {
                 let needed = amount - hand.seats[action_idx].bet_this_round;
                 apply_bet(hand, action_idx, needed);
                 hand.seats[action_idx].has_acted = true;
+                if hand.seats[action_idx].chips == 0 {
+                    hand.seats[action_idx].status = SeatStatus::AllIn;
+                }
                 reset_acted_except(hand, action_idx);
             }
             ActionType::AllIn => {
