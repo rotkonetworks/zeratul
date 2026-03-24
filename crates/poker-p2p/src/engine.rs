@@ -16,6 +16,8 @@ pub struct GameEngine {
     /// chips per seat (0 = empty seat)
     stacks: Vec<u64>,
     hand: Option<HandState>,
+    /// monotonic hand counter
+    hand_counter: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -157,6 +159,7 @@ impl GameEngine {
             stacks: vec![0; num_seats as usize],
             hand: None,
             rules,
+            hand_counter: 0,
         })
     }
 
@@ -238,7 +241,8 @@ impl GameEngine {
             }
         }).collect();
 
-        let hand_number = 1; // caller can set via returned state
+        self.hand_counter += 1;
+        let hand_number = self.hand_counter;
         let mut hand = HandState {
             hand_number,
             phase: Phase::Preflop,
@@ -283,6 +287,37 @@ impl GameEngine {
             let seat = hand.seats[idx].seat;
             let va = compute_valid_actions(&hand, idx);
             events.push(EngineEvent::ActionRequired { seat, valid_actions: va });
+        } else {
+            // no one can act (all players all-in from blinds) — run to showdown
+            let active_or_allin = hand.seats.iter()
+                .filter(|s| s.status == SeatStatus::Active || s.status == SeatStatus::AllIn)
+                .count();
+            if active_or_allin >= 2 {
+                recalculate_pots(&mut hand);
+                events.push(EngineEvent::PotUpdated { pots: hand.pots.clone() });
+                // deal all community cards
+                while hand.community_cards.len() < 5 {
+                    let phase = match hand.community_cards.len() {
+                        0 => Phase::Flop,
+                        3 => Phase::Turn,
+                        4 => Phase::River,
+                        _ => break,
+                    };
+                    let new_cards = deal_community(&mut hand, phase);
+                    hand.phase = phase;
+                    events.push(EngineEvent::PhaseChanged { phase, new_cards });
+                }
+                hand.phase = Phase::Showdown;
+                let showdown_events = run_showdown(&mut hand);
+                events.extend(showdown_events);
+                for s in &hand.seats {
+                    self.stacks[s.seat as usize] = s.chips;
+                }
+                hand.phase = Phase::Complete;
+                events.push(EngineEvent::HandComplete { stacks: self.stacks.clone() });
+                self.hand = None;
+                return Ok(events);
+            }
         }
 
         self.hand = Some(hand);
@@ -823,11 +858,13 @@ fn run_showdown(hand: &mut HandState) -> Vec<EngineEvent> {
         let share = pot.amount / winners.len() as u64;
         let remainder = pot.amount % winners.len() as u64;
 
-        for (i, &winner_id) in winners.iter().enumerate() {
+        for (i, &winner_idx) in winners.iter().enumerate() {
+            // winner_idx is index into eligible_hands, NOT a seat number
+            let seat_id = eligible_hands[winner_idx].0;
             let award = share + if i == 0 { remainder } else { 0 };
-            hand.seats[winner_id].chips += award;
+            hand.seats[seat_id].chips += award;
             events.push(EngineEvent::PotAwarded {
-                seat: winner_id as u8,
+                seat: seat_id as u8,
                 amount: award,
                 pot_index: pot_idx,
             });
