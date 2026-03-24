@@ -1,0 +1,9 @@
+[package]
+name = "wimius"
+version = "0.1.0"
+edition = "2021"
+description = "PVM execution verification: wim traces → binius64 proofs"
+
+[dependencies]
+binius-core = { path = "/steam/rotko/jar/binius64/crates/core" }
+binius-frontend = { path = "/steam/rotko/jar/binius64/crates/frontend" }
