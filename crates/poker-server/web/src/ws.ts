@@ -11,8 +11,11 @@ import { createSignal } from 'solid-js'
 import type { ServerMsg } from './types'
 import { createRelayTransport, getRoomFromUrl, setRoomInUrl } from './transport'
 import { createGame, loadWasmEngine } from './game'
-import { createSessionIdentity, signKeyExchange } from './identity'
-import type { SessionIdentity } from './identity'
+import { zid } from './zid'
+import type { ZidIdentity } from './zid'
+import { signKeyExchange } from './identity'
+// SessionIdentity is now ZidIdentity
+type SessionIdentity = ZidIdentity & { sessionPubKey: string; nick: string }
 import type { WireMessage } from './transport'
 import { createMedia } from './media'
 import type { MediaState } from './media'
@@ -36,11 +39,16 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
     const room = getRoomFromUrl()
     const isHost = !room
 
-    // create session identity (tries zafu delegation, falls back to anon)
-    const sess = await createSessionIdentity(room)
+    // create session identity via zid SDK (tries zafu, falls back to ephemeral)
+    const zidIdentity = await zid.connect({ appName: 'poker.zk.bot', tradingMode: true })
+    if (name) zid.setName(name)
+    const sess: SessionIdentity = {
+      ...zidIdentity,
+      sessionPubKey: zidIdentity.pubkey,
+      nick: zidIdentity.name,
+    }
     setIdentity(sess)
-    // zafu overrides name with wallet identity; anon keeps user's typed name
-    if (sess.mode === 'zafu') name = sess.nick
+    if (zidIdentity.mode === 'zafu') name = zidIdentity.name
 
     transport = createRelayTransport(
       (msg: WireMessage) => {

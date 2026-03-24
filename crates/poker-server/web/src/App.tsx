@@ -2,6 +2,7 @@ import { createSignal, For, Show, createEffect, onCleanup } from 'solid-js'
 import { createSocket } from './ws'
 import { Card } from './Card'
 import Lobby, { type Table } from './Lobby'
+import { detectZafu } from './zid/provider'
 import type { ServerMsg, CardJson, ValidAction } from './types'
 
 export default function App() {
@@ -12,20 +13,16 @@ export default function App() {
   const [hasWallet, setHasWallet] = createSignal(false)
   const [walletPubkey, setWalletPubkey] = createSignal<string | undefined>(undefined)
 
-  // detect zafu/penumbra wallet extension
+  // detect zafu wallet via zid SDK
   onCleanup((() => {
-    const check = () => {
-      const providers = (window as any)[Symbol.for('penumbra')]
-      const found = providers && Object.keys(providers).length > 0
-      setHasWallet(found)
-      // try to get pubkey from session identity if available
-      if (found) {
-        const id = identity()
-        if (id?.sessionPubKey) setWalletPubkey(id.sessionPubKey)
-      }
+    const check = async () => {
+      const found = await detectZafu()
+      setHasWallet(!!found)
+      const id = identity()
+      if (id?.sessionPubKey) setWalletPubkey(id.sessionPubKey)
     }
     check()
-    const iv = setTimeout(check, 1000)
+    const iv = setTimeout(check, 1500)
     return () => clearTimeout(iv)
   })())
   const [name, setName] = createSignal('')
