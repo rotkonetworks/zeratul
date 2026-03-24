@@ -554,9 +554,50 @@ fn generate_room_code() -> String {
 
 type Rooms = Arc<Mutex<HashMap<String, Arc<Mutex<Room>>>>>;
 
+/// lobby user — connected to the global chat
+struct LobbyUser {
+    name: String,
+    tx: mpsc::UnboundedSender<LobbyMsg>,
+}
+
+/// lobby message types
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(tag = "type")]
+enum LobbyMsg {
+    /// global chat
+    Chat { from: String, text: String },
+    /// whisper (private message)
+    Whisper { from: String, to: String, text: String },
+    /// system message
+    System { text: String },
+    /// player list update
+    Players { names: Vec<String> },
+    /// table list update
+    Tables { tables: Vec<serde_json::Value> },
+    /// challenge from another player
+    Challenge { from: String, table_code: String },
+}
+
+/// lobby client message (from browser)
+#[derive(Deserialize)]
+#[serde(tag = "type")]
+enum LobbyClientMsg {
+    /// set display name
+    Join { name: String },
+    /// global chat: /msg or just text
+    Chat { text: String },
+    /// whisper: /w name message
+    Whisper { to: String, text: String },
+    /// challenge player to a game
+    Challenge { to: String },
+}
+
+type LobbyUsers = Arc<Mutex<HashMap<String, LobbyUser>>>;
+
 #[derive(Clone)]
 struct AppState {
     rooms: Rooms,
+    lobby_users: LobbyUsers,
     static_dir: String,
 }
 
@@ -564,26 +605,146 @@ struct AppState {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// list public tables (for lobby)
-async fn list_tables(State(state): State<AppState>) -> impl IntoResponse {
-    let rooms = state.rooms.lock().await;
+/// lobby websocket — global chat, whispers, player list
+async fn lobby_ws_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_lobby_socket(socket, state))
+}
+
+async fn handle_lobby_socket(socket: WebSocket, state: AppState) {
+    let (tx, mut rx) = mpsc::unbounded_channel::<LobbyMsg>();
+
+    use futures::{SinkExt, StreamExt};
+    let (mut ws_tx, mut ws_rx) = socket.split();
+
+    // send task
+    let send_task = tokio::spawn(async move {
+        while let Some(msg) = rx.recv().await {
+            if let Ok(json) = serde_json::to_string(&msg) {
+                if ws_tx.send(WsMessage::Text(json.into())).await.is_err() { break; }
+            }
+        }
+    });
+
+    let mut my_name: Option<String> = None;
+
+    while let Some(Ok(msg)) = ws_rx.next().await {
+        let text = match msg {
+            WsMessage::Text(t) => t.to_string(),
+            WsMessage::Close(_) => break,
+            _ => continue,
+        };
+
+        let client_msg: LobbyClientMsg = match serde_json::from_str(&text) {
+            Ok(m) => m,
+            Err(_) => continue,
+        };
+
+        match client_msg {
+            LobbyClientMsg::Join { name } => {
+                // remove old entry if re-joining with different name
+                if let Some(ref old) = my_name {
+                    state.lobby_users.lock().await.remove(old);
+                }
+                my_name = Some(name.clone());
+
+                state.lobby_users.lock().await.insert(name.clone(), LobbyUser {
+                    name: name.clone(),
+                    tx: tx.clone(),
+                });
+
+                // broadcast join
+                lobby_broadcast(&state.lobby_users, &LobbyMsg::System {
+                    text: format!("{} joined the lobby", name),
+                }).await;
+
+                // send player list
+                let names: Vec<String> = state.lobby_users.lock().await
+                    .keys().cloned().collect();
+                let _ = tx.send(LobbyMsg::Players { names });
+
+                // send table list
+                let tables = get_table_list(&state.rooms).await;
+                let _ = tx.send(LobbyMsg::Tables { tables });
+            }
+            LobbyClientMsg::Chat { text } => {
+                if let Some(ref name) = my_name {
+                    lobby_broadcast(&state.lobby_users, &LobbyMsg::Chat {
+                        from: name.clone(), text,
+                    }).await;
+                }
+            }
+            LobbyClientMsg::Whisper { to, text } => {
+                if let Some(ref from) = my_name {
+                    let users = state.lobby_users.lock().await;
+                    if let Some(target) = users.get(&to) {
+                        let msg = LobbyMsg::Whisper { from: from.clone(), to: to.clone(), text: text.clone() };
+                        let _ = target.tx.send(msg.clone());
+                        let _ = tx.send(msg); // echo to sender
+                    } else {
+                        let _ = tx.send(LobbyMsg::System { text: format!("user '{}' not found", to) });
+                    }
+                }
+            }
+            LobbyClientMsg::Challenge { to } => {
+                if let Some(ref from) = my_name {
+                    // create a private table
+                    let code = generate_room_code();
+                    let room = Arc::new(Mutex::new(Room::new(code.clone())));
+                    state.rooms.lock().await.insert(code.clone(), room);
+
+                    // notify both players
+                    let msg = LobbyMsg::Challenge { from: from.clone(), table_code: code.clone() };
+                    let users = state.lobby_users.lock().await;
+                    if let Some(target) = users.get(&to) {
+                        let _ = target.tx.send(msg);
+                    }
+                    let _ = tx.send(LobbyMsg::System { text: format!("challenged {} — table {}", to, code) });
+                }
+            }
+        }
+    }
+
+    // cleanup
+    if let Some(ref name) = my_name {
+        state.lobby_users.lock().await.remove(name);
+        lobby_broadcast(&state.lobby_users, &LobbyMsg::System {
+            text: format!("{} left the lobby", name),
+        }).await;
+    }
+    send_task.abort();
+}
+
+async fn lobby_broadcast(users: &LobbyUsers, msg: &LobbyMsg) {
+    let users = users.lock().await;
+    for user in users.values() {
+        let _ = user.tx.send(msg.clone());
+    }
+}
+
+async fn get_table_list(rooms: &Rooms) -> Vec<serde_json::Value> {
+    let rooms = rooms.lock().await;
     let mut tables = Vec::new();
     for (code, room) in rooms.iter() {
         let r = room.lock().await;
-        let player_count = r.player_count();
-        let has_bot = r.bot.is_some();
-        let waiting = player_count < 2;
         tables.push(serde_json::json!({
             "code": code,
-            "players": player_count,
+            "players": r.player_count(),
             "max_players": 2,
-            "waiting": waiting,
-            "has_bot": has_bot,
+            "waiting": r.player_count() < 2,
+            "has_bot": r.bot.is_some(),
             "blinds": format!("{}/{}", r.engine.rules.small_blind, r.engine.rules.big_blind),
             "hand_number": r.hand_number,
         }));
     }
-    Json(tables)
+    tables
+}
+
+/// list public tables (for lobby)
+async fn list_tables(State(state): State<AppState>) -> impl IntoResponse {
+    Json(get_table_list(&state.rooms).await)
 }
 
 /// create new room and redirect to it
@@ -913,6 +1074,7 @@ async fn main() {
 
     let state = AppState {
         rooms: Arc::new(Mutex::new(HashMap::new())),
+        lobby_users: Arc::new(Mutex::new(HashMap::new())),
         static_dir: static_dir.clone(),
     };
 
@@ -920,6 +1082,7 @@ async fn main() {
     tracing::info!("jury config: {}-of-{} frostito nested FROST (pallas)", JURY_T, JURY_N);
 
     let app = Router::new()
+        .route("/ws/lobby", axum::routing::get(lobby_ws_handler))
         .route("/api/tables", axum::routing::get(list_tables))
         .route("/new", axum::routing::get(create_room))
         .route("/{code}/ws", axum::routing::get(ws_handler))

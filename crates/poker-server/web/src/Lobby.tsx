@@ -1,4 +1,4 @@
-import { createSignal, For, Show, onMount, onCleanup } from 'solid-js'
+import { createSignal, createEffect, For, Show, onMount, onCleanup } from 'solid-js'
 
 export type Table = {
   id: number
@@ -54,20 +54,66 @@ export default function Lobby(props: {
     { x: 270, y: 190 },
   ]
 
-  // poll public tables
-  let pollInterval: number
-  onMount(() => {
-    fetchTables()
-    pollInterval = setInterval(fetchTables, 5000)
-  })
-  onCleanup(() => clearInterval(pollInterval))
+  const [chatMessages, setChatMessages] = createSignal<{text: string, cls: string}[]>([])
+  const [players, setPlayers] = createSignal<string[]>([])
+  const [chatInput, setChatInput] = createSignal('')
+  let lobbyWs: WebSocket | null = null
+  let chatEl!: HTMLDivElement
 
-  async function fetchTables() {
-    try {
-      const resp = await fetch('/api/tables')
-      if (resp.ok) setLiveTables(await resp.json())
-    } catch {}
+  function addChat(text: string, cls = '') {
+    setChatMessages(m => [...m.slice(-100), { text, cls }])
   }
+
+  onMount(() => {
+    // connect lobby WebSocket
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    lobbyWs = new WebSocket(`${proto}//${location.host}/ws/lobby`)
+    lobbyWs.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data)
+        switch (msg.type) {
+          case 'Chat': addChat(`${msg.from}: ${msg.text}`); break
+          case 'Whisper': addChat(`[${msg.from} → ${msg.to}]: ${msg.text}`, 'text-purple-400'); break
+          case 'System': addChat(msg.text, 'text-neutral-500'); break
+          case 'Players': setPlayers(msg.names); break
+          case 'Tables': setLiveTables(msg.tables); break
+          case 'Challenge':
+            addChat(`${msg.from} challenges you! table: ${msg.table_code}`, 'text-zec-yellow font-bold')
+            break
+        }
+      } catch {}
+    }
+    lobbyWs.onopen = () => {
+      const n = name() || 'anon' + String(Math.random()*1e5|0).padStart(5,'0')
+      lobbyWs?.send(JSON.stringify({ type: 'Join', name: n }))
+    }
+  })
+  onCleanup(() => lobbyWs?.close())
+
+  function sendChat(text: string) {
+    if (!lobbyWs || !text.trim()) return
+    // parse commands
+    if (text.startsWith('/w ') || text.startsWith('/msg ')) {
+      const parts = text.slice(text.indexOf(' ') + 1).split(' ')
+      const to = parts[0]
+      const msg = parts.slice(1).join(' ')
+      if (text.startsWith('/w ') && to && msg) {
+        lobbyWs.send(JSON.stringify({ type: 'Whisper', to, text: msg }))
+      }
+    } else if (text.startsWith('/challenge ')) {
+      const to = text.slice(11).trim()
+      if (to) lobbyWs.send(JSON.stringify({ type: 'Challenge', to }))
+    } else {
+      lobbyWs.send(JSON.stringify({ type: 'Chat', text }))
+    }
+    setChatInput('')
+  }
+
+  // auto-scroll chat
+  createEffect(() => {
+    chatMessages()
+    if (chatEl) chatEl.scrollTop = chatEl.scrollHeight
+  })
 
   // walk animation
   let walkIv: number
@@ -386,6 +432,57 @@ export default function Lobby(props: {
               </div>
             </div>
           </div>
+        </Show>
+
+        {/* ===== LOBBY CHAT + PLAYERS ===== */}
+        <Show when={props.hasWallet}>
+          <div class="mt-3 border border-neutral-800 rounded-lg overflow-hidden">
+            {/* player count */}
+            <div class="flex items-center justify-between px-2 py-1 bg-neutral-900/50 border-b border-neutral-800">
+              <span class="text-8px text-neutral-500 uppercase tracking-wider">lobby chat</span>
+              <span class="text-8px text-neutral-600">{players().length} online</span>
+            </div>
+
+            {/* messages */}
+            <div ref={chatEl!} class="h-28 overflow-y-auto px-2 py-1 font-mono text-9px bg-zec-surface/50">
+              <For each={chatMessages()}>
+                {m => <div class={`text-neutral-500 leading-relaxed ${m.cls}`}>{m.text}</div>}
+              </For>
+              <Show when={chatMessages().length === 0}>
+                <div class="text-neutral-700 text-8px py-4 text-center">
+                  type to chat · /w name msg · /challenge name
+                </div>
+              </Show>
+            </div>
+
+            {/* input */}
+            <form class="flex border-t border-neutral-800" onSubmit={e => {
+              e.preventDefault()
+              sendChat(chatInput())
+            }}>
+              <input
+                class="flex-1 bg-transparent text-9px px-2 py-1.5 text-white outline-none placeholder-neutral-700"
+                placeholder="/w player hi · /challenge player · or just chat..."
+                value={chatInput()}
+                onInput={e => setChatInput(e.currentTarget.value)}
+              />
+              <button type="submit" class="text-8px px-2 text-neutral-600 hover:text-neutral-400">↵</button>
+            </form>
+          </div>
+
+          {/* online players */}
+          <Show when={players().length > 0}>
+            <div class="flex flex-wrap gap-1 mt-2 px-1">
+              <For each={players()}>
+                {p => (
+                  <span class="text-7px px-1.5 py-0.5 rounded bg-neutral-900 border border-neutral-800 text-neutral-500 cursor-pointer hover:text-zec-yellow hover:border-zec-yellow/30"
+                    onClick={() => setChatInput(`/w ${p} `)}
+                    title={`whisper ${p}`}
+                  >{p}</span>
+                )}
+              </For>
+            </div>
+          </Show>
         </Show>
 
         <div class="text-center text-7px text-neutral-700 mt-3 uppercase tracking-widest">
