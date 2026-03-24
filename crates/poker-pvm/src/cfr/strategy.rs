@@ -73,6 +73,26 @@ pub fn import_strategy(data: &[u8]) -> HashMap<Vec<u8>, Vec<f64>> {
     map
 }
 
+/// export from generic HashMap<Vec<u8>, InfoNode> (used by multi_solver)
+pub fn export_strategy_from_nodes(nodes: &HashMap<Vec<u8>, InfoNode>) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let count = nodes.len() as u32;
+    buf.extend_from_slice(&count.to_le_bytes());
+
+    for (key_bytes, node) in nodes {
+        buf.push(key_bytes.len() as u8);
+        buf.extend_from_slice(key_bytes);
+
+        let avg = node.average_strategy();
+        buf.push(avg.len() as u8);
+        for &p in &avg {
+            let fixed = (p * 65535.0).round().min(65535.0) as u16;
+            buf.extend_from_slice(&fixed.to_le_bytes());
+        }
+    }
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

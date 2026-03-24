@@ -139,6 +139,297 @@ pub struct GameState {
     pub rake: u32,
 }
 
+// ============================================================================
+// Opponent profiling — tracks stats per seat across hands
+// ============================================================================
+
+/// player type classification based on observed stats
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PlayerType {
+    Unknown = 0,
+    Rock = 1,         // VPIP < 20%, low aggression
+    TAG = 2,          // VPIP 20-30%, high aggression
+    LAG = 3,          // VPIP > 40%, high aggression
+    CallingStation = 4, // VPIP > 40%, low aggression
+    Maniac = 5,       // VPIP > 60%, very high aggression, high allin%
+    Nit = 6,          // VPIP < 12%, folds almost everything
+}
+
+/// per-seat opponent stats, updated after every action
+#[derive(Debug, Clone, Copy)]
+pub struct PlayerProfile {
+    // raw counters
+    pub hands_seen: u32,
+    pub vpip_count: u32,       // voluntarily put money in pot
+    pub pfr_count: u32,        // preflop raise
+    pub postflop_bets: u32,    // bets + raises postflop
+    pub postflop_calls: u32,   // calls postflop
+    pub postflop_checks: u32,  // checks postflop
+    pub postflop_folds: u32,   // folds postflop
+    pub allin_count: u32,      // all-in actions
+    pub showdowns_seen: u32,   // went to showdown
+    pub showdowns_won: u32,    // won at showdown
+    pub three_bet_count: u32,  // 3-bet preflop
+    pub cbet_count: u32,       // continuation bet (bet flop after pfr)
+    pub cbet_opportunities: u32,
+
+    // per-hand tracking (reset each hand)
+    pub acted_preflop: bool,
+    pub raised_preflop: bool,
+    pub was_pfr: bool,         // was the preflop raiser (for cbet tracking)
+}
+
+impl Default for PlayerProfile {
+    fn default() -> Self {
+        Self {
+            hands_seen: 0, vpip_count: 0, pfr_count: 0,
+            postflop_bets: 0, postflop_calls: 0, postflop_checks: 0,
+            postflop_folds: 0, allin_count: 0, showdowns_seen: 0,
+            showdowns_won: 0, three_bet_count: 0,
+            cbet_count: 0, cbet_opportunities: 0,
+            acted_preflop: false, raised_preflop: false, was_pfr: false,
+        }
+    }
+}
+
+impl PlayerProfile {
+    /// VPIP: voluntarily put money in pot (0.0 - 1.0)
+    pub fn vpip(&self) -> f32 {
+        if self.hands_seen == 0 { return 0.5; } // unknown = assume average
+        self.vpip_count as f32 / self.hands_seen as f32
+    }
+
+    /// PFR: preflop raise frequency (0.0 - 1.0)
+    pub fn pfr(&self) -> f32 {
+        if self.hands_seen == 0 { return 0.2; }
+        self.pfr_count as f32 / self.hands_seen as f32
+    }
+
+    /// aggression factor: (bets + raises) / calls. higher = more aggressive
+    pub fn aggression_factor(&self) -> f32 {
+        let aggressive = self.postflop_bets as f32;
+        let passive = self.postflop_calls.max(1) as f32;
+        aggressive / passive
+    }
+
+    /// went to showdown frequency
+    pub fn wtsd(&self) -> f32 {
+        if self.hands_seen == 0 { return 0.3; }
+        self.showdowns_seen as f32 / self.hands_seen as f32
+    }
+
+    /// won at showdown frequency
+    pub fn w_sd(&self) -> f32 {
+        if self.showdowns_seen == 0 { return 0.5; }
+        self.showdowns_won as f32 / self.showdowns_seen as f32
+    }
+
+    /// all-in frequency
+    pub fn allin_pct(&self) -> f32 {
+        if self.hands_seen == 0 { return 0.05; }
+        self.allin_count as f32 / self.hands_seen as f32
+    }
+
+    /// continuation bet frequency
+    pub fn cbet(&self) -> f32 {
+        if self.cbet_opportunities == 0 { return 0.5; }
+        self.cbet_count as f32 / self.cbet_opportunities as f32
+    }
+
+    /// confidence weight: 1% at 0 hands → 15% cap at 100+ hands
+    pub fn confidence_weight(&self) -> f32 {
+        (0.01 + 0.14 * (self.hands_seen as f32 / 100.0)).min(0.15)
+    }
+
+    /// classify player type from observed stats
+    pub fn classify(&self) -> PlayerType {
+        if self.hands_seen < 10 { return PlayerType::Unknown; }
+
+        let vpip = self.vpip();
+        let pfr = self.pfr();
+        let af = self.aggression_factor();
+        let allin = self.allin_pct();
+
+        // maniac: shoves constantly
+        if allin > 0.3 || (vpip > 0.6 && af > 4.0) {
+            return PlayerType::Maniac;
+        }
+        // nit: barely plays
+        if vpip < 0.12 {
+            return PlayerType::Nit;
+        }
+        // rock: tight passive
+        if vpip < 0.20 && af < 2.0 {
+            return PlayerType::Rock;
+        }
+        // TAG: tight aggressive
+        if vpip < 0.30 && af >= 2.0 {
+            return PlayerType::TAG;
+        }
+        // calling station: loose passive
+        if vpip >= 0.40 && af < 1.5 {
+            return PlayerType::CallingStation;
+        }
+        // LAG: loose aggressive
+        if vpip >= 0.35 && af >= 2.0 {
+            return PlayerType::LAG;
+        }
+
+        PlayerType::Unknown
+    }
+
+    /// encode as feature vector for neural net input (16 floats)
+    pub fn to_features(&self) -> [f32; 16] {
+        [
+            self.vpip(),
+            self.pfr(),
+            self.aggression_factor().min(10.0) / 10.0, // normalize
+            self.wtsd(),
+            self.w_sd(),
+            self.allin_pct(),
+            self.cbet(),
+            (self.hands_seen as f32).min(200.0) / 200.0, // confidence
+            // one-hot player type
+            if self.classify() == PlayerType::Rock { 1.0 } else { 0.0 },
+            if self.classify() == PlayerType::TAG { 1.0 } else { 0.0 },
+            if self.classify() == PlayerType::LAG { 1.0 } else { 0.0 },
+            if self.classify() == PlayerType::CallingStation { 1.0 } else { 0.0 },
+            if self.classify() == PlayerType::Maniac { 1.0 } else { 0.0 },
+            if self.classify() == PlayerType::Nit { 1.0 } else { 0.0 },
+            // gap between VPIP and PFR (higher = more passive preflop)
+            (self.vpip() - self.pfr()).max(0.0),
+            // 3-bet frequency
+            if self.hands_seen > 0 { self.three_bet_count as f32 / self.hands_seen as f32 } else { 0.1 },
+        ]
+    }
+
+    /// call after each new hand is dealt
+    pub fn new_hand(&mut self) {
+        self.hands_seen += 1;
+        self.acted_preflop = false;
+        self.raised_preflop = false;
+        self.was_pfr = false;
+    }
+
+    /// call after each action is observed
+    pub fn observe_action(&mut self, action: Action, phase: Phase, is_facing_raise: bool) {
+        match phase {
+            Phase::Preflop => {
+                if !self.acted_preflop {
+                    self.acted_preflop = true;
+                    match action {
+                        Action::Call | Action::Bet | Action::Raise | Action::AllIn => {
+                            self.vpip_count += 1;
+                        }
+                        _ => {}
+                    }
+                }
+                match action {
+                    Action::Bet | Action::Raise => {
+                        self.pfr_count += 1;
+                        self.raised_preflop = true;
+                        self.was_pfr = true;
+                        if is_facing_raise {
+                            self.three_bet_count += 1;
+                        }
+                    }
+                    Action::AllIn => {
+                        self.pfr_count += 1;
+                        self.allin_count += 1;
+                        self.was_pfr = true;
+                    }
+                    _ => {}
+                }
+            }
+            Phase::Flop | Phase::Turn | Phase::River => {
+                match action {
+                    Action::Bet | Action::Raise => {
+                        self.postflop_bets += 1;
+                        // track cbet (first bet on flop by preflop raiser)
+                        if phase == Phase::Flop && self.was_pfr {
+                            self.cbet_count += 1;
+                        }
+                    }
+                    Action::Call => { self.postflop_calls += 1; }
+                    Action::Check => {
+                        self.postflop_checks += 1;
+                        // missed cbet
+                        if phase == Phase::Flop && self.was_pfr {
+                            self.cbet_opportunities += 1;
+                        }
+                    }
+                    Action::Fold => { self.postflop_folds += 1; }
+                    Action::AllIn => {
+                        self.postflop_bets += 1;
+                        self.allin_count += 1;
+                    }
+                }
+                // cbet opportunity tracking
+                if phase == Phase::Flop && self.was_pfr && matches!(action, Action::Bet | Action::Raise | Action::AllIn) {
+                    self.cbet_opportunities += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// call when player reaches showdown
+    pub fn observe_showdown(&mut self, won: bool) {
+        self.showdowns_seen += 1;
+        if won { self.showdowns_won += 1; }
+    }
+}
+
+/// tracks all opponents at the table
+#[derive(Debug, Clone)]
+pub struct TableProfiles {
+    pub profiles: [PlayerProfile; MAX_SEATS],
+}
+
+impl Default for TableProfiles {
+    fn default() -> Self {
+        Self { profiles: [PlayerProfile::default(); MAX_SEATS] }
+    }
+}
+
+impl TableProfiles {
+    /// call when a new hand starts
+    pub fn new_hand(&mut self, num_players: u8) {
+        for i in 0..num_players as usize {
+            self.profiles[i].new_hand();
+        }
+    }
+
+    /// observe an action from a player
+    pub fn observe(&mut self, seat: u8, action: Action, phase: Phase, is_facing_raise: bool) {
+        self.profiles[seat as usize].observe_action(action, phase, is_facing_raise);
+    }
+
+    /// observe showdown result
+    pub fn observe_showdown(&mut self, seat: u8, won: bool) {
+        self.profiles[seat as usize].observe_showdown(won);
+    }
+
+    /// get features for all opponents (for neural net input)
+    pub fn opponent_features(&self, hero_seat: u8, num_players: u8) -> [[f32; 16]; MAX_SEATS] {
+        let mut features = [[0.0f32; 16]; MAX_SEATS];
+        let mut idx = 0;
+        for i in 0..num_players as usize {
+            if i != hero_seat as usize {
+                features[idx] = self.profiles[i].to_features();
+                idx += 1;
+            }
+        }
+        features
+    }
+
+    /// classify a specific player
+    pub fn classify(&self, seat: u8) -> PlayerType {
+        self.profiles[seat as usize].classify()
+    }
+}
+
 impl GameState {
     pub fn new(rules: Rules, num_players: u8) -> Self {
         let n = (num_players as usize).min(MAX_SEATS).max(2);
@@ -615,6 +906,28 @@ impl GameState {
     }
 }
 
+/// evaluate best 5-card hand from 2 hole cards + 5 community cards
+pub fn best_hand_7(hole: [u8; 2], community: &[u8; 5]) -> u32 {
+    let mut all7 = [0u8; 7];
+    all7[0] = hole[0];
+    all7[1] = hole[1];
+    for i in 0..5 { all7[2 + i] = community[i]; }
+
+    let mut best = 0u32;
+    for i in 0..7 {
+        for j in (i + 1)..7 {
+            let mut hand = [0u8; 5];
+            let mut idx = 0;
+            for k in 0..7 {
+                if k != i && k != j { hand[idx] = all7[k]; idx += 1; }
+            }
+            let score = eval_5(hand);
+            if score > best { best = score; }
+        }
+    }
+    best
+}
+
 // ============================================================================
 // Hand evaluation
 // ============================================================================
@@ -629,7 +942,7 @@ const FULL_HOUSE: u32 = 6;
 const QUADS: u32 = 7;
 const STRAIGHT_FLUSH: u32 = 8;
 
-fn eval_5(hand: [u8; 5]) -> u32 {
+pub fn eval_5(hand: [u8; 5]) -> u32 {
     let mut ranks = [0u8; 5];
     let mut suits = [0u8; 5];
     for i in 0..5 { ranks[i] = hand[i] % 13; suits[i] = hand[i] / 13; }

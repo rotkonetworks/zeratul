@@ -151,7 +151,7 @@ pub fn abstract_action(action: Action, amount: u32, pot: u32, stack: u32) -> u8 
     }
 }
 
-/// information set key: hand bucket + action history
+/// information set key: hand bucket + action history (heads-up)
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
 pub struct InfoSetKey {
     /// hand bucket (preflop: 0-168, postflop: 0-9)
@@ -170,6 +170,169 @@ impl InfoSetKey {
         bytes.push(self.history.len() as u8);
         bytes.extend_from_slice(&self.history);
         bytes
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+        if data.len() < 4 { return Err("info set key too short".into()); }
+        let hand_bucket = u16::from_le_bytes(data[0..2].try_into().unwrap());
+        let street = data[2];
+        let hist_len = data[3] as usize;
+        if data.len() < 4 + hist_len { return Err("truncated history".into()); }
+        let history = data[4..4 + hist_len].to_vec();
+        Ok(Self { hand_bucket, history, street })
+    }
+}
+
+// ── Multiplayer abstraction (Pluribus-style) ────────────────────────
+//
+// For N>2 players, the full action history is intractable.
+// Pluribus compresses the info set to:
+//   1. Hand bucket (same as heads-up)
+//   2. Position relative to button (0 = BTN, 1 = SB, ... N-1)
+//   3. Per-street action summary (not full history):
+//      - num_raises this street (0-3+)
+//      - num_callers (0-N)
+//      - last aggressor position relative to hero
+//      - pot size bucket (fraction of starting stacks)
+//   4. Street (0-3)
+//
+// This keeps info sets ~100K even at 6-max (vs billions with full history).
+
+/// compressed per-street action summary
+#[derive(Clone, Hash, Eq, PartialEq, Debug)]
+pub struct StreetSummary {
+    /// raises this street (capped at 3)
+    pub num_raises: u8,
+    /// players who called/are still active
+    pub num_active: u8,
+    /// pot size bucket (0-7: fraction of total starting stacks)
+    pub pot_bucket: u8,
+}
+
+impl StreetSummary {
+    pub fn to_byte(&self) -> u8 {
+        // pack into single byte: 2 bits raises + 3 bits active + 3 bits pot
+        (self.num_raises.min(3) << 6) | (self.num_active.min(7) << 3) | self.pot_bucket.min(7)
+    }
+
+    pub fn from_byte(b: u8) -> Self {
+        Self {
+            num_raises: (b >> 6) & 0x3,
+            num_active: (b >> 3) & 0x7,
+            pot_bucket: b & 0x7,
+        }
+    }
+}
+
+/// multiplayer info set key (Pluribus-style compressed)
+#[derive(Clone, Hash, Eq, PartialEq, Debug)]
+pub struct MultiInfoSetKey {
+    /// hand bucket (preflop: 0-168, postflop: 0-9)
+    pub hand_bucket: u16,
+    /// position relative to button (0=BTN, 1=SB, 2=BB, 3=UTG, etc.)
+    pub position: u8,
+    /// current street (0-3)
+    pub street: u8,
+    /// per-street summaries for streets 0..=current
+    pub street_summaries: Vec<StreetSummary>,
+}
+
+/// pot size → bucket (0-7)
+pub fn pot_bucket(pot: u32, total_stacks: u32) -> u8 {
+    if total_stacks == 0 { return 0; }
+    let ratio = pot as f64 / total_stacks as f64;
+    // 0: <5%, 1: 5-10%, 2: 10-20%, 3: 20-35%, 4: 35-50%, 5: 50-70%, 6: 70-90%, 7: >90%
+    if ratio < 0.05 { 0 }
+    else if ratio < 0.10 { 1 }
+    else if ratio < 0.20 { 2 }
+    else if ratio < 0.35 { 3 }
+    else if ratio < 0.50 { 4 }
+    else if ratio < 0.70 { 5 }
+    else if ratio < 0.90 { 6 }
+    else { 7 }
+}
+
+/// position relative to button
+pub fn relative_position(seat: u8, button: u8, num_players: u8) -> u8 {
+    // 0 = button, 1 = SB, 2 = BB, 3+ = early/middle positions
+    (seat + num_players - button) % num_players
+}
+
+impl MultiInfoSetKey {
+    /// serialize to bytes for hashmap lookup
+    pub fn to_bytes(&self) -> Vec<u8> {
+        // magic byte 0xFF to distinguish from heads-up keys
+        let mut bytes = vec![0xFF];
+        bytes.extend_from_slice(&self.hand_bucket.to_le_bytes());
+        bytes.push(self.position);
+        bytes.push(self.street);
+        bytes.push(self.street_summaries.len() as u8);
+        for ss in &self.street_summaries {
+            bytes.push(ss.to_byte());
+        }
+        bytes
+    }
+
+    pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
+        if data.len() < 6 || data[0] != 0xFF {
+            return Err("not a multi info set key".into());
+        }
+        let hand_bucket = u16::from_le_bytes(data[1..3].try_into().unwrap());
+        let position = data[3];
+        let street = data[4];
+        let n = data[5] as usize;
+        if data.len() < 6 + n { return Err("truncated summaries".into()); }
+        let summaries = data[6..6+n].iter().map(|&b| StreetSummary::from_byte(b)).collect();
+        Ok(Self { hand_bucket, position, street, street_summaries: summaries })
+    }
+
+    /// estimate the number of unique info sets for N players
+    /// = hand_buckets × positions × street_combos
+    pub fn estimate_info_sets(num_players: u8) -> usize {
+        let hand_buckets = 169 + 10 + 10 + 10; // preflop + flop + turn + river
+        let positions = num_players as usize;
+        // per-street: 4 raise levels × 8 active × 8 pot = 256 combos
+        // but most are unreachable, ~50 realistic per street × 4 streets
+        let street_combos = 50 * 4;
+        hand_buckets * positions * street_combos
+    }
+}
+
+/// compute multi-player info set from game state
+pub fn compute_multi_info_key(
+    hole: [u8; 2],
+    board: &[u8],
+    street: u8,
+    position: u8,
+    num_raises_per_street: &[u8],
+    active_per_street: &[u8],
+    pot: u32,
+    total_stacks: u32,
+    rng: &mut impl FnMut() -> u32,
+) -> MultiInfoSetKey {
+    let hand_bucket = if street == 0 {
+        preflop_bucket(hole[0], hole[1])
+    } else {
+        let board_len = match street { 1 => 3, 2 => 4, _ => 5 };
+        let actual_board = if board.len() >= board_len { &board[..board_len] } else { board };
+        hand_strength_bucket(hole, actual_board, 10, 200, rng)
+    };
+
+    let pb = pot_bucket(pot, total_stacks);
+    let mut summaries = Vec::new();
+    for s in 0..=street as usize {
+        summaries.push(StreetSummary {
+            num_raises: *num_raises_per_street.get(s).unwrap_or(&0),
+            num_active: *active_per_street.get(s).unwrap_or(&2),
+            pot_bucket: pb, // use current pot bucket for all (approximation)
+        });
+    }
+
+    MultiInfoSetKey {
+        hand_bucket,
+        position,
+        street,
+        street_summaries: summaries,
     }
 }
 

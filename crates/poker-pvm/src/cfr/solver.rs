@@ -335,9 +335,17 @@ impl Solver {
 
     /// run N iterations of MCCFR
     pub fn train(&mut self, num_iterations: u64) {
-        for i in 0..num_iterations {
+        self.train_with_checkpoint(num_iterations, None);
+    }
+
+    /// run N iterations with periodic checkpoint saves
+    pub fn train_with_checkpoint(&mut self, num_iterations: u64, checkpoint_path: Option<&str>) {
+        let start_iter = self.iterations;
+        let target = start_iter + num_iterations;
+
+        for i in start_iter..target {
             // alternate training player
-            let training_player = (i % 2) as u8;
+            let training_player = ((i - start_iter) % 2) as u8;
 
             let (mut state, cards, community) = self.deal_random();
             let mut history = Vec::new();
@@ -345,10 +353,134 @@ impl Solver {
             self.traverse(&mut state, &cards, &community, &mut history, training_player);
             self.iterations += 1;
 
-            if (i + 1) % 10000 == 0 {
-                println!("iteration {}: {} info sets", i + 1, self.nodes.len());
+            if (self.iterations) % 10000 == 0 {
+                println!("iteration {}: {} info sets", self.iterations, self.nodes.len());
+            }
+
+            // checkpoint every 500K iterations
+            if let Some(path) = checkpoint_path {
+                if self.iterations % 500_000 == 0 {
+                    if let Err(e) = self.save_checkpoint(path) {
+                        eprintln!("checkpoint save failed: {}", e);
+                    } else {
+                        println!("checkpoint saved at iteration {} to {}", self.iterations, path);
+                    }
+                }
             }
         }
+    }
+
+    /// serialize full solver state (nodes + rng + iterations + variant) for resume
+    pub fn save_checkpoint(&self, path: &str) -> Result<(), String> {
+        let mut buf: Vec<u8> = Vec::new();
+
+        // magic + version
+        buf.extend_from_slice(b"CFR1");
+
+        // variant tag
+        match self.variant {
+            CfrVariant::Vanilla => buf.push(0),
+            CfrVariant::DcfrPlus { .. } => buf.push(1),
+        };
+        if let CfrVariant::DcfrPlus { alpha, gamma } = self.variant {
+            buf.extend_from_slice(&alpha.to_le_bytes());
+            buf.extend_from_slice(&gamma.to_le_bytes());
+        }
+
+        // iterations + rng
+        buf.extend_from_slice(&self.iterations.to_le_bytes());
+        buf.extend_from_slice(&self.rng_state.to_le_bytes());
+
+        // rules
+        buf.extend_from_slice(&self.rules.buyin.to_le_bytes());
+        buf.extend_from_slice(&self.rules.small_blind.to_le_bytes());
+        buf.extend_from_slice(&self.rules.big_blind.to_le_bytes());
+        buf.extend_from_slice(&self.rules.rake_bps.to_le_bytes());
+        buf.extend_from_slice(&self.rules.rake_cap.to_le_bytes());
+
+        // nodes
+        let count = self.nodes.len() as u64;
+        buf.extend_from_slice(&count.to_le_bytes());
+
+        for (key, node) in &self.nodes {
+            let key_bytes = key.to_bytes();
+            buf.extend_from_slice(&(key_bytes.len() as u16).to_le_bytes());
+            buf.extend_from_slice(&key_bytes);
+
+            buf.extend_from_slice(&(node.num_actions as u16).to_le_bytes());
+            for &r in &node.regret_sum {
+                buf.extend_from_slice(&r.to_le_bytes());
+            }
+            for &s in &node.strategy_sum {
+                buf.extend_from_slice(&s.to_le_bytes());
+            }
+        }
+
+        std::fs::write(path, &buf).map_err(|e| e.to_string())
+    }
+
+    /// load solver state from checkpoint
+    pub fn load_checkpoint(path: &str) -> Result<Self, String> {
+        let data = std::fs::read(path).map_err(|e| e.to_string())?;
+        let mut pos = 0;
+
+        fn read_bytes<'a>(data: &'a [u8], pos: &mut usize, n: usize) -> Result<&'a [u8], String> {
+            if *pos + n > data.len() { return Err("truncated checkpoint".into()); }
+            let slice = &data[*pos..*pos + n];
+            *pos += n;
+            Ok(slice)
+        }
+
+        // magic
+        let magic = read_bytes(&data, &mut pos, 4)?;
+        if magic != b"CFR1" { return Err("not a CFR checkpoint".into()); }
+
+        // variant
+        let tag = read_bytes(&data, &mut pos, 1)?[0];
+        let variant = match tag {
+            0 => CfrVariant::Vanilla,
+            1 => {
+                let alpha = f64::from_le_bytes(read_bytes(&data, &mut pos, 8)?.try_into().unwrap());
+                let gamma = f64::from_le_bytes(read_bytes(&data, &mut pos, 8)?.try_into().unwrap());
+                CfrVariant::DcfrPlus { alpha, gamma }
+            }
+            _ => return Err(format!("unknown variant tag {}", tag)),
+        };
+
+        let iterations = u64::from_le_bytes(read_bytes(&data, &mut pos, 8)?.try_into().unwrap());
+        let rng_state = u64::from_le_bytes(read_bytes(&data, &mut pos, 8)?.try_into().unwrap());
+
+        // rules
+        let buyin = u32::from_le_bytes(read_bytes(&data, &mut pos, 4)?.try_into().unwrap());
+        let small_blind = u32::from_le_bytes(read_bytes(&data, &mut pos, 4)?.try_into().unwrap());
+        let big_blind = u32::from_le_bytes(read_bytes(&data, &mut pos, 4)?.try_into().unwrap());
+        let rake_bps = u16::from_le_bytes(read_bytes(&data, &mut pos, 2)?.try_into().unwrap());
+        let rake_cap = u32::from_le_bytes(read_bytes(&data, &mut pos, 4)?.try_into().unwrap());
+        let rules = Rules { buyin, small_blind, big_blind, turn_timeout_blocks: 6, rake_bps, rake_cap };
+
+        // nodes
+        let count = u64::from_le_bytes(read_bytes(&data, &mut pos, 8)?.try_into().unwrap()) as usize;
+        let mut nodes = HashMap::with_capacity(count);
+
+        for _ in 0..count {
+            let key_len = u16::from_le_bytes(read_bytes(&data, &mut pos, 2)?.try_into().unwrap()) as usize;
+            let key_bytes = read_bytes(&data, &mut pos, key_len)?;
+            let key = super::abstraction::InfoSetKey::from_bytes(key_bytes)?;
+
+            let num_actions = u16::from_le_bytes(read_bytes(&data, &mut pos, 2)?.try_into().unwrap()) as usize;
+            let mut regret_sum = Vec::with_capacity(num_actions);
+            for _ in 0..num_actions {
+                regret_sum.push(f64::from_le_bytes(read_bytes(&data, &mut pos, 8)?.try_into().unwrap()));
+            }
+            let mut strategy_sum = Vec::with_capacity(num_actions);
+            for _ in 0..num_actions {
+                strategy_sum.push(f64::from_le_bytes(read_bytes(&data, &mut pos, 8)?.try_into().unwrap()));
+            }
+
+            nodes.insert(key, InfoNode { regret_sum, strategy_sum, num_actions });
+        }
+
+        Ok(Solver { nodes, rules, iterations, variant, rng_state })
     }
 
     /// exploitability estimate (how far from Nash)

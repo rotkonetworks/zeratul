@@ -23,6 +23,11 @@ name = "cfr-bench"
 path = "src/cfr/bench.rs"
 required-features = ["std"]
 
+[[bin]]
+name = "cfr-selfplay"
+path = "src/cfr/selfplay_bin.rs"
+required-features = ["std"]
+
 [features]
 default = ["std"]
 std = []
