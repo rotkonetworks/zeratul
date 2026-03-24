@@ -150,6 +150,12 @@ export default function App() {
         if (msg.seat < 0) { setActions([]); setActing(-1); break } // clear stale
         setActing(msg.seat)
         if (msg.seat === mySeat()) {
+          // don't auto-action when all-in (stack = 0) or only 1 valid action
+          const myCurrentStack = stacks()[mySeat()] ?? 0
+          if (myCurrentStack === 0) {
+            setActions(msg.valid_actions)
+            break
+          }
           // check auto-action first
           const aa = autoAction()
           const hasCheck = msg.valid_actions.some(a => a.kind === 'check')
