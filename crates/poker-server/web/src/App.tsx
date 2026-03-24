@@ -9,6 +9,25 @@ export default function App() {
     location.pathname.length > 1 ? 'lobby' : 'casino'
   )
   const [selectedTable, setSelectedTable] = createSignal<Table | null>(null)
+  const [hasWallet, setHasWallet] = createSignal(false)
+  const [walletPubkey, setWalletPubkey] = createSignal<string | undefined>(undefined)
+
+  // detect zafu/penumbra wallet extension
+  onCleanup((() => {
+    const check = () => {
+      const providers = (window as any)[Symbol.for('penumbra')]
+      const found = providers && Object.keys(providers).length > 0
+      setHasWallet(found)
+      // try to get pubkey from session identity if available
+      if (found) {
+        const id = identity()
+        if (id?.sessionPubKey) setWalletPubkey(id.sessionPubKey)
+      }
+    }
+    check()
+    const iv = setTimeout(check, 1000)
+    return () => clearTimeout(iv)
+  })())
   const [name, setName] = createSignal('')
   const [mySeat, setMySeat] = createSignal(-1)
   const [oppName, setOppName] = createSignal('\u2014')
@@ -375,7 +394,8 @@ export default function App() {
           {/* casino lobby */}
           <Show when={view() === 'casino'}>
             <Lobby
-              hasWallet={true /* TODO: detect zafu */}
+              hasWallet={hasWallet()}
+              pubkey={walletPubkey()}
               onJoin={(table, playerName) => {
                 setSelectedTable(table)
                 setName(playerName)

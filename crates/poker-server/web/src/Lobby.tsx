@@ -33,8 +33,24 @@ export default function Lobby(props: {
   onJoin: (table: Table, name: string) => void
   onJoinCode: (code: string, name: string) => void
   hasWallet: boolean
+  pubkey?: string  // hex pubkey from zafu
 }) {
-  const [name, setName] = createSignal('')
+  // default nickname: first 8 chars of pubkey, or saved custom name
+  const defaultName = () => {
+    const saved = localStorage.getItem('poker_nickname')
+    if (saved) return saved
+    if (props.pubkey) return props.pubkey.slice(0, 8)
+    return ''
+  }
+  const [name, setName] = createSignal(defaultName())
+
+  // persist nickname changes
+  function updateName(n: string) {
+    setName(n)
+    if (n && n !== props.pubkey?.slice(0, 8)) {
+      localStorage.setItem('poker_nickname', n)
+    }
+  }
   const [inviteCode, setInviteCode] = createSignal('')
   const [liveTables, setLiveTables] = createSignal<LiveTable[]>([])
   const [tab, setTab] = createSignal<'play' | 'public' | 'invite'>('play')
@@ -212,13 +228,18 @@ export default function Lobby(props: {
           <div class="flex items-center justify-center gap-2 mb-3">
             <input
               class="input-field w-36 text-center text-11px"
-              placeholder="name"
+              placeholder={props.pubkey?.slice(0, 8) || 'name'}
               maxLength={16}
               spellcheck={false}
               value={name()}
-              onInput={e => setName(e.currentTarget.value)}
+              onInput={e => updateName(e.currentTarget.value)}
               autofocus
             />
+            <Show when={props.pubkey}>
+              <span class="text-7px text-neutral-700 font-mono" title={props.pubkey}>
+                {props.pubkey!.slice(0, 6)}..
+              </span>
+            </Show>
             <button
               class="text-8px px-2 py-1 rounded border border-neutral-700 text-neutral-500 hover:text-neutral-300"
               onClick={() => setMode(m => m === 'casino' ? 'list' : 'casino')}

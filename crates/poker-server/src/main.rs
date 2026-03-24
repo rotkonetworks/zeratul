@@ -760,6 +760,11 @@ async fn room_page(
     Path(code): Path<String>,
     State(state): State<AppState>,
 ) -> impl IntoResponse {
+    // ignore non-room paths (favicon, assets, api, etc.)
+    if code.contains('.') || code == "api" || code == "ws" || code == "new" || code == "health" {
+        return (axum::http::StatusCode::NOT_FOUND, "not found").into_response();
+    }
+
     // create room if it doesn't exist (joining via invite link)
     {
         let mut rooms = state.rooms.lock().await;
