@@ -396,7 +396,11 @@ export default function App() {
               onJoin={(table, playerName) => {
                 setSelectedTable(table)
                 setName(playerName)
-                fetch('/new', { redirect: 'follow' }).then(resp => {
+                const params = new URLSearchParams({
+                  sb: String(table.sb), bb: String(table.bb),
+                  buyin: String(table.buyin), timeout: String(table.timeout),
+                })
+                fetch(`/new?${params}`, { redirect: 'follow' }).then(resp => {
                   const url = resp.url || resp.headers.get('location') || ''
                   const code = url.split('/').pop() || ''
                   if (code) {

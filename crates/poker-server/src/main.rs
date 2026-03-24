@@ -201,16 +201,20 @@ struct Room {
 
 impl Room {
     fn new(code: String) -> Self {
+        Self::with_settings(code, 5, 10, 1000, 30)
+    }
+
+    fn with_settings(code: String, sb: u64, bb: u64, buyin: u64, timeout: u32) -> Self {
         let rules = TableRules {
-            small_blind: 5, big_blind: 10, ante: 0,
-            min_buy_in: 1000, max_buy_in: 0, seats: 2,
+            small_blind: sb as u128, big_blind: bb as u128, ante: 0,
+            min_buy_in: buyin as u128, max_buy_in: 0, seats: 2,
             tier: poker_p2p::protocol::SecurityTier::Training,
             allow_spectators: false, max_spectators: 0,
-            time_bank: 60, action_timeout: 30,
+            time_bank: 60, action_timeout: timeout,
         };
         let mut engine = GameEngine::new(rules, 2).unwrap();
-        engine.seat_player(0, 1000).unwrap();
-        engine.seat_player(1, 1000).unwrap();
+        engine.seat_player(0, buyin).unwrap();
+        engine.seat_player(1, buyin).unwrap();
 
         // frostito: 2-of-3 nested escrow (player A + player B + jury)
         // jury's share s₃ born distributed via interleaved DKG — never materialized
@@ -748,9 +752,26 @@ async fn list_tables(State(state): State<AppState>) -> impl IntoResponse {
 }
 
 /// create new room and redirect to it
-async fn create_room(State(state): State<AppState>) -> impl IntoResponse {
+/// query params for table creation
+#[derive(Deserialize, Default)]
+struct CreateTableParams {
+    sb: Option<u64>,
+    bb: Option<u64>,
+    buyin: Option<u64>,
+    timeout: Option<u32>,
+}
+
+async fn create_room(
+    State(state): State<AppState>,
+    axum::extract::Query(params): axum::extract::Query<CreateTableParams>,
+) -> impl IntoResponse {
     let code = generate_room_code();
-    let room = Arc::new(Mutex::new(Room::new(code.clone())));
+    let sb = params.sb.unwrap_or(5);
+    let bb = params.bb.unwrap_or(10);
+    let buyin = params.buyin.unwrap_or(1000);
+    let timeout = params.timeout.unwrap_or(30);
+
+    let room = Arc::new(Mutex::new(Room::with_settings(code.clone(), sb, bb, buyin, timeout)));
     state.rooms.lock().await.insert(code.clone(), room);
     axum::response::Redirect::to(&format!("/{}", code))
 }

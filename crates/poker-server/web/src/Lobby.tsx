@@ -258,7 +258,7 @@ export default function Lobby(props: {
               }`}
               onClick={() => setTab(t)}
             >
-              {t === 'play' ? 'play vs bot' : t === 'public' ? `public (${waitingTables().length})` : 'invite friend'}
+              {t === 'play' ? 'create table' : t === 'public' ? `public (${waitingTables().length})` : 'invite friend'}
             </button>
           )}
         </div>
@@ -351,7 +351,7 @@ export default function Lobby(props: {
                         table.speed === 'fast' ? 'bg-orange-900/30 text-orange-400' :
                         'bg-red-900/30 text-red-400'
                       }`}>{table.timeout}s</div>
-                      <div class="text-7px text-neutral-600 mt-0.5">vs bot</div>
+                      <div class="text-7px text-neutral-600 mt-0.5">open seat</div>
                     </div>
                   </button>
                 )}
@@ -365,7 +365,7 @@ export default function Lobby(props: {
           <Show when={waitingTables().length > 0} fallback={
             <div class="text-center py-8">
               <div class="text-neutral-600 text-11px mb-2">no public tables waiting</div>
-              <div class="text-neutral-700 text-9px">create one from the "play vs bot" tab<br/>or invite a friend</div>
+              <div class="text-neutral-700 text-9px">create one from the "create table" tab<br/>or invite a friend</div>
             </div>
           }>
             <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">waiting for opponent</div>
