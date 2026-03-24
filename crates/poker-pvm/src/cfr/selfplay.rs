@@ -46,10 +46,217 @@ impl Arena {
         }
     }
 
-    /// play N hands, return training samples from both players' perspectives
+    /// play N hands across multiple threads, merge results
+    pub fn play_parallel(&self, num_hands: u64, num_threads: usize, fast: bool) -> SelfPlayResult {
+        let hands_per_thread = num_hands / num_threads as u64;
+        let remainder = num_hands % num_threads as u64;
+
+        let strategy = &self.strategy;
+        let handles: Vec<_> = (0..num_threads).map(|t| {
+            let strat = strategy.clone();
+            let n = hands_per_thread + if (t as u64) < remainder { 1 } else { 0 };
+            std::thread::spawn(move || {
+                let arena = Arena::new(&strat);
+                if fast { arena.play_fast(n) } else { arena.play(n) }
+            })
+        }).collect();
+
+        let mut all_samples = Vec::new();
+        let mut total_hands = 0u64;
+        let mut p0 = 0i64;
+        let mut p1 = 0i64;
+
+        for h in handles {
+            let result = h.join().unwrap();
+            all_samples.extend(result.samples);
+            total_hands += result.hands_played;
+            p0 += result.player_0_winnings;
+            p1 += result.player_1_winnings;
+        }
+
+        SelfPlayResult {
+            samples: all_samples,
+            hands_played: total_hands,
+            player_0_winnings: p0,
+            player_1_winnings: p1,
+        }
+    }
+
+    /// play N hands with L0 blueprint only — no search, no range tracking.
+    /// ~62K hands/sec per thread. good for training data generation.
+    pub fn play_fast(&self, num_hands: u64) -> SelfPlayResult {
+        let blueprint = import_strategy(&self.strategy);
+        let mut samples = Vec::new();
+        let mut p0_winnings: i64 = 0;
+        let mut p1_winnings: i64 = 0;
+
+        let mut rng_state: u64 = 0xDEAD_BEEF_CAFE_1234 ^ (std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().subsec_nanos() as u64);
+        let mut rng = || -> u32 {
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            (rng_state >> 16) as u32
+        };
+
+        for hand_num in 0..num_hands {
+            let button = (hand_num % 2) as u8;
+            let mut deck: Vec<u8> = (0..52).collect();
+            for i in (1..52).rev() { let j = (rng() as usize) % (i+1); deck.swap(i, j); }
+
+            let h0 = [deck[0], deck[1]];
+            let h1 = [deck[2], deck[3]];
+            let community = [deck[4], deck[5], deck[6], deck[7], deck[8]];
+
+            let mut stacks = [1000u32, 1000];
+            let mut bets = [0u32, 0];
+            let mut pot = 0u32;
+            let mut acting = button;
+            let mut round_actions = 0u8;
+            let mut streets = 0u8;
+            let mut history: Vec<u8> = Vec::new();
+            let mut hand_samples: Vec<(u8, [f32; NUM_FEATURES], [f32; NUM_ACTIONS])> = Vec::new();
+            let mut folded = false;
+
+            // post blinds
+            let sb = 5u32.min(stacks[acting as usize]);
+            stacks[acting as usize] -= sb;
+            bets[acting as usize] = sb;
+            let bb_seat = 1 - acting;
+            let bb = 10u32.min(stacks[bb_seat as usize]);
+            stacks[bb_seat as usize] -= bb;
+            bets[bb_seat as usize] = bb;
+            pot = sb + bb;
+
+            for _ in 0..50 {
+                let cards = if acting == 0 { &h0 } else { &h1 };
+                let community_count = match streets { 0 => 0usize, 1 => 3, 2 => 4, 3 => 5, _ => 5 };
+                let bucket = Self::hand_bucket_fast(cards, &community[..community_count]);
+                let community_count = match streets { 0 => 0, 1 => 3, 2 => 4, 3 => 5, _ => 5 };
+
+                // blueprint lookup
+                let key_bytes = InfoSetKey { hand_bucket: bucket, history: history.clone(), street: streets }.to_bytes();
+                let probs = blueprint.get(&key_bytes).cloned().unwrap_or_else(|| {
+                    vec![0.15, 0.35, 0.35, 0.15] // fallback: slight fold bias
+                });
+
+                // extract features
+                let opp = 1 - acting;
+                let board = &community[..community_count];
+                let features = ctm::extract_all(
+                    board, pot, stacks[acting as usize], stacks[opp as usize],
+                    bets[acting as usize], 10, 0.5, 0.3, 0.1, 0.1, acting == button,
+                );
+                let mut action_probs = [0.0f32; NUM_ACTIONS];
+                for (i, &p) in probs.iter().enumerate().take(NUM_ACTIONS) { action_probs[i] = p as f32; }
+                let total: f32 = action_probs.iter().sum();
+                if total > 0.0 { for p in &mut action_probs { *p /= total; } }
+
+                hand_samples.push((acting, features.features, action_probs));
+
+                // sample action
+                let r = rng() as f32 / u32::MAX as f32;
+                let mut cumul = 0.0f32;
+                let mut action_idx = 0usize;
+                for (i, &p) in action_probs.iter().enumerate() {
+                    cumul += p;
+                    if r < cumul { action_idx = i; break; }
+                }
+
+                let to_call = bets[0].max(bets[1]) - bets[acting as usize];
+                match action_idx {
+                    0 => { folded = true; history.push(0); break; } // fold
+                    1 => { history.push(1); } // check
+                    2 => { // call
+                        let actual = to_call.min(stacks[acting as usize]);
+                        stacks[acting as usize] -= actual;
+                        bets[acting as usize] += actual;
+                        pot += actual;
+                        history.push(2);
+                    }
+                    3 | 4 => { // bet/raise
+                        let raise = if action_idx == 3 { pot / 2 } else { pot }.max(10);
+                        let total_bet = bets[0].max(bets[1]) + raise;
+                        let needed = total_bet - bets[acting as usize];
+                        let actual = needed.min(stacks[acting as usize]);
+                        stacks[acting as usize] -= actual;
+                        bets[acting as usize] += actual;
+                        pot += actual;
+                        history.push(3);
+                    }
+                    _ => { // allin
+                        let all = stacks[acting as usize];
+                        bets[acting as usize] += all;
+                        stacks[acting as usize] = 0;
+                        pot += all;
+                        history.push(4);
+                    }
+                }
+
+                round_actions += 1;
+                let both_acted = round_actions >= 2;
+                let bets_eq = bets[0] == bets[1] || stacks[0] == 0 || stacks[1] == 0;
+
+                if both_acted && bets_eq {
+                    round_actions = 0;
+                    bets = [0, 0];
+                    streets += 1;
+                    if streets > 3 { break; } // showdown
+                    acting = 1 - button; // OOP first postflop
+                } else {
+                    acting = 1 - acting;
+                }
+            }
+
+            let winner = if folded { 1 - acting }
+                else {
+                    let s0 = eval_best_5(h0, &community);
+                    let s1 = eval_best_5(h1, &community);
+                    if s0 > s1 { 0 } else if s1 > s0 { 1 } else { 255 }
+                };
+
+            let value_0 = if winner == 0 { 1.0 } else if winner == 1 { -1.0 } else { 0.0 };
+            for (seat, features, aprobs) in &hand_samples {
+                let v = if *seat == 0 { value_0 } else { -value_0 };
+                samples.push(SelfPlaySample {
+                    features: *features, action_probs: *aprobs,
+                    outcome_value: v, pot, street: streets,
+                    expert_id: ctm::route(&ctm::StateFeatures { features: *features })[0].0 as u8,
+                });
+            }
+
+            let half = (pot / 2) as i64;
+            if winner == 0 { p0_winnings += half; p1_winnings -= half; }
+            else if winner == 1 { p1_winnings += half; p0_winnings -= half; }
+        }
+
+        SelfPlayResult { samples, hands_played: num_hands, player_0_winnings: p0_winnings, player_1_winnings: p1_winnings }
+    }
+
+    fn hand_bucket_fast(cards: &[u8; 2], board: &[u8]) -> u16 {
+        // fast bucket from card ranks only (no rollout)
+        let r0 = cards[0] % 13;
+        let r1 = cards[1] % 13;
+        let suited = cards[0] / 13 == cards[1] / 13;
+        let high = r0.max(r1);
+        let low = r0.min(r1);
+        let gap = high - low;
+        // simple hand strength heuristic: high cards + pair bonus + suited bonus
+        let mut score = high as u16 * 2 + low as u16;
+        if r0 == r1 { score += 20; } // pair
+        if suited { score += 3; }
+        if gap <= 2 { score += 2; } // connected
+        // map to 0-9 bucket
+        (score * 10 / 50).min(9)
+    }
+
     pub fn play(&self, num_hands: u64) -> SelfPlayResult {
-        let mut brain0 = Brain::new(&self.strategy).with_mode(ExploitMode::Exploit);
-        let mut brain1 = Brain::new(&self.strategy).with_mode(ExploitMode::Exploit);
+        self.play_inner(num_hands, true)
+    }
+
+    fn play_inner(&self, num_hands: u64, use_search: bool) -> SelfPlayResult {
+        let mode = if use_search { ExploitMode::Exploit } else { ExploitMode::Nash };
+        let mut brain0 = Brain::new(&self.strategy).with_mode(mode);
+        let mut brain1 = Brain::new(&self.strategy).with_mode(mode);
 
         let mut samples = Vec::new();
         let mut p0_winnings: i64 = 0;

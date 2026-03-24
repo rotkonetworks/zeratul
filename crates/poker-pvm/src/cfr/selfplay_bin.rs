@@ -14,6 +14,8 @@ fn main() {
     let mut hands: u64 = 100_000;
     let mut output_path: Option<String> = None;
     let mut measure_only = false;
+    let mut threads: usize = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    let mut fast = true; // default: no search, blueprint only (fast)
 
     let mut i = 1;
     while i < args.len() {
@@ -21,6 +23,8 @@ fn main() {
             "--strategy" => { if i+1 < args.len() { strategy_path = args[i+1].clone(); i += 1; } }
             "--hands" => { if i+1 < args.len() { hands = args[i+1].parse().unwrap_or(100_000); i += 1; } }
             "--output" => { if i+1 < args.len() { output_path = Some(args[i+1].clone()); i += 1; } }
+            "--threads" => { if i+1 < args.len() { threads = args[i+1].parse().unwrap_or(4); i += 1; } }
+            "--with-search" => { fast = false; } // enable L1 search (slow but better signal)
             "--measure-only" => { measure_only = true; }
             _ => {}
         }
@@ -31,11 +35,18 @@ fn main() {
         .unwrap_or_else(|e| { eprintln!("failed to load {}: {}", strategy_path, e); std::process::exit(1); });
 
     println!("strategy: {} ({} bytes)", strategy_path, strategy.len());
+    println!("threads: {}  mode: {}", threads, if fast { "fast (L0 only)" } else { "full (L0-L3 + search)" });
 
     let arena = Arena::new(&strategy);
 
     let t0 = Instant::now();
-    let result = arena.play(hands);
+    let result = if threads > 1 {
+        arena.play_parallel(hands, threads, fast)
+    } else if fast {
+        arena.play_fast(hands)
+    } else {
+        arena.play(hands)
+    };
     let elapsed = t0.elapsed();
 
     let rate = hands as f64 / elapsed.as_secs_f64();
