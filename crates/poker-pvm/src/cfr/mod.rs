@@ -37,5 +37,7 @@ pub mod range;
 pub mod brain;
 #[cfg(feature = "std")]
 pub mod ctm;
+#[cfg(feature = "std")]
+pub mod selfplay;
 #[cfg(feature = "onnx")]
 pub mod inference;

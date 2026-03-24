@@ -333,6 +333,27 @@ impl Room {
     }
 
     /// if bot has a pending action, apply it with a small delay for UX
+    fn make_bot_game_state(&self) -> bot::BotGameState {
+        bot::BotGameState {
+            stacks: self.engine.stacks().to_vec(),
+            pot: self.engine.hand_state()
+                .map(|h| h.pots.iter().map(|p| p.amount).sum())
+                .unwrap_or(0),
+            community_cards: self.community_cards.clone(),
+            bets: self.engine.hand_state()
+                .map(|h| h.seats.iter().map(|s| s.bet_this_round).collect())
+                .unwrap_or_default(),
+            num_players: 2,
+            phase: self.engine.hand_state()
+                .map(|h| h.phase).unwrap_or(Phase::Preflop),
+            acting_seat: self.engine.hand_state()
+                .and_then(|h| h.betting.action_on)
+                .map(|idx| self.engine.hand_state().unwrap().seats[idx].seat)
+                .unwrap_or(0),
+            hand_number: self.hand_number as u32,
+        }
+    }
+
     fn apply_bot_action(&mut self) {
         if let Some(action) = self.bot_pending_action.take() {
             // apply after a short "thinking" pause
@@ -369,10 +390,16 @@ impl Room {
                         your_cards: Some([card_json(&cards[0]), card_json(&cards[1])]),
                         stacks: self.engine.stacks().to_vec(),
                     });
-                    // tell bot its cards
+                    // tell bot its cards + update range tracking
                     if *seat == 1 {
                         if let Some(ref mut bot) = self.bot {
-                            bot.set_cards([card_to_index(&cards[0]), card_to_index(&cards[1])]);
+                            let gs = bot::BotGameState {
+                                stacks: self.engine.stacks().to_vec(),
+                                pot: 0, community_cards: Vec::new(), bets: Vec::new(),
+                                num_players: 2, phase: Phase::Preflop,
+                                acting_seat: 0, hand_number: self.hand_number as u32,
+                            };
+                            bot.set_cards([card_to_index(&cards[0]), card_to_index(&cards[1])], &gs);
                         }
                     }
                 }
@@ -413,8 +440,13 @@ impl Room {
                 EngineEvent::PlayerActed { seat, action, new_stack } => {
                     let (action_str, amount) = action_to_json(action);
                     self.broadcast(&ServerMsg::PlayerActed {
-                        seat: *seat, action: action_str, amount, new_stack: *new_stack,
+                        seat: *seat, action: action_str.clone(), amount, new_stack: *new_stack,
                     });
+                    // bot observes opponent actions for range + profile tracking
+                    if *seat != 1 && self.bot.is_some() {
+                        let gs = self.make_bot_game_state();
+                        self.bot.as_mut().unwrap().observe_action(*seat, action.clone(), amount, &gs);
+                    }
                 }
                 EngineEvent::PhaseChanged { phase, new_cards } => {
                     self.community_cards.extend(new_cards);
@@ -422,6 +454,12 @@ impl Room {
                         phase: format!("{:?}", phase).to_lowercase(),
                         cards: self.community_cards.iter().map(card_json).collect(),
                     });
+                    // bot observes community cards for range narrowing
+                    if self.bot.is_some() {
+                        let card_indices: Vec<u8> = new_cards.iter().map(card_to_index).collect();
+                        let gs = self.make_bot_game_state();
+                        self.bot.as_mut().unwrap().observe_community(&card_indices, &gs);
+                    }
                 }
                 EngineEvent::PotUpdated { pots } => {
                     self.broadcast(&ServerMsg::PotUpdate {

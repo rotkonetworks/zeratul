@@ -26,33 +26,46 @@ impl Bot {
         }
     }
 
-    /// notify bot of new hand
+    /// notify bot of new hand — resets range tracking + profile
     pub fn new_hand(&mut self, state: &BotGameState) {
-        // reset for new hand
         self.hero_cards = None;
+        let pvm_state = to_pvm_state(state, self.hero_seat);
+        self.brain.new_hand(&pvm_state);
     }
 
-    /// set bot's hole cards
-    pub fn set_cards(&mut self, cards: [u8; 2]) {
+    /// set bot's hole cards + update range tracking
+    pub fn set_cards(&mut self, cards: [u8; 2], state: &BotGameState) {
         self.hero_cards = Some(cards);
+        let pvm_state = to_pvm_state(state, self.hero_seat);
+        self.brain.set_hero_cards(self.hero_seat, cards, &pvm_state);
     }
 
-    /// decide an action given valid options
+    /// observe opponent's action — updates range + profile
+    pub fn observe_action(&mut self, seat: u8, action: ActionType, amount: u64, state: &BotGameState) {
+        if seat == self.hero_seat { return; }
+        let pvm_state = to_pvm_state(state, self.hero_seat);
+        let pvm_action = engine_action_to_pvm(&action);
+        self.brain.observe_action(seat, pvm_action, amount as u32, &pvm_state);
+    }
+
+    /// observe community cards — updates range tracking
+    pub fn observe_community(&mut self, cards: &[u8], state: &BotGameState) {
+        let pvm_state = to_pvm_state(state, self.hero_seat);
+        self.brain.reveal_community(cards, &pvm_state);
+    }
+
+    /// decide an action given valid options — uses full L0-L3 stack
     pub fn decide(&mut self, valid_actions: &[ValidAction], game_state: &BotGameState) -> ActionType {
-        // if we have hole cards + game state, use the brain
         if let Some(cards) = self.hero_cards {
             let state = to_pvm_state(game_state, self.hero_seat);
             let community = game_state.community_as_indices();
 
             let decision = self.brain.decide(&state, &cards, &community);
 
-            // map brain output to engine action
             if let Some((action, amount)) = decision.sample(rand::random::<f64>()) {
                 return pvm_action_to_engine(action, amount, valid_actions);
             }
         }
-
-        // fallback: pick simplest valid action
         fallback_action(valid_actions)
     }
 }
@@ -180,6 +193,17 @@ fn pvm_action_to_engine(action: poker_pvm::Action, amount: u32, valid: &[ValidAc
             }
         }
         poker_pvm::Action::AllIn => ActionType::AllIn,
+    }
+}
+
+fn engine_action_to_pvm(action: &ActionType) -> poker_pvm::Action {
+    match action {
+        ActionType::Fold => poker_pvm::Action::Fold,
+        ActionType::Check => poker_pvm::Action::Check,
+        ActionType::Call => poker_pvm::Action::Call,
+        ActionType::Bet(_) => poker_pvm::Action::Bet,
+        ActionType::Raise(_) => poker_pvm::Action::Raise,
+        ActionType::AllIn => poker_pvm::Action::AllIn,
     }
 }
 
