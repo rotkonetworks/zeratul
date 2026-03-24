@@ -31,7 +31,51 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
   let announced = false
   let media: MediaState | null = null
 
+  /** direct WebSocket to server (centralized mode, not P2P) */
+  async function connectDirect(name: string) {
+    const room = getRoomFromUrl()
+    if (!room) return
+
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    const ws = new WebSocket(`${proto}//${location.host}/${room}/ws`)
+
+    ws.onopen = () => {
+      setConnected(true)
+      ws.send(JSON.stringify({ type: 'Join', name }))
+    }
+
+    ws.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data)
+        onMsg(msg)
+      } catch {}
+    }
+
+    ws.onclose = () => setConnected(false)
+
+    return {
+      send: (data: Record<string, unknown>) => {
+        if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data))
+      },
+      close: () => ws.close(),
+    }
+  }
+
+  let directWs: { send: (data: Record<string, unknown>) => void; close: () => void } | null = null
+
   async function connect(name: string, customRules?: { smallBlind: number; bigBlind: number; buyin: number }) {
+    // try direct server mode first (centralized WebSocket)
+    const directRoom = getRoomFromUrl()
+    if (directRoom) {
+      onMsg({ type: 'Status', phase: 'connecting', message: 'connecting to table...' })
+      const ws = await connectDirect(name)
+      if (ws) {
+        directWs = ws
+        return
+      }
+    }
+
+    // fallback: P2P relay mode
     onMsg({ type: 'Status', phase: 'connecting', message: 'loading game engine...' })
     const wasmOk = await loadWasmEngine()
     if (!wasmOk) onMsg({ type: 'Error', message: 'game engine failed to load — using fallback' })
@@ -138,6 +182,12 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
   }
 
   const send: SendFn = (data) => {
+    // direct server mode: send JSON to server WebSocket
+    if (directWs) {
+      directWs.send(data)
+      return
+    }
+    // P2P relay mode: route through game engine
     if (data['type'] === 'Action') {
       game?.act((data['action'] as string).toLowerCase(), (data['amount'] as number) || 0)
     } else if (data['type'] === 'StartHand') {
