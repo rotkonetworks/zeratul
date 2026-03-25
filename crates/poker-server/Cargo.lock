@@ -2719,10 +2719,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "poker-pvm"
-version = "0.1.0"
-
-[[package]]
 name = "poker-server"
 version = "0.1.0"
 dependencies = [
@@ -2733,7 +2729,6 @@ dependencies = [
  "osst",
  "pasta_curves",
  "poker-p2p",
- "poker-pvm",
  "rand 0.8.5",
  "reqwest 0.12.28",
  "serde",

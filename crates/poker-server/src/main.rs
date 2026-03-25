@@ -4,7 +4,6 @@
 //! - local: all jury shares in-process (demo/testing)
 //! - narsil: calls live narsild validators over HTTP (production)
 
-mod bot;
 mod jury;
 
 use axum::{
@@ -41,10 +40,12 @@ use pasta_curves::pallas::Scalar as PallasScalar;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 enum ClientMsg {
-    Join { name: String },
+    Join { name: String, #[serde(default)] pubkey: Option<String> },
     Action { action: String, amount: Option<u64> },
     StartHand,
-    /// trigger jury dispute resolution (demo: resolves with OSST signing ceremony)
+    /// host adds a pubkey to the mutuals allow list
+    AllowPlayer { pubkey: String },
+    /// trigger jury dispute resolution
     Dispute,
 }
 
@@ -164,18 +165,35 @@ impl ActionLog {
 struct Player {
     name: String,
     seat: u8,
+    pubkey: Option<String>,
     tx: mpsc::UnboundedSender<ServerMsg>,
-    /// if set, player disconnected at this instant — reconnect window is open
     disconnected_at: Option<tokio::time::Instant>,
 }
 
-/// how long a disconnected player can reclaim their seat
+/// table access control
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+enum TableAccess {
+    /// anyone can join
+    Public,
+    /// only players whose session pubkey is in the allow list (contacts/mutuals)
+    Mutuals { allowed_pubkeys: Vec<String> },
+    /// invite-only — only players who received the room code
+    Private,
+}
+
+impl Default for TableAccess {
+    fn default() -> Self { Self::Public }
+}
+
 const RECONNECT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
-/// how long a player has to act before auto-fold
 const ACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
 struct Room {
     code: String,
+    max_seats: usize,
+    access: TableAccess,
+    host_seat: Option<u8>,  // table creator — can manage access
     players: Vec<Option<Player>>,
     engine: GameEngine,
     hand_number: u64,
@@ -184,37 +202,27 @@ struct Room {
     community_cards: Vec<Card>,
     jury: Arc<dyn jury::JuryService>,
     action_log: ActionLog,
-    /// real Pallas escrow from 2-of-3 nested DKG (player A + player B + jury)
-    /// s₃ never existed — born distributed via interleaved DKG
     escrow_address: [u8; 32],
-    /// player A's outer FROST share (for dispute signing)
     player_a_share: SecretShare<PallasScalar>,
-    /// player B's outer FROST share (for dispute signing)
     player_b_share: SecretShare<PallasScalar>,
-    /// who must act and when they time out (seat, deadline)
     action_deadline: Option<(u8, tokio::time::Instant)>,
-    /// bot player (if BOT_STRATEGY env var is set)
-    bot: Option<bot::Bot>,
-    /// deferred bot action (applied after process_events returns)
-    bot_pending_action: Option<ActionType>,
 }
 
 impl Room {
     fn new(code: String) -> Self {
-        Self::with_settings(code, 5, 10, 1000, 30)
+        Self::with_settings(code, 5, 10, 1000, 30, 2, TableAccess::Public)
     }
 
-    fn with_settings(code: String, sb: u64, bb: u64, buyin: u64, timeout: u32) -> Self {
+    fn with_settings(code: String, sb: u64, bb: u64, buyin: u64, timeout: u32, seats: usize, access: TableAccess) -> Self {
+        let seats = seats.clamp(2, 9);
         let rules = TableRules {
             small_blind: sb as u128, big_blind: bb as u128, ante: 0,
-            min_buy_in: buyin as u128, max_buy_in: 0, seats: 2,
+            min_buy_in: buyin as u128, max_buy_in: 0, seats: seats as u8,
             tier: poker_p2p::protocol::SecurityTier::Training,
             allow_spectators: false, max_spectators: 0,
             time_bank: 60, action_timeout: timeout,
         };
-        let mut engine = GameEngine::new(rules, 2).unwrap();
-        engine.seat_player(0, buyin).unwrap();
-        engine.seat_player(1, buyin).unwrap();
+        let engine = GameEngine::new(rules, seats as u8).unwrap();
 
         // frostito: 2-of-3 nested escrow (player A + player B + jury)
         // jury's share s₃ born distributed via interleaved DKG — never materialized
@@ -251,30 +259,16 @@ impl Room {
             }
         };
 
-        // load bot if BOT_STRATEGY is set
-        let bot = std::env::var("BOT_STRATEGY").ok().and_then(|path| {
-            match std::fs::read(&path) {
-                Ok(data) => {
-                    tracing::info!("room {}: bot loaded from {} ({} bytes)", code, path, data.len());
-                    Some(bot::Bot::from_strategy(&data, 1)) // bot sits at seat 1
-                }
-                Err(e) => {
-                    tracing::warn!("room {}: failed to load bot from {}: {}", code, path, e);
-                    None
-                }
-            }
-        });
-
         Room {
-            code, players: vec![None, None], engine,
-            hand_number: 0, button: 0,
-            hole_cards: vec![None, None], community_cards: Vec::new(),
+            code, max_seats: seats, access, host_seat: None,
+            players: (0..seats).map(|_| None).collect(),
+            engine, hand_number: 0, button: 0,
+            hole_cards: (0..seats).map(|_| None).collect(),
+            community_cards: Vec::new(),
             jury, action_log: ActionLog::new(),
             escrow_address,
             player_a_share, player_b_share,
             action_deadline: None,
-            bot,
-            bot_pending_action: None,
         }
     }
 
@@ -295,14 +289,21 @@ impl Room {
     }
 
     fn start_hand(&mut self) {
-        for i in 0..2u8 {
-            if self.engine.stacks()[i as usize] == 0 {
-                let _ = self.engine.seat_player(i, 1000);
+        // seat players who need buy-in
+        let buyin = self.engine.rules.min_buy_in as u64;
+        for i in 0..self.max_seats as u8 {
+            if self.players[i as usize].is_some() && self.engine.stacks()[i as usize] == 0 {
+                let _ = self.engine.seat_player(i, buyin);
             }
         }
         self.hand_number += 1;
-        self.button = if self.hand_number == 1 { 0 } else { 1 - self.button };
-        self.hole_cards = vec![None, None];
+        self.button = (self.button + 1) % self.max_seats as u8;
+        // skip empty seats for button
+        for _ in 0..self.max_seats {
+            if self.players[self.button as usize].is_some() { break; }
+            self.button = (self.button + 1) % self.max_seats as u8;
+        }
+        self.hole_cards = vec![None; self.max_seats];
         self.community_cards = Vec::new();
 
         let (deck, deck_commitment) = shuffled_deck_with_proof();
@@ -318,49 +319,7 @@ impl Room {
             Err(e) => { self.broadcast(&ServerMsg::Error { message: format!("{}", e) }); return; }
         };
 
-        // tell bot about new hand + its cards
-        if let Some(ref mut bot) = self.bot {
-            bot.new_hand(&bot::BotGameState {
-                stacks: self.engine.stacks().to_vec(),
-                pot: 0, community_cards: Vec::new(), bets: Vec::new(),
-                num_players: 2, phase: Phase::Preflop,
-                acting_seat: 0, hand_number: self.hand_number as u32,
-            });
-        }
-
         self.process_events(&events);
-        self.apply_bot_action();
-    }
-
-    /// if bot has a pending action, apply it with a small delay for UX
-    fn make_bot_game_state(&self) -> bot::BotGameState {
-        bot::BotGameState {
-            stacks: self.engine.stacks().to_vec(),
-            pot: self.engine.hand_state()
-                .map(|h| h.pots.iter().map(|p| p.amount).sum())
-                .unwrap_or(0),
-            community_cards: self.community_cards.clone(),
-            bets: self.engine.hand_state()
-                .map(|h| h.seats.iter().map(|s| s.bet_this_round).collect())
-                .unwrap_or_default(),
-            num_players: 2,
-            phase: self.engine.hand_state()
-                .map(|h| h.phase).unwrap_or(Phase::Preflop),
-            acting_seat: self.engine.hand_state()
-                .and_then(|h| h.betting.action_on)
-                .map(|idx| self.engine.hand_state().unwrap().seats[idx].seat)
-                .unwrap_or(0),
-            hand_number: self.hand_number as u32,
-        }
-    }
-
-    fn apply_bot_action(&mut self) {
-        if let Some(action) = self.bot_pending_action.take() {
-            // apply after a short "thinking" pause
-            self.apply_action(1, action);
-            // recurse in case bot action triggers another bot turn (e.g. preflop)
-            self.apply_bot_action();
-        }
     }
 
     fn apply_action(&mut self, seat: u8, action: ActionType) {
@@ -390,18 +349,6 @@ impl Room {
                         your_cards: Some([card_json(&cards[0]), card_json(&cards[1])]),
                         stacks: self.engine.stacks().to_vec(),
                     });
-                    // tell bot its cards + update range tracking
-                    if *seat == 1 {
-                        if let Some(ref mut bot) = self.bot {
-                            let gs = bot::BotGameState {
-                                stacks: self.engine.stacks().to_vec(),
-                                pot: 0, community_cards: Vec::new(), bets: Vec::new(),
-                                num_players: 2, phase: Phase::Preflop,
-                                acting_seat: 0, hand_number: self.hand_number as u32,
-                            };
-                            bot.set_cards([card_to_index(&cards[0]), card_to_index(&cards[1])], &gs);
-                        }
-                    }
                 }
                 EngineEvent::ActionRequired { seat, valid_actions } => {
                     self.action_deadline = Some((*seat, tokio::time::Instant::now() + ACTION_TIMEOUT));
@@ -413,40 +360,12 @@ impl Room {
                         }).collect(),
                     });
 
-                    // if it's the bot's turn, queue the bot action
-                    if *seat == 1 {
-                        if let Some(ref mut bot) = self.bot {
-                            let game_state = bot::BotGameState {
-                                stacks: self.engine.stacks().to_vec(),
-                                pot: self.engine.hand_state()
-                                    .map(|h| h.pots.iter().map(|p| p.amount).sum())
-                                    .unwrap_or(0),
-                                community_cards: self.community_cards.clone(),
-                                bets: self.engine.hand_state()
-                                    .map(|h| h.seats.iter().map(|s| s.bet_this_round).collect())
-                                    .unwrap_or_default(),
-                                num_players: 2,
-                                phase: self.engine.hand_state()
-                                    .map(|h| h.phase).unwrap_or(Phase::Preflop),
-                                acting_seat: *seat,
-                                hand_number: self.hand_number as u32,
-                            };
-                            let action = bot.decide(valid_actions, &game_state);
-                            // store for deferred application (can't call apply_action during process_events)
-                            self.bot_pending_action = Some(action);
-                        }
-                    }
                 }
                 EngineEvent::PlayerActed { seat, action, new_stack } => {
                     let (action_str, amount) = action_to_json(action);
                     self.broadcast(&ServerMsg::PlayerActed {
                         seat: *seat, action: action_str.clone(), amount, new_stack: *new_stack,
                     });
-                    // bot observes opponent actions for range + profile tracking
-                    if *seat != 1 && self.bot.is_some() {
-                        let gs = self.make_bot_game_state();
-                        self.bot.as_mut().unwrap().observe_action(*seat, action.clone(), amount, &gs);
-                    }
                 }
                 EngineEvent::PhaseChanged { phase, new_cards } => {
                     self.community_cards.extend(new_cards);
@@ -454,12 +373,6 @@ impl Room {
                         phase: format!("{:?}", phase).to_lowercase(),
                         cards: self.community_cards.iter().map(card_json).collect(),
                     });
-                    // bot observes community cards for range narrowing
-                    if self.bot.is_some() {
-                        let card_indices: Vec<u8> = new_cards.iter().map(card_to_index).collect();
-                        let gs = self.make_bot_game_state();
-                        self.bot.as_mut().unwrap().observe_community(&card_indices, &gs);
-                    }
                 }
                 EngineEvent::PotUpdated { pots } => {
                     self.broadcast(&ServerMsg::PotUpdate {
@@ -507,20 +420,6 @@ fn card_json(c: &Card) -> CardJson {
             Suit::Hearts => "h", Suit::Spades => "s",
         }.to_string(),
     }
-}
-
-fn card_to_index(card: &Card) -> u8 {
-    let rank = match card.rank {
-        Rank::Two => 0, Rank::Three => 1, Rank::Four => 2,
-        Rank::Five => 3, Rank::Six => 4, Rank::Seven => 5,
-        Rank::Eight => 6, Rank::Nine => 7, Rank::Ten => 8,
-        Rank::Jack => 9, Rank::Queen => 10, Rank::King => 11,
-        Rank::Ace => 12,
-    };
-    let suit = match card.suit {
-        Suit::Clubs => 0, Suit::Diamonds => 1, Suit::Hearts => 2, Suit::Spades => 3,
-    };
-    rank + suit * 13
 }
 
 fn action_to_json(action: &ActionType) -> (String, u64) {
@@ -766,6 +665,12 @@ async fn lobby_broadcast(users: &LobbyUsers, msg: &LobbyMsg) {
     }
 }
 
+/// push updated table list to all lobby users
+async fn notify_lobby_tables(rooms: &Rooms, lobby_users: &LobbyUsers) {
+    let tables = get_table_list(rooms).await;
+    lobby_broadcast(lobby_users, &LobbyMsg::Tables { tables }).await;
+}
+
 async fn get_table_list(rooms: &Rooms) -> Vec<serde_json::Value> {
     let rooms = rooms.lock().await;
     let mut tables = Vec::new();
@@ -774,9 +679,13 @@ async fn get_table_list(rooms: &Rooms) -> Vec<serde_json::Value> {
         tables.push(serde_json::json!({
             "code": code,
             "players": r.player_count(),
-            "max_players": 2,
+            "max_players": r.max_seats,
             "waiting": r.player_count() < 2,
-            "has_bot": r.bot.is_some(),
+            "access": match &r.access {
+                TableAccess::Public => "public",
+                TableAccess::Private => "private",
+                TableAccess::Mutuals { .. } => "mutuals",
+            },
             "blinds": format!("{}/{}", r.engine.rules.small_blind, r.engine.rules.big_blind),
             "hand_number": r.hand_number,
         }));
@@ -797,6 +706,11 @@ struct CreateTableParams {
     bb: Option<u64>,
     buyin: Option<u64>,
     timeout: Option<u32>,
+    seats: Option<usize>,
+    /// "public" (default), "private", or "mutuals"
+    access: Option<String>,
+    /// comma-separated session pubkeys for mutuals mode
+    allowed: Option<String>,
 }
 
 async fn create_room(
@@ -808,9 +722,20 @@ async fn create_room(
     let bb = params.bb.unwrap_or(10);
     let buyin = params.buyin.unwrap_or(1000);
     let timeout = params.timeout.unwrap_or(30);
+    let seats = params.seats.unwrap_or(2);
+    let access = match params.access.as_deref() {
+        Some("private") => TableAccess::Private,
+        Some("mutuals") => {
+            let allowed = params.allowed.as_deref().unwrap_or("")
+                .split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+            TableAccess::Mutuals { allowed_pubkeys: allowed }
+        }
+        _ => TableAccess::Public,
+    };
 
-    let room = Arc::new(Mutex::new(Room::with_settings(code.clone(), sb, bb, buyin, timeout)));
+    let room = Arc::new(Mutex::new(Room::with_settings(code.clone(), sb, bb, buyin, timeout, seats, access)));
     state.rooms.lock().await.insert(code.clone(), room);
+    notify_lobby_tables(&state.rooms, &state.lobby_users).await;
     axum::response::Redirect::to(&format!("/{}", code))
 }
 
@@ -920,7 +845,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     let mut r = rc.lock().await;
-                    if r.engine.hand_state().is_none() && r.player_count() == 2 {
+                    if r.engine.hand_state().is_none() && r.player_count() >= 2 {
                         r.start_hand();
                     }
                 });
@@ -943,7 +868,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
         };
 
         match client_msg {
-            ClientMsg::Join { name } => {
+            ClientMsg::Join { name, pubkey } => {
                 let mut r = room.lock().await;
 
                 // check for reconnect: same name, seat has disconnected_at set
@@ -980,9 +905,25 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                         });
                     }
 
-                    let other = 1 - seat;
-                    r.send_to(other, ServerMsg::OpponentReconnected { seat });
+                    // notify all other players of reconnect
+                    for i in 0..r.max_seats as u8 {
+                        if i != seat { r.send_to(i, ServerMsg::OpponentReconnected { seat }); }
+                    }
                     continue;
+                }
+
+                // access control
+                match &r.access {
+                    TableAccess::Mutuals { allowed_pubkeys } => {
+                        let pk = pubkey.as_deref().unwrap_or("");
+                        if !allowed_pubkeys.iter().any(|a| a == pk) {
+                            let _ = tx.send(ServerMsg::Error { message: "mutuals-only table".into() });
+                            continue;
+                        }
+                    }
+                    // Private: having the room code is the auth (you got it via invite)
+                    // Public: anyone can join
+                    _ => {}
                 }
 
                 // fresh join
@@ -990,36 +931,34 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                 if let Some(seat_idx) = seat {
                     let seat = seat_idx as u8;
                     r.players[seat_idx] = Some(Player {
-                        name: name.clone(), seat, tx: tx.clone(),
+                        name: name.clone(), seat, pubkey: pubkey.clone(), tx: tx.clone(),
                         disconnected_at: None,
                     });
                     my_seat = Some(seat);
+                    // first player is the host (table leader)
+                    if r.host_seat.is_none() { r.host_seat = Some(seat); }
                     let _ = tx.send(ServerMsg::Seated { seat, name: name.clone() });
 
-                    // if bot is enabled and we're the first human, auto-seat the bot
-                    if r.player_count() == 1 && r.bot.is_some() {
-                        let bot_seat = 1u8;
-                        let (bot_tx, _) = mpsc::unbounded_channel();
-                        r.players[bot_seat as usize] = Some(Player {
-                            name: "bot".into(), seat: bot_seat, tx: bot_tx,
-                            disconnected_at: None,
-                        });
-                        let _ = tx.send(ServerMsg::OpponentJoined { seat: bot_seat, name: "bot".into() });
-                        tracing::info!("room {}: bot auto-seated at seat {}", r.code, bot_seat);
-                        r.start_hand();
-                    } else if r.player_count() == 1 {
-                        // send invite link to first player
+                    // notify existing players
+                    for i in 0..r.max_seats as u8 {
+                        if i != seat && r.players[i as usize].is_some() {
+                            r.send_to(i, ServerMsg::OpponentJoined { seat, name: name.clone() });
+                        }
+                    }
+                    // seat player in engine
+                    let buyin = r.engine.rules.min_buy_in as u64;
+                    let _ = r.engine.seat_player(seat, buyin);
+
+                    if r.player_count() < 2 {
                         let _ = tx.send(ServerMsg::InviteLink {
                             url: format!("/{}", r.code),
                         });
                         let _ = tx.send(ServerMsg::Waiting);
-                    } else {
-                        let other = 1 - seat;
-                        r.send_to(other, ServerMsg::OpponentJoined { seat, name });
-                        if r.player_count() == 2 {
-                            r.start_hand();
-                        }
+                    } else if r.engine.hand_state().is_none() {
+                        r.start_hand();
                     }
+                    drop(r);
+                    notify_lobby_tables(&state.rooms, &state.lobby_users).await;
                 } else {
                     let _ = tx.send(ServerMsg::Error { message: "table full".into() });
                 }
@@ -1036,7 +975,6 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
 
                 let mut r = room.lock().await;
                 r.apply_action(seat, action);
-                r.apply_bot_action(); // bot responds if it's now their turn
 
                 // hand complete — happy path, no jury needed
                 if r.engine.hand_state().is_none() {
@@ -1045,7 +983,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     tokio::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         let mut r = room_clone.lock().await;
-                        if r.engine.hand_state().is_none() && r.player_count() == 2 {
+                        if r.engine.hand_state().is_none() && r.player_count() >= 2 {
                             r.start_hand();
                         }
                     });
@@ -1054,8 +992,30 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
             }
             ClientMsg::StartHand => {
                 let mut r = room.lock().await;
-                if r.engine.hand_state().is_none() && r.player_count() == 2 {
+                if r.engine.hand_state().is_none() && r.player_count() >= 2 {
                     r.start_hand();
+                }
+            }
+            ClientMsg::AllowPlayer { pubkey } => {
+                let mut r = room.lock().await;
+                let seat = my_seat.unwrap_or(255);
+                if r.host_seat != Some(seat) {
+                    let _ = tx.send(ServerMsg::Error { message: "only the host can manage access".into() });
+                    continue;
+                }
+                match &mut r.access {
+                    TableAccess::Mutuals { ref mut allowed_pubkeys } => {
+                        if !allowed_pubkeys.contains(&pubkey) {
+                            allowed_pubkeys.push(pubkey.clone());
+                            let _ = tx.send(ServerMsg::Status {
+                                phase: "access".into(),
+                                message: format!("allowed {}", &pubkey[..8.min(pubkey.len())]),
+                            });
+                        }
+                    }
+                    _ => {
+                        let _ = tx.send(ServerMsg::Error { message: "table is not in mutuals mode".into() });
+                    }
                 }
             }
             ClientMsg::Dispute => {
@@ -1113,6 +1073,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
             seat,
             reconnect_secs: RECONNECT_WINDOW.as_secs(),
         });
+        drop(r);
+        notify_lobby_tables(&state.rooms, &state.lobby_users).await;
     }
     send_task.abort();
     timeout_handle.abort();
