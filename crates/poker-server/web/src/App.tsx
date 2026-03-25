@@ -3,6 +3,7 @@ import { createSocket } from './ws'
 import { Card } from './Card'
 import Lobby, { type Table } from './Lobby'
 import { detectZafu } from './zid/provider'
+import { getPositionShort } from './positions'
 import type { ServerMsg, CardJson, ValidAction } from './types'
 
 export default function App() {
@@ -27,7 +28,9 @@ export default function App() {
   })())
   const [name, setName] = createSignal('')
   const [mySeat, setMySeat] = createSignal(-1)
+  const [maxSeats, setMaxSeats] = createSignal(2)
   const [oppName, setOppName] = createSignal('\u2014')
+  const [playerNames, setPlayerNames] = createSignal<Record<number, string>>({})
   const [stacks, setStacks] = createSignal([0, 0])
   const [bets, setBets] = createSignal([0, 0])
   const [myCards, setMyCards] = createSignal<[CardJson, CardJson] | null>(null)
@@ -52,6 +55,7 @@ export default function App() {
   const [autoAction, setAutoAction] = createSignal<'none' | 'check/fold' | 'check' | 'fold' | 'call any'>('check/fold')
   const [deckVerified, setDeckVerified] = createSignal(false)
   const [gameStatus, setGameStatus] = createSignal('')
+  const [lastResult, setLastResult] = createSignal<{ won: boolean; amount: number } | null>(null)
 
   const opp = () => mySeat() === 0 ? 1 : 0
   const myStack = () => stacks()[mySeat()] ?? 0
@@ -75,6 +79,7 @@ export default function App() {
         break
       case 'OpponentJoined':
         setOppName(msg.name)
+        setPlayerNames(p => ({ ...p, [msg.seat]: msg.name }))
         break
       case 'RulesProposed':
         setPendingRules({ buyin: msg.buyin, smallBlind: msg.smallBlind, bigBlind: msg.bigBlind, turnTimeout: (msg as any).turnTimeout ?? 30, fromSelf: msg.fromSelf })
@@ -218,9 +223,13 @@ export default function App() {
         }
         log('showdown', 'c-green')
         break
-      case 'PotAwarded':
-        log(`${msg.seat === mySeat() ? 'you' : 'opp'} wins ${msg.amount}${msg.amount === 0 ? ' (split)' : ''}`, 'c-zec-yellow font-500')
+      case 'PotAwarded': {
+        const won = msg.seat === mySeat()
+        log(`${won ? 'you' : oppName()} wins ${msg.amount}${msg.amount === 0 ? ' (split)' : ''}`, 'c-zec-yellow font-500')
+        setLastResult({ won, amount: msg.amount })
+        setTimeout(() => setLastResult(null), 2500)
         break
+      }
       case 'HandComplete':
         setStacks(msg.stacks)
         setBets([0, 0])
@@ -354,10 +363,11 @@ export default function App() {
         const p = pot() || 1
         const min = betAction.min_amount || 0
         switch (e.key) {
-          case '1': setRaiseVal(Math.max(Math.floor(p / 2), min)); break
-          case '2': setRaiseVal(Math.max(Math.floor(p * 3 / 4), min)); break
-          case '3': setRaiseVal(Math.max(p, min)); break
-          case '4': setRaiseVal(Math.max(p * 2, min)); break
+          case '1': setRaiseVal(Math.max(Math.floor(p / 4), min)); break   // 1/4 pot
+          case '2': setRaiseVal(Math.max(Math.floor(p / 2), min)); break   // 1/2 pot
+          case '3': setRaiseVal(Math.max(Math.floor(p * 3 / 4), min)); break // 3/4 pot
+          case '4': setRaiseVal(Math.max(p, min)); break                    // pot
+          case '5': setRaiseVal(Math.max(p * 2, min)); break               // 2x pot
         }
       }
     }
@@ -429,7 +439,7 @@ export default function App() {
           <Show when={view() === 'lobby'}>
             <div class="p-8 text-center">
               <div class="text-zec-yellow text-10px font-semibold uppercase tracking-3px mb-5">
-                heads-up no-limit hold'em
+                no-limit hold'em
               </div>
               {/* game parameters — only for host (creating table) */}
               <Show when={location.pathname.length <= 1} fallback={
@@ -483,14 +493,38 @@ export default function App() {
           <Show when={view() === 'waiting'}>
             <div class="p-10 text-center">
               <div class="text-zec-yellow text-11px uppercase tracking-2px mb-4">
-                waiting for opponent
+                waiting for players
               </div>
+
+              {/* invite from contacts */}
+              <Show when={identity()?.pickContacts}>
+                <button
+                  class="mb-4 px-4 py-2 bg-zec-surface border border-neutral-800 rounded-lg hover:border-zec-yellow transition-colors inline-flex items-center gap-2"
+                  onClick={async () => {
+                    const contacts = await identity()?.pickContacts?.({ purpose: 'Invite to your table', max: 5 })
+                    if (contacts?.length) {
+                      for (const c of contacts) {
+                        await identity()?.invite?.(c.handle, {
+                          type: 'poker-table-invite',
+                          data: { url: inviteUrl() },
+                          ttl: 300,
+                        })
+                      }
+                      log(`invited ${contacts.map(c => c.displayName).join(', ')}`, 'c-zec-yellow')
+                    }
+                  }}
+                >
+                  <span class="text-zec-yellow text-14px">+</span>
+                  <span class="text-10px text-neutral-400">invite from contacts</span>
+                </button>
+              </Show>
+
               <Show when={inviteUrl()}>
                 <div class="mb-4">
-                  <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">share invite link</div>
+                  <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">or share link</div>
                   <div
                     class="input-field text-11px text-center cursor-pointer select-all"
-                    onClick={() => navigator.clipboard?.writeText(inviteUrl())}
+                    onClick={() => { navigator.clipboard?.writeText(inviteUrl()); log('copied invite link', 'c-green') }}
                     title="click to copy"
                   >
                     {inviteUrl()}
@@ -533,7 +567,7 @@ export default function App() {
                 <Show when={juryProgress()}>
                   <span class="text-zec-yellow animate-pulse">{juryProgress()}</span>
                 </Show>
-                <span>you: {button() === mySeat() ? 'BTN/SB' : 'BB'}</span>
+                <span>you: {getPositionShort(mySeat(), button(), maxSeats())}</span>
               </div>
 
               {/* felt */}
@@ -568,7 +602,7 @@ export default function App() {
                 <div class="absolute top--4 left-50% -translate-x-50% text-center w-44">
                   <div class={`inline-block px-3 py-1 bg-zec-surface border ${acting() === opp() ? 'border-zec-yellow shadow-[0_0_8px_rgba(244,183,40,0.3)]' : oppDisconnected() ? 'border-red-800' : 'border-neutral-800'}`}>
                     <div class={`text-9px font-semibold uppercase tracking-wider ${acting() === opp() ? 'text-zec-yellow' : oppDisconnected() ? 'text-red-400' : 'text-neutral-500'}`}>
-                      {oppName()} <span class="text-neutral-600">{button() === opp() ? 'BTN/SB' : 'BB'}</span> {oppDisconnected() ? '(dc)' : ''}
+                      {oppName()} <span class="text-neutral-600">{getPositionShort(opp(), button(), maxSeats())}</span> {oppDisconnected() ? '(dc)' : ''}
                     </div>
                     <div class="font-mono text-13px text-zec-yellow">{oppStack()}</div>
                     <Show when={acting() === opp() && actionTimer() > 0}>
@@ -623,9 +657,15 @@ export default function App() {
                   </For>
                 </div>
 
-                {/* pot */}
-                <div class="text-center font-mono text-14px font-500 text-zec-yellow min-h-5">
-                  {pot() > 0 ? pot() : ''}
+                {/* pot + result */}
+                <div class="text-center font-mono text-14px font-500 min-h-5 relative">
+                  <Show when={lastResult()} fallback={
+                    <span class="text-zec-yellow">{pot() > 0 ? pot() : ''}</span>
+                  }>
+                    <span class={`animate-pulse ${lastResult()!.won ? 'text-green-400' : 'text-red-400'}`}>
+                      {lastResult()!.won ? '+' : ''}{lastResult()!.amount}
+                    </span>
+                  </Show>
                 </div>
 
                 {/* you (bottom) */}
@@ -656,6 +696,31 @@ export default function App() {
                     <span class="text-neutral-600 text-10px uppercase tracking-wider">opponent to act</span>
                   </Show>
                 }>
+                  {/* sizing buttons — Pluribus-style: 1/4, 1/2, 3/4, pot, 2x */}
+                  {(() => {
+                    const betAction = actions().find(v => v.kind === 'raise') || actions().find(v => v.kind === 'bet')
+                    if (!betAction) return null
+                    const p = pot()
+                    const min = betAction.min_amount || 0
+                    const max = betAction.max_amount || 0
+                    const clamp = (v: number) => Math.min(Math.max(Math.round(v), min), max)
+                    const sizes = [
+                      { label: '¼', val: clamp(p / 4) },
+                      { label: '½', val: clamp(p / 2) },
+                      { label: '¾', val: clamp(p * 3 / 4) },
+                      { label: 'pot', val: clamp(p) },
+                      { label: '2x', val: clamp(p * 2) },
+                    ].filter(s => s.val >= min && s.val <= max)
+                    // dedupe sizes that collapse to same value
+                    const unique = sizes.filter((s, i) => i === 0 || s.val !== sizes[i-1].val)
+                    return <div class="flex gap-0.5 justify-center mb-1">
+                      {unique.map(s =>
+                        <button class={`btn btn-xs px-2 py-0.5 text-9px ${raiseVal() === s.val ? 'btn-active' : 'btn-ghost'}`}
+                          onClick={() => setRaiseVal(s.val)}>{s.label}</button>
+                      )}
+                    </div>
+                  })()}
+                  {/* main action buttons */}
                   <For each={actions()}>
                     {a => {
                       if (a.kind === 'fold')
@@ -666,19 +731,19 @@ export default function App() {
                         return <button class="btn btn-primary min-h-9 sm:min-h-auto px-3 sm:px-2" onClick={() => act('call')}>call {a.min_amount}</button>
                       if (a.kind === 'bet')
                         return <div class="flex items-center gap-1">
-                          <input class="input-field w-16 sm:w-20 text-center text-11px" type="number"
+                          <input class="input-field w-14 sm:w-16 text-center text-11px" type="number"
                             min={a.min_amount} max={a.max_amount}
                             value={raiseVal()} onInput={e => setRaiseVal(+e.currentTarget.value)} />
-                          <button class="btn min-h-9 sm:min-h-auto px-3 sm:px-2" onClick={() => act('bet', raiseVal())}>bet</button>
+                          <button class="btn min-h-9 sm:min-h-auto px-3 sm:px-2" onClick={() => act('bet', raiseVal())}>bet {raiseVal()}</button>
                         </div>
                       if (a.kind === 'raise')
                         return <div class="flex items-center gap-1">
                           <Show when={!actions().some(x => x.kind === 'bet')}>
-                            <input class="input-field w-16 sm:w-20 text-center text-11px" type="number"
+                            <input class="input-field w-14 sm:w-16 text-center text-11px" type="number"
                               min={a.min_amount} max={a.max_amount}
                               value={raiseVal()} onInput={e => setRaiseVal(+e.currentTarget.value)} />
                           </Show>
-                          <button class="btn min-h-9 sm:min-h-auto px-3 sm:px-2" onClick={() => act('raise', raiseVal())}>raise</button>
+                          <button class="btn min-h-9 sm:min-h-auto px-3 sm:px-2" onClick={() => act('raise', raiseVal())}>raise {raiseVal()}</button>
                         </div>
                       if (a.kind === 'allin')
                         return <button class="btn btn-allin min-h-9 sm:min-h-auto px-3 sm:px-2" onClick={() => act('allin')}>all in</button>
@@ -715,7 +780,7 @@ export default function App() {
               </div>
               <div class="text-center text-6px text-neutral-700 pb-0.5">
                 <Show when={keyMode() === 'classic'}>
-                  F1 fold · F2 check/call · F3 raise · F4 pot · Space call · Q all-in · 1-4 sizing
+                  F1 fold · F2 check/call · F3 raise · F4 pot · Space call · Q all-in · 1-5 sizing
                 </Show>
                 <Show when={keyMode() === 'vim'}>
                   f fold · d check · s call · r/w raise · a all-in · j/k size ±  · H ½p · M ¾p · G pot · L 2x
@@ -757,6 +822,15 @@ export default function App() {
                 <For each={logs()}>
                   {l => <div class={`text-neutral-600 ${l.cls}`}>{l.text}</div>}
                 </For>
+              </div>
+              {/* quick reactions */}
+              <div class="flex gap-1 mb-1 flex-wrap">
+                {['nh', 'gg', 'wp', 'lol', 'wow', '...'].map(r =>
+                  <button
+                    class="text-8px px-2 py-0.5 rounded border border-neutral-800 text-neutral-600 hover:text-neutral-400 hover:border-neutral-600 active:text-zec-yellow active:border-zec-yellow transition-colors"
+                    onClick={() => { send({ type: 'Chat', text: r }); log(`you: ${r}`, 'text-white') }}
+                  >{r}</button>
+                )}
               </div>
               <form class="flex gap-1 mb-2" onSubmit={(e) => {
                 e.preventDefault()

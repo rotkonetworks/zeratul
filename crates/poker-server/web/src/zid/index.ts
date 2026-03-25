@@ -14,4 +14,8 @@
  */
 
 export { zid } from './zid'
-export type { ZidIdentity, ZidChannel, ZidOptions } from './types'
+export { upsertContact, removeContact, getContactRefs, resolveHandle, contactCount } from './contacts'
+export type {
+  ZidIdentity, ZidChannel, ZidOptions,
+  ContactRef, PickContactsOptions, InvitePayload, InviteResult, IncomingInvite,
+} from './types'

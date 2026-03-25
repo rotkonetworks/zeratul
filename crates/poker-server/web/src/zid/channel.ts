@@ -55,9 +55,22 @@ export async function createChannel(
       const msg = JSON.parse(ev.data)
 
       if (msg.type === 'keyex' && msg.from === peerPubkey) {
-        // peer's DH pubkey arrived — derive shared secret
+        // verify peer signed their DH pubkey with their session key (prevents relay MitM)
+        const peerDhBytes = unhex(msg.dhPub)
+        const peerSessionKey = await crypto.subtle.importKey(
+          'raw', unhex(peerPubkey), 'Ed25519', false, ['verify'],
+        )
+        const sigValid = await crypto.subtle.verify(
+          'Ed25519', peerSessionKey, unhex(msg.sig), peerDhBytes,
+        )
+        if (!sigValid) {
+          console.error('zid: DH signature verification failed — possible MitM')
+          return
+        }
+
+        // derive shared secret
         const peerDhPub = await crypto.subtle.importKey(
-          'raw', unhex(msg.dhPub),
+          'raw', peerDhBytes,
           { name: 'X25519' } as any,
           false, [],
         )
@@ -67,10 +80,12 @@ export async function createChannel(
             dh.privateKey, 256,
           ),
         )
-        // derive AES key from shared secret
+        // derive AES key — info binds to both session pubkeys to prevent unknown-key-share
+        const sortedPubkeys = [session.pubkey, peerPubkey].sort().join(':')
+        const info = new TextEncoder().encode(`zid-e2ee:${sortedPubkeys}`)
         const keyMaterial = await crypto.subtle.importKey('raw', sharedBits, 'HKDF', false, ['deriveKey'])
         sharedKey = await crypto.subtle.deriveKey(
-          { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info: new TextEncoder().encode('zid-e2ee') },
+          { name: 'HKDF', hash: 'SHA-256', salt: new Uint8Array(32), info },
           keyMaterial,
           { name: 'AES-GCM', length: 256 },
           false,
@@ -79,13 +94,14 @@ export async function createChannel(
       }
 
       if (msg.type === 'enc' && msg.from === peerPubkey && sharedKey) {
-        // decrypt incoming message
         const iv = unhex(msg.iv)
         const ct = unhex(msg.ct)
         const plain = new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv }, sharedKey, ct))
         for (const h of handlers) h(plain)
       }
-    } catch {}
+    } catch (e) {
+      console.error('zid channel error:', e)
+    }
   }
 
   return {

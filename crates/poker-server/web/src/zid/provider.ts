@@ -82,6 +82,96 @@ export async function requestDelegation(
   }
 }
 
+/** pick contacts from zafu address book (opens extension picker UI) */
+export async function pickContacts(
+  zafu: { origin: string; provider: any },
+  opts: { purpose?: string; max?: number; appName?: string } = {},
+): Promise<{ handle: string; displayName: string }[] | null> {
+  try {
+    const extId = zafu.origin.replace('chrome-extension://', '').replace(/\/$/, '')
+    const resp: any = await new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(extId, {
+        type: 'zafu_pick_contacts',
+        purpose: opts.purpose || `${opts.appName || 'App'} wants to pick contacts`,
+        max: opts.max || 1,
+        appOrigin: globalThis.location?.origin || opts.appName || 'unknown',
+      }, (r: any) => {
+        if (chrome.runtime.lastError) reject(chrome.runtime.lastError)
+        else resolve(r)
+      })
+    })
+
+    if (resp?.success && Array.isArray(resp.contacts)) {
+      return resp.contacts // [{ handle, displayName }] — handles are app-scoped BLAKE2b
+    }
+    return null
+  } catch {
+    return null
+  }
+}
+
+/** send an invite to a contact via their opaque handle.
+ *  zafu resolves handle→pubkey internally, delivers via e2ee channel. */
+export async function sendInvite(
+  zafu: { origin: string; provider: any },
+  handle: string,
+  payload: { type: string; data: Record<string, unknown>; ttl?: number },
+  opts: { appName?: string; relayUrl?: string } = {},
+): Promise<{ sent: boolean; delivered?: boolean }> {
+  try {
+    const extId = zafu.origin.replace('chrome-extension://', '').replace(/\/$/, '')
+    const resp: any = await new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(extId, {
+        type: 'zafu_send_invite',
+        handle,
+        payload,
+        appOrigin: globalThis.location?.origin || opts.appName || 'unknown',
+        relayUrl: opts.relayUrl,
+      }, (r: any) => {
+        if (chrome.runtime.lastError) reject(chrome.runtime.lastError)
+        else resolve(r)
+      })
+    })
+
+    return { sent: resp?.sent ?? false, delivered: resp?.delivered }
+  } catch {
+    return { sent: false }
+  }
+}
+
+/** subscribe to incoming invites via zafu extension */
+export function listenInvites(
+  zafu: { origin: string; provider: any },
+  handler: (invite: {
+    appOrigin: string; type: string; data: Record<string, unknown>;
+    fromName: string; accept: () => void; decline: () => void;
+  }) => void,
+): () => void {
+  const extId = zafu.origin.replace('chrome-extension://', '').replace(/\/$/, '')
+  const listener = (msg: any, sender: any) => {
+    if (sender.id !== extId) return
+    if (msg?.type !== 'zafu_incoming_invite') return
+    handler({
+      appOrigin: msg.appOrigin,
+      type: msg.inviteType,
+      data: msg.data,
+      fromName: msg.fromName,
+      accept: () => {
+        chrome.runtime.sendMessage(extId, {
+          type: 'zafu_invite_response', id: msg.inviteId, accepted: true,
+        })
+      },
+      decline: () => {
+        chrome.runtime.sendMessage(extId, {
+          type: 'zafu_invite_response', id: msg.inviteId, accepted: false,
+        })
+      },
+    })
+  }
+  chrome.runtime.onMessage.addListener(listener)
+  return () => chrome.runtime.onMessage.removeListener(listener)
+}
+
 // hex helpers
 function hex(bytes: Uint8Array): string {
   return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('')

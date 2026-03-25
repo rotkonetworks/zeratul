@@ -24,7 +24,6 @@ type LiveTable = {
   players: number
   max_players: number
   waiting: boolean
-  has_bot: boolean
   blinds: string
   hand_number: number
 }
@@ -32,8 +31,10 @@ type LiveTable = {
 export default function Lobby(props: {
   onJoin: (table: Table, name: string) => void
   onJoinCode: (code: string, name: string) => void
+  onChat?: (msg: string) => void
   hasWallet: boolean
   pubkey?: string  // hex pubkey from zafu
+  identity?: { pickContacts?: (opts?: any) => Promise<any[]>; invite?: (handle: string, payload: any) => Promise<any> }
 }) {
   // default nickname: first 8 chars of pubkey, or saved custom name
   const defaultName = () => {
@@ -263,7 +264,7 @@ export default function Lobby(props: {
           )}
         </div>
 
-        {/* ===== PLAY VS BOT ===== */}
+        {/* ===== CREATE / JOIN TABLE ===== */}
         <Show when={tab() === 'play' && props.hasWallet}>
           <Show when={mode() === 'casino'}>
             <div
@@ -409,8 +410,43 @@ export default function Lobby(props: {
         {/* ===== INVITE FRIEND ===== */}
         <Show when={tab() === 'invite' && props.hasWallet}>
           <div class="p-4">
+            {/* invite from contacts */}
+            <Show when={props.identity?.pickContacts}>
+              <div class="mb-4">
+                <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">invite from contacts</div>
+                <button
+                  class="w-full p-3 bg-zec-surface border border-neutral-800 rounded-lg active:border-zec-yellow transition-colors flex items-center gap-3"
+                  onClick={async () => {
+                    const contacts = await props.identity?.pickContacts?.({ purpose: 'Invite to poker table', max: 3 })
+                    if (contacts?.length) {
+                      const tableIdx = 0
+                      const table = TABLES[tableIdx]
+                      // send invites first — they contain the table info
+                      const names = contacts.map(c => c.displayName).join(', ')
+                      for (const c of contacts) {
+                        await props.identity?.invite?.(c.handle, {
+                          type: 'poker-table-invite',
+                          data: { blinds: table.blinds, name: table.name, sb: table.sb, bb: table.bb, buyin: table.buyin },
+                          ttl: 300,
+                        })
+                      }
+                      // then join the table ourselves (creates it with mutuals access)
+                      joinTable(tableIdx)
+                      props.onChat?.(`invited ${names}`)
+                    }
+                  }}
+                >
+                  <div class="w-8 h-8 rounded-full bg-zec-yellow/10 flex items-center justify-center text-zec-yellow text-14px">+</div>
+                  <div>
+                    <div class="text-11px text-white">pick from address book</div>
+                    <div class="text-8px text-neutral-500">opens zafu contact picker</div>
+                  </div>
+                </button>
+              </div>
+            </Show>
+
             <div class="text-neutral-400 text-10px mb-4">
-              share a room code with a friend. both players need the <span class="text-zec-yellow">zafu</span> extension.
+              or share a room code with a friend. both players need the <span class="text-zec-yellow">zafu</span> extension.
             </div>
 
             {/* create private game */}
