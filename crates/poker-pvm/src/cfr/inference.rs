@@ -35,15 +35,32 @@ fn run_model(session: &Mutex<ort::session::Session>, features: &[f32; NUM_FEATUR
 
 impl OnnxMoE {
     pub fn load(model_dir: &str) -> Result<Self, ort::Error> {
+        Self::load_version(model_dir, None)
+    }
+
+    /// Load models, auto-detecting the highest version or using a specific one.
+    pub fn load_version(model_dir: &str, version: Option<u32>) -> Result<Self, ort::Error> {
         let dir = Path::new(model_dir);
+        let names = ["headsup", "preflop_multi", "postflop_wet", "postflop_dry", "shortstack", "river_polar"];
+
+        // find highest version if not specified
+        let ver = version.unwrap_or_else(|| {
+            let mut max_v = 1u32;
+            for v in 1..=20 {
+                if dir.join(format!("router_v{}.onnx", v)).exists() {
+                    max_v = v;
+                }
+            }
+            max_v
+        });
+
         let router = ort::session::Session::builder()?
             .with_intra_threads(1)?
-            .commit_from_file(dir.join("router_v1.onnx"))?;
+            .commit_from_file(dir.join(format!("router_v{}.onnx", ver)))?;
 
-        let names = ["headsup", "preflop_multi", "postflop_wet", "postflop_dry", "shortstack", "river_polar"];
         let mut experts = Vec::new();
         for name in &names {
-            let path = dir.join(format!("expert_{}_v1.onnx", name));
+            let path = dir.join(format!("expert_{}_v{}.onnx", name, ver));
             if path.exists() {
                 experts.push(Some(Mutex::new(ort::session::Session::builder()?
                     .with_intra_threads(1)?

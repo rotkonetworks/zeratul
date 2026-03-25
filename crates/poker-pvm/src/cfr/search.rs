@@ -111,28 +111,40 @@ impl PokerBot {
         self.rng()
     }
 
-    /// get valid actions at current state
+    /// get valid actions at current state.
+    /// Pluribus-style sizing: {0.25x, 0.5x, 1x, 2x, all-in}
     fn get_actions(&self, state: &GameState) -> Vec<(Action, u32)> {
         let seat = state.acting_seat as usize;
         let max_bet = state.bets.iter().take(state.num_players as usize).copied().max().unwrap_or(0);
         let my_bet = state.bets[seat];
         let stack = state.stacks[seat];
         let facing = my_bet < max_bet;
+        let bb = state.rules.big_blind;
+        let pot = state.pot;
 
         let mut actions = vec![(Action::Fold, 0)];
         if !facing { actions.push((Action::Check, 0)); }
         if facing && stack > 0 { actions.push((Action::Call, 0)); }
-        // half pot
-        let half_pot = (state.pot / 2).max(state.rules.big_blind).min(stack);
-        if stack >= state.rules.big_blind {
-            actions.push((Action::Bet, half_pot));
+
+        // bet/raise sizes as fractions of pot: 0.25x, 0.5x, 1x, 2x
+        let min_bet = if facing {
+            // raise: at least 2x the current bet
+            (max_bet * 2 - my_bet).max(bb)
+        } else {
+            bb
+        };
+        let action_type = if facing { Action::Raise } else { Action::Bet };
+
+        let mut seen = Vec::new();
+        for &frac_num in &[1u32, 2, 3, 4, 8] { // 0.25x, 0.5x, 0.75x, 1x, 2x
+            let amount = (pot * frac_num / 4).max(min_bet).min(stack);
+            if amount >= min_bet && amount < stack && !seen.contains(&amount) {
+                actions.push((action_type, amount));
+                seen.push(amount);
+            }
         }
-        // pot
-        let pot_bet = state.pot.min(stack);
-        if stack >= state.rules.big_blind && pot_bet != half_pot {
-            actions.push((Action::Bet, pot_bet));
-        }
-        // all-in
+
+        // all-in (always available if we have chips)
         if stack > 0 {
             actions.push((Action::AllIn, 0));
         }
@@ -462,6 +474,40 @@ impl PokerBot {
         result
     }
 
+    /// L0 only: blueprint lookup, no search fallback.
+    /// Falls back to uniform if blueprint miss.
+    pub fn decide_blueprint_only(
+        &mut self,
+        state: &GameState,
+        hole: &[u8; 2],
+        community: &[u8; 5],
+        history: &[u8],
+    ) -> SearchResult {
+        let actions = self.get_actions(state);
+        if actions.is_empty() {
+            return SearchResult {
+                action_probs: vec![], value: 0.0, actions: vec![],
+                from_blueprint: false, search_iters: 0,
+            };
+        }
+
+        let blueprint_probs = self.blueprint_lookup(state, hole, community, history);
+        let probs = if let Some(bp) = blueprint_probs {
+            self.blueprint_to_concrete(&bp, &actions, state)
+        } else {
+            // uniform fallback
+            vec![1.0 / actions.len() as f64; actions.len()]
+        };
+
+        SearchResult {
+            action_probs: probs,
+            value: 0.0,
+            actions,
+            from_blueprint: true,
+            search_iters: 0,
+        }
+    }
+
     /// sample a concrete action from search result
     pub fn sample_action(&mut self, result: &SearchResult) -> Option<(Action, u32)> {
         if result.actions.is_empty() { return None; }
@@ -478,6 +524,8 @@ impl PokerBot {
 
     /// map blueprint abstract probs [fold, check/call, small_bet, big_bet]
     /// to concrete action probs matching the actions list
+    /// map blueprint's 4 abstract actions [fold, check/call, small_bet, big_bet]
+    /// onto concrete actions with Pluribus-style sizing
     fn blueprint_to_concrete(&self, bp: &[f64], actions: &[(Action, u32)], state: &GameState) -> Vec<f64> {
         let mut probs = vec![0.0; actions.len()];
         let bp4: Vec<f64> = {
@@ -486,22 +534,29 @@ impl PokerBot {
             v
         };
 
+        let pot = state.pot;
+
         for (i, &(action, amount)) in actions.iter().enumerate() {
             match action {
                 Action::Fold => probs[i] = bp4[0],
                 Action::Check => probs[i] = bp4[1],
                 Action::Call => probs[i] = bp4[1],
-                Action::Bet => {
-                    // half pot → small bucket, pot → big bucket
-                    let half_pot = (state.pot / 2).max(state.rules.big_blind);
-                    if amount <= half_pot + state.rules.big_blind {
-                        probs[i] = bp4[2]; // small bet
+                Action::Bet | Action::Raise => {
+                    // distribute small_bet and big_bet across 5 sizing options
+                    let frac = if pot > 0 { amount as f64 / pot as f64 } else { 1.0 };
+                    if frac <= 0.375 {
+                        probs[i] = bp4[2] * 0.7; // 1/4 pot → small bucket
+                    } else if frac <= 0.625 {
+                        probs[i] = bp4[2]; // 1/2 pot → small bucket
+                    } else if frac <= 0.875 {
+                        probs[i] = bp4[2] * 0.3 + bp4[3] * 0.4; // 3/4 pot → blend
+                    } else if frac <= 1.5 {
+                        probs[i] = bp4[3]; // pot → big bucket
                     } else {
-                        probs[i] = bp4[3] * 0.5; // big bet (split with allin)
+                        probs[i] = bp4[3] * 0.7; // 2x pot → big bucket
                     }
                 }
-                Action::AllIn => probs[i] = bp4[3] * 0.5,
-                Action::Raise => probs[i] = bp4[3] * 0.3,
+                Action::AllIn => probs[i] = bp4[3] * 0.4,
             }
         }
 

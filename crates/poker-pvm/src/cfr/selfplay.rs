@@ -10,7 +10,7 @@
 
 use std::collections::HashMap;
 use crate::*;
-use super::brain::{Brain, ExploitMode};
+use super::brain::{Brain, FilterStack, SearchFilter, RangeFilter, ExploitFilter};
 use super::strategy::import_strategy;
 use super::abstraction::*;
 use super::ctm::{self, NUM_FEATURES, NUM_ACTIONS};
@@ -107,7 +107,14 @@ impl Arena {
             let h1 = [deck[2], deck[3]];
             let community = [deck[4], deck[5], deck[6], deck[7], deck[8]];
 
-            let mut stacks = [1000u32, 1000];
+            // randomize stacks: 40% shortstack (10-30bb), 60% normal (50-100bb)
+            let stack_roll = rng() % 100;
+            let chips = if stack_roll < 40 {
+                100 + (rng() % 201) // 100-300 chips (10-30bb)
+            } else {
+                500 + (rng() % 501) // 500-1000 chips (50-100bb)
+            };
+            let mut stacks = [chips, chips];
             let mut bets = [0u32, 0];
             let mut pot = 0u32;
             let mut acting = button;
@@ -146,8 +153,24 @@ impl Arena {
                     board, pot, stacks[acting as usize], stacks[opp as usize],
                     bets[acting as usize], 10, 0.5, 0.3, 0.1, 0.1, acting == button,
                 );
+                // map blueprint 4-bucket [fold, check/call, small, big] → 9-action
+                // [fold, check, call, bet_25, bet_50, bet_75, bet_100, bet_200, allin]
+                let bp = &probs;
+                let p_fold = bp.get(0).copied().unwrap_or(0.0) as f32;
+                let p_passive = bp.get(1).copied().unwrap_or(0.0) as f32;
+                let p_small = bp.get(2).copied().unwrap_or(0.0) as f32;
+                let p_big = bp.get(3).copied().unwrap_or(0.0) as f32;
+                let facing = bets[acting as usize] < bets[0].max(bets[1]);
                 let mut action_probs = [0.0f32; NUM_ACTIONS];
-                for (i, &p) in probs.iter().enumerate().take(NUM_ACTIONS) { action_probs[i] = p as f32; }
+                action_probs[0] = p_fold;                           // fold
+                action_probs[1] = if !facing { p_passive } else { 0.0 }; // check
+                action_probs[2] = if facing { p_passive } else { 0.0 };  // call
+                action_probs[3] = p_small * 0.3;                    // bet_25
+                action_probs[4] = p_small * 0.4;                    // bet_50
+                action_probs[5] = p_small * 0.3;                    // bet_75
+                action_probs[6] = p_big * 0.4;                      // bet_100
+                action_probs[7] = p_big * 0.3;                      // bet_200
+                action_probs[8] = p_big * 0.3;                      // allin
                 let total: f32 = action_probs.iter().sum();
                 if total > 0.0 { for p in &mut action_probs { *p /= total; } }
 
@@ -173,8 +196,9 @@ impl Arena {
                         pot += actual;
                         history.push(2);
                     }
-                    3 | 4 => { // bet/raise
-                        let raise = if action_idx == 3 { pot / 2 } else { pot }.max(10);
+                    3..=7 => { // bet sizes: 25%, 50%, 75%, 100%, 200% pot
+                        let frac = [1u32, 2, 3, 4, 8][action_idx - 3]; // /4
+                        let raise = (pot * frac / 4).max(10);
                         let total_bet = bets[0].max(bets[1]) + raise;
                         let needed = total_bet - bets[acting as usize];
                         let actual = needed.min(stacks[acting as usize]);
@@ -254,9 +278,25 @@ impl Arena {
     }
 
     fn play_inner(&self, num_hands: u64, use_search: bool) -> SelfPlayResult {
-        let mode = if use_search { ExploitMode::Exploit } else { ExploitMode::Nash };
-        let mut brain0 = Brain::new(&self.strategy).with_mode(mode);
-        let mut brain1 = Brain::new(&self.strategy).with_mode(mode);
+        let filters = if use_search {
+            FilterStack::new()
+                .and_then(SearchFilter)
+                .and_then(RangeFilter)
+                .and_then(ExploitFilter)
+        } else {
+            FilterStack::new()
+        };
+        // can't clone FilterStack, so build two
+        let filters1 = if use_search {
+            FilterStack::new()
+                .and_then(SearchFilter)
+                .and_then(RangeFilter)
+                .and_then(ExploitFilter)
+        } else {
+            FilterStack::new()
+        };
+        let mut brain0 = Brain::new(&self.strategy).with_filters(filters);
+        let mut brain1 = Brain::new(&self.strategy).with_filters(filters1);
 
         let mut samples = Vec::new();
         let mut p0_winnings: i64 = 0;
@@ -291,7 +331,19 @@ impl Arena {
 
             // init game state
             let mut state = GameState {
-                stacks: [1000u32, 1000, 0, 0, 0, 0, 0, 0, 0, 0],
+                stacks: {
+                    // randomize: 40% shortstack (10-30bb), 60% normal (50-100bb)
+                    let roll = rng() % 100;
+                    let chips = if roll < 40 {
+                        100 + (rng() % 201)
+                    } else {
+                        500 + (rng() % 501)
+                    };
+                    let mut s = [0u32; 10];
+                    s[0] = chips;
+                    s[1] = chips;
+                    s
+                },
                 bets: [0; MAX_SEATS],
                 pot: 0,
                 community: [0; MAX_COMMUNITY],
@@ -362,10 +414,27 @@ impl Arena {
                     acting == button,
                 );
 
-                // map decision to fixed action space
+                // map decision's variable actions → fixed 8-action training format
+                // [fold, check, call, bet_25, bet_50, bet_100, bet_200, allin]
                 let mut action_probs = [0.0f32; NUM_ACTIONS];
-                for (i, &p) in decision.action_probs.iter().enumerate().take(NUM_ACTIONS) {
-                    action_probs[i] = p as f32;
+                for (j, (&(act, amt), &prob)) in decision.actions.iter()
+                    .zip(decision.action_probs.iter()).enumerate()
+                {
+                    let idx = match act {
+                        Action::Fold => 0,
+                        Action::Check => 1,
+                        Action::Call => 2,
+                        Action::Bet | Action::Raise => {
+                            let frac = if state.pot > 0 { amt as f64 / state.pot as f64 } else { 1.0 };
+                            if frac <= 0.375 { 3 }       // bet_25
+                            else if frac <= 0.625 { 4 }   // bet_50
+                            else if frac <= 0.875 { 5 }   // bet_75
+                            else if frac <= 1.5 { 6 }     // bet_100
+                            else { 7 }                     // bet_200
+                        }
+                        Action::AllIn => 8,
+                    };
+                    action_probs[idx] += prob as f32;
                 }
 
                 // route to expert
@@ -379,12 +448,15 @@ impl Arena {
                     None => (Action::Check, 0),
                 };
 
+                // observe action in opponent brain BEFORE state update
+                let opp_brain = if acting == 0 { &mut brain1 } else { &mut brain0 };
+                opp_brain.observe_action(acting, action, amount, &state);
+
                 // apply action to state
                 match action {
                     Action::Fold => { folded = true; break; }
                     Action::Check => {
                         state.round_actions += 1;
-                        // advance
                     }
                     Action::Call => {
                         let to_call = state.bets.iter().take(2).max().copied().unwrap_or(0)
@@ -412,10 +484,6 @@ impl Arena {
                         state.round_actions += 1;
                     }
                 }
-
-                // observe action in opponent brain
-                let opp_brain = if acting == 0 { &mut brain1 } else { &mut brain0 };
-                opp_brain.observe_action(acting, action, amount, &state);
 
                 // check if betting round complete (simplified)
                 let both_acted = state.round_actions >= 2;
@@ -471,6 +539,14 @@ impl Arena {
                 let h1 = eval_best_5(hero1_cards, &community);
                 if h0 > h1 { 0 } else if h1 > h0 { 1 } else { 255 } // 255 = tie
             };
+
+            // track showdown stats (only when hand went to showdown, not fold)
+            if !folded {
+                brain0.profiles.profiles[0].observe_showdown(winner == 0);
+                brain0.profiles.profiles[1].observe_showdown(winner == 1);
+                brain1.profiles.profiles[0].observe_showdown(winner == 0);
+                brain1.profiles.profiles[1].observe_showdown(winner == 1);
+            }
 
             let pot = state.pot;
             let value_0 = if winner == 0 { 1.0 } else if winner == 1 { -1.0 } else { 0.0 };

@@ -65,6 +65,13 @@ impl Range {
         }
     }
 
+    /// fraction of range that's still alive (non-zero weight)
+    /// 1.0 = full range, 0.0 = nothing left
+    pub fn alive_fraction(&self) -> f32 {
+        let alive: usize = self.weights.iter().filter(|&&w| w > 1e-10).count();
+        alive as f32 / NUM_COMBOS as f32
+    }
+
     /// how many effective combos remain (entropy-based)
     pub fn effective_combos(&self) -> f32 {
         let total: f32 = self.weights.iter().sum();

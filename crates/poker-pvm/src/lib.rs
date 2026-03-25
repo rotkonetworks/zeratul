@@ -146,7 +146,9 @@ pub struct GameState {
 /// player type classification based on observed stats
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
+#[derive(Default)]
 pub enum PlayerType {
+    #[default]
     Unknown = 0,
     Rock = 1,         // VPIP < 20%, low aggression
     TAG = 2,          // VPIP 20-30%, high aggression

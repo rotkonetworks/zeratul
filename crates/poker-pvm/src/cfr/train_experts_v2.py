@@ -14,7 +14,7 @@ import os
 from pathlib import Path
 
 NUM_FEATURES = 27
-NUM_ACTIONS = 6
+NUM_ACTIONS = 9  # fold, check, call, bet_25, bet_50, bet_75, bet_100, bet_200, allin
 
 def load_selfplay_data(path):
     """Load binary self-play data: [count, n_feat, n_act, samples...]"""

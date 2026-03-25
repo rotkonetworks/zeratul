@@ -52,7 +52,7 @@
 pub const NUM_FEATURES: usize = 27;
 
 /// number of discrete actions the model outputs probabilities for
-pub const NUM_ACTIONS: usize = 6; // fold, check, call, bet_small, bet_big, allin
+pub const NUM_ACTIONS: usize = 9; // fold, check, call, bet_25, bet_50, bet_75, bet_100, bet_200, allin
 
 /// number of experts in the MoE
 pub const NUM_EXPERTS: usize = 6;
@@ -265,20 +265,24 @@ pub fn route(features: &StateFeatures) -> [(usize, f32); TOP_K] {
 
     let mut scores = [0.0f32; NUM_EXPERTS];
 
-    // expert 0: dry boards (low wetness, paired, rainbow)
-    scores[0] = (1.0 - board_wetness) * 0.5 + f[3] * 0.3 + f[6] * 0.2;
+    // expert IDs aligned with Python train_experts_v2.py:
+    // 0=headsup, 1=preflop_multi, 2=postflop_wet, 3=postflop_dry, 4=shortstack, 5=river_polar
 
-    // expert 1: wet boards (high wetness, draws)
-    scores[1] = board_wetness * 0.4 + f[7] * 0.3 + f[8] * 0.3;
+    // expert 0: headsup (always active in HU, low weight in multiway)
+    scores[0] = 0.3; // baseline for HU
 
-    // expert 2: deep stacks (SPR > 8)
-    scores[2] = if spr > 8.0 { (spr - 8.0).min(12.0) / 12.0 } else { 0.0 };
+    // expert 1: preflop_multi (preflop, no community cards)
+    scores[1] = if community_count == 0 { 0.7 } else { 0.0 };
 
-    // expert 3: short stacks (SPR < 3)
-    scores[3] = if spr < 3.0 { (3.0 - spr) / 3.0 } else { 0.0 };
+    // expert 2: postflop wet boards (high wetness, draws)
+    scores[2] = if community_count > 0 { board_wetness * 0.4 + f[7] * 0.3 + f[8] * 0.3 } else { 0.0 };
 
-    // expert 4: multiway (placeholder — needs player count)
-    scores[4] = 0.0;
+    // expert 3: postflop dry boards (low wetness, paired, rainbow)
+    scores[3] = if community_count > 0 { (1.0 - board_wetness) * 0.5 + f[3] * 0.3 + f[6] * 0.2 } else { 0.0 };
+
+    // expert 4: short stacks (SPR < 8, i.e. effective stack < 8x pot)
+    // covers push/fold territory through medium stack-to-pot situations
+    scores[4] = if spr < 8.0 { (8.0 - spr) / 8.0 } else { 0.0 };
 
     // expert 5: river polarization
     scores[5] = if is_river { 0.8 } else { 0.0 };
@@ -337,11 +341,11 @@ impl Default for MoEEnsemble {
     fn default() -> Self {
         Self {
             experts: vec![
-                Expert { id: 0, name: "dry_board" },
-                Expert { id: 1, name: "wet_board" },
-                Expert { id: 2, name: "deep_stack" },
-                Expert { id: 3, name: "short_stack" },
-                Expert { id: 4, name: "multiway" },
+                Expert { id: 0, name: "headsup" },
+                Expert { id: 1, name: "preflop_multi" },
+                Expert { id: 2, name: "postflop_wet" },
+                Expert { id: 3, name: "postflop_dry" },
+                Expert { id: 4, name: "shortstack" },
                 Expert { id: 5, name: "river_polar" },
             ],
         }
@@ -435,10 +439,10 @@ mod tests {
         );
         let wet_route = route(&wet);
 
-        // dry board should prefer expert 0 (dry_board)
-        assert_eq!(dry_route[0].0, 0, "dry board should route to expert 0");
-        // wet board should prefer expert 1 (wet_board)
-        assert_eq!(wet_route[0].0, 1, "wet board should route to expert 1");
+        // dry board should prefer expert 3 (postflop_dry)
+        assert_eq!(dry_route[0].0, 3, "dry board should route to expert 3");
+        // wet board should prefer expert 2 (postflop_wet)
+        assert_eq!(wet_route[0].0, 2, "wet board should route to expert 2");
     }
 
     #[test]
@@ -450,9 +454,9 @@ mod tests {
         );
         let routing = route(&features);
 
-        // should prefer expert 3 (short_stack)
-        let has_short = routing.iter().any(|&(idx, _)| idx == 3);
-        assert!(has_short, "short stack should route to expert 3");
+        // should prefer expert 4 (shortstack)
+        let has_short = routing.iter().any(|&(idx, _)| idx == 4);
+        assert!(has_short, "short stack should route to expert 4");
     }
 
     #[test]
