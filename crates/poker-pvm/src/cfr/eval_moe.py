@@ -7,7 +7,7 @@ import numpy as np
 from pathlib import Path
 
 NUM_FEATURES = 27
-NUM_ACTIONS = 6
+NUM_ACTIONS = None  # read from data
 
 def load_selfplay_data(path, max_samples=50000):
     data = Path(path).read_bytes()
@@ -84,7 +84,8 @@ def main():
         w1 = 1.0 - w0
 
         pred_v = 0.0
-        pred_p = np.zeros(NUM_ACTIONS)
+        n_act_data = Yp.shape[1]
+        pred_p = np.zeros(n_act_data)
         for k, (eidx, w) in enumerate([(top2[0], w0), (top2[1], w1)]):
             if eidx not in experts:
                 continue

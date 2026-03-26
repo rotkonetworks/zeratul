@@ -29,6 +29,10 @@ pub struct SelfPlaySample {
 /// self-play arena
 pub struct Arena {
     strategy: Vec<u8>,
+    #[cfg(feature = "onnx")]
+    moe_dir: Option<String>,
+    #[cfg(feature = "onnx")]
+    moe_weight: f32,
 }
 
 /// result of a self-play session
@@ -43,7 +47,18 @@ impl Arena {
     pub fn new(strategy_data: &[u8]) -> Self {
         Self {
             strategy: strategy_data.to_vec(),
+            #[cfg(feature = "onnx")]
+            moe_dir: None,
+            #[cfg(feature = "onnx")]
+            moe_weight: 0.0,
         }
+    }
+
+    #[cfg(feature = "onnx")]
+    pub fn with_moe(mut self, dir: &str, weight: f32) -> Self {
+        self.moe_dir = Some(dir.to_string());
+        self.moe_weight = weight;
+        self
     }
 
     /// play N hands across multiple threads, merge results
@@ -278,25 +293,36 @@ impl Arena {
     }
 
     fn play_inner(&self, num_hands: u64, use_search: bool) -> SelfPlayResult {
-        let filters = if use_search {
-            FilterStack::new()
-                .and_then(SearchFilter)
-                .and_then(RangeFilter)
-                .and_then(ExploitFilter)
-        } else {
-            FilterStack::new()
+        // load MoE if available
+        #[cfg(feature = "onnx")]
+        let moe = self.moe_dir.as_ref().and_then(|dir| {
+            match super::inference::OnnxMoE::load(dir) {
+                Ok(m) => {
+                    println!("[moe] loaded from {}", dir);
+                    Some(std::sync::Arc::new(m))
+                }
+                Err(e) => { eprintln!("[moe] failed to load: {}", e); None }
+            }
+        });
+
+        let make_brain = |strategy: &[u8]| -> Brain {
+            let mut filters = FilterStack::new();
+            if use_search {
+                filters = filters
+                    .and_then(SearchFilter)
+                    .and_then(RangeFilter)
+                    .and_then(ExploitFilter);
+            }
+            let mut brain = Brain::new(strategy).with_filters(filters);
+            #[cfg(feature = "onnx")]
+            if let Some(ref m) = moe {
+                brain = brain.with_moe(m.clone(), self.moe_weight);
+            }
+            brain
         };
-        // can't clone FilterStack, so build two
-        let filters1 = if use_search {
-            FilterStack::new()
-                .and_then(SearchFilter)
-                .and_then(RangeFilter)
-                .and_then(ExploitFilter)
-        } else {
-            FilterStack::new()
-        };
-        let mut brain0 = Brain::new(&self.strategy).with_filters(filters);
-        let mut brain1 = Brain::new(&self.strategy).with_filters(filters1);
+
+        let mut brain0 = make_brain(&self.strategy);
+        let mut brain1 = make_brain(&self.strategy);
 
         let mut samples = Vec::new();
         let mut p0_winnings: i64 = 0;

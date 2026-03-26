@@ -19,6 +19,8 @@ fn main() {
     let mut fast = true;
     let mut checkpoint_dir: Option<String> = None;
     let mut checkpoint_every: u64 = 100_000;
+    let mut moe_dir: Option<String> = None;
+    let mut moe_weight: f32 = 0.3;
 
     let mut i = 1;
     while i < args.len() {
@@ -31,6 +33,8 @@ fn main() {
             "--measure-only" => { measure_only = true; }
             "--checkpoint-dir" => { if i+1 < args.len() { checkpoint_dir = Some(args[i+1].clone()); i += 1; } }
             "--checkpoint-every" => { if i+1 < args.len() { checkpoint_every = args[i+1].parse().unwrap_or(100_000); i += 1; } }
+            "--moe-dir" => { if i+1 < args.len() { moe_dir = Some(args[i+1].clone()); i += 1; } }
+            "--moe-weight" => { if i+1 < args.len() { moe_weight = args[i+1].parse().unwrap_or(0.3); i += 1; } }
             _ => {}
         }
         i += 1;
@@ -42,7 +46,12 @@ fn main() {
     println!("strategy: {} ({} bytes)", strategy_path, strategy.len());
     println!("threads: {}  mode: {}", threads, if fast { "fast (L0 only)" } else { "full (L0-L3 + search)" });
 
-    let arena = Arena::new(&strategy);
+    let mut arena = Arena::new(&strategy);
+    #[cfg(feature = "onnx")]
+    if let Some(ref dir) = moe_dir {
+        println!("MoE: {} (weight: {})", dir, moe_weight);
+        arena = arena.with_moe(dir, moe_weight);
+    }
 
     if measure_only {
         let t0 = Instant::now();

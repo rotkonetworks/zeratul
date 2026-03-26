@@ -4,19 +4,70 @@ export type Table = {
   id: number
   name: string
   blinds: string
-  sb: number
+  sb: number        // in zatoshis (1 ZEC = 100_000_000 zats)
   bb: number
   buyin: number
+  maxBuyin: number
   speed: string
   timeout: number
   color: string
+  rakeBps: number   // escrow fee in basis points (100 = 1%)
+  rakeCap: number   // max fee per pot in zatoshis
+}
+
+// 1 ZEC = 100_000_000 zatoshis
+const ZEC = 100_000_000
+const mZEC = ZEC / 1000  // 0.001 ZEC = 100_000 zats
+
+/** format zatoshis as ZEC for display */
+function fmtZec(zats: number): string {
+  const zec = zats / ZEC
+  if (zec >= 1) return zec.toFixed(1) + ' ZEC'
+  if (zec >= 0.01) return zec.toFixed(2) + ' ZEC'
+  return zec.toFixed(4) + ' ZEC'
 }
 
 export const TABLES: Table[] = [
-  { id: 1, name: 'Chill',    blinds: '1/2',    sb: 1,  bb: 2,  buyin: 200,  speed: 'slow',   timeout: 60, color: '#2d5a3d' },
-  { id: 2, name: 'Standard', blinds: '5/10',   sb: 5,  bb: 10, buyin: 1000, speed: 'normal', timeout: 30, color: '#3d5a2d' },
-  { id: 3, name: 'Turbo',    blinds: '10/20',  sb: 10, bb: 20, buyin: 2000, speed: 'fast',   timeout: 15, color: '#5a3d2d' },
-  { id: 4, name: 'Hyper',    blinds: '25/50',  sb: 25, bb: 50, buyin: 5000, speed: 'hyper',  timeout: 8,  color: '#5a2d3d' },
+  {
+    id: 1, name: 'Micro',
+    blinds: '0.0005/0.001',
+    sb: 50_000, bb: 100_000,       // 0.0005 / 0.001 ZEC
+    buyin: 10 * mZEC,              // 0.1 ZEC (100bb)
+    maxBuyin: 25 * mZEC,           // 0.25 ZEC (250bb)
+    speed: 'normal', timeout: 30,
+    color: '#2d5a3d',
+    rakeBps: 250, rakeCap: 500_000, // 2.5% capped at 0.005 ZEC
+  },
+  {
+    id: 2, name: 'Low',
+    blinds: '0.005/0.01',
+    sb: 500_000, bb: 1_000_000,    // 0.005 / 0.01 ZEC
+    buyin: ZEC,                     // 1 ZEC (100bb)
+    maxBuyin: 2.5 * ZEC,           // 2.5 ZEC (250bb)
+    speed: 'normal', timeout: 30,
+    color: '#3d5a2d',
+    rakeBps: 200, rakeCap: 5_000_000, // 2% capped at 0.05 ZEC
+  },
+  {
+    id: 3, name: 'Mid',
+    blinds: '0.05/0.1',
+    sb: 5_000_000, bb: 10_000_000, // 0.05 / 0.1 ZEC
+    buyin: 10 * ZEC,               // 10 ZEC (100bb)
+    maxBuyin: 25 * ZEC,            // 25 ZEC (250bb)
+    speed: 'normal', timeout: 30,
+    color: '#5a3d2d',
+    rakeBps: 150, rakeCap: 25_000_000, // 1.5% capped at 0.25 ZEC (unchanged)
+  },
+  {
+    id: 4, name: 'High',
+    blinds: '0.5/1.0',
+    sb: 50_000_000, bb: ZEC,       // 0.5 / 1.0 ZEC
+    buyin: 100 * ZEC,              // 100 ZEC (100bb)
+    maxBuyin: 250 * ZEC,           // 250 ZEC (250bb)
+    speed: 'normal', timeout: 45,
+    color: '#5a2d3d',
+    rakeBps: 100, rakeCap: ZEC,    // 1% capped at 1 ZEC
+  },
 ]
 
 type LiveTable = {
@@ -56,21 +107,6 @@ export default function Lobby(props: {
   const [liveTables, setLiveTables] = createSignal<LiveTable[]>([])
   const [tab, setTab] = createSignal<'play' | 'public' | 'invite'>('play')
   const isMobile = window.innerWidth <= 640
-  const [mode, setMode] = createSignal<'casino' | 'list'>(isMobile ? 'list' : 'casino')
-
-  // casino walk state
-  const [px, setPx] = createSignal(180)
-  const [py, setPy] = createSignal(260)
-  const [target, setTarget] = createSignal<{x:number,y:number}|null>(null)
-  const [facing, setFacing] = createSignal<'d'|'u'|'l'|'r'>('d')
-
-  const tpos = [
-    { x: 90,  y: 80 },
-    { x: 270, y: 80 },
-    { x: 90,  y: 190 },
-    { x: 270, y: 190 },
-  ]
-
   const [chatMessages, setChatMessages] = createSignal<{text: string, cls: string}[]>([])
   const [players, setPlayers] = createSignal<string[]>([])
   const [chatInput, setChatInput] = createSignal('')
@@ -131,51 +167,6 @@ export default function Lobby(props: {
     chatMessages()
     if (chatEl) chatEl.scrollTop = chatEl.scrollHeight
   })
-
-  // walk animation
-  let walkIv: number
-  onMount(() => {
-    walkIv = setInterval(() => {
-      const t = target()
-      if (!t) return
-      const dx = t.x - px(), dy = t.y - py()
-      const d = Math.sqrt(dx*dx + dy*dy)
-      if (d < 3) { setTarget(null); return }
-      const s = 2.5
-      setPx(x => x + dx/d*s)
-      setPy(y => y + dy/d*s)
-      if (Math.abs(dx) > Math.abs(dy)) setFacing(dx > 0 ? 'r' : 'l')
-      else setFacing(dy > 0 ? 'd' : 'u')
-    }, 25)
-  })
-  onCleanup(() => clearInterval(walkIv))
-
-  // keyboard
-  onMount(() => {
-    const onKey = (e: KeyboardEvent) => {
-      if (mode() !== 'casino' || tab() !== 'play') return
-      if ((e.target as HTMLElement)?.tagName === 'INPUT') return
-      const step = 8
-      if (e.key === 'ArrowUp' || e.key === 'w') { setPy(y => Math.max(15, y - step)); setFacing('u') }
-      if (e.key === 'ArrowDown' || e.key === 's') { setPy(y => Math.min(285, y + step)); setFacing('d') }
-      if (e.key === 'ArrowLeft' || e.key === 'a') { setPx(x => Math.max(15, x - step)); setFacing('l') }
-      if (e.key === 'ArrowRight' || e.key === 'd') { setPx(x => Math.min(345, x + step)); setFacing('r') }
-      if (e.key === 'Enter' || e.key === ' ') {
-        const nt = nearTable()
-        if (nt !== null) { e.preventDefault(); joinTable(nt) }
-      }
-    }
-    window.addEventListener('keydown', onKey)
-    onCleanup(() => window.removeEventListener('keydown', onKey))
-  })
-
-  const nearTable = () => {
-    for (let i = 0; i < tpos.length; i++) {
-      const dx = px() - tpos[i].x, dy = py() - tpos[i].y
-      if (Math.sqrt(dx*dx + dy*dy) < 45) return i
-    }
-    return null
-  }
 
   function joinTable(i: number) {
     if (!props.hasWallet) return // zafu required
@@ -241,10 +232,6 @@ export default function Lobby(props: {
                 {props.pubkey!.slice(0, 6)}..
               </span>
             </Show>
-            <button
-              class="text-8px px-2 py-1 rounded border border-neutral-700 text-neutral-500 hover:text-neutral-300"
-              onClick={() => setMode(m => m === 'casino' ? 'list' : 'casino')}
-            >{mode() === 'casino' ? '☰' : '🎰'}</button>
           </div>
         </Show>
 
@@ -266,75 +253,7 @@ export default function Lobby(props: {
 
         {/* ===== CREATE / JOIN TABLE ===== */}
         <Show when={tab() === 'play' && props.hasWallet}>
-          <Show when={mode() === 'casino'}>
-            <div
-              class="relative border border-neutral-800 rounded overflow-hidden cursor-pointer select-none mx-auto"
-              style="width:360px; height:300px; background:#111113;"
-              onClick={e => {
-                const r = (e.currentTarget as HTMLElement).getBoundingClientRect()
-                setTarget({x: e.clientX - r.left, y: e.clientY - r.top})
-              }}
-            >
-              <div class="absolute inset-0" style="background:repeating-conic-gradient(#18181c 0% 25%,#141417 0% 50%) 0 0/16px 16px" />
-              <div class="absolute left-1/2 -translate-x-1/2 top-0 bottom-0 w-16 opacity-30" style="background:linear-gradient(90deg,transparent,rgba(244,183,40,0.06),transparent)" />
-              <div class="absolute top-0 left-0 right-0 h-2" style="background:linear-gradient(180deg,#2a2a30,#1a1a1f)" />
-              <div class="absolute bottom-0 left-0 right-0 h-2 bg-neutral-800" />
-              <div class="absolute top-3 left-1/2 -translate-x-1/2 text-7px text-neutral-600 uppercase tracking-[0.3em] font-bold">poker room</div>
-
-              <For each={TABLES}>
-                {(table, i) => {
-                  const p = tpos[i()]
-                  const near = () => nearTable() === i()
-                  return (
-                    <div class="absolute" style={`left:${p.x-24}px;top:${p.y-18}px`}>
-                      <div
-                        class={`w-12 h-9 rounded-lg border-2 flex flex-col items-center justify-center transition-all duration-150 ${near() ? 'border-zec-yellow scale-110' : 'border-neutral-700'}`}
-                        style={`background:${table.color};${near() ? 'box-shadow:0 0 16px rgba(244,183,40,0.3)' : ''}`}
-                      >
-                        <div class="text-7px font-bold text-white/90">{table.blinds}</div>
-                        <div class="text-5px text-white/50">{table.speed}</div>
-                      </div>
-                      {[[-3,-7],[15,-7],[-3,12],[15,12]].map(([cx,cy]) =>
-                        <div class="absolute w-2.5 h-2.5 rounded-sm bg-neutral-800 border border-neutral-700" style={`left:${cx+16}px;top:${cy+10}px`} />
-                      )}
-                      <div class={`text-center text-6px mt-0.5 uppercase tracking-wider ${near() ? 'text-zec-yellow' : 'text-neutral-700'}`}>{table.name}</div>
-                    </div>
-                  )
-                }}
-              </For>
-
-              {/* player avatar */}
-              <div class="absolute z-10 transition-none" style={`left:${px()-8}px;top:${py()-14}px`}>
-                <div class="w-4 h-5 rounded-t-full bg-zec-yellow border border-zec-gold relative">
-                  <div class="absolute w-1 h-1 bg-black rounded-full"
-                    style={`left:${facing()==='l'?2:facing()==='r'?6:3}px;top:${facing()==='u'?2:5}px`} />
-                  <div class="absolute w-1 h-1 bg-black rounded-full"
-                    style={`left:${facing()==='l'?4:facing()==='r'?8:7}px;top:${facing()==='u'?2:5}px`} />
-                </div>
-                <div class="flex justify-center gap-px">
-                  <div class="w-1.5 h-1.5 bg-neutral-600 rounded-b" />
-                  <div class="w-1.5 h-1.5 bg-neutral-600 rounded-b" />
-                </div>
-                <div class="absolute -top-3 left-1/2 -translate-x-1/2 text-6px text-zec-yellow whitespace-nowrap font-bold">{name() || '?'}</div>
-              </div>
-
-              <Show when={nearTable() !== null}>
-                <div class="absolute bottom-4 left-1/2 -translate-x-1/2 z-20">
-                  <button
-                    class="bg-zec-yellow text-black text-9px font-bold px-4 py-1 rounded animate-pulse"
-                    onClick={e => { e.stopPropagation(); joinTable(nearTable()!) }}
-                  >SIT · {TABLES[nearTable()!].name} ({TABLES[nearTable()!].blinds})</button>
-                </div>
-              </Show>
-
-              <div class="absolute top-20 right-6 w-1.5 h-24 bg-neutral-800 rounded-sm" />
-              <div class="absolute top-28 right-3 text-5px text-neutral-700" style="writing-mode:vertical-rl">BAR</div>
-            </div>
-            <div class="text-center text-neutral-700 text-7px mt-1">click or WASD · approach table · ENTER to sit</div>
-          </Show>
-
-          <Show when={mode() === 'list'}>
-            <div class="flex flex-col gap-2">
+          <div class="flex flex-col gap-2">
               <For each={TABLES}>
                 {(table, i) => (
                   <button
@@ -343,22 +262,16 @@ export default function Lobby(props: {
                   >
                     <div>
                       <div class="text-12px font-semibold">{table.name}</div>
-                      <div class="text-9px text-neutral-500">{table.blinds} · {table.buyin} buy-in</div>
+                      <div class="text-9px text-neutral-500">{table.blinds} ZEC blinds</div>
                     </div>
                     <div class="text-right">
-                      <div class={`text-9px px-2 py-0.5 rounded inline-block ${
-                        table.speed === 'slow' ? 'bg-green-900/30 text-green-400' :
-                        table.speed === 'normal' ? 'bg-blue-900/30 text-blue-400' :
-                        table.speed === 'fast' ? 'bg-orange-900/30 text-orange-400' :
-                        'bg-red-900/30 text-red-400'
-                      }`}>{table.timeout}s</div>
-                      <div class="text-7px text-neutral-600 mt-0.5">open seat</div>
+                      <div class="text-10px font-mono text-zec-yellow">{fmtZec(table.buyin)}</div>
+                      <div class="text-7px text-neutral-600">buy-in · {table.rakeBps/100}% fee</div>
                     </div>
                   </button>
                 )}
               </For>
             </div>
-          </Show>
         </Show>
 
         {/* ===== PUBLIC TABLES ===== */}

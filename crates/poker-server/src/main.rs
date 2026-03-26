@@ -42,10 +42,9 @@ use pasta_curves::pallas::Scalar as PallasScalar;
 enum ClientMsg {
     Join { name: String, #[serde(default)] pubkey: Option<String> },
     Action { action: String, amount: Option<u64> },
+    Chat { text: String },
     StartHand,
-    /// host adds a pubkey to the mutuals allow list
     AllowPlayer { pubkey: String },
-    /// trigger jury dispute resolution
     Dispute,
 }
 
@@ -82,6 +81,8 @@ enum ServerMsg {
     InviteLink { url: String },
     /// game status (shuffle progress, deck verification, etc.)
     Status { phase: String, message: String },
+    /// table chat
+    Chat { seat: u8, name: String, text: String },
     Error { message: String },
     Waiting,
 }
@@ -961,6 +962,14 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     notify_lobby_tables(&state.rooms, &state.lobby_users).await;
                 } else {
                     let _ = tx.send(ServerMsg::Error { message: "table full".into() });
+                }
+            }
+            ClientMsg::Chat { text } => {
+                if let Some(seat) = my_seat {
+                    let r = room.lock().await;
+                    let player_name = r.players[seat as usize].as_ref()
+                        .map(|p| p.name.clone()).unwrap_or_default();
+                    r.broadcast(&ServerMsg::Chat { seat, name: player_name, text });
                 }
             }
             ClientMsg::Action { action, amount } => {

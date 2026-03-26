@@ -236,6 +236,11 @@ export default function App() {
         setActions([])
         setActing(-1)
         break
+      case 'Chat':
+        if (msg.seat !== mySeat()) {
+          log(`${msg.name}: ${msg.text}`, 'text-neutral-300')
+        }
+        break
       case 'JuryVote':
         setJuryProgress(`jury ${msg.node}/${msg.total}`)
         log(`jury node ${msg.node}/${msg.total} voted [${msg.payload_hash}]`, 'c-green')
@@ -386,7 +391,7 @@ export default function App() {
 
   return (
     <div class="min-h-screen min-h-[100dvh] flex items-center justify-center p-1 sm:p-4 bg-zec-dark font-sans text-white">
-      <div class="w-full max-w-160 sm:max-w-160">
+      <div class="w-full max-w-160 lg:max-w-4xl xl:max-w-5xl">
         <div class="panel">
           {/* titlebar */}
           <div class="titlebar">
@@ -415,6 +420,7 @@ export default function App() {
                 const params = new URLSearchParams({
                   sb: String(table.sb), bb: String(table.bb),
                   buyin: String(table.buyin), timeout: String(table.timeout),
+                  rake_bps: String(table.rakeBps), rake_cap: String(table.rakeCap),
                 })
                 fetch(`/new?${params}`, { redirect: 'follow' }).then(resp => {
                   const url = resp.url || resp.headers.get('location') || ''
@@ -555,7 +561,8 @@ export default function App() {
 
           {/* game */}
           <Show when={view() === 'game'}>
-            <div class="px-2">
+            <div class="px-2 lg:flex lg:gap-4">
+             <div class="lg:flex-1">
               {/* status bar */}
               <div class="flex justify-between px-2 py-1.5 text-9px text-neutral-500 uppercase tracking-wider">
                 <span>
@@ -571,7 +578,7 @@ export default function App() {
               </div>
 
               {/* felt */}
-              <div class="bg-zec-felt border-2 border-zec-feltb rounded-15 sm:rounded-25 px-2 sm:px-5 py-4 sm:py-6 relative" style="min-height: 220px; box-shadow: inset 0 2px 20px rgba(0,0,0,0.4)">
+              <div class="bg-zec-felt border-2 border-zec-feltb rounded-15 sm:rounded-25 px-2 sm:px-5 py-4 sm:py-6 lg:py-10 relative" style="min-height: 220px; box-shadow: inset 0 2px 20px rgba(0,0,0,0.4)">
 
                 {/* disconnect overlay */}
                 <Show when={oppDisconnected()}>
@@ -817,8 +824,11 @@ export default function App() {
                 </div>
               </div>
 
-              {/* log + chat */}
-              <div ref={logEl!} class="bg-zec-surface border border-neutral-800 p-2 max-h-28 overflow-y-auto font-mono text-10px mb-1 leading-relaxed">
+             </div>{/* end main column */}
+
+              {/* log + chat sidebar */}
+              <div class="lg:w-72 lg:flex-shrink-0">
+              <div ref={logEl!} class="bg-zec-surface border border-neutral-800 p-2 max-h-28 lg:max-h-80 overflow-y-auto font-mono text-10px mb-1 leading-relaxed">
                 <For each={logs()}>
                   {l => <div class={`text-neutral-600 ${l.cls}`}>{l.text}</div>}
                 </For>
@@ -848,6 +858,7 @@ export default function App() {
                 />
                 <button type="submit" class="text-8px px-2 py-0.5 rounded border border-neutral-700 text-neutral-600 hover:text-neutral-400">send</button>
               </form>
+              </div>{/* end sidebar */}
             </div>
           </Show>
 

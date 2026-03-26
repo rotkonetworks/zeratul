@@ -435,6 +435,10 @@ def train_expert(expert_name, samples, version, output_dir, epochs=80):
     params = sum(p.numel() for p in model.parameters())
     print(f"  training expert_{expert_name}_v{version}: {params:,} params, {len(samples)} samples, {epochs} epochs")
 
+    # Bound-guided: per-step loss weighting based on optimality gaps
+    step_weights = torch.ones(MAX_THINK_STEPS, device=device)
+    bound_analyze_every = 20
+
     for epoch in range(epochs):
         perm = torch.randperm(len(X))
         total_loss = 0; batches = 0
@@ -450,6 +454,44 @@ def train_expert(expert_name, samples, version, output_dir, epochs=80):
             optimizer.step()
             total_loss += loss.item(); batches += 1
         scheduler.step()
+
+        # Bound analysis: compute per-step Jacobian energy to find weak steps
+        if (epoch + 1) % bound_analyze_every == 0:
+            model.eval()
+            with torch.no_grad():
+                # Sample a batch for analysis
+                n_analyze = min(500, len(X))
+                ax = X[:n_analyze]
+                h = model.init_hidden.unsqueeze(0).expand(n_analyze, -1)
+                step_jac_energy = []
+                step_losses = []
+                for step in range(MAX_THINK_STEPS):
+                    h_prev = h.clone()
+                    h = model.step_net(torch.cat([ax, h], dim=-1))
+                    # Jacobian proxy: ||h - h_prev|| / ||h_prev|| (how much the step changes state)
+                    delta = (h - h_prev).norm(dim=-1).mean()
+                    h_norm = h_prev.norm(dim=-1).mean().clamp(min=1e-6)
+                    step_jac_energy.append((delta / h_norm).item())
+                    # Per-step value prediction quality
+                    v_step = model.value_head(h).squeeze(-1)
+                    step_losses.append(((v_step - Yv[:n_analyze])**2).mean().item())
+
+                # Weight steps inversely to their loss improvement
+                # Steps with big loss → high gap → more weight
+                step_losses_t = torch.tensor(step_losses, device=device)
+                if step_losses_t.max() > 1e-8:
+                    normalized = step_losses_t / step_losses_t.max()
+                    step_weights = 1.0 + 2.0 * normalized
+                else:
+                    step_weights = torch.ones(MAX_THINK_STEPS, device=device)
+
+                jac_str = ' '.join(f'{j:.3f}' for j in step_jac_energy)
+                loss_str = ' '.join(f'{l:.4f}' for l in step_losses)
+                print(f"    [bounds] jac_energy: [{jac_str}]")
+                print(f"    [bounds] step_loss:  [{loss_str}]")
+                print(f"    [bounds] weights:    [{" ".join(f"{w:.2f}" for w in step_weights.tolist())}]")
+            model.train()
+
         if (epoch+1) % 20 == 0:
             print(f"    epoch {epoch+1}/{epochs}: loss={total_loss/max(batches,1):.4f}")
 
