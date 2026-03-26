@@ -311,12 +311,23 @@ pub struct ExpertOutput {
     pub think_steps: u8,
 }
 
+/// per-expert max thinking ticks (from bound analysis)
+pub const EXPERT_MAX_TICKS: [u8; NUM_EXPERTS] = [
+    6, // headsup
+    6, // preflop_multi
+    8, // postflop_wet
+    8, // postflop_dry
+    3, // shortstack (push/fold converges fast)
+    6, // river_polar
+];
+
 /// a single CTM expert.
 /// in production: ONNX model loaded via tract or candle.
 /// for now: returns blueprint-derived heuristic.
 pub struct Expert {
     pub id: usize,
     pub name: &'static str,
+    pub max_ticks: u8,
 }
 
 impl Expert {
@@ -341,12 +352,12 @@ impl Default for MoEEnsemble {
     fn default() -> Self {
         Self {
             experts: vec![
-                Expert { id: 0, name: "headsup" },
-                Expert { id: 1, name: "preflop_multi" },
-                Expert { id: 2, name: "postflop_wet" },
-                Expert { id: 3, name: "postflop_dry" },
-                Expert { id: 4, name: "shortstack" },
-                Expert { id: 5, name: "river_polar" },
+                Expert { id: 0, name: "headsup", max_ticks: EXPERT_MAX_TICKS[0] },
+                Expert { id: 1, name: "preflop_multi", max_ticks: EXPERT_MAX_TICKS[1] },
+                Expert { id: 2, name: "postflop_wet", max_ticks: EXPERT_MAX_TICKS[2] },
+                Expert { id: 3, name: "postflop_dry", max_ticks: EXPERT_MAX_TICKS[3] },
+                Expert { id: 4, name: "shortstack", max_ticks: EXPERT_MAX_TICKS[4] },
+                Expert { id: 5, name: "river_polar", max_ticks: EXPERT_MAX_TICKS[5] },
             ],
         }
     }

@@ -60,24 +60,42 @@ def train(features, policies, values, expert_ids, version, output_dir, n_actions
 
     MAX_THINK = 8
 
+    # per-expert max ticks — learned from bound analysis
+    # shortstack: push/fold is 2-tick, postflop needs more thinking
+    EXPERT_MAX_TICKS = {
+        'headsup': 6,
+        'preflop_multi': 6,
+        'postflop_wet': 8,
+        'postflop_dry': 8,
+        'shortstack': 3,
+        'river_polar': 6,
+    }
+
     class CTMExpert(nn.Module):
-        def __init__(self, hidden=128):
+        def __init__(self, hidden=128, max_ticks=MAX_THINK, kl_halt_threshold=0.01):
             super().__init__()
+            self.max_ticks = max_ticks
+            self.kl_halt_threshold = kl_halt_threshold
+            # spectral normalization on step weights prevents divergence
             self.step = nn.Sequential(
-                nn.Linear(NUM_FEATURES + hidden, hidden), nn.GELU(),
-                nn.Linear(hidden, hidden), nn.GELU())
+                nn.utils.parametrizations.spectral_norm(nn.Linear(NUM_FEATURES + hidden, hidden)),
+                nn.GELU(),
+                nn.utils.parametrizations.spectral_norm(nn.Linear(hidden, hidden)),
+                nn.GELU())
             self.halt = nn.Linear(hidden, 1)
             self.vhead = nn.Linear(hidden, 1)
             self.phead = nn.Linear(hidden, n_actions)
             self.h0 = nn.Parameter(torch.randn(hidden) * 0.01)
 
-        def forward(self, x):
+        def forward(self, x, adaptive=False):
             b = x.shape[0]
             h = self.h0.unsqueeze(0).expand(b, -1)
             tv = torch.zeros(b, device=x.device)
             tp = torch.zeros(b, n_actions, device=x.device)
             rem = torch.ones(b, device=x.device)
-            for _ in range(MAX_THINK):
+            prev_p = None
+            ticks_used = self.max_ticks
+            for s in range(self.max_ticks):
                 h = self.step(torch.cat([x, h], -1))
                 halt = torch.sigmoid(self.halt(h)).squeeze(-1)
                 v = self.vhead(h).squeeze(-1)
@@ -86,13 +104,20 @@ def train(features, policies, values, expert_ids, version, output_dir, n_actions
                 tv += emit * v
                 tp += emit.unsqueeze(-1) * p
                 rem = rem * (1 - halt)
+                # KL-based adaptive halt: stop when policy stops changing
+                if adaptive and prev_p is not None and s >= 1:
+                    kl = (p * (torch.log(p + 1e-8) - torch.log(prev_p + 1e-8))).sum(-1).mean()
+                    if kl.item() < self.kl_halt_threshold:
+                        ticks_used = s + 1
+                        break
+                prev_p = p.detach()
+            # emit remainder
             tv += rem * self.vhead(h).squeeze(-1)
             tp += rem.unsqueeze(-1) * torch.softmax(self.phead(h), -1)
             return tv, tp
 
         def forward_weighted(self, x, step_weights=None):
-            """forward with per-step loss weighting fed back into the model.
-            returns (value, policy, per_step_values) for weighted loss computation."""
+            """forward with per-step loss weighting + auxiliary supervision"""
             b = x.shape[0]
             h = self.h0.unsqueeze(0).expand(b, -1)
             tv = torch.zeros(b, device=x.device)
@@ -100,12 +125,11 @@ def train(features, policies, values, expert_ids, version, output_dir, n_actions
             rem = torch.ones(b, device=x.device)
             step_values = []
             step_policies = []
-            for s in range(MAX_THINK):
+            for s in range(self.max_ticks):
                 h = self.step(torch.cat([x, h], -1))
                 halt = torch.sigmoid(self.halt(h)).squeeze(-1)
                 v = self.vhead(h).squeeze(-1)
                 p = torch.softmax(self.phead(h), -1)
-                # apply step weight to emission (amplify weak steps)
                 w = step_weights[s] if step_weights is not None else 1.0
                 emit = rem * halt * w
                 tv += emit * v
@@ -115,36 +139,42 @@ def train(features, policies, values, expert_ids, version, output_dir, n_actions
                 step_policies.append(p)
             tv += rem * self.vhead(h).squeeze(-1)
             tp += rem.unsqueeze(-1) * torch.softmax(self.phead(h), -1)
-            # renormalize policy
             tp_sum = tp.sum(dim=-1, keepdim=True).clamp(min=1e-8)
             tp = tp / tp_sum
             return tv, tp, step_values, step_policies
 
         def forward_diagnostic(self, x, targets_v=None):
-            """forward with per-step diagnostics for bound-guided training"""
+            """per-step diagnostics for bound analysis"""
             b = x.shape[0]
             h = self.h0.unsqueeze(0).expand(b, -1)
-            step_jac = []    # jacobian energy per step
-            step_vloss = []  # value loss per step
-            step_halt = []   # average halt probability per step
-            for s in range(MAX_THINK):
+            step_jac = []
+            step_vloss = []
+            step_halt = []
+            step_kl = []
+            prev_p = None
+            for s in range(self.max_ticks):
                 h_prev = h.clone()
                 h = self.step(torch.cat([x, h], -1))
-                # jacobian proxy: how much this step changes hidden state
                 delta = (h - h_prev).norm(dim=-1).mean()
                 h_norm = h_prev.norm(dim=-1).mean().clamp(min=1e-6)
                 step_jac.append((delta / h_norm).item())
-                # per-step value quality
                 v_step = self.vhead(h).squeeze(-1)
                 if targets_v is not None:
                     step_vloss.append(((v_step - targets_v)**2).mean().item())
-                # halt probability
                 halt = torch.sigmoid(self.halt(h)).squeeze(-1)
                 step_halt.append(halt.mean().item())
+                p = torch.softmax(self.phead(h), -1)
+                if prev_p is not None:
+                    kl = (p * (torch.log(p + 1e-8) - torch.log(prev_p + 1e-8))).sum(-1).mean()
+                    step_kl.append(kl.item())
+                else:
+                    step_kl.append(float('inf'))
+                prev_p = p
             return {
                 'jac_energy': step_jac,
                 'step_vloss': step_vloss,
                 'halt_probs': step_halt,
+                'step_kl': step_kl,
             }
 
     EXPERT_NAMES = ['headsup', 'preflop_multi', 'postflop_wet', 'postflop_dry', 'shortstack', 'river_polar']
@@ -159,7 +189,8 @@ def train(features, policies, values, expert_ids, version, output_dir, n_actions
         ex = X[mask]
         ep = Yp[mask]
         ev = Yv[mask]
-        model = CTMExpert().to(device)
+        expert_ticks = EXPERT_MAX_TICKS.get(EXPERT_NAMES[eid], MAX_THINK)
+        model = CTMExpert(max_ticks=expert_ticks).to(device)
         # resume from previous version if available
         if resume_dir:
             for prev_v in range(version, 0, -1):
@@ -221,10 +252,13 @@ def train(features, policies, values, expert_ids, version, output_dir, n_actions
                     jac = ' '.join(f'{j:.3f}' for j in diag['jac_energy'])
                     vloss_str = ' '.join(f'{l:.4f}' for l in diag['step_vloss'])
                     halt_str = ' '.join(f'{h:.2f}' for h in diag['halt_probs'])
-                    print(f"    epoch {epoch+1}: loss={avg_loss:.4f} (v={avg_v:.4f} p={avg_p:.4f})")
+                    kl_str = ' '.join(f'{k:.4f}' for k in diag.get('step_kl', []))
+                    print(f"    epoch {epoch+1}: loss={avg_loss:.4f} (v={avg_v:.4f} p={avg_p:.4f}) ticks={expert_ticks}")
                     print(f"      jac:  [{jac}]")
                     print(f"      vloss:[{vloss_str}]")
                     print(f"      halt: [{halt_str}]")
+                    if kl_str:
+                        print(f"      kl:   [{kl_str}]")
                 model.train()
 
         path = f"{output_dir}/expert_{EXPERT_NAMES[eid]}_v{version}.pt"
