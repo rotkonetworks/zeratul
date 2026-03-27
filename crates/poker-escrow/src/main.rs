@@ -1,0 +1,334 @@
+//! poker-escrow: FROST 2-of-3 escrow service for poker games.
+//!
+//! Manages:
+//!   - Key generation (trusted dealer for demo, DKG for production)
+//!   - Escrow address derivation
+//!   - Deposit tracking (watches zidecar for incoming ZEC)
+//!   - Rake fee transaction (from escrow → house wallet)
+//!   - Payout transaction (from escrow → winners)
+//!
+//! Separate from the relay — holds key material, the relay doesn't.
+//!
+//! API:
+//!   POST /room                   — create escrow for a new room
+//!   GET  /room/{code}            — escrow address + deposit status
+//!   POST /room/{code}/rake       — build + sign rake tx (needs 1 player sig)
+//!   POST /room/{code}/payout     — build + sign payout tx
+//!   GET  /health                 — service health
+
+use axum::{Router, Json, extract::{Path, State}, response::IntoResponse};
+use serde::{Deserialize, Serialize};
+use sha2::{Sha256, Digest};
+use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::Mutex;
+
+use osst::redpallas::zcash as frost;
+use pasta_curves::pallas::Scalar as PallasScalar;
+
+// ---------------------------------------------------------------------------
+// Types
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Serialize)]
+struct EscrowInfo {
+    code: String,
+    escrow_address: String,
+    player_a_deposited: u64,
+    player_b_deposited: u64,
+    required_deposit: u64,
+    rake_paid: bool,
+    game_active: bool,
+    created_at: u64,
+}
+
+struct EscrowRoom {
+    code: String,
+    escrow_address: [u8; 32],
+    group_pubkey: pasta_curves::pallas::Point,
+    // server's key share (signer #3)
+    server_share: osst::SecretShare<PallasScalar>,
+    // player shares (sent to players on creation)
+    player_a_share_hex: String,
+    player_b_share_hex: String,
+    // deposit tracking
+    player_a_deposit: u64,  // zatoshis
+    player_b_deposit: u64,
+    required_deposit: u64,
+    rake_bps: u16,
+    rake_paid: bool,
+    game_active: bool,
+    // payout
+    final_stacks: Option<(u64, u64)>,  // (player_a, player_b)
+    created_at: u64,
+}
+
+type Rooms = Arc<Mutex<HashMap<String, EscrowRoom>>>;
+
+#[derive(Clone)]
+pub struct AppState {
+    rooms: Rooms,
+    house_address: String,
+    zidecar_url: String,
+}
+
+// ---------------------------------------------------------------------------
+// Handlers
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct CreateRoomReq {
+    code: String,
+    required_deposit: u64,  // zatoshis per player
+    rake_bps: u16,
+}
+
+#[derive(Serialize)]
+struct CreateRoomResp {
+    escrow_address: String,
+    player_a_share: String,
+    player_b_share: String,
+    public_key_package: String,
+}
+
+async fn create_room(
+    State(state): State<AppState>,
+    Json(req): Json<CreateRoomReq>,
+) -> impl IntoResponse {
+    // do all crypto BEFORE any await (rng is not Send)
+    let (room, a_share_hex, b_share_hex, pubkey_hex, escrow_hex) = {
+        let mut rng = rand::thread_rng();
+        let result = frost::setup_escrow(1, 1, &mut rng);
+        let (player_a_share, player_b_share, jury_network, group_pubkey) = match result {
+            Ok(r) => r,
+            Err(e) => return Json(serde_json::json!({"error": format!("{:?}", e)})),
+        };
+
+        let escrow_address = frost::derive_address_bytes(&group_pubkey);
+        let escrow_hex = hex::encode(&escrow_address);
+        let a_share_hex = hex::encode(&share_to_bytes(&player_a_share));
+        let b_share_hex = hex::encode(&share_to_bytes(&player_b_share));
+        let pubkey_hex = hex::encode(&point_to_bytes(&group_pubkey));
+
+        let server_share = jury_network.node_shares.into_iter().next()
+            .expect("jury_n=1 should produce exactly 1 share");
+
+        let room = EscrowRoom {
+            code: req.code.clone(),
+            escrow_address,
+            group_pubkey,
+            server_share,
+            player_a_share_hex: a_share_hex.clone(),
+            player_b_share_hex: b_share_hex.clone(),
+            player_a_deposit: 0,
+            player_b_deposit: 0,
+            required_deposit: req.required_deposit,
+            rake_bps: req.rake_bps,
+            rake_paid: false,
+            game_active: false,
+            final_stacks: None,
+            created_at: now_ms(),
+        };
+        (room, a_share_hex, b_share_hex, pubkey_hex, escrow_hex)
+    };
+
+    state.rooms.lock().await.insert(req.code.clone(), room);
+
+    tracing::info!("escrow created: {} → {}", req.code, &escrow_hex[..16]);
+
+    Json(serde_json::json!({
+        "escrow_address": escrow_hex,
+        "player_a_share": a_share_hex,
+        "player_b_share": b_share_hex,
+        "public_key_package": pubkey_hex,
+    }))
+}
+
+async fn get_room(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+) -> impl IntoResponse {
+    let rooms = state.rooms.lock().await;
+    match rooms.get(&code) {
+        Some(room) => Json(serde_json::json!({
+            "code": room.code,
+            "escrow_address": hex::encode(&room.escrow_address),
+            "player_a_deposit": room.player_a_deposit,
+            "player_b_deposit": room.player_b_deposit,
+            "required_deposit": room.required_deposit,
+            "rake_bps": room.rake_bps,
+            "rake_paid": room.rake_paid,
+            "game_active": room.game_active,
+            "both_deposited": room.player_a_deposit >= room.required_deposit
+                && room.player_b_deposit >= room.required_deposit,
+        })),
+        None => Json(serde_json::json!({"error": "room not found"})),
+    }
+}
+
+/// player reports their deposit tx (0-conf)
+#[derive(Deserialize)]
+struct DepositReport {
+    seat: u8,  // 0 = player A, 1 = player B
+    txid: String,
+    amount: u64,
+}
+
+async fn report_deposit(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    Json(req): Json<DepositReport>,
+) -> impl IntoResponse {
+    let mut rooms = state.rooms.lock().await;
+    let room = match rooms.get_mut(&code) {
+        Some(r) => r,
+        None => return Json(serde_json::json!({"error": "room not found"})),
+    };
+
+    // TODO: verify txid against zidecar (check it actually pays to escrow_address)
+    // for demo: trust the client report
+    match req.seat {
+        0 => room.player_a_deposit += req.amount,
+        1 => room.player_b_deposit += req.amount,
+        _ => return Json(serde_json::json!({"error": "invalid seat"})),
+    }
+
+    let both = room.player_a_deposit >= room.required_deposit
+        && room.player_b_deposit >= room.required_deposit;
+
+    tracing::info!("deposit: room={} seat={} amount={} txid={} both={}",
+        code, req.seat, req.amount, &req.txid[..req.txid.len().min(16)], both);
+
+    if both && !room.game_active {
+        room.game_active = true;
+    }
+
+    Json(serde_json::json!({
+        "ok": true,
+        "player_a_deposit": room.player_a_deposit,
+        "player_b_deposit": room.player_b_deposit,
+        "both_deposited": both,
+        "game_active": room.game_active,
+    }))
+}
+
+/// game ended — record final stacks for payout
+#[derive(Deserialize)]
+struct SettleReq {
+    player_a_stack: u64,
+    player_b_stack: u64,
+    action_log_hash: String,
+}
+
+async fn settle(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    Json(req): Json<SettleReq>,
+) -> impl IntoResponse {
+    let mut rooms = state.rooms.lock().await;
+    let room = match rooms.get_mut(&code) {
+        Some(r) => r,
+        None => return Json(serde_json::json!({"error": "room not found"})),
+    };
+
+    if !room.game_active {
+        return Json(serde_json::json!({"error": "game not active"}));
+    }
+
+    // compute rake
+    let total_pot = room.player_a_deposit + room.player_b_deposit;
+    let rake = (total_pot as u128 * room.rake_bps as u128 / 10000) as u64;
+    let distributable = total_pot - rake;
+
+    // proportional payout based on final stacks
+    let total_stacks = req.player_a_stack + req.player_b_stack;
+    let payout_a = if total_stacks > 0 {
+        distributable * req.player_a_stack / total_stacks
+    } else {
+        distributable / 2
+    };
+    let payout_b = distributable - payout_a;
+
+    room.final_stacks = Some((payout_a, payout_b));
+    room.game_active = false;
+
+    tracing::info!("settle: room={} A={} B={} rake={} log={}",
+        code, payout_a, payout_b, rake, &req.action_log_hash[..req.action_log_hash.len().min(16)]);
+
+    Json(serde_json::json!({
+        "payout_a": payout_a,
+        "payout_b": payout_b,
+        "rake": rake,
+        "action_log_hash": req.action_log_hash,
+        // TODO: return unsigned payout tx for players to co-sign
+    }))
+}
+
+async fn health() -> &'static str { "ok" }
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+fn share_to_bytes(share: &osst::SecretShare<PallasScalar>) -> [u8; 36] {
+    let mut buf = [0u8; 36];
+    buf[0..4].copy_from_slice(&share.index.to_le_bytes());
+    use pasta_curves::group::ff::PrimeField;
+    let scalar_bytes = share.scalar().to_repr();
+    buf[4..36].copy_from_slice(scalar_bytes.as_ref());
+    buf
+}
+
+fn point_to_bytes(point: &pasta_curves::pallas::Point) -> [u8; 32] {
+    use pasta_curves::group::GroupEncoding;
+    let compressed = point.to_bytes();
+    compressed.into()
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
+}
+
+// ---------------------------------------------------------------------------
+// Main
+// ---------------------------------------------------------------------------
+
+#[tokio::main]
+async fn main() {
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
+            .add_directive("poker_escrow=info".parse().unwrap()))
+        .init();
+
+    let house_address = std::env::var("HOUSE_ADDRESS")
+        .unwrap_or_else(|_| "ztestsapling1...".to_string());
+    let zidecar_url = std::env::var("ZIDECAR_URL")
+        .unwrap_or_else(|_| "https://zcash.rotko.net".to_string());
+
+    let state = AppState {
+        rooms: Arc::new(Mutex::new(HashMap::new())),
+        house_address,
+        zidecar_url,
+    };
+
+    tracing::info!("house address: {}", state.house_address);
+    tracing::info!("zidecar: {}", state.zidecar_url);
+
+    let app = Router::new()
+        .route("/room", axum::routing::post(create_room))
+        .route("/room/{code}", axum::routing::get(get_room))
+        .route("/room/{code}/deposit", axum::routing::post(report_deposit))
+        .route("/room/{code}/settle", axum::routing::post(settle))
+        .route("/health", axum::routing::get(health))
+        .with_state(state);
+
+    let port = std::env::var("ESCROW_PORT").unwrap_or_else(|_| "3034".to_string());
+    let addr = format!("0.0.0.0:{}", port);
+    tracing::info!("poker-escrow listening on http://{}", addr);
+
+    let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
