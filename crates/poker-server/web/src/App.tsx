@@ -797,28 +797,21 @@ export default function App() {
                 </Show>
               </div>
 
-              {/* auto-action presets — shown when it's NOT your turn */}
-              <Show when={!isMyTurn()}>
-                <div class="flex gap-1.5 justify-center py-2">
-                  {(['check/fold', 'check', 'fold', 'call any'] as const).map(mode =>
-                    <button
-                      class={`text-9px px-3 py-1.5 rounded-md border transition-all ${
-                        autoAction() === mode
-                          ? 'border-zec-yellow text-zec-yellow bg-zec-yellow/15 shadow-[0_0_6px_rgba(244,183,40,0.2)]'
-                          : 'border-neutral-700 text-neutral-500 hover:text-neutral-300 hover:border-neutral-500'
-                      }`}
-                      onClick={() => setAutoAction(autoAction() === mode ? 'none' : mode)}
-                    >
-                      {mode}
-                    </button>
-                  )}
-                </div>
-              </Show>
-              <Show when={!isMyTurn() && autoAction() !== 'none'}>
-                <div class="text-center text-8px text-zec-yellow/60 pb-1">
-                  auto: {autoAction()}
-                </div>
-              </Show>
+              {/* auto-action presets — always visible */}
+              <div class="flex gap-1.5 justify-center py-2">
+                {(['check/fold', 'check', 'fold', 'call any'] as const).map(mode =>
+                  <button
+                    class={`text-9px px-3 py-1.5 rounded-md border transition-all ${
+                      autoAction() === mode
+                        ? 'border-zec-yellow text-zec-yellow bg-zec-yellow/15 shadow-[0_0_6px_rgba(244,183,40,0.2)]'
+                        : 'border-neutral-700 text-neutral-500 hover:text-neutral-300 hover:border-neutral-500'
+                    }`}
+                    onClick={() => setAutoAction(autoAction() === mode ? 'none' : mode)}
+                  >
+                    {mode}
+                  </button>
+                )}
+              </div>
 
               {/* hotkey legend + mode toggle */}
               <div class="flex items-center justify-center gap-2 py-0.5">
