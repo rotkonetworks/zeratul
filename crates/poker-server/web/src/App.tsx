@@ -57,6 +57,20 @@ export default function App() {
   const [gameStatus, setGameStatus] = createSignal('')
   const [lastResult, setLastResult] = createSignal<{ won: boolean; amount: number } | null>(null)
 
+  // --- Broadcast (spectator stream) ---
+  // player controls what spectators see. server fans out via /{code}/spectate WS.
+  // only public info by default. own hole cards opt-in.
+  const [broadcasting, setBroadcasting] = createSignal(false)
+  const [showMyCards, setShowMyCards] = createSignal(false)
+  const [spectatorCount, setSpectatorCount] = createSignal(0)
+
+  function broadcastEvent(event: string, data: Record<string, unknown> = {}) {
+    if (!broadcasting()) return
+    // filter: only public info
+    const payload = JSON.stringify({ event, ...data, ts: Date.now() })
+    send({ type: 'Broadcast', data: payload })
+  }
+
   const opp = () => mySeat() === 0 ? 1 : 0
   const myStack = () => stacks()[mySeat()] ?? 0
   const oppStack = () => stacks()[opp()] ?? 0
@@ -142,6 +156,10 @@ export default function App() {
           setMyCards(msg.your_cards)
         }
         log(`hand #${msg.hand_number}`, 'c-green')
+        broadcastEvent('hand_started', {
+          hand: msg.hand_number, button: msg.button, stacks: msg.stacks,
+          ...(showMyCards() && msg.your_cards ? { hero_cards: msg.your_cards } : {}),
+        })
         break
       case 'BlindsPosted':
         setBets(b => {
@@ -207,12 +225,14 @@ export default function App() {
         const who = msg.seat === mySeat() ? `you(${pos})` : `opp(${pos})`
         const amt = msg.amount > 0 && (msg.action === 'bet' || msg.action === 'raise') ? ` ${msg.amount}` : ''
         log(`${who}: ${msg.action}${amt}`)
+        broadcastEvent('action', { seat: msg.seat, action: msg.action, amount: msg.amount })
         break
       }
       case 'CommunityCards':
         setBoard(msg.cards)
         setBets([0, 0])
         log(`${msg.phase}: ${msg.cards.map(c => c.rank + c.suit).join(' ')}`, 'c-green')
+        broadcastEvent('community', { phase: msg.phase, cards: msg.cards })
         break
       case 'PotUpdate':
         setPot(msg.pots.reduce((s, p) => s + p.amount, 0))
@@ -222,12 +242,14 @@ export default function App() {
           if (seat === opp()) { setOppCards(cards); setOppRevealed(true) }
         }
         log('showdown', 'c-green')
+        broadcastEvent('showdown', { hands: msg.hands })
         break
       case 'PotAwarded': {
         const won = msg.seat === mySeat()
         log(`${won ? 'you' : oppName()} wins ${msg.amount}${msg.amount === 0 ? ' (split)' : ''}`, 'c-zec-yellow font-500')
         setLastResult({ won, amount: msg.amount })
         setTimeout(() => setLastResult(null), 2500)
+        broadcastEvent('pot_awarded', { seat: msg.seat, amount: msg.amount })
         break
       }
       case 'HandComplete':
@@ -574,7 +596,21 @@ export default function App() {
                 <Show when={juryProgress()}>
                   <span class="text-zec-yellow animate-pulse">{juryProgress()}</span>
                 </Show>
-                <span>you: {getPositionShort(mySeat(), button(), maxSeats())}</span>
+                <span class="flex items-center gap-2">
+                  <span>you: {getPositionShort(mySeat(), button(), maxSeats())}</span>
+                  <button
+                    class={`px-1.5 py-0.5 rounded text-7px border ${broadcasting() ? 'border-red-500 text-red-400 bg-red-900/20' : 'border-neutral-700 text-neutral-600 hover:text-neutral-400'}`}
+                    onClick={() => setBroadcasting(b => !b)}
+                    title={broadcasting() ? 'stop broadcasting to spectators' : 'broadcast game to spectators (public info only)'}
+                  >{broadcasting() ? 'LIVE' : 'broadcast'}</button>
+                  <Show when={broadcasting()}>
+                    <button
+                      class={`px-1.5 py-0.5 rounded text-7px border ${showMyCards() ? 'border-zec-yellow text-zec-yellow' : 'border-neutral-700 text-neutral-600'}`}
+                      onClick={() => setShowMyCards(s => !s)}
+                      title="toggle showing your hole cards to spectators"
+                    >{showMyCards() ? 'cards: shown' : 'cards: hidden'}</button>
+                  </Show>
+                </span>
               </div>
 
               {/* felt */}

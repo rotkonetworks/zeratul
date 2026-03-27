@@ -45,6 +45,8 @@ enum ClientMsg {
     Chat { text: String },
     StartHand,
     AllowPlayer { pubkey: String },
+    /// player broadcasts filtered game state to spectators
+    Broadcast { data: String },
     Dispute,
 }
 
@@ -194,8 +196,10 @@ struct Room {
     code: String,
     max_seats: usize,
     access: TableAccess,
-    host_seat: Option<u8>,  // table creator — can manage access
+    host_seat: Option<u8>,
     players: Vec<Option<Player>>,
+    /// spectator channels — receive broadcast events from players
+    spectators: Vec<mpsc::UnboundedSender<String>>,
     engine: GameEngine,
     hand_number: u64,
     button: u8,
@@ -263,6 +267,7 @@ impl Room {
         Room {
             code, max_seats: seats, access, host_seat: None,
             players: (0..seats).map(|_| None).collect(),
+            spectators: Vec::new(),
             engine, hand_number: 0, button: 0,
             hole_cards: (0..seats).map(|_| None).collect(),
             community_cards: Vec::new(),
@@ -766,6 +771,55 @@ async fn room_page(
 }
 
 /// websocket handler for a specific room
+/// spectator WebSocket — read-only, receives broadcast events from players
+async fn spectate_handler(
+    Path(code): Path<String>,
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_spectate(socket, state, code))
+}
+
+async fn handle_spectate(socket: WebSocket, state: AppState, code: String) {
+    use futures::{SinkExt, StreamExt};
+    let (mut ws_tx, mut ws_rx) = socket.split();
+
+    let (tx, mut rx) = mpsc::unbounded_channel::<String>();
+
+    // register as spectator
+    {
+        let rooms = state.rooms.lock().await;
+        if let Some(room) = rooms.get(&code) {
+            let mut r = room.lock().await;
+            r.spectators.push(tx);
+            let count = r.spectators.len();
+            // notify players of spectator count
+            r.broadcast(&ServerMsg::Status {
+                phase: "spectators".into(),
+                message: format!("{}", count),
+            });
+        }
+    }
+
+    // send loop: forward broadcast events to spectator
+    let send_task = tokio::spawn(async move {
+        while let Some(data) = rx.recv().await {
+            if ws_tx.send(WsMessage::Text(data.into())).await.is_err() { break; }
+        }
+    });
+
+    // read loop: spectators can't send anything meaningful, just keep alive
+    while let Some(Ok(msg)) = ws_rx.next().await {
+        match msg {
+            WsMessage::Close(_) => break,
+            WsMessage::Ping(d) => {} // tungstenite handles pong
+            _ => {} // ignore spectator messages
+        }
+    }
+
+    send_task.abort();
+}
+
 async fn ws_handler(
     Path(code): Path<String>,
     ws: WebSocketUpgrade,
@@ -1027,6 +1081,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     }
                 }
             }
+            ClientMsg::Broadcast { data } => {
+                // player sends filtered game state — fan out to all spectators
+                let mut r = room.lock().await;
+                r.spectators.retain(|tx| tx.send(data.clone()).is_ok());
+            }
             ClientMsg::Dispute => {
                 let (jury, payload, player_a_share, txs, payload_hash) = {
                     let r = room.lock().await;
@@ -1121,6 +1180,7 @@ async fn main() {
         .route("/api/tables", axum::routing::get(list_tables))
         .route("/new", axum::routing::get(create_room))
         .route("/{code}/ws", axum::routing::get(ws_handler))
+        .route("/{code}/spectate", axum::routing::get(spectate_handler))
         .route("/{code}", axum::routing::get(room_page))
         .fallback_service(ServeDir::new(&static_dir))
         .with_state(state);
