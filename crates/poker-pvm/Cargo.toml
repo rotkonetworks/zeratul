@@ -28,6 +28,11 @@ name = "cfr-selfplay"
 path = "src/cfr/selfplay_bin.rs"
 required-features = ["std"]
 
+[[bin]]
+name = "cfr-bot"
+path = "src/cfr/bot_client.rs"
+required-features = ["bot"]
+
 [features]
 default = ["std"]
 std = []
@@ -41,6 +46,8 @@ gpu = ["std"]
 parallel = ["std", "dep:rayon", "dep:dashmap", "dep:parking_lot"]
 # ONNX inference for CTM-MoE bot
 onnx = ["std", "dep:ort", "dep:ndarray"]
+# standalone bot client (WebSocket + JSON)
+bot = ["std", "dep:tungstenite", "dep:serde_json", "dep:serde", "dep:rand"]
 
 [dependencies]
 # optional: WASM bindings
@@ -54,6 +61,10 @@ parking_lot = { version = "0.12", optional = true }
 # ONNX runtime for CTM-MoE inference
 ort = { version = "2.0.0-rc.12", optional = true }
 ndarray = { version = "0.16", optional = true }
+# WebSocket client for standalone bot
+tungstenite = { version = "0.24", optional = true }
+serde_json = { version = "1", optional = true }
+rand = { version = "0.8", optional = true }
 
 [dev-dependencies]
 rand = "0.8"
