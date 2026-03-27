@@ -27,46 +27,57 @@ function fmtZec(zats: number): string {
   return zec.toFixed(4) + ' ZEC'
 }
 
+// ZEC ≈ $200.  Tiers from $2 → $20,000 buy-in.
 export const TABLES: Table[] = [
   {
+    id: 0, name: 'Nano',
+    blinds: '50/100 zats',
+    sb: 50, bb: 100,               // 0.0000005 / 0.000001 ZEC (~$0.0002)
+    buyin: 10_000,                  // 0.0001 ZEC (~$0.02) — play money tier
+    maxBuyin: 25_000,
+    speed: 'normal', timeout: 30,
+    color: '#1a3a2d',
+    rakeBps: 0, rakeCap: 0,        // free tier, no rake
+  },
+  {
     id: 1, name: 'Micro',
-    blinds: '0.0005/0.001',
-    sb: 50_000, bb: 100_000,       // 0.0005 / 0.001 ZEC
-    buyin: 10 * mZEC,              // 0.1 ZEC (100bb)
-    maxBuyin: 25 * mZEC,           // 0.25 ZEC (250bb)
+    blinds: '0.00005/0.0001',
+    sb: 5_000, bb: 10_000,         // ~$0.01 / $0.02
+    buyin: mZEC,                    // 0.001 ZEC = $0.20 (100bb)
+    maxBuyin: 2.5 * mZEC,
     speed: 'normal', timeout: 30,
     color: '#2d5a3d',
-    rakeBps: 250, rakeCap: 500_000, // 2.5% capped at 0.005 ZEC
+    rakeBps: 250, rakeCap: 50_000, // 2.5% capped at 0.0005 ZEC
   },
   {
     id: 2, name: 'Low',
-    blinds: '0.005/0.01',
-    sb: 500_000, bb: 1_000_000,    // 0.005 / 0.01 ZEC
-    buyin: ZEC,                     // 1 ZEC (100bb)
-    maxBuyin: 2.5 * ZEC,           // 2.5 ZEC (250bb)
+    blinds: '0.0005/0.001',
+    sb: 50_000, bb: 100_000,       // ~$0.10 / $0.20
+    buyin: 10 * mZEC,              // 0.01 ZEC = $2 (100bb)
+    maxBuyin: 25 * mZEC,
     speed: 'normal', timeout: 30,
     color: '#3d5a2d',
-    rakeBps: 200, rakeCap: 5_000_000, // 2% capped at 0.05 ZEC
+    rakeBps: 200, rakeCap: 500_000, // 2% capped at 0.005 ZEC
   },
   {
     id: 3, name: 'Mid',
-    blinds: '0.05/0.1',
-    sb: 5_000_000, bb: 10_000_000, // 0.05 / 0.1 ZEC
-    buyin: 10 * ZEC,               // 10 ZEC (100bb)
-    maxBuyin: 25 * ZEC,            // 25 ZEC (250bb)
+    blinds: '0.005/0.01',
+    sb: 500_000, bb: 1_000_000,    // ~$1 / $2
+    buyin: ZEC / 10,               // 0.1 ZEC = $20 (100bb)
+    maxBuyin: ZEC / 4,
     speed: 'normal', timeout: 30,
     color: '#5a3d2d',
-    rakeBps: 150, rakeCap: 25_000_000, // 1.5% capped at 0.25 ZEC (unchanged)
+    rakeBps: 150, rakeCap: 5_000_000, // 1.5% capped at 0.05 ZEC
   },
   {
     id: 4, name: 'High',
     blinds: '0.5/1.0',
-    sb: 50_000_000, bb: ZEC,       // 0.5 / 1.0 ZEC
-    buyin: 100 * ZEC,              // 100 ZEC (100bb)
-    maxBuyin: 250 * ZEC,           // 250 ZEC (250bb)
+    sb: 50_000_000, bb: ZEC,       // ~$100 / $200
+    buyin: 100 * ZEC,              // 100 ZEC = $20,000 (100bb)
+    maxBuyin: 250 * ZEC,
     speed: 'normal', timeout: 45,
     color: '#5a2d3d',
-    rakeBps: 100, rakeCap: ZEC,    // 1% capped at 1 ZEC
+    rakeBps: 100, rakeCap: ZEC,    // 1% capped at 1 ZEC ($200)
   },
 ]
 

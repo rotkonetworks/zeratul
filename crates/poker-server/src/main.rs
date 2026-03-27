@@ -131,7 +131,7 @@ struct ActionLog {
 impl ActionLog {
     fn new() -> Self { Self { entries: Vec::new(), sequence: 0 } }
 
-    fn record(&mut self, hand_number: u64, seat: u8, action: &str, amount: u64) -> &ActionLogEntry {
+    fn record(&mut self, hand_number: u64, seat: u8, action: &str, amount: u64, room_code: &str) -> &ActionLogEntry {
         self.sequence += 1;
         let mut hasher = Sha256::new();
         hasher.update(b"zk.poker/action/v1");
@@ -144,8 +144,21 @@ impl ActionLog {
 
         self.entries.push(ActionLogEntry {
             hand_number, seat, action: action.to_string(), amount,
-            sequence: self.sequence, hash,
+            sequence: self.sequence, hash: hash.clone(),
         });
+
+        // flush to disk — append JSONL per room
+        let log_dir = std::path::Path::new("logs");
+        let _ = std::fs::create_dir_all(log_dir);
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true)
+            .open(log_dir.join(format!("{}.jsonl", room_code)))
+        {
+            use std::io::Write;
+            let _ = writeln!(f, r#"{{"seq":{},"hand":{},"seat":{},"action":"{}","amount":{},"hash":"{}","ts":{}}}"#,
+                self.sequence, hand_number, seat, action, amount, hash,
+                std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis());
+        }
+
         self.entries.last().unwrap()
     }
 
@@ -331,7 +344,7 @@ impl Room {
 
     fn apply_action(&mut self, seat: u8, action: ActionType) {
         let (action_str, amount) = action_to_json(&action);
-        self.action_log.record(self.hand_number, seat, &action_str, amount);
+        self.action_log.record(self.hand_number, seat, &action_str, amount, &self.code);
 
         let events = match self.engine.apply_action(seat, action) {
             Ok(e) => e,
