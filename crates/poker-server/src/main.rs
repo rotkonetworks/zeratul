@@ -682,15 +682,21 @@ async fn get_table_list(rooms: &Rooms) -> Vec<serde_json::Value> {
     let mut tables = Vec::new();
     for (code, room) in rooms.iter() {
         let r = room.lock().await;
-        // only public tables appear in the lobby list
-        // private/mutuals tables are hidden — join via invite link only
-        if r.access != TableAccess::Public { continue; }
+        let has_spectators = !r.spectators.is_empty();
+        // public tables: shown as joinable
+        // private/mutuals with spectators: shown as watchable (live broadcast)
+        // private without spectators: hidden
+        if r.access != TableAccess::Public && !has_spectators { continue; }
         tables.push(serde_json::json!({
             "code": code,
             "players": r.player_count(),
             "max_players": r.max_seats,
             "waiting": r.player_count() < 2,
-            "access": "public",
+            "access": match &r.access {
+                TableAccess::Public => "public",
+                _ => "private",
+            },
+            "live": has_spectators,
             "blinds": format!("{}/{}", r.engine.rules.small_blind, r.engine.rules.big_blind),
             "hand_number": r.hand_number,
             "spectators": r.spectators.len(),

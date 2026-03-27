@@ -75,8 +75,11 @@ type LiveTable = {
   players: number
   max_players: number
   waiting: boolean
+  access: string
+  live: boolean
   blinds: string
   hand_number: number
+  spectators: number
 }
 
 export default function Lobby(props: {
@@ -188,8 +191,9 @@ export default function Lobby(props: {
     props.onJoinCode(table.code, n)
   }
 
-  const waitingTables = () => liveTables().filter(t => t.waiting)
-  const activeTables = () => liveTables().filter(t => !t.waiting)
+  const waitingTables = () => liveTables().filter(t => t.waiting && t.access === 'public')
+  const activeTables = () => liveTables().filter(t => !t.waiting && t.access === 'public')
+  const liveStreams = () => liveTables().filter(t => t.live)
 
   return (
     <div class="min-h-screen min-h-[100dvh] flex flex-col items-center justify-center p-2 bg-zec-dark font-sans text-white">
@@ -238,7 +242,7 @@ export default function Lobby(props: {
               }`}
               onClick={() => setTab(t)}
             >
-              {t === 'play' ? 'create table' : t === 'public' ? `public (${waitingTables().length})` : 'invite friend'}
+              {t === 'play' ? 'create table' : t === 'public' ? `tables (${waitingTables().length})${liveStreams().length ? ` · ${liveStreams().length} live` : ''}` : 'invite friend'}
             </button>
           )}
         </div>
@@ -289,6 +293,32 @@ export default function Lobby(props: {
                     <div class="flex items-center gap-2">
                       <span class="text-9px text-neutral-500">{table.players}/{table.max_players}</span>
                       <span class="w-2 h-2 rounded-full bg-zec-yellow animate-pulse" />
+                    </div>
+                  </button>
+                )}
+              </For>
+            </div>
+          </Show>
+
+          <Show when={liveStreams().length > 0}>
+            <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2 mt-4 flex items-center gap-2">
+              <span class="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
+              live games
+            </div>
+            <div class="flex flex-col gap-2">
+              <For each={liveStreams()}>
+                {table => (
+                  <button
+                    class="flex items-center justify-between p-3 bg-zec-surface border border-red-900/30 rounded-lg hover:border-red-700/50 transition-colors"
+                    onClick={() => window.open(`/${table.code}/spectate`, '_blank')}
+                  >
+                    <div>
+                      <div class="text-11px font-mono text-white">{table.code}</div>
+                      <div class="text-8px text-neutral-500">{table.blinds} · hand #{table.hand_number}</div>
+                    </div>
+                    <div class="flex items-center gap-2">
+                      <span class="text-8px text-neutral-500">{table.spectators} watching</span>
+                      <span class="text-8px px-1.5 py-0.5 rounded bg-red-900/30 text-red-400">LIVE</span>
                     </div>
                   </button>
                 )}
