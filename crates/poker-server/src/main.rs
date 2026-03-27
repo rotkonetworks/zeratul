@@ -59,6 +59,7 @@ enum ServerMsg {
     OpponentDisconnected { seat: u8, reconnect_secs: u64 },
     OpponentReconnected { seat: u8 },
     ActionTimeout { seat: u8 },
+    TimerTick { seat: u8, seconds_left: u64 },
     HandStarted {
         hand_number: u64,
         button: u8,
@@ -877,11 +878,20 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
             // check action timeout
             let mut hand_ended = false;
             if let Some((seat, deadline)) = r.action_deadline {
-                if tokio::time::Instant::now() >= deadline {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                let secs_left = remaining.as_secs();
+
+                if remaining.is_zero() {
                     tracing::info!("room: seat {} timed out, auto-folding", seat);
+                    r.action_deadline = None;
                     r.broadcast(&ServerMsg::ActionTimeout { seat });
-                    r.apply_action(seat, ActionType::Fold);
-                    hand_ended = r.engine.hand_state().is_none();
+                    if r.engine.hand_state().is_some() {
+                        r.apply_action(seat, ActionType::Fold);
+                        hand_ended = r.engine.hand_state().is_none();
+                    }
+                } else {
+                    // send timer tick every second so frontend shows countdown
+                    r.broadcast(&ServerMsg::TimerTick { seat, seconds_left: secs_left });
                 }
             }
 

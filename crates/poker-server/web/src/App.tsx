@@ -134,7 +134,7 @@ export default function App() {
         log('opponent reconnected', 'c-green')
         break
       case 'TimerTick':
-        setActionTimer(msg.secondsLeft)
+        setActionTimer(msg.seconds_left)
         break
       case 'ActionTimeout':
         log(`${msg.seat === mySeat() ? 'you' : 'opp'} timed out (auto-fold)`, 'c-red')
@@ -650,7 +650,7 @@ export default function App() {
                     </div>
                     <div class="font-mono text-13px text-zec-yellow">{oppStack()}</div>
                     <Show when={acting() === opp() && actionTimer() > 0}>
-                      <div class={`font-mono text-9px ${actionTimer() <= 10 ? 'text-red-400' : 'text-neutral-500'}`}>{actionTimer()}s</div>
+                      <div class={`font-mono text-11px font-bold ${actionTimer() <= 5 ? 'text-red-500 animate-pulse' : actionTimer() <= 10 ? 'text-orange-400' : actionTimer() <= 20 ? 'text-zec-yellow' : 'text-neutral-400'}`}>{actionTimer()}s</div>
                     </Show>
                   </div>
                   <div class="flex gap-1 justify-center mt-1.5">
@@ -723,7 +723,7 @@ export default function App() {
                   </div>
                   <div class={`inline-block px-3 py-1 bg-zec-surface border ${acting() === mySeat() ? 'border-zec-yellow shadow-[0_0_8px_rgba(244,183,40,0.3)]' : 'border-neutral-800'}`}>
                     <Show when={acting() === mySeat() && actionTimer() > 0}>
-                      <div class={`font-mono text-9px ${actionTimer() <= 10 ? 'text-red-400 animate-pulse' : 'text-neutral-500'}`}>{actionTimer()}s</div>
+                      <div class={`font-mono text-11px font-bold ${actionTimer() <= 5 ? 'text-red-500 animate-pulse' : actionTimer() <= 10 ? 'text-orange-400' : actionTimer() <= 20 ? 'text-zec-yellow' : 'text-neutral-400'}`}>{actionTimer()}s</div>
                     </Show>
                     <div class="font-mono text-13px text-zec-yellow">{myStack()}</div>
                     <div class={`text-9px font-semibold uppercase tracking-wider ${acting() === mySeat() ? 'text-zec-yellow' : 'text-neutral-500'}`}>
