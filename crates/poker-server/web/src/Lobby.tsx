@@ -215,18 +215,10 @@ export default function Lobby(props: {
           </div>
         </Show>
 
-        {/* name input */}
+        {/* identity */}
         <Show when={props.hasWallet}>
           <div class="flex items-center justify-center gap-2 mb-3">
-            <input
-              class="input-field w-36 text-center text-11px"
-              placeholder={props.pubkey?.slice(0, 8) || 'name'}
-              maxLength={16}
-              spellcheck={false}
-              value={name()}
-              onInput={e => updateName(e.currentTarget.value)}
-              autofocus
-            />
+            <span class="text-11px text-zec-yellow font-mono">{name() || props.pubkey?.slice(0, 8) || 'anon'}</span>
             <Show when={props.pubkey}>
               <span class="text-7px text-neutral-700 font-mono" title={props.pubkey}>
                 {props.pubkey!.slice(0, 6)}..

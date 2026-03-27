@@ -443,6 +443,7 @@ export default function App() {
                   sb: String(table.sb), bb: String(table.bb),
                   buyin: String(table.buyin), timeout: String(table.timeout),
                   rake_bps: String(table.rakeBps), rake_cap: String(table.rakeCap),
+                  access: 'private',
                 })
                 fetch(`/new?${params}`, { redirect: 'follow' }).then(resp => {
                   const url = resp.url || resp.headers.get('location') || ''
@@ -884,6 +885,16 @@ export default function App() {
                 const msg = input.value.trim()
                 if (!msg) return
                 input.value = ''
+                // slash commands
+                if (msg.startsWith('/nick ')) {
+                  const newName = msg.slice(6).trim()
+                  if (newName) {
+                    setName(newName)
+                    localStorage.setItem('poker_nickname', newName)
+                    log(`nickname set to ${newName}`, 'text-neutral-400')
+                  }
+                  return
+                }
                 send({ type: 'Chat', text: msg })
                 log(`you: ${msg}`, 'text-white')
               }}>
