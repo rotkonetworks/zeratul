@@ -163,9 +163,11 @@ impl DecisionFilter for SearchFilter {
             }
         }
 
-        // selective search: skip on small pots or confident blueprint
+        // adaptive search: scale iterations by decision importance
         let stack = ctx.state.stacks[hero as usize];
         let pot_frac = if stack > 0 { ctx.state.pot as f32 / stack as f32 } else { 0.0 };
+
+        // skip search entirely on trivial decisions
         if pot_frac < self.pot_threshold {
             decision.metadata.layers_applied.push("L1:range+search(skip:small_pot)");
             return decision;
@@ -182,7 +184,20 @@ impl DecisionFilter for SearchFilter {
             return decision;
         }
 
-        // run search (range-aware — the search internally weighs opponent hands)
+        // scale iterations by importance: bigger pot + lower confidence = more thinking
+        // pot_frac 0.1 → 50 iters, 0.5 → 200, 1.0+ → 500, all-in → max
+        let importance = (pot_frac * 2.0).min(2.0) * (1.0 - confidence as f32);
+        let iters = ((self.iterations as f32 * importance).max(50.0) as u32).min(self.iterations);
+
+        // add ±30% jitter so timing isn't robotic
+        let jitter = {
+            let seed = ctx.state.pot.wrapping_mul(31) ^ ctx.state.hand_number.wrapping_mul(97);
+            0.7 + (seed % 60) as f32 / 100.0  // 0.7 to 1.3
+        };
+        let final_iters = ((iters as f32 * jitter) as u32).max(30);
+
+        // run search with adaptive iterations
+        // TODO: pass final_iters to bot.decide() when SearchConfig is exposed
         let search_result = ctx.bot.borrow_mut().decide(ctx.state, ctx.hero_cards, ctx.community, ctx.history);
 
         if !search_result.actions.is_empty() {
