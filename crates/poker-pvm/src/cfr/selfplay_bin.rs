@@ -21,6 +21,8 @@ fn main() {
     let mut checkpoint_every: u64 = 100_000;
     let mut moe_dir: Option<String> = None;
     let mut moe_weight: f32 = 0.3;
+    let mut moe_a: Option<String> = None;
+    let mut moe_b: Option<String> = None;
 
     let mut i = 1;
     while i < args.len() {
@@ -35,6 +37,8 @@ fn main() {
             "--checkpoint-every" => { if i+1 < args.len() { checkpoint_every = args[i+1].parse().unwrap_or(100_000); i += 1; } }
             "--moe-dir" => { if i+1 < args.len() { moe_dir = Some(args[i+1].clone()); i += 1; } }
             "--moe-weight" => { if i+1 < args.len() { moe_weight = args[i+1].parse().unwrap_or(0.3); i += 1; } }
+            "--moe-a" => { if i+1 < args.len() { moe_a = Some(args[i+1].clone()); i += 1; } }
+            "--moe-b" => { if i+1 < args.len() { moe_b = Some(args[i+1].clone()); i += 1; } }
             _ => {}
         }
         i += 1;
@@ -45,6 +49,27 @@ fn main() {
 
     println!("strategy: {} ({} bytes)", strategy_path, strategy.len());
     println!("threads: {}  mode: {}", threads, if fast { "fast (L0 only)" } else { "full (L0-L3 + search)" });
+
+    // A/B head-to-head mode
+    #[cfg(feature = "onnx")]
+    if let (Some(ref a), Some(ref b)) = (&moe_a, &moe_b) {
+        let full = !fast; // --with-search enables full L0-L4 stack
+        println!("A/B match: {} vs {}", a, b);
+        println!("hands: {}  weight: {}  stack: {}", hands, moe_weight, if full { "L0-L4 (full)" } else { "L0+L4 (fast)" });
+        let arena = Arena::new(&strategy);
+        let result = if full {
+            arena.play_ab_full(hands, a, b, moe_weight)
+        } else {
+            arena.play_ab(hands, a, b, moe_weight)
+        };
+        let bb_diff = result.player_0_winnings as f64 / hands as f64 / 10.0;
+        println!("A winnings: {:+}  B winnings: {:+}", result.player_0_winnings, result.player_1_winnings);
+        println!("A edge: {:+.3} bb/hand", bb_diff);
+        if bb_diff > 0.0 { println!(">>> A wins") }
+        else if bb_diff < 0.0 { println!(">>> B wins") }
+        else { println!(">>> draw") }
+        return;
+    }
 
     let mut arena = Arena::new(&strategy);
     #[cfg(feature = "onnx")]

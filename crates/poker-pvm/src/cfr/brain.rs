@@ -83,6 +83,7 @@ pub struct DecisionContext<'a> {
     pub history: &'a [u8],
     pub ranges: &'a [Option<Range>; MAX_SEATS],
     pub profiles: &'a TableProfiles,
+    pub bot: &'a std::cell::RefCell<PokerBot>,
 }
 
 // ---------------------------------------------------------------------------
@@ -111,36 +112,36 @@ pub struct BlueprintService {
 }
 
 // ---------------------------------------------------------------------------
-// L1: Search filter — refines blueprint via real-time CFR
+// L1: Search + Range (combined, Pluribus-style)
+// Range narrows opponent hands, search solves within that range.
 // ---------------------------------------------------------------------------
 
-pub struct SearchFilter;
+/// L1: Combined search + range filter.
+/// Computes range equity AND runs selective depth-limited CFR in one pass.
+/// Selective: skips search on small pots or when blueprint is confident.
+pub struct SearchFilter {
+    pub iterations: u32,
+    pub pot_threshold: f32,
+}
 
-impl DecisionFilter for SearchFilter {
-    fn name(&self) -> &'static str { "search" }
-
-    fn apply(&self, _ctx: &DecisionContext, mut decision: Decision) -> Decision {
-        // search is handled at the base level (PokerBot::decide vs decide_blueprint_only)
-        // this filter is a marker — the actual search happens in Brain::base_decision()
-        decision.metadata.layers_applied.push("L1:search");
-        decision
+impl Default for SearchFilter {
+    fn default() -> Self {
+        Self { iterations: 200, pot_threshold: 0.1 }
     }
 }
 
-// ---------------------------------------------------------------------------
-// L2: Range filter — Bayesian equity estimation
-// ---------------------------------------------------------------------------
+impl SearchFilter {
+    pub fn thorough() -> Self { Self { iterations: 1000, pot_threshold: 0.0 } }
+    pub fn fast() -> Self { Self { iterations: 100, pot_threshold: 0.3 } }
+}
 
-pub struct RangeFilter;
-
-impl DecisionFilter for RangeFilter {
-    fn name(&self) -> &'static str { "range" }
+impl DecisionFilter for SearchFilter {
+    fn name(&self) -> &'static str { "search" }
 
     fn apply(&self, ctx: &DecisionContext, mut decision: Decision) -> Decision {
         let n = ctx.state.num_players as usize;
         let hero = ctx.state.acting_seat;
         let opp = if n == 2 { 1 - hero } else {
-            // multiplayer: pick the most active opponent (highest bet)
             let mut best = (hero + 1) % n as u8;
             for i in 0..n as u8 {
                 if i != hero && ctx.state.bets[i as usize] > ctx.state.bets[best as usize] {
@@ -150,25 +151,85 @@ impl DecisionFilter for RangeFilter {
             best
         };
 
+        // range equity (always computed — cheap)
         if ctx.state.community_count == 5 {
-            // river: exact equity vs range
             if let Some(ref range) = ctx.ranges[opp as usize] {
-                let equity = range.equity_vs(*ctx.hero_cards, ctx.community);
-                decision.metadata.range_equity = Some(equity);
+                decision.metadata.range_equity = Some(range.equity_vs(*ctx.hero_cards, ctx.community));
             }
         } else if ctx.state.community_count >= 3 {
-            // flop/turn: approximate equity from range weight (how much of their range is left)
             if let Some(ref range) = ctx.ranges[opp as usize] {
                 let alive = range.alive_fraction();
-                // tighter range = stronger hands → lower equity for us
-                // uniform range (~1.0) → 0.5 equity, narrow range (~0.1) → 0.3 equity
-                let equity = 0.5 * alive + 0.3 * (1.0 - alive);
-                decision.metadata.range_equity = Some(equity);
+                decision.metadata.range_equity = Some(0.5 * alive + 0.3 * (1.0 - alive));
             }
         }
-        // preflop: leave as None (default 0.5)
 
-        decision.metadata.layers_applied.push("L2:range");
+        // selective search: skip on small pots or confident blueprint
+        let stack = ctx.state.stacks[hero as usize];
+        let pot_frac = if stack > 0 { ctx.state.pot as f32 / stack as f32 } else { 0.0 };
+        if pot_frac < self.pot_threshold {
+            decision.metadata.layers_applied.push("L1:range+search(skip:small_pot)");
+            return decision;
+        }
+
+        let entropy: f64 = decision.action_probs.iter()
+            .filter(|&&p| p > 0.0)
+            .map(|&p| -p * p.ln())
+            .sum();
+        let max_entropy = (decision.actions.len() as f64).ln();
+        let confidence = 1.0 - (entropy / max_entropy.max(0.01));
+        if confidence > 0.7 {
+            decision.metadata.layers_applied.push("L1:range+search(skip:confident)");
+            return decision;
+        }
+
+        // run search (range-aware — the search internally weighs opponent hands)
+        let search_result = ctx.bot.borrow_mut().decide(ctx.state, ctx.hero_cards, ctx.community, ctx.history);
+
+        if !search_result.actions.is_empty() {
+            let blend = 0.7;
+            for (i, prob) in decision.action_probs.iter_mut().enumerate() {
+                if i < search_result.action_probs.len() {
+                    *prob = (1.0 - blend) * *prob + blend * search_result.action_probs[i];
+                }
+            }
+            let total: f64 = decision.action_probs.iter().sum();
+            if total > 1e-10 { for p in decision.action_probs.iter_mut() { *p /= total; } }
+            decision.value = (1.0 - blend) * decision.value + blend * search_result.value;
+            decision.from_blueprint = false;
+        }
+
+        decision.metadata.layers_applied.push("L1:range+search");
+        decision
+    }
+}
+
+// keep RangeFilter available for standalone use (L0 + range only, no search)
+pub struct RangeFilter;
+
+impl DecisionFilter for RangeFilter {
+    fn name(&self) -> &'static str { "range" }
+
+    fn apply(&self, ctx: &DecisionContext, mut decision: Decision) -> Decision {
+        let n = ctx.state.num_players as usize;
+        let hero = ctx.state.acting_seat;
+        let opp = if n == 2 { 1 - hero } else {
+            let mut best = (hero + 1) % n as u8;
+            for i in 0..n as u8 {
+                if i != hero && ctx.state.bets[i as usize] > ctx.state.bets[best as usize] { best = i; }
+            }
+            best
+        };
+        if ctx.state.community_count == 5 {
+            if let Some(ref range) = ctx.ranges[opp as usize] {
+                decision.metadata.range_equity = Some(range.equity_vs(*ctx.hero_cards, ctx.community));
+            }
+        } else if ctx.state.community_count >= 3 {
+            if let Some(ref range) = ctx.ranges[opp as usize] {
+                let alive = range.alive_fraction();
+                decision.metadata.range_equity = Some(0.5 * alive + 0.3 * (1.0 - alive));
+            }
+        }
+        decision.metadata.layers_applied.push("L1:range");
         decision
     }
 }
@@ -383,14 +444,13 @@ impl FilterStack {
 /// base service (PokerBot). The filter stack is a separate, composable
 /// pipeline that transforms the base decision.
 pub struct Brain {
-    pub bot: PokerBot,
+    pub bot: std::cell::RefCell<PokerBot>,
     pub ranges: [Option<Range>; MAX_SEATS],
     pub profiles: TableProfiles,
     pub mode: ExploitMode,
     pub filters: FilterStack,
     history: Vec<u8>,
     hand_number: u32,
-    use_search: bool,
 }
 
 /// exploitation mode
@@ -404,14 +464,13 @@ impl Brain {
     /// create with default filter stack (L0 blueprint only)
     pub fn new(strategy_data: &[u8]) -> Self {
         Self {
-            bot: PokerBot::from_strategy_bytes(strategy_data),
+            bot: std::cell::RefCell::new(PokerBot::from_strategy_bytes(strategy_data)),
             ranges: Default::default(),
             profiles: TableProfiles::default(),
             mode: ExploitMode::Nash,
             filters: FilterStack::new(),
             history: Vec::new(),
             hand_number: 0,
-            use_search: false,
         }
     }
 
@@ -434,8 +493,6 @@ impl Brain {
     ///     )
     /// ```
     pub fn with_filters(mut self, filters: FilterStack) -> Self {
-        // detect if search filter is in the stack
-        self.use_search = filters.filters.iter().any(|f| f.name() == "search");
         if filters.filters.iter().any(|f| f.name() == "exploit") {
             self.mode = ExploitMode::Exploit;
         }
@@ -509,7 +566,7 @@ impl Brain {
             };
             let action_bucket = abs;
             let community = &state.community[..state.community_count as usize];
-            let blueprint = &self.bot.config.blueprint;
+            let blueprint = &self.bot.borrow().config.blueprint;
             // seed from hand + history length for varied bucketing
             let mut rng_state = 0xBAD_C0FFEEu64 ^ (self.hand_number as u64 * 31) ^ (self.history.len() as u64 * 97);
             let mut rng = || -> u32 {
@@ -525,35 +582,35 @@ impl Brain {
         }
     }
 
-    /// main decision: base service + filter stack
+    /// main decision: base service (L0 blueprint) + filter stack
     ///
-    /// equivalent to Eriksen's:
-    ///   blueprint andThen search andThen range andThen exploit andThen neural
+    /// Layer order:
+    ///   L0: Blueprint lookup (base service, always)
+    ///   L1: Range tracking (narrows opponent hands)
+    ///   L2: Search (expensive, selective — uses narrowed range)
+    ///   L3: Exploit (counter-strategy from opponent profile)
+    ///   L4: MoE neural (final integrator, sees everything)
     pub fn decide(
         &mut self,
         state: &GameState,
         hero_cards: &[u8; 2],
         community: &[u8; 5],
     ) -> Decision {
-        // base service: L0 (+ L1 if search filter present)
-        let search_result = if self.use_search {
-            self.bot.decide(state, hero_cards, community, &self.history)
-        } else {
-            self.bot.decide_blueprint_only(state, hero_cards, community, &self.history)
-        };
+        // L0: always start from blueprint (fast, Nash floor)
+        let search_result = self.bot.borrow_mut().decide_blueprint_only(state, hero_cards, community, &self.history);
 
         let mut decision = Decision {
             action_probs: search_result.action_probs,
             actions: search_result.actions,
             value: search_result.value,
-            from_blueprint: search_result.from_blueprint,
+            from_blueprint: true,
             metadata: DecisionMeta {
-                layers_applied: vec![if self.use_search { "L0+L1:blueprint+search" } else { "L0:blueprint" }],
+                layers_applied: vec!["L0:blueprint"],
                 ..Default::default()
             },
         };
 
-        // apply filter stack
+        // apply filter stack: L1 range → L2 search → L3 exploit → L4 neural
         let ctx = DecisionContext {
             state,
             hero_cards,
@@ -561,6 +618,7 @@ impl Brain {
             history: &self.history,
             ranges: &self.ranges,
             profiles: &self.profiles,
+            bot: &self.bot,
         };
 
         decision = self.filters.apply(&ctx, decision);
@@ -607,19 +665,24 @@ impl Brain {
         Self::new(strategy_data)
     }
 
-    /// L0 + L1 — blueprint + search
-    pub fn with_search(strategy_data: &[u8]) -> Self {
+    /// L0 + L1(range only) — blueprint + range tracking, no search
+    pub fn with_range(strategy_data: &[u8]) -> Self {
         Self::new(strategy_data)
-            .with_filters(FilterStack::new().and_then(SearchFilter))
+            .with_filters(FilterStack::new().and_then(RangeFilter))
     }
 
-    /// full L0-L3 stack — blueprint + search + range + exploit
+    /// L0 + L1 — blueprint + search+range (Pluribus-style)
+    pub fn with_search(strategy_data: &[u8]) -> Self {
+        Self::new(strategy_data)
+            .with_filters(FilterStack::new().and_then(SearchFilter::default()))
+    }
+
+    /// L0-L2 — blueprint + search+range + exploit
     pub fn full_stack(strategy_data: &[u8]) -> Self {
         Self::new(strategy_data)
             .with_filters(
                 FilterStack::new()
-                    .and_then(SearchFilter)
-                    .and_then(RangeFilter)
+                    .and_then(SearchFilter::default())
                     .and_then(ExploitFilter)
             )
     }
@@ -634,14 +697,14 @@ impl Brain {
             )
     }
 
-    /// full L0-L4 — all layers
+    /// full L0-L3 — all layers
+    /// L0 blueprint → L1 search+range → L2 exploit → L3 neural
     #[cfg(feature = "onnx")]
     pub fn full_with_neural(strategy_data: &[u8], moe: Arc<OnnxMoE>, weight: f32) -> Self {
         Self::new(strategy_data)
             .with_filters(
                 FilterStack::new()
-                    .and_then(SearchFilter)
-                    .and_then(RangeFilter)
+                    .and_then(SearchFilter::default())
                     .and_then(ExploitFilter)
                     .and_then(NeuralFilter { moe, weight })
             )

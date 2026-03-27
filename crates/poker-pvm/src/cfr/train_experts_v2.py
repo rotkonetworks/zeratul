@@ -207,7 +207,7 @@ def train(features, policies, values, expert_ids, version, output_dir, n_actions
         sched = optim.lr_scheduler.CosineAnnealingLR(opt, epochs)
 
         # bound-guided: per-step loss weighting
-        step_weights = torch.ones(MAX_THINK, device=device)
+        step_weights = torch.ones(expert_ticks, device=device)
         bound_every = 20
 
         print(f"  expert {EXPERT_NAMES[eid]}: {mask.sum()} samples")
@@ -222,9 +222,10 @@ def train(features, policies, values, expert_ids, version, output_dir, n_actions
                 ploss = (bp * (torch.log(bp + 1e-8) - torch.log(pp + 1e-8))).sum(-1).mean()
                 # auxiliary: per-step value supervision (teach each step to predict well)
                 aux_vloss = 0.0
-                for s in range(MAX_THINK):
-                    w = step_weights[s].item() if step_weights is not None else 1.0
-                    aux_vloss += w * ((sv[s] - bv)**2).mean() / MAX_THINK
+                n_steps = len(sv)
+                for s in range(n_steps):
+                    w = step_weights[s].item() if step_weights is not None and s < len(step_weights) else 1.0
+                    aux_vloss += w * ((sv[s] - bv)**2).mean() / n_steps
                 loss = vloss + ploss + 0.1 * aux_vloss  # 10% auxiliary weight
                 opt.zero_grad(); loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)

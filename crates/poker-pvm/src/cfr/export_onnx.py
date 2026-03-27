@@ -6,7 +6,7 @@ import os
 from pathlib import Path
 
 NUM_FEATURES = 27
-NUM_ACTIONS = 8  # default; overridden from model checkpoint
+NUM_ACTIONS = 9  # must match training
 MAX_THINK = 8
 
 def export(model_dir, version, output_dir):
@@ -23,8 +23,10 @@ def export(model_dir, version, output_dir):
         def __init__(self, hidden=128):
             super().__init__()
             self.step = nn.Sequential(
-                nn.Linear(NUM_FEATURES + hidden, hidden), nn.GELU(),
-                nn.Linear(hidden, hidden), nn.GELU())
+                nn.utils.parametrizations.spectral_norm(nn.Linear(NUM_FEATURES + hidden, hidden)),
+                nn.GELU(),
+                nn.utils.parametrizations.spectral_norm(nn.Linear(hidden, hidden)),
+                nn.GELU())
             self.halt = nn.Linear(hidden, 1)
             self.vhead = nn.Linear(hidden, 1)
             self.phead = nn.Linear(hidden, NUM_ACTIONS)

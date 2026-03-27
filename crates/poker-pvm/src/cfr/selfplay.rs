@@ -292,6 +292,181 @@ impl Arena {
         self.play_inner(num_hands, true)
     }
 
+    /// A/B head-to-head: player 0 uses moe_a, player 1 uses moe_b.
+    /// positive p0_winnings = A is winning.
+    #[cfg(feature = "onnx")]
+    pub fn play_ab(&self, num_hands: u64, moe_dir_a: &str, moe_dir_b: &str, weight: f32) -> SelfPlayResult {
+        self.play_ab_inner(num_hands, moe_dir_a, moe_dir_b, weight, false)
+    }
+
+    #[cfg(feature = "onnx")]
+    pub fn play_ab_full(&self, num_hands: u64, moe_dir_a: &str, moe_dir_b: &str, weight: f32) -> SelfPlayResult {
+        self.play_ab_inner(num_hands, moe_dir_a, moe_dir_b, weight, true)
+    }
+
+    #[cfg(feature = "onnx")]
+    fn play_ab_inner(&self, num_hands: u64, moe_dir_a: &str, moe_dir_b: &str, weight: f32, use_search: bool) -> SelfPlayResult {
+        let moe_a = super::inference::OnnxMoE::load(moe_dir_a).ok().map(std::sync::Arc::new);
+        let moe_b = super::inference::OnnxMoE::load(moe_dir_b).ok().map(std::sync::Arc::new);
+        if moe_a.is_none() { eprintln!("[ab] failed to load A from {}", moe_dir_a); }
+        if moe_b.is_none() { eprintln!("[ab] failed to load B from {}", moe_dir_b); }
+
+        let make_brain = |moe: &Option<std::sync::Arc<super::inference::OnnxMoE>>| -> Brain {
+            let mut filters = FilterStack::new();
+            if use_search {
+                filters = filters
+                    .and_then(SearchFilter::default())
+                    .and_then(ExploitFilter);
+            }
+            let mut brain = Brain::new(&self.strategy).with_filters(filters);
+            if let Some(ref m) = moe {
+                brain = brain.with_moe(m.clone(), weight);
+            }
+            brain
+        };
+
+        let mut brain0 = make_brain(&moe_a);
+        let mut brain1 = make_brain(&moe_b);
+
+        let mut p0_winnings: i64 = 0;
+        let mut p1_winnings: i64 = 0;
+
+        let mut rng_state: u64 = 0xABCDEF_1234;
+        let mut rng = || -> u32 {
+            rng_state ^= rng_state << 13;
+            rng_state ^= rng_state >> 7;
+            rng_state ^= rng_state << 17;
+            (rng_state >> 16) as u32
+        };
+
+        let rules = Rules {
+            buyin: 1000, small_blind: 5, big_blind: 10,
+            turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0,
+        };
+
+        for hand_num in 0..num_hands {
+            let button = (hand_num % 2) as u8;
+            let mut deck: Vec<u8> = (0..52).collect();
+            for i in (1..52).rev() { let j = (rng() as usize) % (i+1); deck.swap(i, j); }
+            let h0 = [deck[0], deck[1]];
+            let h1 = [deck[2], deck[3]];
+            let community = [deck[4], deck[5], deck[6], deck[7], deck[8]];
+
+            // randomize stacks
+            let roll = rng() % 100;
+            let chips = if roll < 40 { 100 + (rng() % 201) } else { 500 + (rng() % 501) };
+
+            let mut state = GameState {
+                stacks: { let mut s = [0u32; 10]; s[0] = chips; s[1] = chips; s },
+                bets: [0; MAX_SEATS], pot: 0,
+                community: [0; MAX_COMMUNITY], community_count: 0,
+                phase: Phase::Preflop, acting_seat: button,
+                num_players: 2, hand_number: hand_num as u32, button,
+                seat_state: { let mut s = [SeatState::Empty; MAX_SEATS]; s[0] = SeatState::Active; s[1] = SeatState::Active; s },
+                cards: { let mut c = [[0u8; 2]; MAX_SEATS]; c[0] = h0; c[1] = h1; c },
+                round_actions: 0, last_aggressor: 0, action_count: 0,
+                last_action_hash: [0; 32], rake: 0, rules,
+            };
+
+            // post blinds
+            state.bets[button as usize] = 5;
+            state.stacks[button as usize] -= 5;
+            state.bets[(1-button) as usize] = 10;
+            state.stacks[(1-button) as usize] -= 10;
+            state.pot = 15;
+
+            brain0.new_hand(&state);
+            brain1.new_hand(&state);
+            brain0.set_hero_cards(0, h0, &state);
+            brain1.set_hero_cards(1, h1, &state);
+
+            let mut folded = false;
+            let mut streets_dealt = 0u8;
+
+            for _ in 0..100 {
+                let acting = state.acting_seat;
+                let brain = if acting == 0 { &mut brain0 } else { &mut brain1 };
+                let cards = if acting == 0 { &h0 } else { &h1 };
+                let decision = brain.decide(&state, cards, &community);
+
+                // observe in opponent brain before state update
+                let opp_brain = if acting == 0 { &mut brain1 } else { &mut brain0 };
+                let (action, amount) = match decision.sample(rng() as f64 / u32::MAX as f64) {
+                    Some(a) => a,
+                    None => (Action::Check, 0),
+                };
+                opp_brain.observe_action(acting, action, amount, &state);
+
+                match action {
+                    Action::Fold => { folded = true; break; }
+                    Action::Check => { state.round_actions += 1; }
+                    Action::Call => {
+                        let to_call = state.bets.iter().take(2).max().copied().unwrap_or(0) - state.bets[acting as usize];
+                        let actual = to_call.min(state.stacks[acting as usize]);
+                        state.stacks[acting as usize] -= actual;
+                        state.bets[acting as usize] += actual;
+                        state.pot += actual;
+                        state.round_actions += 1;
+                    }
+                    Action::Bet | Action::Raise => {
+                        let bet_total = amount.max(state.bets.iter().take(2).max().copied().unwrap_or(0) + 10);
+                        let needed = bet_total - state.bets[acting as usize];
+                        let actual = needed.min(state.stacks[acting as usize]);
+                        state.stacks[acting as usize] -= actual;
+                        state.bets[acting as usize] += actual;
+                        state.pot += actual;
+                        state.round_actions += 1;
+                    }
+                    Action::AllIn => {
+                        let all = state.stacks[acting as usize];
+                        state.bets[acting as usize] += all;
+                        state.stacks[acting as usize] = 0;
+                        state.pot += all;
+                        state.round_actions += 1;
+                    }
+                }
+
+                let both_acted = state.round_actions >= 2;
+                let bets_equal = state.bets[0] == state.bets[1] || state.stacks[0] == 0 || state.stacks[1] == 0;
+                if both_acted && bets_equal {
+                    state.round_actions = 0;
+                    state.bets = [0; MAX_SEATS];
+                    streets_dealt += 1;
+                    match streets_dealt {
+                        1 => { state.phase = Phase::Flop; state.community[0..3].copy_from_slice(&community[0..3]); state.community_count = 3;
+                            brain0.reveal_community(&community[0..3], &state); brain1.reveal_community(&community[0..3], &state); }
+                        2 => { state.phase = Phase::Turn; state.community[3] = community[3]; state.community_count = 4;
+                            brain0.reveal_community(&[community[3]], &state); brain1.reveal_community(&[community[3]], &state); }
+                        3 => { state.phase = Phase::River; state.community[4] = community[4]; state.community_count = 5;
+                            brain0.reveal_community(&[community[4]], &state); brain1.reveal_community(&[community[4]], &state); }
+                        _ => break,
+                    }
+                    state.acting_seat = 1 - button;
+                } else {
+                    state.acting_seat = 1 - acting;
+                }
+            }
+
+            let winner = if folded { 1 - state.acting_seat }
+            else {
+                let h0s = eval_best_5(h0, &community);
+                let h1s = eval_best_5(h1, &community);
+                if h0s > h1s { 0 } else if h1s > h0s { 1 } else { 255 }
+            };
+
+            let half_pot = (state.pot / 2) as i64;
+            if winner == 0 { p0_winnings += half_pot; p1_winnings -= half_pot; }
+            else if winner == 1 { p1_winnings += half_pot; p0_winnings -= half_pot; }
+        }
+
+        SelfPlayResult {
+            samples: Vec::new(),
+            hands_played: num_hands,
+            player_0_winnings: p0_winnings,
+            player_1_winnings: p1_winnings,
+        }
+    }
+
     fn play_inner(&self, num_hands: u64, use_search: bool) -> SelfPlayResult {
         // load MoE if available
         #[cfg(feature = "onnx")]
@@ -309,8 +484,7 @@ impl Arena {
             let mut filters = FilterStack::new();
             if use_search {
                 filters = filters
-                    .and_then(SearchFilter)
-                    .and_then(RangeFilter)
+                    .and_then(SearchFilter::default())
                     .and_then(ExploitFilter);
             }
             let mut brain = Brain::new(strategy).with_filters(filters);
