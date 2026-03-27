@@ -280,6 +280,10 @@ export default function App() {
           setEscrow(msg.escrow)
         }
         break
+      case 'DepositStatus':
+        log(`deposits: A=${msg.player_a_deposit} B=${msg.player_b_deposit} ${msg.ready ? '✓ ready' : 'waiting...'}`,
+          msg.ready ? 'c-green' : 'c-zec-yellow')
+        break
       case 'InviteLink':
         setInviteUrl(window.location.origin + msg.url)
         break
@@ -561,6 +565,31 @@ export default function App() {
                   <div class="text-neutral-600 text-8px mt-1">click to copy</div>
                 </div>
               </Show>
+              {/* escrow deposit */}
+              <Show when={escrow() && escrow().length > 10}>
+                <div class="mb-4 p-3 border border-neutral-800 rounded-lg bg-zec-surface">
+                  <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">escrow address (2-of-3 multisig)</div>
+                  <div
+                    class="font-mono text-9px text-zec-yellow break-all cursor-pointer select-all mb-2"
+                    onClick={() => { navigator.clipboard?.writeText(escrow()); log('copied escrow address', 'c-green') }}
+                    title="click to copy"
+                  >
+                    {escrow()}
+                  </div>
+                  <div class="text-neutral-600 text-8px mb-3">send buy-in to this address · 0-conf accepted</div>
+                  <div class="flex gap-2 justify-center">
+                    <button
+                      class="btn text-9px px-4 py-1"
+                      onClick={() => {
+                        // for demo: simulate deposit report
+                        send({ type: 'ReportDeposit', txid: 'demo_' + Date.now(), amount: 1000 })
+                        log('deposit reported (demo)', 'c-zec-yellow')
+                      }}
+                    >report deposit</button>
+                  </div>
+                </div>
+              </Show>
+
               <Show when={pendingRules() && !pendingRules()?.fromSelf}>
                 <div class="mt-4 p-4 border border-neutral-700 rounded">
                   <div class="text-neutral-400 text-10px uppercase tracking-wider mb-2">opponent proposes</div>

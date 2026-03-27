@@ -45,6 +45,8 @@ enum ClientMsg {
     Chat { text: String },
     StartHand,
     AllowPlayer { pubkey: String },
+    /// player reports their ZEC deposit to escrow address
+    ReportDeposit { txid: String, amount: u64 },
     /// player broadcasts filtered game state to spectators
     Broadcast { data: String },
     Dispute,
@@ -86,6 +88,14 @@ enum ServerMsg {
     Status { phase: String, message: String },
     /// table chat
     Chat { seat: u8, name: String, text: String },
+    /// deposit status update
+    DepositStatus {
+        escrow_address: String,
+        player_a_deposit: u64,
+        player_b_deposit: u64,
+        required: u64,
+        ready: bool,
+    },
     Error { message: String },
     Waiting,
 }
@@ -212,8 +222,11 @@ struct Room {
     access: TableAccess,
     host_seat: Option<u8>,
     players: Vec<Option<Player>>,
-    /// spectator channels — receive broadcast events from players
+    /// spectator channels
     spectators: Vec<mpsc::UnboundedSender<String>>,
+    /// deposit tracking (zatoshis per seat)
+    deposits: Vec<u64>,
+    required_deposit: u64,
     engine: GameEngine,
     hand_number: u64,
     button: u8,
@@ -282,6 +295,8 @@ impl Room {
             code, max_seats: seats, access, host_seat: None,
             players: (0..seats).map(|_| None).collect(),
             spectators: Vec::new(),
+            deposits: vec![0; seats],
+            required_deposit: buyin,
             engine, hand_number: 0, button: 0,
             hole_cards: (0..seats).map(|_| None).collect(),
             community_cards: Vec::new(),
@@ -1107,6 +1122,35 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     }
                     _ => {
                         let _ = tx.send(ServerMsg::Error { message: "table is not in mutuals mode".into() });
+                    }
+                }
+            }
+            ClientMsg::ReportDeposit { txid, amount } => {
+                if let Some(seat) = my_seat {
+                    let mut r = room.lock().await;
+                    if (seat as usize) < r.deposits.len() {
+                        r.deposits[seat as usize] += amount;
+                        tracing::info!("deposit: room={} seat={} amount={} txid={}",
+                            r.code, seat, amount, &txid[..txid.len().min(16)]);
+
+                        // check if all seated players have deposited enough
+                        let all_deposited = r.players.iter().enumerate().all(|(i, p)| {
+                            p.is_none() || r.deposits[i] >= r.required_deposit
+                        });
+
+                        // broadcast deposit status
+                        r.broadcast(&ServerMsg::DepositStatus {
+                            escrow_address: hex::encode(r.escrow_address),
+                            player_a_deposit: r.deposits.get(0).copied().unwrap_or(0),
+                            player_b_deposit: r.deposits.get(1).copied().unwrap_or(0),
+                            required: r.required_deposit,
+                            ready: all_deposited,
+                        });
+
+                        // auto-start game when both deposited
+                        if all_deposited && r.player_count() >= 2 && r.engine.hand_state().is_none() {
+                            r.start_hand();
+                        }
                     }
                 }
             }
