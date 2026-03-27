@@ -1,227 +1,31 @@
-//! cfr-bot: standalone poker bot that connects via WebSocket
+//! cfr-bot: standalone poker bot that connects via WebSocket.
 //!
-//! Connects to the relay as a regular player. No special access.
-//! Uses the Brain (L0 blueprint + optional L4 MoE) for decisions.
+//! Connects to the relay server as a regular player.
+//! No special access — uses the same protocol as the browser client.
 //!
-//! usage:
-//!   cfr-bot --server ws://localhost:3030/room123/ws --strategy strategy.bin --name "alice"
+//! Usage:
+//!   cfr-bot --server ws://localhost:3030/room/ws --strategy strategy_100m.bin --name "alice"
+//!   cfr-bot --server ws://poker.zk.bot/abc/ws --strategy strategy_100m.bin --moe-dir models/onnx
 
-use poker_pvm::cfr::brain::{Brain, FilterStack, Decision};
-use poker_pvm::cfr::abstraction::*;
-use poker_pvm::*;
-use std::time::{Duration, Instant};
-
-use serde::{Deserialize, Serialize};
-use tungstenite::{connect, Message};
-
-// --- Wire types (matching poker-server) ---
-
-#[derive(Serialize)]
-#[serde(tag = "type")]
-enum ClientMsg {
-    Join { name: String, pubkey: Option<String> },
-    Action { action: String, amount: Option<u64> },
-    Chat { text: String },
-    StartHand,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
-enum ServerMsg {
-    Seated { seat: u8 },
-    OpponentJoined { seat: u8, name: String },
-    OpponentLeft { seat: u8 },
-    OpponentDisconnected { seat: u8, reconnect_secs: u64 },
-    OpponentReconnected { seat: u8 },
-    ActionTimeout { seat: u8 },
-    HandStarted {
-        hand_number: u64,
-        button: u8,
-        your_cards: Option<[CardJson; 2]>,
-        stacks: Vec<u64>,
-    },
-    BlindsPosted { small_blind: (u8, u64), big_blind: (u8, u64) },
-    ActionRequired { seat: u8, valid_actions: Vec<ValidActionJson> },
-    PlayerActed { seat: u8, action: String, amount: u64, new_stack: u64 },
-    CommunityCards { phase: String, cards: Vec<CardJson> },
-    PotUpdate { pots: Vec<PotJson> },
-    Showdown { hands: Vec<(u8, [CardJson; 2])> },
-    PotAwarded { seat: u8, amount: u64 },
-    HandComplete { stacks: Vec<u64> },
-    InviteLink { url: String },
-    Status { phase: String, message: String },
-    Chat { seat: u8, name: String, text: String },
-    Error { message: String },
-    Waiting,
-    #[serde(other)]
-    Unknown,
-}
-
-#[derive(Debug, Deserialize)]
-struct CardJson { rank: String, suit: String }
-
-#[derive(Debug, Deserialize)]
-struct ValidActionJson { kind: String, min_amount: u64, max_amount: u64 }
-
-#[derive(Debug, Deserialize)]
-struct PotJson { amount: u64 }
-
-// --- Card parsing ---
-
-fn card_index(card: &CardJson) -> u8 {
-    let rank = match card.rank.as_str() {
-        "2" => 0, "3" => 1, "4" => 2, "5" => 3, "6" => 4, "7" => 5,
-        "8" => 6, "9" => 7, "10" | "T" => 8, "J" => 9, "Q" => 10, "K" => 11, "A" => 12,
-        _ => 0,
-    };
-    let suit = match card.suit.as_str() {
-        "clubs" | "c" => 0, "diamonds" | "d" => 1, "hearts" | "h" => 2, "spades" | "s" => 3,
-        _ => 0,
-    };
-    rank + suit * 13
-}
-
-fn phase_from_str(s: &str) -> Phase {
-    match s {
-        "flop" => Phase::Flop, "turn" => Phase::Turn, "river" => Phase::River,
-        _ => Phase::Preflop,
-    }
-}
-
-fn action_from_str(s: &str) -> Action {
-    match s {
-        "fold" => Action::Fold, "check" => Action::Check, "call" => Action::Call,
-        "bet" => Action::Bet, "raise" => Action::Raise, "allin" => Action::AllIn,
-        _ => Action::Check,
-    }
-}
-
-// --- Bot state ---
-
-struct BotState {
-    brain: Brain,
-    my_seat: Option<u8>,
-    my_cards: Option<[u8; 2]>,
-    community: [u8; 5],
-    community_count: u8,
-    stacks: Vec<u64>,
-    bets: Vec<u64>,
-    pot: u64,
-    button: u8,
-    hand_number: u32,
-    phase: Phase,
-    num_players: u8,
-}
-
-impl BotState {
-    fn new(strategy: &[u8]) -> Self {
-        Self {
-            brain: Brain::new(strategy),
-            my_seat: None,
-            my_cards: None,
-            community: [0; 5],
-            community_count: 0,
-            stacks: vec![0; 10],
-            bets: vec![0; 10],
-            pot: 0,
-            button: 0,
-            hand_number: 0,
-            phase: Phase::Preflop,
-            num_players: 2,
-        }
-    }
-
-    fn game_state(&self) -> GameState {
-        let mut gs_stacks = [0u32; MAX_SEATS];
-        let mut gs_bets = [0u32; MAX_SEATS];
-        let mut seat_state = [SeatState::Empty; MAX_SEATS];
-        for (i, &s) in self.stacks.iter().enumerate().take(MAX_SEATS) {
-            gs_stacks[i] = s as u32;
-            gs_bets[i] = self.bets.get(i).copied().unwrap_or(0) as u32;
-            if s > 0 { seat_state[i] = SeatState::Active; }
-        }
-        GameState {
-            stacks: gs_stacks, bets: gs_bets,
-            pot: self.pot as u32, community: self.community,
-            community_count: self.community_count, phase: self.phase,
-            acting_seat: self.my_seat.unwrap_or(0),
-            num_players: self.num_players, hand_number: self.hand_number,
-            button: self.button, seat_state,
-            cards: [[0; 2]; MAX_SEATS],
-            round_actions: 0, last_aggressor: 0, action_count: 0,
-            last_action_hash: [0; 32], rake: 0,
-            rules: Rules { buyin: 1000, small_blind: 5, big_blind: 10,
-                turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0 },
-        }
-    }
-
-    fn decide(&mut self, valid_actions: &[ValidActionJson]) -> (String, Option<u64>) {
-        let seat = self.my_seat.unwrap_or(0);
-        let cards = self.my_cards.unwrap_or([0, 0]);
-        let state = self.game_state();
-
-        let decision = self.brain.decide(&state, &cards, &self.community);
-
-        // map decision to a valid action
-        if let Some((action, amount)) = decision.sample(rand_f64()) {
-            let action_str = match action {
-                Action::Fold => "fold", Action::Check => "check", Action::Call => "call",
-                Action::Bet => "bet", Action::Raise => "raise", Action::AllIn => "allin",
-            };
-            // verify it's valid
-            if valid_actions.iter().any(|v| v.kind == action_str) {
-                let amt = if amount > 0 { Some(amount as u64) } else { None };
-                return (action_str.to_string(), amt);
-            }
-        }
-
-        // fallback: check > call > fold
-        for pref in &["check", "call", "fold"] {
-            if valid_actions.iter().any(|v| v.kind == *pref) {
-                return (pref.to_string(), None);
-            }
-        }
-        ("fold".to_string(), None)
-    }
-}
-
-fn rand_f64() -> f64 {
-    use std::time::SystemTime;
-    let t = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().subsec_nanos();
-    (t as f64) / (u32::MAX as f64)
-}
-
-// --- Behavioral timing ---
-
-fn think_delay(action: &str) -> Duration {
-    let base = match action {
-        "fold" => 1.0,
-        "check" => 1.5,
-        "call" => 2.5,
-        "bet" | "raise" => 4.0,
-        "allin" => 6.0,
-        _ => 2.0,
-    };
-    // add jitter ±30%
-    let jitter = 0.7 + rand_f64() * 0.6;
-    Duration::from_secs_f64(base * jitter)
-}
-
-// --- Main ---
+use std::time::Duration;
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     let mut server_url = "ws://localhost:3030/test/ws".to_string();
-    let mut strategy_path = "strategy.bin".to_string();
-    let mut bot_name = "player".to_string();
+    let mut strategy_path = "strategy_100m.bin".to_string();
+    let mut name = "player".to_string();
+    let mut _moe_dir: Option<String> = None;
+    let mut _moe_weight: f32 = 0.3;
 
     let mut i = 1;
     while i < args.len() {
         match args[i].as_str() {
             "--server" => { if i+1 < args.len() { server_url = args[i+1].clone(); i += 1; } }
             "--strategy" => { if i+1 < args.len() { strategy_path = args[i+1].clone(); i += 1; } }
-            "--name" => { if i+1 < args.len() { bot_name = args[i+1].clone(); i += 1; } }
+            "--name" => { if i+1 < args.len() { name = args[i+1].clone(); i += 1; } }
+            "--moe-dir" => { if i+1 < args.len() { _moe_dir = Some(args[i+1].clone()); i += 1; } }
+            "--moe-weight" => { if i+1 < args.len() { _moe_weight = args[i+1].parse().unwrap_or(0.3); i += 1; } }
             _ => {}
         }
         i += 1;
@@ -230,128 +34,315 @@ fn main() {
     let strategy = std::fs::read(&strategy_path)
         .unwrap_or_else(|e| { eprintln!("failed to load {}: {}", strategy_path, e); std::process::exit(1); });
 
-    println!("connecting to {}...", server_url);
-    let (mut ws, _response) = connect(&server_url)
-        .unwrap_or_else(|e| { eprintln!("failed to connect: {}", e); std::process::exit(1); });
+    println!("cfr-bot v8");
+    println!("server:   {}", server_url);
+    println!("strategy: {} ({} bytes)", strategy_path, strategy.len());
+    println!("name:     {}", name);
 
-    println!("connected. joining as '{}'", bot_name);
+    // create brain
+    use poker_pvm::cfr::brain::*;
+
+    let mut brain = {
+        #[cfg(feature = "onnx")]
+        {
+            if let Some(ref dir) = _moe_dir {
+                use poker_pvm::cfr::inference::OnnxMoE;
+                match OnnxMoE::load(dir) {
+                    Ok(moe) => {
+                        println!("MoE:      {} (weight: {})", dir, _moe_weight);
+                        Brain::full_with_neural(&strategy, std::sync::Arc::new(moe), _moe_weight)
+                    }
+                    Err(e) => {
+                        eprintln!("MoE failed: {}, falling back to L0-L2", e);
+                        Brain::full_stack(&strategy)
+                    }
+                }
+            } else {
+                Brain::full_stack(&strategy)
+            }
+        }
+        #[cfg(not(feature = "onnx"))]
+        { Brain::full_stack(&strategy) }
+    };
+
+    // connect
+    let (mut socket, _) = tungstenite::connect(&server_url)
+        .unwrap_or_else(|e| { eprintln!("connect failed: {}", e); std::process::exit(1); });
+    println!("connected");
 
     // join
-    let join_msg = serde_json::to_string(&ClientMsg::Join { name: bot_name.clone(), pubkey: None }).unwrap();
-    ws.send(Message::Text(join_msg.into())).unwrap();
+    let join = serde_json::json!({"type": "Join", "name": name});
+    socket.send(tungstenite::Message::Text(join.to_string())).unwrap();
 
-    let mut state = BotState::new(&strategy);
-    let mut hands_played = 0u64;
+    // state
+    let mut my_seat: Option<u8> = None;
+    let mut my_cards: Option<[u8; 2]> = None;
+    let mut community_cards = [0u8; 5];
+    let mut hand_number = 0u32;
+    let mut button = 0u8;
+    let mut stacks = vec![0u64; 10];
+    let mut bets = vec![0u64; 10];
+    let mut pot = 0u64;
 
-    // main loop
+    let mut rng_state: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
+    let mut rng_f = move || -> f64 {
+        rng_state ^= rng_state << 13;
+        rng_state ^= rng_state >> 7;
+        rng_state ^= rng_state << 17;
+        (rng_state >> 16) as f64 / u32::MAX as f64
+    };
+
     loop {
-        let msg = match ws.read() {
-            Ok(Message::Text(t)) => t.to_string(),
-            Ok(Message::Close(_)) => { println!("server closed connection"); break; }
-            Err(e) => { eprintln!("ws error: {}", e); break; }
-            _ => continue,
+        let msg = match socket.read() {
+            Ok(tungstenite::Message::Text(t)) => t.to_string(),
+            Ok(tungstenite::Message::Close(_)) => { println!("disconnected"); break; }
+            Ok(_) => continue,
+            Err(e) => { eprintln!("error: {}", e); break; }
         };
 
-        let server_msg: ServerMsg = match serde_json::from_str(&msg) {
-            Ok(m) => m,
+        let v: serde_json::Value = match serde_json::from_str(&msg) {
+            Ok(v) => v,
             Err(_) => continue,
         };
 
-        match server_msg {
-            ServerMsg::Seated { seat, .. } => {
-                state.my_seat = Some(seat);
-                println!("seated at {}", seat);
+        match v["type"].as_str().unwrap_or("") {
+            "Seated" => {
+                my_seat = Some(v["seat"].as_u64().unwrap_or(0) as u8);
+                println!("[seated] seat {}", my_seat.unwrap());
             }
-            ServerMsg::Waiting => {
-                println!("waiting for opponent...");
-            }
-            ServerMsg::OpponentJoined { seat, name } => {
-                println!("opponent joined: {} (seat {})", name, seat);
-            }
-            ServerMsg::HandStarted { hand_number, button, your_cards, stacks } => {
-                state.hand_number = hand_number as u32;
-                state.button = button;
-                state.stacks = stacks;
-                state.bets = vec![0; state.stacks.len()];
-                state.pot = 0;
-                state.community = [0; 5];
-                state.community_count = 0;
-                state.phase = Phase::Preflop;
-                state.num_players = state.stacks.len() as u8;
+            "Waiting" => { println!("[waiting] for opponent"); }
+            "HandStarted" => {
+                hand_number = v["hand_number"].as_u64().unwrap_or(0) as u32;
+                button = v["button"].as_u64().unwrap_or(0) as u8;
+                if let Some(s) = v["stacks"].as_array() {
+                    stacks = s.iter().map(|x| x.as_u64().unwrap_or(0)).collect();
+                }
+                bets = vec![0; stacks.len()];
+                pot = 0;
+                community_cards = [0; 5];
 
-                if let Some(cards) = your_cards {
-                    let c = [card_index(&cards[0]), card_index(&cards[1])];
-                    state.my_cards = Some(c);
+                if let Some(cards) = v.get("your_cards").and_then(|c| c.as_array()) {
+                    if cards.len() == 2 {
+                        my_cards = Some([parse_card(&cards[0]), parse_card(&cards[1])]);
+                    }
                 }
 
-                let gs = state.game_state();
-                state.brain.new_hand(&gs);
-                if let Some(cards) = state.my_cards {
-                    state.brain.set_hero_cards(state.my_seat.unwrap_or(0), cards, &gs);
+                // build GameState for brain
+                let gs = build_game_state(&stacks, &bets, pot, &community_cards, 0,
+                    poker_pvm::Phase::Preflop, my_seat.unwrap_or(0), 2, hand_number, button);
+                brain.new_hand(&gs);
+                if let Some(cards) = my_cards {
+                    brain.set_hero_cards(my_seat.unwrap_or(0), cards, &gs);
                 }
 
-                hands_played += 1;
-                println!("hand #{} (btn={}, cards={:?})", hand_number, button,
-                    state.my_cards.map(|c| format!("{},{}", c[0], c[1])).unwrap_or_default());
+                println!("[hand #{}] cards: {:?}", hand_number, my_cards);
             }
-            ServerMsg::BlindsPosted { small_blind, big_blind } => {
-                if let Some(b) = state.bets.get_mut(small_blind.0 as usize) { *b = small_blind.1; }
-                if let Some(b) = state.bets.get_mut(big_blind.0 as usize) { *b = big_blind.1; }
-                state.pot = small_blind.1 + big_blind.1;
+            "BlindsPosted" => {
+                // update bets/pot from blinds
+                if let Some(sb) = v.get("small_blind").and_then(|x| x.as_array()) {
+                    if sb.len() == 2 {
+                        let seat = sb[0].as_u64().unwrap_or(0) as usize;
+                        let amt = sb[1].as_u64().unwrap_or(0);
+                        if seat < bets.len() { bets[seat] = amt; }
+                        pot += amt;
+                    }
+                }
+                if let Some(bb) = v.get("big_blind").and_then(|x| x.as_array()) {
+                    if bb.len() == 2 {
+                        let seat = bb[0].as_u64().unwrap_or(0) as usize;
+                        let amt = bb[1].as_u64().unwrap_or(0);
+                        if seat < bets.len() { bets[seat] = amt; }
+                        pot += amt;
+                    }
+                }
             }
-            ServerMsg::ActionRequired { seat, valid_actions } => {
-                if Some(seat) == state.my_seat {
-                    let (action, amount) = state.decide(&valid_actions);
-                    let delay = think_delay(&action);
-                    std::thread::sleep(delay);
+            "CommunityCards" => {
+                if let Some(cards) = v.get("cards").and_then(|c| c.as_array()) {
+                    let old_count = community_cards.iter().filter(|&&c| c > 0 || cards.len() > 0).count();
+                    for (i, c) in cards.iter().enumerate().take(5) {
+                        community_cards[i] = parse_card(c);
+                    }
+                    let phase_str = v["phase"].as_str().unwrap_or("?");
+                    let new_cards: Vec<u8> = cards.iter().skip(old_count.min(cards.len())).map(|c| parse_card(c)).collect();
+                    if !new_cards.is_empty() {
+                        let gs = build_game_state(&stacks, &bets, pot, &community_cards,
+                            cards.len() as u8, phase_from_str(phase_str),
+                            my_seat.unwrap_or(0), 2, hand_number, button);
+                        brain.reveal_community(&new_cards, &gs);
+                    }
+                    println!("[{}] {:?}", phase_str, community_cards.iter().take(cards.len()).collect::<Vec<_>>());
+                }
+                bets = vec![0; stacks.len()]; // reset bets on new street
+            }
+            "PlayerActed" => {
+                let seat = v["seat"].as_u64().unwrap_or(255) as u8;
+                let action_str = v["action"].as_str().unwrap_or("?");
+                let amount = v["amount"].as_u64().unwrap_or(0);
 
-                    let msg = serde_json::to_string(&ClientMsg::Action {
-                        action: action.clone(), amount,
-                    }).unwrap();
-                    ws.send(Message::Text(msg.into())).unwrap();
-                    println!("  -> {} {}", action, amount.map(|a| a.to_string()).unwrap_or_default());
+                if Some(seat) != my_seat {
+                    // observe opponent action
+                    let pvm_action = action_from_str(action_str);
+                    let cc = community_cards.iter().filter(|&&c| c > 0).count() as u8;
+                    let gs = build_game_state(&stacks, &bets, pot, &community_cards,
+                        cc, phase_from_count(cc), my_seat.unwrap_or(0), 2, hand_number, button);
+                    brain.observe_action(seat, pvm_action, amount as u32, &gs);
+                    println!("[opp] {} {}", action_str, if amount > 0 { format!("{}", amount) } else { String::new() });
+                }
+
+                // update state
+                if seat < bets.len() as u8 {
+                    bets[seat as usize] += amount;
+                    if seat < stacks.len() as u8 {
+                        stacks[seat as usize] = v["new_stack"].as_u64().unwrap_or(stacks[seat as usize]);
+                    }
                 }
             }
-            ServerMsg::PlayerActed { seat, action, amount, .. } => {
-                if Some(seat) != state.my_seat {
-                    let gs = state.game_state();
-                    state.brain.observe_action(seat, action_from_str(&action), amount as u32, &gs);
+            "PotUpdate" => {
+                if let Some(pots) = v.get("pots").and_then(|p| p.as_array()) {
+                    pot = pots.iter().map(|p| p["amount"].as_u64().unwrap_or(0)).sum();
                 }
-                // update bets/pot
-                if let Some(b) = state.bets.get_mut(seat as usize) {
-                    *b += amount;
+            }
+            "ActionRequired" => {
+                let seat = v["seat"].as_u64().unwrap_or(255) as u8;
+                if my_seat != Some(seat) { continue; }
+
+                // think time: 1-8 seconds with variation
+                let think_ms = 1000 + (rng_f() * 7000.0) as u64;
+                std::thread::sleep(Duration::from_millis(think_ms));
+
+                // decide using Brain
+                let cc = community_cards.iter().filter(|&&c| c > 0).count() as u8;
+                let gs = build_game_state(&stacks, &bets, pot, &community_cards,
+                    cc, phase_from_count(cc), seat, 2, hand_number, button);
+
+                let cards = my_cards.unwrap_or([0, 0]);
+                let decision = brain.decide(&gs, &cards, &community_cards);
+
+                // sample action
+                let (action, amount) = match decision.sample(rng_f()) {
+                    Some(a) => a,
+                    None => (poker_pvm::Action::Check, 0),
+                };
+
+                // map to server action
+                let valid = v.get("valid_actions").and_then(|a| a.as_array());
+                let action_json = to_server_action(action, amount, valid);
+                println!("[act] {} (thought {}ms)", action_json, think_ms);
+                let _ = socket.send(tungstenite::Message::Text(action_json));
+            }
+            "PotAwarded" => {
+                let seat = v["seat"].as_u64().unwrap_or(255) as u8;
+                let amount = v["amount"].as_u64().unwrap_or(0);
+                let won = my_seat == Some(seat);
+                println!("[{}] {}", if won { "WIN" } else { "LOSE" }, amount);
+            }
+            "Showdown" => { println!("[showdown]"); }
+            "HandComplete" => {
+                if let Some(s) = v["stacks"].as_array() {
+                    stacks = s.iter().map(|x| x.as_u64().unwrap_or(0)).collect();
                 }
-                state.pot += amount;
+                println!("[complete] stacks: {:?}", &stacks[..2]);
             }
-            ServerMsg::CommunityCards { phase, cards } => {
-                state.phase = phase_from_str(&phase);
-                for (i, card) in cards.iter().enumerate().take(5) {
-                    state.community[i] = card_index(card);
-                }
-                state.community_count = cards.len() as u8;
-                let gs = state.game_state();
-                let new_cards: Vec<u8> = cards.iter().map(card_index).collect();
-                state.brain.reveal_community(&new_cards, &gs);
-                // reset bets for new street
-                state.bets = vec![0; state.stacks.len()];
-            }
-            ServerMsg::PotAwarded { seat, amount } => {
-                let won = Some(seat) == state.my_seat;
-                println!("  {} wins {} {}", if won { "we" } else { "they" }, amount,
-                    if won { "(+)" } else { "(-)" });
-            }
-            ServerMsg::HandComplete { stacks } => {
-                state.stacks = stacks;
-            }
-            ServerMsg::Chat { name, text, .. } => {
-                println!("  [{}] {}", name, text);
-            }
-            ServerMsg::Error { message } => {
-                eprintln!("  error: {}", message);
+            "Error" => { eprintln!("[error] {}", v["message"].as_str().unwrap_or("?")); }
+            "Chat" => {
+                let from = v["name"].as_str().unwrap_or("?");
+                let text = v["text"].as_str().unwrap_or("");
+                println!("[chat] {}: {}", from, text);
             }
             _ => {}
         }
     }
+}
 
-    println!("disconnected after {} hands", hands_played);
+fn parse_card(v: &serde_json::Value) -> u8 {
+    let r = match v.get("rank").and_then(|r| r.as_str()).unwrap_or("2") {
+        "2" => 0, "3" => 1, "4" => 2, "5" => 3, "6" => 4, "7" => 5,
+        "8" => 6, "9" => 7, "10" | "T" => 8, "J" => 9, "Q" => 10, "K" => 11, "A" => 12,
+        _ => 0,
+    };
+    let s = match v.get("suit").and_then(|s| s.as_str()).unwrap_or("c") {
+        "c" | "clubs" => 0, "d" | "diamonds" => 1, "h" | "hearts" => 2, "s" | "spades" => 3,
+        _ => 0,
+    };
+    r + s * 13
+}
+
+fn action_from_str(s: &str) -> poker_pvm::Action {
+    match s {
+        "fold" => poker_pvm::Action::Fold,
+        "check" => poker_pvm::Action::Check,
+        "call" => poker_pvm::Action::Call,
+        "bet" => poker_pvm::Action::Bet,
+        "raise" => poker_pvm::Action::Raise,
+        "allin" => poker_pvm::Action::AllIn,
+        _ => poker_pvm::Action::Check,
+    }
+}
+
+fn phase_from_str(s: &str) -> poker_pvm::Phase {
+    match s {
+        "preflop" => poker_pvm::Phase::Preflop,
+        "flop" => poker_pvm::Phase::Flop,
+        "turn" => poker_pvm::Phase::Turn,
+        "river" => poker_pvm::Phase::River,
+        _ => poker_pvm::Phase::Preflop,
+    }
+}
+
+fn phase_from_count(cc: u8) -> poker_pvm::Phase {
+    match cc {
+        0 => poker_pvm::Phase::Preflop,
+        3 => poker_pvm::Phase::Flop,
+        4 => poker_pvm::Phase::Turn,
+        5 => poker_pvm::Phase::River,
+        _ => poker_pvm::Phase::Preflop,
+    }
+}
+
+fn build_game_state(
+    stacks: &[u64], bets: &[u64], pot: u64, community: &[u8; 5],
+    cc: u8, phase: poker_pvm::Phase, acting: u8, num_players: u8,
+    hand_number: u32, button: u8,
+) -> poker_pvm::GameState {
+    let mut gs_stacks = [0u32; poker_pvm::MAX_SEATS];
+    let mut gs_bets = [0u32; poker_pvm::MAX_SEATS];
+    let mut seat_state = [poker_pvm::SeatState::Empty; poker_pvm::MAX_SEATS];
+    for (i, &s) in stacks.iter().enumerate().take(poker_pvm::MAX_SEATS) {
+        gs_stacks[i] = s as u32;
+        if s > 0 || bets.get(i).copied().unwrap_or(0) > 0 { seat_state[i] = poker_pvm::SeatState::Active; }
+    }
+    for (i, &b) in bets.iter().enumerate().take(poker_pvm::MAX_SEATS) {
+        gs_bets[i] = b as u32;
+    }
+    poker_pvm::GameState {
+        stacks: gs_stacks, bets: gs_bets, pot: pot as u32,
+        community: *community, community_count: cc, phase,
+        acting_seat: acting, num_players, hand_number, button, seat_state,
+        cards: [[0; 2]; poker_pvm::MAX_SEATS],
+        round_actions: 0, last_aggressor: 0, action_count: 0,
+        last_action_hash: [0; 32], rake: 0,
+        rules: poker_pvm::Rules { buyin: 1000, small_blind: 5, big_blind: 10, turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0 },
+    }
+}
+
+fn to_server_action(action: poker_pvm::Action, amount: u32, valid: Option<&Vec<serde_json::Value>>) -> String {
+    match action {
+        poker_pvm::Action::Fold => r#"{"type":"Action","action":"fold"}"#.to_string(),
+        poker_pvm::Action::Check => r#"{"type":"Action","action":"check"}"#.to_string(),
+        poker_pvm::Action::Call => r#"{"type":"Action","action":"call"}"#.to_string(),
+        poker_pvm::Action::Bet => {
+            let min = valid.and_then(|v| v.iter().find(|a| a["kind"].as_str() == Some("bet")))
+                .and_then(|a| a["min_amount"].as_u64()).unwrap_or(10);
+            let amt = (amount as u64).max(min);
+            format!(r#"{{"type":"Action","action":"bet","amount":{}}}"#, amt)
+        }
+        poker_pvm::Action::Raise => {
+            let min = valid.and_then(|v| v.iter().find(|a| a["kind"].as_str() == Some("raise")))
+                .and_then(|a| a["min_amount"].as_u64()).unwrap_or(20);
+            let amt = (amount as u64).max(min);
+            format!(r#"{{"type":"Action","action":"raise","amount":{}}}"#, amt)
+        }
+        poker_pvm::Action::AllIn => r#"{"type":"Action","action":"allin"}"#.to_string(),
+    }
 }
