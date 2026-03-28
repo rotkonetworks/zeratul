@@ -40,7 +40,7 @@ use pasta_curves::pallas::Scalar as PallasScalar;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 enum ClientMsg {
-    Join { name: String, #[serde(default)] pubkey: Option<String> },
+    Join { name: String, #[serde(default)] pubkey: Option<String>, #[serde(default)] zcash_address: Option<String> },
     Action { action: String, amount: Option<u64> },
     Chat { text: String },
     StartHand,
@@ -200,6 +200,8 @@ struct Player {
     name: String,
     seat: u8,
     pubkey: Option<String>,
+    /// Zcash shielded address for payouts/refunds
+    zcash_address: Option<String>,
     tx: mpsc::UnboundedSender<ServerMsg>,
     disconnected_at: Option<tokio::time::Instant>,
 }
@@ -974,7 +976,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
         };
 
         match client_msg {
-            ClientMsg::Join { name, pubkey } => {
+            ClientMsg::Join { name, pubkey, zcash_address } => {
                 let mut r = room.lock().await;
 
                 // check for reconnect: same name, seat has disconnected_at set
@@ -1037,8 +1039,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                 if let Some(seat_idx) = seat {
                     let seat = seat_idx as u8;
                     r.players[seat_idx] = Some(Player {
-                        name: name.clone(), seat, pubkey: pubkey.clone(), tx: tx.clone(),
-                        disconnected_at: None,
+                        name: name.clone(), seat, pubkey: pubkey.clone(),
+                        zcash_address: zcash_address.clone(),
+                        tx: tx.clone(), disconnected_at: None,
                     });
                     my_seat = Some(seat);
                     // first player is the host (table leader)
