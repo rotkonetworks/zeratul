@@ -47,6 +47,8 @@ enum ClientMsg {
     AllowPlayer { pubkey: String },
     /// player reports their ZEC deposit to escrow address
     ReportDeposit { txid: String, amount: u64 },
+    /// player leaves — triggers settlement and payout
+    Leave,
     /// player broadcasts filtered game state to spectators
     Broadcast { data: String },
     Dispute,
@@ -88,6 +90,11 @@ enum ServerMsg {
     Status { phase: String, message: String },
     /// table chat
     Chat { seat: u8, name: String, text: String },
+    /// game over — settlement complete, payouts ready
+    GameOver {
+        reason: String,
+        payouts: Vec<(u8, u64)>,  // (seat, amount)
+    },
     /// deposit status update
     DepositStatus {
         escrow_address: String,
@@ -1123,6 +1130,41 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     _ => {
                         let _ = tx.send(ServerMsg::Error { message: "table is not in mutuals mode".into() });
                     }
+                }
+            }
+            ClientMsg::Leave => {
+                if let Some(seat) = my_seat {
+                    let mut r = room.lock().await;
+                    tracing::info!("room {}: seat {} leaving", r.code, seat);
+
+                    // compute payouts from current stacks
+                    let stacks = r.engine.stacks();
+                    let mut payouts = Vec::new();
+                    for i in 0..r.max_seats {
+                        if r.players[i].is_some() && stacks[i] > 0 {
+                            payouts.push((i as u8, stacks[i]));
+                        }
+                    }
+
+                    r.broadcast(&ServerMsg::GameOver {
+                        reason: format!("seat {} left the table", seat),
+                        payouts: payouts.clone(),
+                    });
+
+                    // log settlement
+                    let payout_str: Vec<String> = payouts.iter()
+                        .map(|(s, a)| format!("seat{}={}", s, a)).collect();
+                    tracing::info!("settlement: room={} payouts=[{}]",
+                        r.code, payout_str.join(", "));
+
+                    // remove player
+                    r.players[seat as usize] = None;
+                    r.action_deadline = None;
+
+                    // notify
+                    r.broadcast(&ServerMsg::OpponentLeft { seat });
+                    drop(r);
+                    notify_lobby_tables(&state.rooms, &state.lobby_users).await;
                 }
             }
             ClientMsg::ReportDeposit { txid, amount } => {

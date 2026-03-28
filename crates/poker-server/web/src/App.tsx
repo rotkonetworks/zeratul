@@ -280,6 +280,14 @@ export default function App() {
           setEscrow(msg.escrow)
         }
         break
+      case 'GameOver': {
+        const myPayout = msg.payouts.find((p: any) => p[0] === mySeat())
+        log(`game over: ${msg.reason}`, 'c-red font-500')
+        if (myPayout) log(`your payout: ${myPayout[1]}`, 'c-zec-yellow font-500')
+        setActions([])
+        setActing(-1)
+        break
+      }
       case 'DepositStatus':
         log(`deposits: A=${msg.player_a_deposit} B=${msg.player_b_deposit} ${msg.ready ? '✓ ready' : 'waiting...'}`,
           msg.ready ? 'c-green' : 'c-zec-yellow')
@@ -640,6 +648,11 @@ export default function App() {
                       title="toggle showing your hole cards to spectators"
                     >{showMyCards() ? 'cards: shown' : 'cards: hidden'}</button>
                   </Show>
+                  <button
+                    class="px-1.5 py-0.5 rounded text-7px border border-red-900 text-red-400 hover:bg-red-900/20"
+                    onClick={() => { if (confirm('Leave table and cash out?')) send({ type: 'Leave' }) }}
+                    title="leave table — settles escrow and pays out"
+                  >leave</button>
                 </span>
               </div>
 
