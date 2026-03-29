@@ -14,6 +14,7 @@
 //!   GET  /room/{code}            — escrow address + deposit status
 //!   POST /room/{code}/rake       — build + sign rake tx (needs 1 player sig)
 //!   POST /room/{code}/payout     — build + sign payout tx
+//!   POST /room/{code}/cancel     — cancel game + refund depositors
 //!   GET  /health                 — service health
 
 use axum::{Router, Json, extract::{Path, State}, response::IntoResponse};
@@ -58,6 +59,10 @@ struct EscrowRoom {
     rake_bps: u16,
     rake_paid: bool,
     game_active: bool,
+    cancelled: bool,
+    // player addresses for refunds
+    player_a_address: Option<String>,
+    player_b_address: Option<String>,
     // payout
     final_stacks: Option<(u64, u64)>,
     // FROST signing state (ephemeral, consumed on round 2)
@@ -72,6 +77,7 @@ pub struct AppState {
     rooms: Rooms,
     house_address: String,
     zidecar_url: String,
+    verify_deposits: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -128,6 +134,9 @@ async fn create_room(
             rake_bps: req.rake_bps,
             rake_paid: false,
             game_active: false,
+            cancelled: false,
+            player_a_address: None,
+            player_b_address: None,
             final_stacks: None,
             pending_nonces: None,
             created_at: now_ms(),
@@ -162,6 +171,7 @@ async fn get_room(
             "rake_bps": room.rake_bps,
             "rake_paid": room.rake_paid,
             "game_active": room.game_active,
+            "cancelled": room.cancelled,
             "both_deposited": room.player_a_deposit >= room.required_deposit
                 && room.player_b_deposit >= room.required_deposit,
         })),
@@ -175,6 +185,9 @@ struct DepositReport {
     seat: u8,  // 0 = player A, 1 = player B
     txid: String,
     amount: u64,
+    /// player's return address for refunds
+    #[serde(default)]
+    return_address: Option<String>,
 }
 
 async fn report_deposit(
@@ -188,8 +201,27 @@ async fn report_deposit(
         None => return Json(serde_json::json!({"error": "room not found"})),
     };
 
-    // TODO: verify txid against zidecar (check it actually pays to escrow_address)
-    // for demo: trust the client report
+    if room.cancelled {
+        return Json(serde_json::json!({"error": "room cancelled"}));
+    }
+
+    // store player return address if provided
+    if let Some(addr) = &req.return_address {
+        match req.seat {
+            0 => room.player_a_address = Some(addr.clone()),
+            1 => room.player_b_address = Some(addr.clone()),
+            _ => {}
+        }
+    }
+
+    // when verify_deposits is true, we would check the txid against zidecar here.
+    // for now (demo mode), trust the client report.
+    if state.verify_deposits {
+        tracing::warn!("ESCROW_VERIFY_DEPOSITS=true but chain verification not yet implemented — accepting report on trust");
+        // TODO: call zidecar to confirm txid pays to escrow_address
+        // let confirmed = verify_deposit_on_chain(&state.zidecar_url, &room.escrow_address, &req.txid).await;
+    }
+
     match req.seat {
         0 => room.player_a_deposit += req.amount,
         1 => room.player_b_deposit += req.amount,
@@ -233,6 +265,10 @@ async fn settle(
         Some(r) => r,
         None => return Json(serde_json::json!({"error": "room not found"})),
     };
+
+    if room.cancelled {
+        return Json(serde_json::json!({"error": "room cancelled"}));
+    }
 
     if !room.game_active {
         return Json(serde_json::json!({"error": "game not active"}));
@@ -289,6 +325,10 @@ async fn frost_sign(
         Some(r) => r,
         None => return Json(serde_json::json!({"error": "room not found"})),
     };
+
+    if room.cancelled && req.tx_type != "refund" {
+        return Json(serde_json::json!({"error": "room cancelled — only refund signing allowed"}));
+    }
 
     // validate: only sign rake if deposits confirmed, only sign payout if game ended
     match req.tx_type.as_str() {
@@ -404,7 +444,123 @@ async fn frost_sign_round2(
     }))
 }
 
+/// Cancel a room and compute refund plan.
+/// Either player can cancel before the game starts.
+/// If game is active, reject — must use /settle or dispute.
+#[derive(Deserialize)]
+struct CancelReq {
+    /// seat of the player requesting cancel (0 or 1)
+    seat: u8,
+    /// reason for cancellation (logged, not enforced)
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+async fn cancel_room(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    Json(req): Json<CancelReq>,
+) -> impl IntoResponse {
+    let mut rooms = state.rooms.lock().await;
+    let room = match rooms.get_mut(&code) {
+        Some(r) => r,
+        None => return Json(serde_json::json!({"error": "room not found"})),
+    };
+
+    if room.cancelled {
+        return Json(serde_json::json!({"error": "room already cancelled"}));
+    }
+
+    if room.game_active {
+        return Json(serde_json::json!({
+            "error": "game is active — use /settle or dispute instead"
+        }));
+    }
+
+    // mark cancelled
+    room.cancelled = true;
+    room.game_active = false;
+
+    let reason = req.reason.as_deref().unwrap_or("player request");
+    tracing::info!("cancel: room={} seat={} reason={}", code, req.seat, reason);
+
+    // build refund plan — same format as payout outputs
+    // no rake on cancellation (game never started)
+    let mut refunds = Vec::new();
+
+    if room.player_a_deposit > 0 {
+        refunds.push(serde_json::json!({
+            "seat": 0,
+            "address": room.player_a_address.as_deref().unwrap_or("unknown"),
+            "amount": room.player_a_deposit,
+        }));
+    }
+
+    if room.player_b_deposit > 0 {
+        refunds.push(serde_json::json!({
+            "seat": 1,
+            "address": room.player_b_address.as_deref().unwrap_or("unknown"),
+            "amount": room.player_b_deposit,
+        }));
+    }
+
+    let total_refund: u64 = room.player_a_deposit + room.player_b_deposit;
+
+    Json(serde_json::json!({
+        "cancelled": true,
+        "reason": reason,
+        "cancelled_by": req.seat,
+        "escrow_address": hex::encode(&room.escrow_address),
+        "total_refund": total_refund,
+        "refunds": refunds,
+        "tx_type": "refund",
+    }))
+}
+
 async fn health() -> &'static str { "ok" }
+
+// ---------------------------------------------------------------------------
+// Background deposit monitor
+// ---------------------------------------------------------------------------
+
+/// Runs every 5 seconds. For each room with pending deposits, checks if both
+/// players have met the required deposit and auto-activates the game.
+///
+/// When ESCROW_VERIFY_DEPOSITS=true (future), this would also poll zidecar
+/// to trial-decrypt incoming Orchard notes for the escrow address.
+async fn deposit_monitor(state: AppState) {
+    let mut interval = tokio::time::interval(std::time::Duration::from_secs(5));
+    loop {
+        interval.tick().await;
+
+        let mut rooms = state.rooms.lock().await;
+        let mut activated = Vec::new();
+
+        for (code, room) in rooms.iter_mut() {
+            if room.game_active || room.cancelled {
+                continue;
+            }
+
+            let both = room.player_a_deposit >= room.required_deposit
+                && room.player_b_deposit >= room.required_deposit;
+
+            if both {
+                room.game_active = true;
+                activated.push(code.clone());
+            } else if state.verify_deposits && (room.player_a_deposit > 0 || room.player_b_deposit > 0) {
+                // future: poll zidecar for new notes at this escrow address
+                // let notes = poll_zidecar_notes(&state.zidecar_url, &room.escrow_address).await;
+                tracing::debug!("monitor: room={} waiting (A={}/{} B={}/{})",
+                    code, room.player_a_deposit, room.required_deposit,
+                    room.player_b_deposit, room.required_deposit);
+            }
+        }
+
+        for code in activated {
+            tracing::info!("monitor: room={} both deposits confirmed — game_active=true", code);
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -447,21 +603,30 @@ async fn main() {
         .unwrap_or_else(|_| "ztestsapling1...".to_string());
     let zidecar_url = std::env::var("ZIDECAR_URL")
         .unwrap_or_else(|_| "https://zcash.rotko.net".to_string());
+    let verify_deposits = std::env::var("ESCROW_VERIFY_DEPOSITS")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
 
     let state = AppState {
         rooms: Arc::new(Mutex::new(HashMap::new())),
         house_address,
         zidecar_url,
+        verify_deposits,
     };
 
     tracing::info!("house address: {}", state.house_address);
     tracing::info!("zidecar: {}", state.zidecar_url);
+    tracing::info!("verify_deposits: {}", state.verify_deposits);
+
+    // spawn background deposit monitor (checks every 5s)
+    tokio::spawn(deposit_monitor(state.clone()));
 
     let app = Router::new()
         .route("/room", axum::routing::post(create_room))
         .route("/room/{code}", axum::routing::get(get_room))
         .route("/room/{code}/deposit", axum::routing::post(report_deposit))
         .route("/room/{code}/settle", axum::routing::post(settle))
+        .route("/room/{code}/cancel", axum::routing::post(cancel_room))
         .route("/room/{code}/sign", axum::routing::post(frost_sign))
         .route("/room/{code}/sign-round2", axum::routing::post(frost_sign_round2))
         .route("/health", axum::routing::get(health))
