@@ -329,11 +329,15 @@ async fn frost_sign(
     }))
 }
 
-/// FROST round 2 — server produces its signature share
+/// FROST round 2 — server produces its signature share.
+/// Matches zafu WASM format: hex-encoded commitments + sighash.
 #[derive(Deserialize)]
 struct SignRound2Req {
-    /// full RedPallasPackage (all signers' commitments + message)
-    package_hex: String,
+    /// sighash to sign (hex, 32 bytes)
+    sighash: String,
+    /// all signers' commitments as JSON array of hex strings
+    /// each commitment is 68 bytes: [index:4][D:32][E:32]
+    commitments: Vec<String>,
 }
 
 async fn frost_sign_round2(
@@ -347,31 +351,56 @@ async fn frost_sign_round2(
         None => return Json(serde_json::json!({"error": "room not found"})),
     };
 
-    // consume nonces (one-time use)
+    // consume nonces (one-time use, zeroized on drop)
     let nonces = match room.pending_nonces.take() {
         Some(n) => n,
         None => return Json(serde_json::json!({"error": "no pending nonces — call /sign first"})),
     };
 
-    // deserialize the signing package
-    let package_bytes = match hex::decode(&req.package_hex) {
-        Ok(b) => b,
-        Err(_) => return Json(serde_json::json!({"error": "invalid package hex"})),
+    // parse sighash
+    let message = match hex::decode(&req.sighash) {
+        Ok(b) if b.len() == 32 => b,
+        _ => return Json(serde_json::json!({"error": "invalid sighash (need 32 bytes hex)"})),
     };
 
-    // TODO: deserialize RedPallasPackage from bytes
-    // For now, compute signature share directly
-    // In production: frost::sign(&package, nonces, &room.server_share, &room.group_pubkey)
+    // parse commitments
+    let mut parsed_commitments = Vec::new();
+    for c_hex in &req.commitments {
+        let bytes = match hex::decode(c_hex) {
+            Ok(b) if b.len() == 68 => {
+                let mut arr = [0u8; 68];
+                arr.copy_from_slice(&b);
+                arr
+            }
+            _ => return Json(serde_json::json!({"error": "invalid commitment (need 68 bytes hex each)"})),
+        };
+        match osst::frost::SigningCommitments::<pasta_curves::pallas::Point>::from_bytes(&bytes) {
+            Ok(c) => parsed_commitments.push(c),
+            Err(e) => return Json(serde_json::json!({"error": format!("commitment parse error: {:?}", e)})),
+        }
+    }
 
-    tracing::info!("frost_sign round2: room={} server_idx={} package_len={}",
-        code, room.server_share.index, package_bytes.len());
+    // build RedPallasPackage
+    let package = match frost::RedPallasPackage::new(message, parsed_commitments) {
+        Ok(p) => p,
+        Err(e) => return Json(serde_json::json!({"error": format!("package error: {:?}", e)})),
+    };
 
-    // placeholder until RedPallasPackage deserialization is implemented
+    // produce signature share
+    let share = match frost::sign(&package, nonces, &room.server_share, &room.group_pubkey) {
+        Ok(s) => s,
+        Err(e) => return Json(serde_json::json!({"error": format!("signing error: {:?}", e)})),
+    };
+
+    let share_bytes = share.to_bytes();
+
+    tracing::info!("frost_sign round2: room={} server_idx={} share={}",
+        code, room.server_share.index, hex::encode(&share_bytes[..8]));
+
     Json(serde_json::json!({
         "signed": true,
         "server_index": room.server_share.index,
-        // TODO: actual signature_share hex
-        "note": "round2 signing ready, needs RedPallasPackage deserialization",
+        "signature_share": hex::encode(&share_bytes),
     }))
 }
 
