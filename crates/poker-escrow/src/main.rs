@@ -264,6 +264,69 @@ async fn settle(
     }))
 }
 
+/// FROST signing — escrow provides its signature share for a transaction.
+/// Client sends: sighash + their commitments. Server returns its commitment + share.
+#[derive(Deserialize)]
+struct SignReq {
+    /// which tx: "rake" or "payout"
+    tx_type: String,
+    /// the sighash to sign (hex)
+    sighash: String,
+    /// player commitments (JSON from frost_sign_round1)
+    player_commitments: String,
+}
+
+async fn frost_sign(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    Json(req): Json<SignReq>,
+) -> impl IntoResponse {
+    let rooms = state.rooms.lock().await;
+    let room = match rooms.get(&code) {
+        Some(r) => r,
+        None => return Json(serde_json::json!({"error": "room not found"})),
+    };
+
+    // validate: only sign rake if deposits confirmed, only sign payout if game ended
+    match req.tx_type.as_str() {
+        "rake" => {
+            if room.player_a_deposit < room.required_deposit || room.player_b_deposit < room.required_deposit {
+                return Json(serde_json::json!({"error": "deposits not confirmed"}));
+            }
+        }
+        "payout" => {
+            if room.final_stacks.is_none() {
+                return Json(serde_json::json!({"error": "game not settled"}));
+            }
+        }
+        "refund" => {
+            // refund always allowed
+        }
+        _ => return Json(serde_json::json!({"error": "unknown tx_type"})),
+    }
+
+    // TODO: actual FROST signing with server's key share
+    // For now, return a placeholder that proves the escrow service is willing to sign
+    let approval_hash = {
+        let mut hasher = Sha256::new();
+        hasher.update(b"poker-escrow/sign/v1");
+        hasher.update(code.as_bytes());
+        hasher.update(req.tx_type.as_bytes());
+        hasher.update(hex::decode(&req.sighash).unwrap_or_default());
+        hex::encode(&hasher.finalize()[..16])
+    };
+
+    tracing::info!("frost_sign: room={} type={} sighash={}...",
+        code, req.tx_type, &req.sighash[..req.sighash.len().min(16)]);
+
+    Json(serde_json::json!({
+        "approved": true,
+        "approval_hash": approval_hash,
+        "server_index": room.server_share.index,
+        // TODO: actual frost_sign_round1 commitment + round2 share
+    }))
+}
+
 async fn health() -> &'static str { "ok" }
 
 // ---------------------------------------------------------------------------
@@ -322,6 +385,7 @@ async fn main() {
         .route("/room/{code}", axum::routing::get(get_room))
         .route("/room/{code}/deposit", axum::routing::post(report_deposit))
         .route("/room/{code}/settle", axum::routing::post(settle))
+        .route("/room/{code}/sign", axum::routing::post(frost_sign))
         .route("/health", axum::routing::get(health))
         .with_state(state);
 
