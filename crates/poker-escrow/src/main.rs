@@ -4,18 +4,21 @@
 //!   - Key generation (trusted dealer for demo, DKG for production)
 //!   - Escrow address derivation
 //!   - Deposit tracking (watches zidecar for incoming ZEC)
-//!   - Rake fee transaction (from escrow → house wallet)
-//!   - Payout transaction (from escrow → winners)
+//!   - Rake fee transaction (from escrow -> house wallet)
+//!   - Payout transaction (from escrow -> winners)
 //!
-//! Separate from the relay — holds key material, the relay doesn't.
+//! Separate from the relay -- holds key material, the relay doesn't.
 //!
 //! API:
-//!   POST /room                   — create escrow for a new room
-//!   GET  /room/{code}            — escrow address + deposit status
-//!   POST /room/{code}/rake       — build + sign rake tx (needs 1 player sig)
-//!   POST /room/{code}/payout     — build + sign payout tx
-//!   POST /room/{code}/cancel     — cancel game + refund depositors
-//!   GET  /health                 — service health
+//!   POST /room                   -- create escrow for a new room
+//!   GET  /room/{code}            -- escrow address + deposit status
+//!   POST /room/{code}/deposit    -- player reports deposit tx
+//!   POST /room/{code}/settle     -- record final stacks, compute payout plan
+//!   GET  /room/{code}/payout     -- full payout plan (addresses + amounts for zafu)
+//!   POST /room/{code}/sign       -- FROST round 1 (server commitment)
+//!   POST /room/{code}/sign-round2-- FROST round 2 (server signature share)
+//!   POST /room/{code}/cancel     -- cancel game + refund depositors
+//!   GET  /health                 -- service health
 
 use axum::{Router, Json, extract::{Path, State}, response::IntoResponse};
 use serde::{Deserialize, Serialize};
@@ -43,6 +46,35 @@ struct EscrowInfo {
     created_at: u64,
 }
 
+/// A single output in the payout transaction.
+#[derive(Clone, Serialize, Deserialize)]
+struct PayoutOutput {
+    /// Zcash shielded address (Orchard UA or Sapling)
+    address: String,
+    /// Amount in zatoshis
+    amount: u64,
+    /// What this output is for
+    memo: String,
+}
+
+/// Everything the client (zafu WASM) needs to build the payout transaction.
+/// The escrow computes this at settle time; the client fetches it via GET /payout.
+#[derive(Clone, Serialize, Deserialize)]
+struct PayoutPlan {
+    /// Room code
+    room: String,
+    /// Escrow note to spend (hex-encoded address for now; will be a full note reference)
+    escrow_source: String,
+    /// Total value being spent from escrow (zatoshis)
+    escrow_value: u64,
+    /// The outputs: player payouts + rake
+    outputs: Vec<PayoutOutput>,
+    /// Hash of the action log that produced these stacks
+    action_log_hash: String,
+    /// Timestamp of settlement
+    settled_at: u64,
+}
+
 struct EscrowRoom {
     code: String,
     escrow_address: [u8; 32],
@@ -59,12 +91,12 @@ struct EscrowRoom {
     rake_bps: u16,
     rake_paid: bool,
     game_active: bool,
-    cancelled: bool,
-    // player addresses for refunds
+    // player zcash addresses (provided at settle time)
     player_a_address: Option<String>,
     player_b_address: Option<String>,
     // payout
     final_stacks: Option<(u64, u64)>,
+    payout_plan: Option<PayoutPlan>,
     // FROST signing state (ephemeral, consumed on round 2)
     pending_nonces: Option<osst::frost::Nonces<PallasScalar>>,
     created_at: u64,
@@ -134,10 +166,10 @@ async fn create_room(
             rake_bps: req.rake_bps,
             rake_paid: false,
             game_active: false,
-            cancelled: false,
             player_a_address: None,
             player_b_address: None,
             final_stacks: None,
+            payout_plan: None,
             pending_nonces: None,
             created_at: now_ms(),
         };
@@ -146,7 +178,7 @@ async fn create_room(
 
     state.rooms.lock().await.insert(req.code.clone(), room);
 
-    tracing::info!("escrow created: {} → {}", req.code, &escrow_hex[..16]);
+    tracing::info!("escrow created: {} -> {}", req.code, &escrow_hex[..16]);
 
     Json(serde_json::json!({
         "escrow_address": escrow_hex,
@@ -171,7 +203,7 @@ async fn get_room(
             "rake_bps": room.rake_bps,
             "rake_paid": room.rake_paid,
             "game_active": room.game_active,
-            "cancelled": room.cancelled,
+            "settled": room.payout_plan.is_some(),
             "both_deposited": room.player_a_deposit >= room.required_deposit
                 && room.player_b_deposit >= room.required_deposit,
         })),
@@ -185,9 +217,6 @@ struct DepositReport {
     seat: u8,  // 0 = player A, 1 = player B
     txid: String,
     amount: u64,
-    /// player's return address for refunds
-    #[serde(default)]
-    return_address: Option<String>,
 }
 
 async fn report_deposit(
@@ -201,23 +230,10 @@ async fn report_deposit(
         None => return Json(serde_json::json!({"error": "room not found"})),
     };
 
-    if room.cancelled {
-        return Json(serde_json::json!({"error": "room cancelled"}));
-    }
-
-    // store player return address if provided
-    if let Some(addr) = &req.return_address {
-        match req.seat {
-            0 => room.player_a_address = Some(addr.clone()),
-            1 => room.player_b_address = Some(addr.clone()),
-            _ => {}
-        }
-    }
-
     // when verify_deposits is true, we would check the txid against zidecar here.
     // for now (demo mode), trust the client report.
     if state.verify_deposits {
-        tracing::warn!("ESCROW_VERIFY_DEPOSITS=true but chain verification not yet implemented — accepting report on trust");
+        tracing::warn!("ESCROW_VERIFY_DEPOSITS=true but chain verification not yet implemented -- accepting report on trust");
         // TODO: call zidecar to confirm txid pays to escrow_address
         // let confirmed = verify_deposit_on_chain(&state.zidecar_url, &room.escrow_address, &req.txid).await;
     }
@@ -247,11 +263,15 @@ async fn report_deposit(
     }))
 }
 
-/// game ended — record final stacks for payout
+/// game ended -- record final stacks, compute full payout plan for zafu
 #[derive(Deserialize)]
 struct SettleReq {
     player_a_stack: u64,
     player_b_stack: u64,
+    /// Zcash address for player A's payout
+    player_a_address: String,
+    /// Zcash address for player B's payout
+    player_b_address: String,
     action_log_hash: String,
 }
 
@@ -266,13 +286,13 @@ async fn settle(
         None => return Json(serde_json::json!({"error": "room not found"})),
     };
 
-    if room.cancelled {
-        return Json(serde_json::json!({"error": "room cancelled"}));
-    }
-
     if !room.game_active {
         return Json(serde_json::json!({"error": "game not active"}));
     }
+
+    // store player addresses
+    room.player_a_address = Some(req.player_a_address.clone());
+    room.player_b_address = Some(req.player_b_address.clone());
 
     // compute rake
     let total_pot = room.player_a_deposit + room.player_b_deposit;
@@ -291,19 +311,75 @@ async fn settle(
     room.final_stacks = Some((payout_a, payout_b));
     room.game_active = false;
 
-    tracing::info!("settle: room={} A={} B={} rake={} log={}",
-        code, payout_a, payout_b, rake, &req.action_log_hash[..req.action_log_hash.len().min(16)]);
+    // build payout plan: one output per player (skip zero payouts) + rake to house
+    let escrow_hex = hex::encode(&room.escrow_address);
+    let mut outputs = Vec::new();
+
+    if payout_a > 0 {
+        outputs.push(PayoutOutput {
+            address: req.player_a_address.clone(),
+            amount: payout_a,
+            memo: format!("zk.poker payout room={}", code),
+        });
+    }
+    if payout_b > 0 {
+        outputs.push(PayoutOutput {
+            address: req.player_b_address.clone(),
+            amount: payout_b,
+            memo: format!("zk.poker payout room={}", code),
+        });
+    }
+    if rake > 0 {
+        outputs.push(PayoutOutput {
+            address: state.house_address.clone(),
+            amount: rake,
+            memo: format!("zk.poker rake room={}", code),
+        });
+    }
+
+    let plan = PayoutPlan {
+        room: code.clone(),
+        escrow_source: escrow_hex.clone(),
+        escrow_value: total_pot,
+        outputs: outputs.clone(),
+        action_log_hash: req.action_log_hash.clone(),
+        settled_at: now_ms(),
+    };
+
+    room.payout_plan = Some(plan.clone());
+
+    tracing::info!("settle: room={} A={} B={} rake={} outputs={} log={}",
+        code, payout_a, payout_b, rake, outputs.len(),
+        &req.action_log_hash[..req.action_log_hash.len().min(16)]);
 
     Json(serde_json::json!({
-        "payout_a": payout_a,
-        "payout_b": payout_b,
-        "rake": rake,
-        "action_log_hash": req.action_log_hash,
-        // TODO: return unsigned payout tx for players to co-sign
+        "settled": true,
+        "payout_plan": plan,
     }))
 }
 
-/// FROST signing — escrow provides its signature share for a transaction.
+/// GET /room/{code}/payout -- returns the full payout plan for zafu to build the tx.
+/// Available after settlement. The client uses this to construct the Zcash transaction.
+async fn get_payout(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+) -> impl IntoResponse {
+    let rooms = state.rooms.lock().await;
+    let room = match rooms.get(&code) {
+        Some(r) => r,
+        None => return Json(serde_json::json!({"error": "room not found"})),
+    };
+
+    match &room.payout_plan {
+        Some(plan) => Json(serde_json::json!({
+            "payout_plan": plan,
+            "group_pubkey": hex::encode(&point_to_bytes(&room.group_pubkey)),
+        })),
+        None => Json(serde_json::json!({"error": "game not settled yet"})),
+    }
+}
+
+/// FROST signing -- escrow provides its signature share for a transaction.
 /// Client sends: sighash + their commitments. Server returns its commitment + share.
 #[derive(Deserialize)]
 struct SignReq {
@@ -326,10 +402,6 @@ async fn frost_sign(
         None => return Json(serde_json::json!({"error": "room not found"})),
     };
 
-    if room.cancelled && req.tx_type != "refund" {
-        return Json(serde_json::json!({"error": "room cancelled — only refund signing allowed"}));
-    }
-
     // validate: only sign rake if deposits confirmed, only sign payout if game ended
     match req.tx_type.as_str() {
         "rake" => {
@@ -338,7 +410,7 @@ async fn frost_sign(
             }
         }
         "payout" => {
-            if room.final_stacks.is_none() {
+            if room.payout_plan.is_none() {
                 return Json(serde_json::json!({"error": "game not settled"}));
             }
         }
@@ -369,7 +441,7 @@ async fn frost_sign(
     }))
 }
 
-/// FROST round 2 — server produces its signature share.
+/// FROST round 2 -- server produces its signature share.
 /// Matches zafu WASM format: hex-encoded commitments + sighash.
 #[derive(Deserialize)]
 struct SignRound2Req {
@@ -394,7 +466,7 @@ async fn frost_sign_round2(
     // consume nonces (one-time use, zeroized on drop)
     let nonces = match room.pending_nonces.take() {
         Some(n) => n,
-        None => return Json(serde_json::json!({"error": "no pending nonces — call /sign first"})),
+        None => return Json(serde_json::json!({"error": "no pending nonces -- call /sign first"})),
     };
 
     // parse sighash
@@ -444,79 +516,6 @@ async fn frost_sign_round2(
     }))
 }
 
-/// Cancel a room and compute refund plan.
-/// Either player can cancel before the game starts.
-/// If game is active, reject — must use /settle or dispute.
-#[derive(Deserialize)]
-struct CancelReq {
-    /// seat of the player requesting cancel (0 or 1)
-    seat: u8,
-    /// reason for cancellation (logged, not enforced)
-    #[serde(default)]
-    reason: Option<String>,
-}
-
-async fn cancel_room(
-    State(state): State<AppState>,
-    Path(code): Path<String>,
-    Json(req): Json<CancelReq>,
-) -> impl IntoResponse {
-    let mut rooms = state.rooms.lock().await;
-    let room = match rooms.get_mut(&code) {
-        Some(r) => r,
-        None => return Json(serde_json::json!({"error": "room not found"})),
-    };
-
-    if room.cancelled {
-        return Json(serde_json::json!({"error": "room already cancelled"}));
-    }
-
-    if room.game_active {
-        return Json(serde_json::json!({
-            "error": "game is active — use /settle or dispute instead"
-        }));
-    }
-
-    // mark cancelled
-    room.cancelled = true;
-    room.game_active = false;
-
-    let reason = req.reason.as_deref().unwrap_or("player request");
-    tracing::info!("cancel: room={} seat={} reason={}", code, req.seat, reason);
-
-    // build refund plan — same format as payout outputs
-    // no rake on cancellation (game never started)
-    let mut refunds = Vec::new();
-
-    if room.player_a_deposit > 0 {
-        refunds.push(serde_json::json!({
-            "seat": 0,
-            "address": room.player_a_address.as_deref().unwrap_or("unknown"),
-            "amount": room.player_a_deposit,
-        }));
-    }
-
-    if room.player_b_deposit > 0 {
-        refunds.push(serde_json::json!({
-            "seat": 1,
-            "address": room.player_b_address.as_deref().unwrap_or("unknown"),
-            "amount": room.player_b_deposit,
-        }));
-    }
-
-    let total_refund: u64 = room.player_a_deposit + room.player_b_deposit;
-
-    Json(serde_json::json!({
-        "cancelled": true,
-        "reason": reason,
-        "cancelled_by": req.seat,
-        "escrow_address": hex::encode(&room.escrow_address),
-        "total_refund": total_refund,
-        "refunds": refunds,
-        "tx_type": "refund",
-    }))
-}
-
 async fn health() -> &'static str { "ok" }
 
 // ---------------------------------------------------------------------------
@@ -537,7 +536,7 @@ async fn deposit_monitor(state: AppState) {
         let mut activated = Vec::new();
 
         for (code, room) in rooms.iter_mut() {
-            if room.game_active || room.cancelled {
+            if room.game_active {
                 continue;
             }
 
@@ -557,7 +556,7 @@ async fn deposit_monitor(state: AppState) {
         }
 
         for code in activated {
-            tracing::info!("monitor: room={} both deposits confirmed — game_active=true", code);
+            tracing::info!("monitor: room={} both deposits confirmed -- game_active=true", code);
         }
     }
 }
@@ -626,7 +625,7 @@ async fn main() {
         .route("/room/{code}", axum::routing::get(get_room))
         .route("/room/{code}/deposit", axum::routing::post(report_deposit))
         .route("/room/{code}/settle", axum::routing::post(settle))
-        .route("/room/{code}/cancel", axum::routing::post(cancel_room))
+        .route("/room/{code}/payout", axum::routing::get(get_payout))
         .route("/room/{code}/sign", axum::routing::post(frost_sign))
         .route("/room/{code}/sign-round2", axum::routing::post(frost_sign_round2))
         .route("/health", axum::routing::get(health))
