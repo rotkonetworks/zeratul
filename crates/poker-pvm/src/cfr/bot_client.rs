@@ -3,75 +3,48 @@
 //! Connects to the relay server as a regular player.
 //! No special access — uses the same protocol as the browser client.
 //!
-//! Usage:
-//!   cfr-bot --server ws://localhost:3030/room/ws --strategy strategy_100m.bin --name "alice"
-//!   cfr-bot --server ws://poker.zk.bot/abc/ws --strategy strategy_100m.bin --moe-dir models/onnx
+//! Modes:
+//!   Single table:  cfr-bot --server ws://host/room/ws --strategy strategy.bin
+//!   Multi table:   cfr-bot --lobby ws://host/ws/lobby --strategy strategy.bin --max-tables 4
+//!   Named:         cfr-bot --server ws://host/room/ws --name "alice"
 
+use std::sync::Arc;
 use std::time::Duration;
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
+/// shared config across all bot threads
+struct BotConfig {
+    strategy: Arc<Vec<u8>>,
+    #[cfg(feature = "onnx")]
+    moe: Option<Arc<poker_pvm::cfr::inference::OnnxMoE>>,
+    #[cfg(feature = "onnx")]
+    moe_weight: f32,
+    base_name: String,
+}
 
-    let mut server_url = "ws://localhost:3030/test/ws".to_string();
-    let mut strategy_path = "strategy_100m.bin".to_string();
-    let mut name = "player".to_string();
-    let mut _moe_dir: Option<String> = None;
-    let mut _moe_weight: f32 = 0.3;
-
-    let mut i = 1;
-    while i < args.len() {
-        match args[i].as_str() {
-            "--server" => { if i+1 < args.len() { server_url = args[i+1].clone(); i += 1; } }
-            "--strategy" => { if i+1 < args.len() { strategy_path = args[i+1].clone(); i += 1; } }
-            "--name" => { if i+1 < args.len() { name = args[i+1].clone(); i += 1; } }
-            "--moe-dir" => { if i+1 < args.len() { _moe_dir = Some(args[i+1].clone()); i += 1; } }
-            "--moe-weight" => { if i+1 < args.len() { _moe_weight = args[i+1].parse().unwrap_or(0.3); i += 1; } }
-            _ => {}
-        }
-        i += 1;
-    }
-
-    let strategy = std::fs::read(&strategy_path)
-        .unwrap_or_else(|e| { eprintln!("failed to load {}: {}", strategy_path, e); std::process::exit(1); });
-
-    println!("cfr-bot v8");
-    println!("server:   {}", server_url);
-    println!("strategy: {} ({} bytes)", strategy_path, strategy.len());
-    println!("name:     {}", name);
-
-    // create brain
-    use poker_pvm::cfr::brain::*;
-
-    let mut brain = {
+impl BotConfig {
+    fn make_brain(&self) -> poker_pvm::cfr::brain::Brain {
+        use poker_pvm::cfr::brain::*;
         #[cfg(feature = "onnx")]
-        {
-            if let Some(ref dir) = _moe_dir {
-                use poker_pvm::cfr::inference::OnnxMoE;
-                match OnnxMoE::load(dir) {
-                    Ok(moe) => {
-                        println!("MoE:      {} (weight: {})", dir, _moe_weight);
-                        Brain::full_with_neural(&strategy, std::sync::Arc::new(moe), _moe_weight)
-                    }
-                    Err(e) => {
-                        eprintln!("MoE failed: {}, falling back to L0-L2", e);
-                        Brain::full_stack(&strategy)
-                    }
-                }
-            } else {
-                Brain::full_stack(&strategy)
-            }
+        if let Some(ref moe) = self.moe {
+            return Brain::full_with_neural(&self.strategy, moe.clone(), self.moe_weight);
         }
-        #[cfg(not(feature = "onnx"))]
-        { Brain::full_stack(&strategy) }
-    };
+        Brain::full_stack(&self.strategy)
+    }
+}
+
+/// run one bot on one table — blocking, runs until disconnect
+fn run_bot(config: &BotConfig, server_url: &str, bot_name: &str) {
+    let mut brain = config.make_brain();
 
     // connect
-    let (mut socket, _) = tungstenite::connect(&server_url)
-        .unwrap_or_else(|e| { eprintln!("connect failed: {}", e); std::process::exit(1); });
-    println!("connected");
+    let (mut socket, _) = match tungstenite::connect(server_url) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("[{}] connect failed: {}", bot_name, e); return; }
+    };
+    println!("[{}] connected to {}", bot_name, server_url);
 
     // join
-    let join = serde_json::json!({"type": "Join", "name": name});
+    let join = serde_json::json!({"type": "Join", "name": bot_name});
     socket.send(tungstenite::Message::Text(join.to_string())).unwrap();
 
     // state
@@ -100,6 +73,9 @@ fn main() {
             Ok(_) => continue,
             Err(e) => { eprintln!("error: {}", e); break; }
         };
+
+        // debug: print all messages
+        eprintln!("[recv] {}", &msg[..msg.len().min(200)]);
 
         let v: serde_json::Value = match serde_json::from_str(&msg) {
             Ok(v) => v,
@@ -344,5 +320,80 @@ fn to_server_action(action: poker_pvm::Action, amount: u32, valid: Option<&Vec<s
             format!(r#"{{"type":"Action","action":"raise","amount":{}}}"#, amt)
         }
         poker_pvm::Action::AllIn => r#"{"type":"Action","action":"allin"}"#.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main: single table or multi-table mode
+// ---------------------------------------------------------------------------
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    let mut servers: Vec<String> = Vec::new();
+    let mut strategy_path = "strategy.bin".to_string();
+    let mut base_name = "bot".to_string();
+    let mut _moe_dir: Option<String> = None;
+    let mut _moe_weight: f32 = 0.3;
+
+    let mut i = 1;
+    while i < args.len() {
+        match args[i].as_str() {
+            "--server" => { if i+1 < args.len() { servers.push(args[i+1].clone()); i += 1; } }
+            "--strategy" => { if i+1 < args.len() { strategy_path = args[i+1].clone(); i += 1; } }
+            "--name" => { if i+1 < args.len() { base_name = args[i+1].clone(); i += 1; } }
+            "--moe-dir" => { if i+1 < args.len() { _moe_dir = Some(args[i+1].clone()); i += 1; } }
+            "--moe-weight" => { if i+1 < args.len() { _moe_weight = args[i+1].parse().unwrap_or(0.3); i += 1; } }
+            _ => {}
+        }
+        i += 1;
+    }
+
+    let strategy = std::fs::read(&strategy_path)
+        .unwrap_or_else(|e| { eprintln!("failed to load {}: {}", strategy_path, e); std::process::exit(1); });
+
+    println!("cfr-bot v9");
+    println!("strategy: {} ({} bytes)", strategy_path, strategy.len());
+    println!("tables: {}", servers.len());
+
+    let config = Arc::new(BotConfig {
+        strategy: Arc::new(strategy),
+        #[cfg(feature = "onnx")]
+        moe: _moe_dir.as_ref().and_then(|dir| {
+            use poker_pvm::cfr::inference::OnnxMoE;
+            match OnnxMoE::load(dir) {
+                Ok(m) => { println!("MoE: {} (weight: {})", dir, _moe_weight); Some(Arc::new(m)) }
+                Err(e) => { eprintln!("MoE failed: {}", e); None }
+            }
+        }),
+        #[cfg(feature = "onnx")]
+        moe_weight: _moe_weight,
+        base_name: base_name.clone(),
+    });
+
+    if servers.is_empty() {
+        eprintln!("usage: cfr-bot --server ws://host/room/ws --strategy strategy.bin");
+        eprintln!("       cfr-bot --server ws://host/room1/ws --server ws://host/room2/ws");
+        std::process::exit(1);
+    }
+
+    if servers.len() == 1 {
+        // single table — run in main thread
+        run_bot(&config, &servers[0], &base_name);
+    } else {
+        // multi-table — one thread per table
+        println!("multi-table: {} tables", servers.len());
+        let mut handles = Vec::new();
+        for (idx, url) in servers.iter().enumerate() {
+            let config = config.clone();
+            let url = url.clone();
+            let name = format!("{}_{}", base_name, idx);
+            handles.push(std::thread::spawn(move || {
+                run_bot(&config, &url, &name);
+            }));
+        }
+        for h in handles {
+            let _ = h.join();
+        }
     }
 }
