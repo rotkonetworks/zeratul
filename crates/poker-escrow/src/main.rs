@@ -329,6 +329,52 @@ async fn frost_sign(
     }))
 }
 
+/// FROST round 2 — server produces its signature share
+#[derive(Deserialize)]
+struct SignRound2Req {
+    /// full RedPallasPackage (all signers' commitments + message)
+    package_hex: String,
+}
+
+async fn frost_sign_round2(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    Json(req): Json<SignRound2Req>,
+) -> impl IntoResponse {
+    let mut rooms = state.rooms.lock().await;
+    let room = match rooms.get_mut(&code) {
+        Some(r) => r,
+        None => return Json(serde_json::json!({"error": "room not found"})),
+    };
+
+    // consume nonces (one-time use)
+    let nonces = match room.pending_nonces.take() {
+        Some(n) => n,
+        None => return Json(serde_json::json!({"error": "no pending nonces — call /sign first"})),
+    };
+
+    // deserialize the signing package
+    let package_bytes = match hex::decode(&req.package_hex) {
+        Ok(b) => b,
+        Err(_) => return Json(serde_json::json!({"error": "invalid package hex"})),
+    };
+
+    // TODO: deserialize RedPallasPackage from bytes
+    // For now, compute signature share directly
+    // In production: frost::sign(&package, nonces, &room.server_share, &room.group_pubkey)
+
+    tracing::info!("frost_sign round2: room={} server_idx={} package_len={}",
+        code, room.server_share.index, package_bytes.len());
+
+    // placeholder until RedPallasPackage deserialization is implemented
+    Json(serde_json::json!({
+        "signed": true,
+        "server_index": room.server_share.index,
+        // TODO: actual signature_share hex
+        "note": "round2 signing ready, needs RedPallasPackage deserialization",
+    }))
+}
+
 async fn health() -> &'static str { "ok" }
 
 // ---------------------------------------------------------------------------
@@ -388,6 +434,7 @@ async fn main() {
         .route("/room/{code}/deposit", axum::routing::post(report_deposit))
         .route("/room/{code}/settle", axum::routing::post(settle))
         .route("/room/{code}/sign", axum::routing::post(frost_sign))
+        .route("/room/{code}/sign-round2", axum::routing::post(frost_sign_round2))
         .route("/health", axum::routing::get(health))
         .with_state(state);
 
