@@ -59,7 +59,9 @@ struct EscrowRoom {
     rake_paid: bool,
     game_active: bool,
     // payout
-    final_stacks: Option<(u64, u64)>,  // (player_a, player_b)
+    final_stacks: Option<(u64, u64)>,
+    // FROST signing state (ephemeral, consumed on round 2)
+    pending_nonces: Option<osst::frost::Nonces<PallasScalar>>,
     created_at: u64,
 }
 
@@ -127,6 +129,7 @@ async fn create_room(
             rake_paid: false,
             game_active: false,
             final_stacks: None,
+            pending_nonces: None,
             created_at: now_ms(),
         };
         (room, a_share_hex, b_share_hex, pubkey_hex, escrow_hex)
@@ -281,8 +284,8 @@ async fn frost_sign(
     Path(code): Path<String>,
     Json(req): Json<SignReq>,
 ) -> impl IntoResponse {
-    let rooms = state.rooms.lock().await;
-    let room = match rooms.get(&code) {
+    let mut rooms = state.rooms.lock().await;
+    let room = match rooms.get_mut(&code) {
         Some(r) => r,
         None => return Json(serde_json::json!({"error": "room not found"})),
     };
@@ -305,25 +308,24 @@ async fn frost_sign(
         _ => return Json(serde_json::json!({"error": "unknown tx_type"})),
     }
 
-    // TODO: actual FROST signing with server's key share
-    // For now, return a placeholder that proves the escrow service is willing to sign
-    let approval_hash = {
-        let mut hasher = Sha256::new();
-        hasher.update(b"poker-escrow/sign/v1");
-        hasher.update(code.as_bytes());
-        hasher.update(req.tx_type.as_bytes());
-        hasher.update(hex::decode(&req.sighash).unwrap_or_default());
-        hex::encode(&hasher.finalize()[..16])
+    // FROST round 1: generate commitment + store nonces for round 2
+    let (nonces, commitment) = {
+        let mut rng = rand::thread_rng();
+        frost::commit(room.server_share.index, &mut rng)
     };
+    let commitment_bytes = commitment.to_bytes();
 
-    tracing::info!("frost_sign: room={} type={} sighash={}...",
-        code, req.tx_type, &req.sighash[..req.sighash.len().min(16)]);
+    // store nonces for round 2 (consumed when sign-round2 is called)
+    room.pending_nonces = Some(nonces);
+
+    tracing::info!("frost_sign round1: room={} type={} server_idx={}",
+        code, req.tx_type, room.server_share.index);
 
     Json(serde_json::json!({
         "approved": true,
-        "approval_hash": approval_hash,
         "server_index": room.server_share.index,
-        // TODO: actual frost_sign_round1 commitment + round2 share
+        "server_commitment": hex::encode(&commitment_bytes),
+        "tx_type": req.tx_type,
     }))
 }
 
