@@ -33,6 +33,41 @@ service Zidecar {
 
     // Get transparent transaction history for addresses
     rpc GetTaddressTxids(TransparentAddressFilter) returns (TxidList);
+
+    // Check license status for a ZID (scans payments to rotko address)
+    rpc CheckLicense(LicenseRequest) returns (LicenseResponse);
+
+    // Get the current pro subscriber ring for anonymous membership proofs
+    rpc GetProRing(Empty) returns (ProRing);
+}
+
+// License request by ZID public key
+message LicenseRequest {
+    string zid = 1;              // ZID public key (hex)
+    bytes ring_pubkey = 2;       // Bandersnatch public key for ring VRF (32 bytes)
+}
+
+// Signed license response
+message LicenseResponse {
+    string zid = 1;           // ZID public key (hex)
+    string plan = 2;          // "free" or "pro"
+    uint64 expires = 3;       // unix timestamp (seconds)
+    string signature = 4;     // ed25519 signature (hex) over "zafu-license-v1\n{zid}\n{plan}\n{expires}"
+    uint64 total_paid_zat = 5; // cumulative payment amount
+}
+
+// Ring of pro subscriber Bandersnatch public keys (daily rotation)
+message ProRing {
+    // all pro subscriber Bandersnatch public keys (32 bytes each, compressed)
+    repeated bytes ring_keys = 1;
+    // ring commitment (144 bytes, serialized verifier commitment)
+    bytes commitment = 2;
+    // ring epoch (YYYY-MM-DD, rotates daily)
+    string epoch = 3;
+    // context string for VRF input (includes server nonce for freshness)
+    string context = 4;
+    // number of keys in the ring
+    uint32 ring_size = 5;
 }
 
 // Request proof for height range
