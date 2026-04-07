@@ -18,30 +18,26 @@ NUM_ACTIONS = None  # read from data header
 
 def load_selfplay_data(path):
     """Load binary self-play data: [count, n_feat, n_act, samples...]"""
+    import numpy as np
     data = Path(path).read_bytes()
-    pos = 0
-    count = struct.unpack_from('<I', data, pos)[0]; pos += 4
-    n_feat = struct.unpack_from('<I', data, pos)[0]; pos += 4
-    n_act = struct.unpack_from('<I', data, pos)[0]; pos += 4
+    count = struct.unpack_from('<I', data, 0)[0]
+    n_feat = struct.unpack_from('<I', data, 4)[0]
+    n_act = struct.unpack_from('<I', data, 8)[0]
 
     print(f"loading {count} samples ({n_feat} features, {n_act} actions)")
 
-    features, policies, values, expert_ids = [], [], [], []
-    for _ in range(count):
-        f = list(struct.unpack_from(f'<{n_feat}f', data, pos)); pos += n_feat * 4
-        p = list(struct.unpack_from(f'<{n_act}f', data, pos)); pos += n_act * 4
-        v = struct.unpack_from('<f', data, pos)[0]; pos += 4
-        pot = struct.unpack_from('<I', data, pos)[0]; pos += 4
-        eid = data[pos]; pos += 1
+    sample_size = n_feat * 4 + n_act * 4 + 4 + 4 + 1
+    raw = np.frombuffer(data, dtype=np.uint8, offset=12)
+    raw = raw[:count * sample_size].reshape(count, sample_size)
 
-        features.append(f)
-        policies.append(p)
-        values.append(v)
-        expert_ids.append(eid)
+    features = np.frombuffer(raw[:, :n_feat*4].tobytes(), dtype=np.float32).reshape(count, n_feat).copy()
+    policies = np.frombuffer(raw[:, n_feat*4:(n_feat+n_act)*4].tobytes(), dtype=np.float32).reshape(count, n_act).copy()
+    values = np.frombuffer(raw[:, (n_feat+n_act)*4:(n_feat+n_act+1)*4].tobytes(), dtype=np.float32).reshape(count).copy()
+    expert_ids = raw[:, -1].astype(np.int64).copy()
 
     return features, policies, values, expert_ids
 
-def train(features, policies, values, expert_ids, version, output_dir, n_actions, epochs=60, resume_dir=None):
+def train(features, policies, values, expert_ids, version, output_dir, n_actions, epochs=60, resume_dir=None, only_expert=None):
     try:
         import torch
         import torch.nn as nn
@@ -53,22 +49,22 @@ def train(features, policies, values, expert_ids, version, output_dir, n_actions
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"training on {device}, {len(features)} samples, {n_actions} actions, {epochs} epochs")
 
-    X = torch.tensor(features, dtype=torch.float32).to(device)
-    Yp = torch.tensor(policies, dtype=torch.float32).to(device)
-    Yv = torch.tensor(values, dtype=torch.float32).to(device)
-    E = torch.tensor(expert_ids, dtype=torch.long).to(device)
+    # keep data on CPU, move batches to GPU to avoid VRAM OOM
+    X = torch.from_numpy(features).float()
+    Yp = torch.from_numpy(policies).float()
+    Yv = torch.from_numpy(values).float()
+    E = torch.from_numpy(expert_ids).long()
 
     MAX_THINK = 8
 
-    # per-expert max ticks — learned from bound analysis
-    # shortstack: push/fold is 2-tick, postflop needs more thinking
+    # all experts get max ticks — adaptive halt stops early when policy converges
     EXPERT_MAX_TICKS = {
-        'headsup': 6,
-        'preflop_multi': 6,
-        'postflop_wet': 8,
-        'postflop_dry': 8,
-        'shortstack': 3,
-        'river_polar': 6,
+        'headsup': MAX_THINK,
+        'preflop_multi': MAX_THINK,
+        'postflop_wet': MAX_THINK,
+        'postflop_dry': MAX_THINK,
+        'shortstack': MAX_THINK,
+        'river_polar': MAX_THINK,
     }
 
     class CTMExpert(nn.Module):
@@ -76,12 +72,9 @@ def train(features, policies, values, expert_ids, version, output_dir, n_actions
             super().__init__()
             self.max_ticks = max_ticks
             self.kl_halt_threshold = kl_halt_threshold
-            # spectral normalization on step weights prevents divergence
             self.step = nn.Sequential(
-                nn.utils.parametrizations.spectral_norm(nn.Linear(NUM_FEATURES + hidden, hidden)),
-                nn.GELU(),
-                nn.utils.parametrizations.spectral_norm(nn.Linear(hidden, hidden)),
-                nn.GELU())
+                nn.Linear(NUM_FEATURES + hidden, hidden), nn.GELU(),
+                nn.Linear(hidden, hidden), nn.GELU())
             self.halt = nn.Linear(hidden, 1)
             self.vhead = nn.Linear(hidden, 1)
             self.phead = nn.Linear(hidden, n_actions)
@@ -181,6 +174,8 @@ def train(features, policies, values, expert_ids, version, output_dir, n_actions
 
     # train each expert on its data
     for eid in range(6):
+        if only_expert and EXPERT_NAMES[eid] != only_expert:
+            continue
         mask = E == eid
         if mask.sum() < 100:
             print(f"  expert {EXPERT_NAMES[eid]}: {mask.sum()} samples, skipping")
@@ -210,13 +205,16 @@ def train(features, policies, values, expert_ids, version, output_dir, n_actions
         step_weights = torch.ones(expert_ticks, device=device)
         bound_every = 20
 
-        print(f"  expert {EXPERT_NAMES[eid]}: {mask.sum()} samples")
+        BATCH = 2048
+        print(f"  expert {EXPERT_NAMES[eid]}: {mask.sum()} samples (batch={BATCH})")
+        import time as _time
+        _t0 = _time.time()
         for epoch in range(epochs):
             perm = torch.randperm(len(ex))
             total_loss = 0; total_vloss = 0; total_ploss = 0; batches = 0
-            for j in range(0, len(ex), 512):
-                idx = perm[j:j+512]
-                bx, bp, bv = ex[idx], ep[idx], ev[idx]
+            for j in range(0, len(ex), BATCH):
+                idx = perm[j:j+BATCH]
+                bx, bp, bv = ex[idx].to(device), ep[idx].to(device), ev[idx].to(device)
                 pv, pp, sv, sp = model.forward_weighted(bx, step_weights)
                 vloss = ((pv - bv)**2).mean()
                 ploss = (bp * (torch.log(bp + 1e-8) - torch.log(pp + 1e-8))).sum(-1).mean()
@@ -233,13 +231,16 @@ def train(features, policies, values, expert_ids, version, output_dir, n_actions
                 total_loss += loss.item(); total_vloss += vloss.item(); total_ploss += ploss.item()
                 batches += 1
             sched.step()
+            avg_l = total_loss/max(batches,1)
+            _elapsed = _time.time() - _t0
+            print(f"    epoch {epoch+1}/{epochs}: loss={avg_l:.4f} [{_elapsed:.0f}s]")
 
             if (epoch+1) % bound_every == 0:
                 # bound analysis: diagnose per-step thinking quality
                 model.eval()
                 with torch.no_grad():
                     n_analyze = min(1000, len(ex))
-                    diag = model.forward_diagnostic(ex[:n_analyze], ev[:n_analyze])
+                    diag = model.forward_diagnostic(ex[:n_analyze].to(device), ev[:n_analyze].to(device))
 
                     # reweight: steps with high loss get more gradient
                     if diag['step_vloss']:
@@ -266,7 +267,9 @@ def train(features, policies, values, expert_ids, version, output_dir, n_actions
         torch.save({'model_state': model.state_dict(), 'expert': EXPERT_NAMES[eid], 'version': version}, path)
         print(f"    saved {path}")
 
-    # train router
+    # train router (skip if only training one expert)
+    if only_expert:
+        return
     class Router(nn.Module):
         def __init__(self):
             super().__init__()
@@ -282,12 +285,18 @@ def train(features, policies, values, expert_ids, version, output_dir, n_actions
         total_loss = 0; batches = 0
         for j in range(0, len(X), 256):
             idx = perm[j:j+256]
-            logits = router(X[idx])
-            loss = nn.CrossEntropyLoss()(logits, E[idx])
+            logits = router(X[idx].to(device))
+            loss = nn.CrossEntropyLoss()(logits, E[idx].to(device))
             opt.zero_grad(); loss.backward(); opt.step()
             total_loss += loss.item(); batches += 1
         if (epoch+1) % 10 == 0:
-            acc = (router(X).argmax(-1) == E).float().mean()
+            # evaluate router accuracy in batches to avoid OOM
+            correct = 0
+            for k in range(0, len(X), 4096):
+                bx = X[k:k+4096].to(device)
+                be = E[k:k+4096].to(device)
+                correct += (router(bx).argmax(-1) == be).sum().item()
+            acc = correct / len(X)
             print(f"    epoch {epoch+1}: loss={total_loss/batches:.4f} acc={acc:.3f}")
 
     path = f"{output_dir}/router_v{version}.pt"
@@ -301,9 +310,10 @@ if __name__ == '__main__':
     parser.add_argument('--output-dir', default='models')
     parser.add_argument('--epochs', type=int, default=60)
     parser.add_argument('--resume-dir', default=None, help='directory with previous version models to resume from')
+    parser.add_argument('--expert', default=None, help='train only this expert (e.g. shortstack)')
     args = parser.parse_args()
 
     os.makedirs(args.output_dir, exist_ok=True)
     features, policies, values, expert_ids = load_selfplay_data(args.data)
-    n_actions = len(policies[0]) if policies else 8
-    train(features, policies, values, expert_ids, args.version, args.output_dir, n_actions, args.epochs, args.resume_dir)
+    n_actions = policies.shape[1] if len(policies) > 0 else 8
+    train(features, policies, values, expert_ids, args.version, args.output_dir, n_actions, args.epochs, args.resume_dir, args.expert)

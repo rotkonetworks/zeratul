@@ -22,10 +22,11 @@ def export(model_dir, version, output_dir):
     class CTMExpert(nn.Module):
         def __init__(self, hidden=128):
             super().__init__()
+            # no spectral norm for export — saved weights are plain
             self.step = nn.Sequential(
-                nn.utils.parametrizations.spectral_norm(nn.Linear(NUM_FEATURES + hidden, hidden)),
+                nn.Linear(NUM_FEATURES + hidden, hidden),
                 nn.GELU(),
-                nn.utils.parametrizations.spectral_norm(nn.Linear(hidden, hidden)),
+                nn.Linear(hidden, hidden),
                 nn.GELU())
             self.halt = nn.Linear(hidden, 1)
             self.vhead = nn.Linear(hidden, 1)
