@@ -67,6 +67,8 @@ pub struct PokerBot {
     /// CTM-MoE for leaf evaluation (replaces blueprint at depth limit)
     #[cfg(feature = "onnx")]
     pub moe: Option<super::inference::OnnxMoE>,
+    /// Native CTM for leaf evaluation with sync accumulators
+    pub native_ctm: Option<std::sync::Arc<std::sync::Mutex<super::ctm_native::NativeCTMExpert>>>,
 }
 
 impl PokerBot {
@@ -76,6 +78,7 @@ impl PokerBot {
             rng_state: 0xB0BA_CAFE_F00D_1234,
             #[cfg(feature = "onnx")]
             moe: None,
+            native_ctm: None,
         }
     }
 
@@ -168,7 +171,11 @@ impl PokerBot {
             hand_strength_bucket(*hole, &community[..board_len], 10, 200, &mut || self.rng())
         };
 
-        let key = InfoSetKey { hand_bucket, history: history.to_vec(), street };
+        let position = if state.acting_seat == state.button { 1 } else { 0 };
+        let opp = 1 - state.acting_seat as usize;
+        let stack_bucket = super::abstraction::stack_depth_bucket(state.stacks[state.acting_seat as usize], state.stacks[opp], state.rules.big_blind as u32);
+        let board_texture = if state.community_count > 0 { super::abstraction::board_texture_bucket(&community[..state.community_count as usize]) } else { 0 };
+        let key = InfoSetKey { hand_bucket, history: history.to_vec(), street, position, stack_bucket, board_texture };
         self.config.blueprint.get(&key.to_bytes()).cloned()
     }
 
@@ -345,10 +352,29 @@ impl PokerBot {
         }
     }
 
+    /// Attach native CTM for leaf evaluation (replaces ONNX and MC rollout)
+    pub fn set_native_ctm(&mut self, ctm: std::sync::Arc<std::sync::Mutex<super::ctm_native::NativeCTMExpert>>) {
+        self.native_ctm = Some(ctm);
+    }
+
     /// L2: leaf node evaluation
-    /// Uses CTM-MoE when available, falls back to MC rollout.
+    /// Priority: native CTM > ONNX MoE > MC rollout
     fn leaf_evaluate(&mut self, state: &GameState, hole: &[u8; 2], community: &[u8; 5], seat: u8) -> f64 {
-        // try CTM-MoE first (if loaded)
+        // try native CTM first (with sync accumulators)
+        if let Some(ref ctm_arc) = self.native_ctm {
+            if let Ok(mut ctm) = ctm_arc.lock() {
+                let mut features = [0.0f32; 33];
+                features[13] = state.pot as f32 / 1000.0;
+                features[16] = state.stacks[seat as usize] as f32 / 1000.0;
+                let opp = 1 - seat as usize;
+                features[17] = state.stacks[opp] as f32 / 1000.0;
+                // Don't persist sync during search — search explores hypothetical futures
+                let output = ctm.forward(&features, false);
+                return output.value as f64;
+            }
+        }
+
+        // try ONNX MoE (if loaded)
         #[cfg(feature = "onnx")]
         if let Some(ref moe) = self.moe {
             let board_len = match state.phase {
@@ -522,15 +548,13 @@ impl PokerBot {
         Some(*result.actions.last().unwrap())
     }
 
-    /// map blueprint abstract probs [fold, check/call, small_bet, big_bet]
-    /// to concrete action probs matching the actions list
-    /// map blueprint's 4 abstract actions [fold, check/call, small_bet, big_bet]
-    /// onto concrete actions with Pluribus-style sizing
+    /// map blueprint 9 abstract actions onto concrete actions
+    /// matches CTM-MoE: [fold, check, call, bet_25, bet_50, bet_75, bet_100, bet_200, allin]
     fn blueprint_to_concrete(&self, bp: &[f64], actions: &[(Action, u32)], state: &GameState) -> Vec<f64> {
         let mut probs = vec![0.0; actions.len()];
-        let bp4: Vec<f64> = {
+        let bp9: Vec<f64> = {
             let mut v = bp.to_vec();
-            while v.len() < 4 { v.push(0.0); }
+            while v.len() < 9 { v.push(0.0); }
             v
         };
 
@@ -538,25 +562,32 @@ impl PokerBot {
 
         for (i, &(action, amount)) in actions.iter().enumerate() {
             match action {
-                Action::Fold => probs[i] = bp4[0],
-                Action::Check => probs[i] = bp4[1],
-                Action::Call => probs[i] = bp4[1],
+                Action::Fold => probs[i] = bp9[0],
+                Action::Check => probs[i] = bp9[1],
+                Action::Call => probs[i] = bp9[2],
                 Action::Bet | Action::Raise => {
-                    // distribute small_bet and big_bet across 5 sizing options
                     let frac = if pot > 0 { amount as f64 / pot as f64 } else { 1.0 };
                     if frac <= 0.375 {
-                        probs[i] = bp4[2] * 0.7; // 1/4 pot → small bucket
+                        probs[i] = bp9[3];       // bet_25
                     } else if frac <= 0.625 {
-                        probs[i] = bp4[2]; // 1/2 pot → small bucket
+                        probs[i] = bp9[4];       // bet_50
                     } else if frac <= 0.875 {
-                        probs[i] = bp4[2] * 0.3 + bp4[3] * 0.4; // 3/4 pot → blend
+                        probs[i] = bp9[5];       // bet_75
                     } else if frac <= 1.5 {
-                        probs[i] = bp4[3]; // pot → big bucket
+                        probs[i] = bp9[6];       // bet_100
                     } else {
-                        probs[i] = bp4[3] * 0.7; // 2x pot → big bucket
+                        probs[i] = bp9[7];       // bet_200
                     }
                 }
-                Action::AllIn => probs[i] = bp4[3] * 0.4,
+                Action::AllIn => {
+                    let stack = state.stacks[state.acting_seat as usize];
+                    let spr = if pot > 0 { stack as f64 / pot as f64 } else { 20.0 };
+                    let allin_weight = if spr > 10.0 { 0.3 }
+                        else if spr > 5.0 { 0.5 }
+                        else if spr > 2.0 { 0.8 }
+                        else { 1.0 };
+                    probs[i] = bp9[8] * allin_weight;
+                }
             }
         }
 
@@ -621,7 +652,7 @@ mod tests {
 
         // add entries for ALL 169 preflop buckets so we always hit
         for bucket in 0..169u16 {
-            let key = InfoSetKey { hand_bucket: bucket, history: vec![], street: 0 };
+            let key = InfoSetKey { hand_bucket: bucket, history: vec![], street: 0, position: 0, stack_bucket: 3, board_texture: 0 };
             if bucket >= 150 {
                 // premium hands: heavy allin
                 blueprint.insert(key.to_bytes(), vec![0.01, 0.04, 0.05, 0.90]);

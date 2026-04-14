@@ -35,6 +35,13 @@ pub mod multi_solver;
 pub mod parallel;
 pub mod range;
 pub mod brain;
+pub mod plasticity;
+pub mod ctm_native;
+pub mod moe_native;
+pub mod hebbian;
+pub mod evolve;
+#[cfg(feature = "std")]
+pub mod tournament;
 #[cfg(feature = "std")]
 pub mod ctm;
 #[cfg(feature = "std")]

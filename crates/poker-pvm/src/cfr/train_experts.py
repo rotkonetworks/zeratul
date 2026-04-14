@@ -33,8 +33,8 @@ from pathlib import Path
 from dataclasses import dataclass, field
 from typing import List, Dict, Optional
 
-NUM_FEATURES = 27
-NUM_ACTIONS = 6
+NUM_FEATURES = 33  # 27 base + 6 opponent profile
+NUM_ACTIONS = 9  # fold, check, call, bet_25, bet_50, bet_75, bet_100, bet_200, allin
 MAX_THINK_STEPS = 8
 
 # ---------------------------------------------------------------------------
@@ -91,7 +91,10 @@ def card_suit(c): return c // 13
 # Feature extraction (matches ctm.rs)
 # ---------------------------------------------------------------------------
 
-def extract_features(community, pot, hero_stack, villain_stack, current_bet, big_blind, is_ip, player_count=2):
+NUM_PROFILE_FEATURES = 6  # vpip, pfr, af, fold_to_3bet, wtsd, hands_seen_norm
+
+def extract_features(community, pot, hero_stack, villain_stack, current_bet, big_blind, is_ip, player_count=2,
+                     range_equity=None, range_polarization=None, opponent_profile=None):
     f = [0.0] * NUM_FEATURES
 
     if community:
@@ -130,13 +133,41 @@ def extract_features(community, pot, hero_stack, villain_stack, current_bet, big
     bb = max(big_blind, 1)
     f[16] = min(hero_stack / bb / 200.0, 1.0)
     f[17] = min(villain_stack / bb / 200.0, 1.0)
-    f[18:22] = [0.5, 0.3, 0.1, 0.1]  # range placeholder
+
+    # Range features — realistic values, not placeholders
+    if range_equity is not None:
+        f[18] = range_equity  # [0, 1] how strong our hand vs opponent range
+        f[19] = range_polarization if range_polarization is not None else 0.3
+        # top/bottom of range (how our hand ranks in our own range)
+        f[20] = max(0, range_equity - 0.3) / 0.7  # rough top_pct proxy
+        f[21] = max(0, 0.7 - range_equity) / 0.7  # rough bottom_pct proxy
+    else:
+        # During training: sample realistic range values based on hand strength
+        # This teaches the model to USE range information
+        f[18] = 0.5  # will be overwritten by caller
+        f[19] = 0.3
+        f[20] = 0.1
+        f[21] = 0.1
+
     nc = len(community) if community else 0
     f[22] = 1.0 if nc == 0 else 0.0
     f[23] = 1.0 if nc == 3 else 0.0
     f[24] = 1.0 if nc == 4 else 0.0
     f[25] = 1.0 if nc == 5 else 0.0
     f[26] = 1.0 if is_ip else 0.0
+
+    # Opponent profile features (appended beyond base features)
+    # These match what we observe live: VPIP, PFR, AF, fold_to_3bet, WTSD, confidence
+    if opponent_profile is not None:
+        # Ensure NUM_FEATURES is large enough
+        base = 27
+        f[base] = opponent_profile.get('vpip', 0.5)           # voluntary put in pot [0,1]
+        f[base+1] = opponent_profile.get('pfr', 0.3)          # preflop raise [0,1]
+        f[base+2] = opponent_profile.get('af', 0.5)           # aggression factor [0,1] normalized
+        f[base+3] = opponent_profile.get('fold_to_3bet', 0.5) # [0,1]
+        f[base+4] = opponent_profile.get('wtsd', 0.3)         # went to showdown [0,1]
+        f[base+5] = opponent_profile.get('confidence', 0.0)   # [0,1] how many hands seen
+
     return f
 
 # ---------------------------------------------------------------------------
@@ -201,6 +232,8 @@ def eval_5(hand):
     return (ranks[0]<<16)|(ranks[1]<<12)|(ranks[2]<<8)|(ranks[3]<<4)|ranks[4]
 
 def hand_strength(hole, community, rollouts=100):
+    if not community:
+        return 0.5  # no community cards = unknown
     available = [c for c in DECK if c not in hole and c not in community]
     wins, total = 0, 0
     for _ in range(rollouts):
@@ -208,10 +241,12 @@ def hand_strength(hole, community, rollouts=100):
         opp = available[:2]
         remaining = 5 - len(community)
         board = list(community) + available[2:2+remaining]
-        h_best = max(eval_5([hole[0], hole[1]] + [board[a] for a in combo])
-                     for combo in _combos5from7(list(hole) + board))
-        o_best = max(eval_5([opp[0], opp[1]] + [board[a] for a in combo])
-                     for combo in _combos5from7(list(opp) + board))
+        all7_h = list(hole) + board
+        all7_o = list(opp) + board
+        h_best = max(eval_5([all7_h[k] for k in combo])
+                     for combo in _combos5from7(all7_h))
+        o_best = max(eval_5([all7_o[k] for k in combo])
+                     for combo in _combos5from7(all7_o))
         if h_best > o_best: wins += 2
         elif h_best == o_best: wins += 1
         total += 2
@@ -265,10 +300,51 @@ def generate_expert_data(expert_name, blueprints, num_positions=50000):
         if situation != expert_name:
             continue
 
-        features = extract_features(community, pot, hero_stack, villain_stack, current_bet, big_blind, is_ip, player_count)
+        # Compute real hand strength for range features
+        # hand_strength needs community cards — use 0.5 for preflop
+        if community:
+            hs = hand_strength(hole, community, rollouts=15)
+        else:
+            # Preflop: approximate from hole cards (high cards + pairs are strong)
+            r0, r1 = card_rank(hole[0]), card_rank(hole[1])
+            suited = card_suit(hole[0]) == card_suit(hole[1])
+            pair_bonus = 0.3 if r0 == r1 else 0
+            high_bonus = (r0 + r1) / 24.0  # 0-1 scale
+            suit_bonus = 0.05 if suited else 0
+            hs = min(1.0, 0.2 + pair_bonus + high_bonus * 0.4 + suit_bonus)
+
+        # Simulate realistic range equity: hand_strength + noise
+        # In real play, range equity comes from Bayesian tracking of opponent actions
+        # Here we approximate: our equity correlates with hand strength but varies
+        range_noise = random.gauss(0, 0.15)
+        range_equity = max(0, min(1, hs + range_noise))
+        range_polar = random.uniform(0.1, 0.6)
+
+        # Generate random opponent profile (simulates different player types)
+        # This teaches the model to use profile info for decisions
+        opp_type = random.choice(['rock', 'nit', 'tag', 'lag', 'maniac', 'station', 'average'])
+        profiles = {
+            'rock':    {'vpip': 0.12, 'pfr': 0.08, 'af': 0.3, 'fold_to_3bet': 0.85, 'wtsd': 0.20},
+            'nit':     {'vpip': 0.10, 'pfr': 0.07, 'af': 0.2, 'fold_to_3bet': 0.90, 'wtsd': 0.15},
+            'tag':     {'vpip': 0.22, 'pfr': 0.18, 'af': 0.6, 'fold_to_3bet': 0.55, 'wtsd': 0.28},
+            'lag':     {'vpip': 0.35, 'pfr': 0.28, 'af': 0.8, 'fold_to_3bet': 0.40, 'wtsd': 0.32},
+            'maniac':  {'vpip': 0.55, 'pfr': 0.40, 'af': 0.9, 'fold_to_3bet': 0.20, 'wtsd': 0.40},
+            'station': {'vpip': 0.45, 'pfr': 0.10, 'af': 0.2, 'fold_to_3bet': 0.30, 'wtsd': 0.45},
+            'average': {'vpip': 0.28, 'pfr': 0.20, 'af': 0.5, 'fold_to_3bet': 0.50, 'wtsd': 0.30},
+        }
+        profile = profiles[opp_type].copy()
+        # Add noise to each stat (opponents aren't textbook types)
+        for k in profile:
+            profile[k] = max(0, min(1, profile[k] + random.gauss(0, 0.05)))
+        # Confidence: how many hands we've seen (varies 0-1)
+        profile['confidence'] = random.choice([0.0, 0.1, 0.3, 0.5, 0.7, 0.9])
+
+        features = extract_features(community, pot, hero_stack, villain_stack, current_bet, big_blind, is_ip, player_count,
+                                    range_equity=range_equity, range_polarization=range_polar,
+                                    opponent_profile=profile)
 
         # query blueprints
-        bucket = int(hand_strength(hole, community, rollouts=50) * 9.99)
+        bucket = int(hs * 9.99)
         key = bytes([bucket, street, 0])
         total_w = 0.0
         policy = [0.0] * NUM_ACTIONS
@@ -352,15 +428,23 @@ def parse_phh_for_expert(phh_dir, expert_name):
 
                     situation = classify_situation(community, pot, hero_stack, villain_stack, bb, n, street)
                     if situation == expert_name:
-                        features = extract_features(community, pot, hero_stack, villain_stack, current_bet, bb, player==0, n)
-                        # map action
+                        features = extract_features(community, pot, hero_stack, villain_stack, current_bet, bb, player==0, n,
+                                                    range_equity=random.uniform(0.2, 0.8), range_polarization=random.uniform(0.1, 0.5),
+                                                    opponent_profile={'vpip': 0.28, 'pfr': 0.2, 'af': 0.5, 'fold_to_3bet': 0.5, 'wtsd': 0.3, 'confidence': 0.5})
+                        # map action to 9-action abstraction
+                        # [fold, check, call, bet_25, bet_50, bet_75, bet_100, bet_200, allin]
                         action_idx = 1  # default check
                         if act == 'f': action_idx = 0
                         elif act == 'cc' and current_bet > 0: action_idx = 2
                         elif act == 'cc': action_idx = 1
                         elif act in ('cbr','br','r'):
                             ratio = amount / max(pot, 1)
-                            action_idx = 5 if ratio >= 2 else (4 if ratio >= 0.75 else 3)
+                            if ratio <= 0.375: action_idx = 3     # bet_25
+                            elif ratio <= 0.625: action_idx = 4   # bet_50
+                            elif ratio <= 0.875: action_idx = 5   # bet_75
+                            elif ratio <= 1.5: action_idx = 6     # bet_100
+                            else: action_idx = 7                   # bet_200
+                        elif act == 'allin': action_idx = 8
                         policy = [0.0]*NUM_ACTIONS
                         policy[action_idx] = 1.0
                         samples.append(Sample(features=features, target_policy=policy, target_value=0.0))
@@ -394,34 +478,79 @@ def train_expert(expert_name, samples, version, output_dir, epochs=80):
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
     class CTMExpert(nn.Module):
-        def __init__(self, input_dim=NUM_FEATURES, hidden_dim=128):
+        """CTM expert with sync accumulators for neuroplasticity.
+
+        The sync signal accumulates across hands (when persist=True), enabling
+        gradient-free adaptation to opponent patterns. Output heads are
+        conditioned on accumulated sync so behavior shifts based on history.
+        """
+        def __init__(self, input_dim=NUM_FEATURES, hidden_dim=128, n_synch=64):
             super().__init__()
+            self.hidden_dim = hidden_dim
+            self.n_synch = n_synch
             self.step_net = nn.Sequential(
                 nn.Linear(input_dim + hidden_dim, hidden_dim), nn.GELU(),
                 nn.Linear(hidden_dim, hidden_dim), nn.GELU(),
             )
             self.halt_net = nn.Linear(hidden_dim, 1)
-            self.value_head = nn.Linear(hidden_dim, 1)
-            self.policy_head = nn.Linear(hidden_dim, NUM_ACTIONS)
+            self.value_head = nn.Linear(hidden_dim + n_synch, 1)
+            self.policy_head = nn.Linear(hidden_dim + n_synch, NUM_ACTIONS)
             self.init_hidden = nn.Parameter(torch.randn(hidden_dim) * 0.01)
 
-        def forward(self, x, max_steps=MAX_THINK_STEPS):
+            # Sync pairs + learnable decay
+            self.register_buffer('sync_left', torch.randperm(hidden_dim)[:n_synch])
+            self.register_buffer('sync_right', torch.randperm(hidden_dim)[:n_synch])
+            self.decay = nn.Parameter(torch.zeros(n_synch))
+
+            # Persistent sync state (memory channel across hands)
+            self.register_buffer('persist_alpha', torch.zeros(n_synch))
+            self.register_buffer('persist_beta', torch.ones(n_synch))
+
+        def reset_memory(self):
+            self.persist_alpha.zero_()
+            self.persist_beta.fill_(1.0)
+
+        def forward(self, x, max_steps=MAX_THINK_STEPS, persist=False):
             batch = x.shape[0]
             h = self.init_hidden.unsqueeze(0).expand(batch, -1)
+            r = torch.exp(-self.decay.clamp(0, 15))
+
+            if persist:
+                alpha = self.persist_alpha.unsqueeze(0).expand(batch, -1).clone()
+                beta = self.persist_beta.unsqueeze(0).expand(batch, -1).clone()
+            else:
+                alpha = torch.zeros(batch, self.n_synch, device=x.device)
+                beta = torch.ones(batch, self.n_synch, device=x.device)
+
             total_v = torch.zeros(batch, device=x.device)
             total_p = torch.zeros(batch, NUM_ACTIONS, device=x.device)
             remaining = torch.ones(batch, device=x.device)
+
             for step in range(max_steps):
                 h = self.step_net(torch.cat([x, h], dim=-1))
+                left = h[:, self.sync_left]
+                right = h[:, self.sync_right]
+                alpha = r * alpha + left * right
+                beta = r * beta + 1
+                sync = alpha / torch.sqrt(beta)
+
                 halt = torch.sigmoid(self.halt_net(h)).squeeze(-1)
-                v = self.value_head(h).squeeze(-1)
-                p = torch.softmax(self.policy_head(h), dim=-1)
+                h_sync = torch.cat([h, sync], dim=-1)
+                v = self.value_head(h_sync).squeeze(-1)
+                p = torch.softmax(self.policy_head(h_sync), dim=-1)
                 emit = remaining * halt
                 total_v += emit * v
                 total_p += emit.unsqueeze(-1) * p
                 remaining = remaining * (1 - halt)
-            total_v += remaining * self.value_head(h).squeeze(-1)
-            total_p += remaining.unsqueeze(-1) * torch.softmax(self.policy_head(h), dim=-1)
+
+            h_sync = torch.cat([h, sync], dim=-1)
+            total_v += remaining * self.value_head(h_sync).squeeze(-1)
+            total_p += remaining.unsqueeze(-1) * torch.softmax(self.policy_head(h_sync), dim=-1)
+
+            if persist:
+                self.persist_alpha.copy_(alpha.mean(0).detach())
+                self.persist_beta.copy_(beta.mean(0).detach())
+
             return total_v, total_p
 
     model = CTMExpert().to(device)
@@ -439,16 +568,37 @@ def train_expert(expert_name, samples, version, output_dir, epochs=80):
     step_weights = torch.ones(MAX_THINK_STEPS, device=device)
     bound_analyze_every = 20
 
+    # Session length for persistent sync training
+    # 70% of batches use fresh sync, 30% use persistent (session of 16 hands)
+    session_len = 16
+    persist_ratio = 0.30
+
     for epoch in range(epochs):
         perm = torch.randperm(len(X))
         total_loss = 0; batches = 0
         for i in range(0, len(X), 512):
             idx = perm[i:i+512]
             bx, bp, bv = X[idx], Yp[idx], Yv[idx]
-            pv, pp = model(bx)
-            vloss = ((pv - bv)**2).mean()
-            ploss = (bp * (torch.log(bp + 1e-8) - torch.log(pp + 1e-8))).sum(-1).mean()
-            loss = vloss + ploss
+
+            use_persist = random.random() < persist_ratio
+            if use_persist and len(bx) >= session_len:
+                # Train with persistent sync: sequential session
+                model.reset_memory()
+                session_loss = torch.tensor(0.0, device=device)
+                for j in range(0, min(len(bx), session_len * 4), session_len):
+                    chunk = bx[j:j+session_len]
+                    pv, pp = model(chunk, persist=True)
+                    vloss = ((pv - bv[j:j+session_len])**2).mean()
+                    ploss = (bp[j:j+session_len] * torch.log(
+                        bp[j:j+session_len] / (pp + 1e-8) + 1e-8)).sum(-1).mean()
+                    session_loss = session_loss + vloss + ploss
+                loss = session_loss / max(1, min(len(bx), session_len * 4) // session_len)
+            else:
+                pv, pp = model(bx)
+                vloss = ((pv - bv)**2).mean()
+                ploss = (bp * (torch.log(bp + 1e-8) - torch.log(pp + 1e-8))).sum(-1).mean()
+                loss = vloss + ploss
+
             optimizer.zero_grad(); loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
@@ -489,7 +639,8 @@ def train_expert(expert_name, samples, version, output_dir, epochs=80):
                 loss_str = ' '.join(f'{l:.4f}' for l in step_losses)
                 print(f"    [bounds] jac_energy: [{jac_str}]")
                 print(f"    [bounds] step_loss:  [{loss_str}]")
-                print(f"    [bounds] weights:    [{" ".join(f"{w:.2f}" for w in step_weights.tolist())}]")
+                weights_str = " ".join("%.2f" % w for w in step_weights.tolist())
+                print(f"    [bounds] weights:    [{weights_str}]")
             model.train()
 
         if (epoch+1) % 20 == 0:

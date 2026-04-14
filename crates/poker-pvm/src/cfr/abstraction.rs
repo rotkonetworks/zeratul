@@ -12,9 +12,9 @@ use crate::Action;
 
 /// number of hand strength buckets per street
 pub const PREFLOP_BUCKETS: usize = 169;  // canonical hole card combos
-pub const FLOP_BUCKETS: usize = 10;      // hand strength deciles
-pub const TURN_BUCKETS: usize = 10;
-pub const RIVER_BUCKETS: usize = 10;
+pub const FLOP_BUCKETS: usize = 50;      // hand strength percentiles (was 10)
+pub const TURN_BUCKETS: usize = 50;      // 50 = 2% granularity per bucket
+pub const RIVER_BUCKETS: usize = 50;     // gives ~21M possible info sets
 
 // GPU FFI for hand equity (ROCm HIP)
 #[cfg(feature = "gpu")]
@@ -139,27 +139,76 @@ fn best_hand_7(hole: [u8; 2], community: &[u8; 5]) -> u32 {
 }
 
 /// abstract action: maps a concrete action to a bucket
-pub fn abstract_action(action: Action, amount: u32, pot: u32, stack: u32) -> u8 {
+/// Compute effective stack depth bucket
+pub fn stack_depth_bucket(hero_stack: u32, villain_stack: u32, big_blind: u32) -> u8 {
+    let effective = hero_stack.min(villain_stack);
+    let eff_bb = if big_blind > 0 { effective / big_blind } else { 100 };
+    if eff_bb < 20 { 0 }       // short
+    else if eff_bb < 50 { 1 }  // medium
+    else if eff_bb < 100 { 2 } // deep
+    else { 3 }                  // very deep
+}
+
+/// Compute board texture bucket from community cards
+pub fn board_texture_bucket(community: &[u8]) -> u8 {
+    if community.is_empty() { return 0; }
+
+    let mut suits = [0u8; 4];
+    let mut ranks = [0u8; 13];
+    for &c in community {
+        suits[(c / 13) as usize] += 1;
+        ranks[(c % 13) as usize] += 1;
+    }
+
+    let flush_draw = suits.iter().any(|&s| s >= 3);
+    let paired = ranks.iter().any(|&r| r >= 2);
+    let mut connected = false;
+    for i in 0..12 {
+        if ranks[i] > 0 && ranks[i + 1] > 0 { connected = true; break; }
+    }
+
+    if paired { 2 }            // paired board
+    else if flush_draw { 1 }   // flush draw
+    else if connected { 3 }    // connected/straight draw
+    else { 0 }                 // dry
+}
+
+/// 9 abstract actions — matches CTM-MoE expert training (NUM_ACTIONS=9)
+pub fn abstract_action(action: Action, amount: u32, pot: u32, _stack: u32) -> u8 {
     match action {
         Action::Fold => 0,
-        Action::Check | Action::Call => 1,
+        Action::Check => 1,
+        Action::Call => 2,
         Action::Bet | Action::Raise => {
-            if amount as f64 > pot as f64 * 0.75 { 3 } // big bet
-            else { 2 } // small bet
+            let frac = if pot > 0 { amount as f64 / pot as f64 } else { 1.0 };
+            if frac <= 0.375 { 3 }       // bet_25 (quarter pot)
+            else if frac <= 0.625 { 4 }   // bet_50 (half pot)
+            else if frac <= 0.875 { 5 }   // bet_75 (three-quarter pot)
+            else if frac <= 1.5 { 6 }     // bet_100 (pot-sized)
+            else { 7 }                    // bet_200 (overbet 2x+)
         }
-        Action::AllIn => 3,
+        Action::AllIn => 8,
     }
 }
 
-/// information set key: hand bucket + action history (heads-up)
+/// information set key: hand bucket + context + action history
+/// Each dimension multiplies the info set space:
+///   hand_bucket(50) × position(2) × stack_bucket(4) × board_texture(4) × street(4) × history
+///   = 50 × 2 × 4 × 4 × 4 × ~100 action seqs = ~6.4M possible info sets
 #[derive(Clone, Hash, Eq, PartialEq, Debug)]
 pub struct InfoSetKey {
-    /// hand bucket (preflop: 0-168, postflop: 0-9)
+    /// hand strength bucket (preflop: 0-168, postflop: 0-49)
     pub hand_bucket: u16,
     /// compressed action history per street
     pub history: Vec<u8>,
-    /// current betting round
+    /// current betting round (0=preflop, 1=flop, 2=turn, 3=river)
     pub street: u8,
+    /// position: 0=OOP (out of position), 1=IP (in position / button)
+    pub position: u8,
+    /// effective stack depth bucket: 0=short(<20bb), 1=medium(20-50bb), 2=deep(50-100bb), 3=very deep(100bb+)
+    pub stack_bucket: u8,
+    /// board texture: 0=dry, 1=wet(flush draw), 2=paired, 3=connected
+    pub board_texture: u8,
 }
 
 impl InfoSetKey {
@@ -167,19 +216,25 @@ impl InfoSetKey {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&self.hand_bucket.to_le_bytes());
         bytes.push(self.street);
+        bytes.push(self.position);
+        bytes.push(self.stack_bucket);
+        bytes.push(self.board_texture);
         bytes.push(self.history.len() as u8);
         bytes.extend_from_slice(&self.history);
         bytes
     }
 
     pub fn from_bytes(data: &[u8]) -> Result<Self, String> {
-        if data.len() < 4 { return Err("info set key too short".into()); }
+        if data.len() < 7 { return Err("info set key too short".into()); }
         let hand_bucket = u16::from_le_bytes(data[0..2].try_into().unwrap());
         let street = data[2];
-        let hist_len = data[3] as usize;
-        if data.len() < 4 + hist_len { return Err("truncated history".into()); }
-        let history = data[4..4 + hist_len].to_vec();
-        Ok(Self { hand_bucket, history, street })
+        let position = data[3];
+        let stack_bucket = data[4];
+        let board_texture = data[5];
+        let hist_len = data[6] as usize;
+        if data.len() < 7 + hist_len { return Err("truncated history".into()); }
+        let history = data[7..7 + hist_len].to_vec();
+        Ok(Self { hand_bucket, history, street, position, stack_bucket, board_texture })
     }
 }
 

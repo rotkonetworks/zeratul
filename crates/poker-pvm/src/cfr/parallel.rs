@@ -204,17 +204,26 @@ pub mod par {
             let my_bet = state.bets[seat];
             let stack = state.stacks[seat];
             let facing = my_bet < max_bet;
+            let bb = rules.big_blind;
+            let pot = state.pot;
 
             let mut actions = vec![(Action::Fold, 0)];
             if !facing { actions.push((Action::Check, 0)); }
             if facing && stack > 0 { actions.push((Action::Call, 0)); }
-            let pot_bet = state.pot.min(stack);
-            if pot_bet >= rules.big_blind && stack >= pot_bet {
-                actions.push((Action::Bet, pot_bet));
+
+            // 5 bet sizes matching 9-action abstraction: 25%, 50%, 75%, 100%, 200% of pot
+            let min_bet = if facing { (max_bet * 2 - my_bet).max(bb) } else { bb };
+            let action_type = if facing { Action::Raise } else { Action::Bet };
+            let mut seen = Vec::new();
+            for &frac_num in &[1u32, 2, 3, 4, 8] {
+                let amount = (pot * frac_num / 4).max(min_bet).min(stack);
+                if amount >= min_bet && amount < stack && !seen.contains(&amount) {
+                    actions.push((action_type, amount));
+                    seen.push(amount);
+                }
             }
-            if stack > 0 && (actions.len() < 3 || stack != pot_bet) {
-                actions.push((Action::AllIn, 0));
-            }
+
+            if stack > 0 { actions.push((Action::AllIn, 0)); }
             actions
         }
 
@@ -223,6 +232,7 @@ pub mod par {
             history: &[u8], rng: &mut ThreadRng,
         ) -> Vec<u8> {
             let seat = state.acting_seat as usize;
+            let opp = 1 - seat;
             let hole = cards[seat];
             let street = match state.phase {
                 Phase::Preflop => 0u8, Phase::Flop => 1, Phase::Turn => 2, Phase::River => 3, _ => 0,
@@ -231,9 +241,26 @@ pub mod par {
                 preflop_bucket(hole[0], hole[1])
             } else {
                 let board_len = match street { 1 => 3, 2 => 4, _ => 5 };
-                hand_strength_bucket(hole, &community[..board_len], 10, 200, &mut || rng.next())
+                hand_strength_bucket(hole, &community[..board_len], FLOP_BUCKETS, 200, &mut || rng.next())
             };
-            let key = InfoSetKey { hand_bucket, history: history.to_vec(), street };
+
+            // Position: IP (button) vs OOP
+            let position = if state.acting_seat == state.button { 1 } else { 0 };
+
+            // Effective stack depth
+            let stack_bucket = stack_depth_bucket(
+                state.stacks[seat], state.stacks[opp], state.rules.big_blind as u32,
+            );
+
+            // Board texture
+            let board_texture = if state.community_count > 0 {
+                board_texture_bucket(&community[..state.community_count as usize])
+            } else { 0 };
+
+            let key = InfoSetKey {
+                hand_bucket, history: history.to_vec(), street,
+                position, stack_bucket, board_texture,
+            };
             key.to_bytes()
         }
 

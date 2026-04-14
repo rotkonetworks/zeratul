@@ -156,7 +156,7 @@ impl Arena {
                 let community_count = match streets { 0 => 0, 1 => 3, 2 => 4, 3 => 5, _ => 5 };
 
                 // blueprint lookup
-                let key_bytes = InfoSetKey { hand_bucket: bucket, history: history.clone(), street: streets }.to_bytes();
+                let key_bytes = InfoSetKey { hand_bucket: bucket, history: history.clone(), street: streets, position: 0, stack_bucket: 3, board_texture: 0 }.to_bytes();
                 let probs = blueprint.get(&key_bytes).cloned().unwrap_or_else(|| {
                     vec![0.15, 0.35, 0.35, 0.15] // fallback: slight fold bias
                 });
@@ -484,8 +484,7 @@ impl Arena {
             let mut filters = FilterStack::new();
             if use_search {
                 filters = filters
-                    .and_then(SearchFilter::default())
-                    .and_then(ExploitFilter);
+                    .and_then(SearchFilter::ultrafast());
             }
             let mut brain = Brain::new(strategy).with_filters(filters);
             #[cfg(feature = "onnx")]

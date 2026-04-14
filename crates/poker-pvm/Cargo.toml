@@ -33,6 +33,16 @@ name = "cfr-bot"
 path = "src/cfr/bot_client.rs"
 required-features = ["bot"]
 
+[[bin]]
+name = "cfr-evolve"
+path = "src/cfr/evolve_bin.rs"
+required-features = ["std"]
+
+[[bin]]
+name = "cfr-analyze"
+path = "src/cfr/analyze_bin.rs"
+required-features = ["std"]
+
 [features]
 default = ["std"]
 std = []
@@ -62,7 +72,7 @@ parking_lot = { version = "0.12", optional = true }
 ort = { version = "2.0.0-rc.12", optional = true }
 ndarray = { version = "0.16", optional = true }
 # WebSocket client for standalone bot
-tungstenite = { version = "0.24", optional = true }
+tungstenite = { version = "0.24", features = ["native-tls"], optional = true }
 serde_json = { version = "1", optional = true }
 rand = { version = "0.8", optional = true }
 

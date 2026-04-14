@@ -198,10 +198,28 @@ impl Solver {
             _ => 4,
         };
 
+        // Position: are we in position (button) or out of position?
+        let position = if state.acting_seat == state.button { 1 } else { 0 };
+
+        // Effective stack depth bucket
+        let opp_seat = 1 - seat;
+        let stack_bucket = stack_depth_bucket(
+            state.stacks[seat], state.stacks[opp_seat],
+            state.rules.big_blind as u32,
+        );
+
+        // Board texture
+        let board_texture = if state.community_count > 0 {
+            board_texture_bucket(&community[..state.community_count as usize])
+        } else { 0 };
+
         InfoSetKey {
             hand_bucket,
             history: history.to_vec(),
             street,
+            position,
+            stack_bucket,
+            board_texture,
         }
     }
 

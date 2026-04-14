@@ -204,6 +204,9 @@ pub fn action_likelihoods(
             hand_bucket,
             history: history.to_vec(),
             street,
+            position: 0,
+            stack_bucket: 3,
+            board_texture: 0,
         };
 
         // look up blueprint probability for this action

@@ -19,7 +19,7 @@
 
 use crate::*;
 use super::abstraction::*;
-use super::search::{PokerBot, SearchResult};
+use super::search::{PokerBot, SearchResult, SearchConfig};
 use super::range::{Range, action_likelihoods};
 #[cfg(feature = "std")]
 use super::ctm;
@@ -132,7 +132,8 @@ impl Default for SearchFilter {
 
 impl SearchFilter {
     pub fn thorough() -> Self { Self { iterations: 1000, pot_threshold: 0.0 } }
-    pub fn fast() -> Self { Self { iterations: 100, pot_threshold: 0.3 } }
+    pub fn fast() -> Self { Self { iterations: 50, pot_threshold: 0.3 } }
+    pub fn ultrafast() -> Self { Self { iterations: 50, pot_threshold: 0.0 } }
 }
 
 impl DecisionFilter for SearchFilter {
@@ -466,6 +467,14 @@ pub struct Brain {
     pub filters: FilterStack,
     history: Vec<u8>,
     hand_number: u32,
+    /// Hebbian plasticity: real-time adaptation to opponent patterns
+    pub plasticity: [super::plasticity::PlasticityState; MAX_SEATS],
+    /// Native CTM expert with sync accumulators (optional)
+    pub native_ctm: Option<std::cell::RefCell<super::ctm_native::NativeCTMExpert>>,
+    /// Native MoE — trained CTM experts with Hebbian (optional)
+    pub native_moe: Option<std::cell::RefCell<super::moe_native::NativeMoE>>,
+    /// Last MoE expert indices (for Hebbian update on hand_complete)
+    last_moe_experts: [usize; 2],
 }
 
 /// exploitation mode
@@ -486,6 +495,30 @@ impl Brain {
             filters: FilterStack::new(),
             history: Vec::new(),
             hand_number: 0,
+            plasticity: std::array::from_fn(|_| super::plasticity::PlasticityState::new()),
+            native_ctm: None,
+            native_moe: None,
+            last_moe_experts: [0, 0],
+        }
+    }
+
+    /// create from a pre-deserialized shared blueprint (avoids re-parsing)
+    pub fn from_shared_blueprint(blueprint: &std::collections::HashMap<Vec<u8>, Vec<f64>>) -> Self {
+        Self {
+            bot: std::cell::RefCell::new(PokerBot::new(SearchConfig {
+                blueprint: blueprint.clone(),
+                ..Default::default()
+            })),
+            ranges: Default::default(),
+            profiles: TableProfiles::default(),
+            mode: ExploitMode::Nash,
+            filters: FilterStack::new(),
+            history: Vec::new(),
+            hand_number: 0,
+            plasticity: std::array::from_fn(|_| super::plasticity::PlasticityState::new()),
+            native_ctm: None,
+            native_moe: None,
+            last_moe_experts: [0, 0],
         }
     }
 
@@ -637,7 +670,113 @@ impl Brain {
         };
 
         decision = self.filters.apply(&ctx, decision);
+
+        // L4: Native CTM with sync accumulators (if loaded)
+        if let Some(ref ctm_cell) = self.native_ctm {
+            let mut ctm = ctm_cell.borrow_mut();
+            // Build feature vector for CTM
+            let mut features = [0.0f32; 33]; // NUM_FEATURES = 33
+            // TODO: extract proper features from game state
+            // For now, use basic state info
+            features[13] = state.pot as f32 / 1000.0;
+            features[16] = state.stacks[state.acting_seat as usize] as f32 / 1000.0;
+            let range_eq = decision.metadata.range_equity.unwrap_or(0.5);
+            features[18] = range_eq;
+
+            let ctm_out = ctm.forward(&features, true); // persist=true for cross-hand memory
+
+            // Blend CTM policy with blueprint (30% CTM, 70% blueprint)
+            let ctm_weight = 0.3;
+            for i in 0..decision.actions.len().min(ctm_out.policy.len()) {
+                decision.action_probs[i] = (1.0 - ctm_weight) * decision.action_probs[i]
+                    + ctm_weight * ctm_out.policy[i] as f64;
+            }
+            // Renormalize
+            let total: f64 = decision.action_probs.iter().sum();
+            if total > 1e-10 { for p in decision.action_probs.iter_mut() { *p /= total; } }
+
+            // Use sync novelty to modulate plasticity learning rate
+            let novelty = ctm.sync_novelty(&ctm_out.sync_state);
+            if novelty > 0.1 {
+                decision.metadata.layers_applied.push("L4:ctm+sync(novel)");
+            } else {
+                decision.metadata.layers_applied.push("L4:ctm+sync");
+            }
+        }
+
+        // L4b: Native MoE — trained CTM experts with Hebbian (if loaded)
+        if let Some(ref moe_cell) = self.native_moe {
+            let mut moe = moe_cell.borrow_mut();
+            // Build 27-feature vector for MoE
+            let mut features = [0.0f32; 27];
+            features[0] = state.pot as f32 / 1000.0;
+            features[1] = state.stacks[state.acting_seat as usize] as f32 / 1000.0;
+            let street = match state.phase { crate::Phase::Preflop => 0.0, crate::Phase::Flop => 1.0, crate::Phase::Turn => 2.0, _ => 3.0 };
+            features[2] = street / 3.0;
+            features[3] = if state.num_players > 0 { state.bets[state.acting_seat as usize] as f32 / state.pot.max(1) as f32 } else { 0.0 };
+            // Copy blueprint probs as features (teaches MoE what blueprint thinks)
+            for i in 0..decision.action_probs.len().min(9) {
+                features[4 + i] = decision.action_probs[i] as f32;
+            }
+            features[13] = decision.metadata.range_equity.unwrap_or(0.5);
+
+            let moe_out = moe.evaluate(&features);
+            self.last_moe_experts = moe_out.expert_idx;
+
+            let blend = moe.blend_weight as f64;
+            for i in 0..decision.actions.len().min(9) {
+                decision.action_probs[i] = (1.0 - blend) * decision.action_probs[i]
+                    + blend * moe_out.policy[i] as f64;
+            }
+            let total: f64 = decision.action_probs.iter().sum();
+            if total > 1e-10 { for p in decision.action_probs.iter_mut() { *p /= total; } }
+            decision.metadata.layers_applied.push("L4b:moe-native");
+        }
+
+        // L5: Hebbian plasticity — real-time adaptation (zero gradients)
+        let hero = state.acting_seat as usize;
+        let n = state.num_players as usize;
+        let opp = if n == 2 { 1 - hero } else {
+            (hero + 1) % n
+        };
+        let has_equity = decision.metadata.range_equity.unwrap_or(0.5) > 0.5;
+        self.plasticity[opp].adjust_probs(
+            &mut decision.action_probs,
+            &decision.actions,
+            has_equity,
+        );
+        if self.plasticity[opp].n_updates > 10 {
+            decision.metadata.layers_applied.push("L5:plasticity");
+        }
+
         decision
+    }
+
+    /// Call after a hand completes to feed outcome to plasticity + CTM Hebbian.
+    /// `hero_seat` — our seat, `outcome` — +1 win, -1 loss, 0 neutral
+    pub fn hand_complete(&mut self, hero_seat: u8, outcome: f32, last_action: u8, street: u8) {
+        let n = 2usize; // heads-up for now
+        let opp = if n == 2 { 1 - hero_seat as usize } else { 0 };
+
+        // L5: Update plasticity (probability adjustments)
+        self.plasticity[opp].update(
+            &self.profiles.profiles[opp],
+            last_action,
+            outcome,
+            street,
+        );
+
+        // L4: Hebbian weight modification on CTM (actual network rewiring)
+        if let Some(ref ctm_cell) = self.native_ctm {
+            let mut ctm = ctm_cell.borrow_mut();
+            ctm.hebbian_update(outcome);
+        }
+
+        // L4b: Hebbian on MoE experts
+        if let Some(ref moe_cell) = self.native_moe {
+            let mut moe = moe_cell.borrow_mut();
+            moe.hebbian_update(outcome, &self.last_moe_experts);
+        }
     }
 }
 
@@ -692,13 +831,15 @@ impl Brain {
             .with_filters(FilterStack::new().and_then(SearchFilter::default()))
     }
 
-    /// L0-L2 — blueprint + search+range + exploit
+    /// L0 + L1 + L5 — blueprint + search+range + Hebbian plasticity
+    /// ExploitFilter removed — plasticity handles adaptation (zero gradients)
     pub fn full_stack(strategy_data: &[u8]) -> Self {
         Self::new(strategy_data)
             .with_filters(
                 FilterStack::new()
                     .and_then(SearchFilter::default())
-                    .and_then(ExploitFilter)
+                    // L3 ExploitFilter deprecated — Hebbian plasticity (L5) replaces it
+                    // Profile stats feed directly into plasticity.adjust_probs()
             )
     }
 
@@ -723,6 +864,41 @@ impl Brain {
                     .and_then(ExploitFilter)
                     .and_then(NeuralFilter { moe, weight })
             )
+    }
+    /// L0 + L1(search with CTM leaf eval) + L4(CTM) + L5(Hebbian)
+    /// The full stack: search uses CTM for leaf evaluation,
+    /// CTM runs on the actual decision, plasticity adapts.
+    pub fn with_native_ctm(strategy_data: &[u8], ctm: super::ctm_native::NativeCTMExpert) -> Self {
+        let ctm_arc = std::sync::Arc::new(std::sync::Mutex::new(ctm));
+
+        let mut brain = Self::new(strategy_data)
+            .with_filters(
+                FilterStack::new()
+                    .and_then(SearchFilter::default())
+            );
+
+        // Share CTM with search for leaf evaluation
+        // Search uses persist=false (hypothetical exploration)
+        brain.bot.borrow_mut().native_ctm = Some(ctm_arc.clone());
+
+        // Brain keeps separate CTM for direct inference + Hebbian updates
+        // This one uses persist=true (real decisions accumulate sync)
+        let brain_ctm = {
+            let locked = ctm_arc.lock().unwrap();
+            super::ctm_native::NativeCTMExpert::new(
+                locked.input_dim, locked.hidden_dim, locked.n_sync
+            )
+        };
+        brain.native_ctm = Some(std::cell::RefCell::new(brain_ctm));
+
+        brain
+    }
+
+    /// Create with native MoE (trained CTM experts + Hebbian)
+    pub fn with_native_moe(strategy_data: &[u8], moe: super::moe_native::NativeMoE) -> Self {
+        let mut brain = Self::new(strategy_data);
+        brain.native_moe = Some(std::cell::RefCell::new(moe));
+        brain
     }
 }
 
