@@ -4,6 +4,7 @@ import { Card } from './Card'
 import Lobby, { type Table } from './Lobby'
 import { detectZafu } from './zid/provider'
 import { getPositionShort } from './positions'
+import { requestPokerDkg } from './dkg'
 import type { ServerMsg, CardJson, ValidAction } from './types'
 
 export default function App() {
@@ -59,6 +60,8 @@ export default function App() {
   const [inviteUrl, setInviteUrl] = createSignal('')
   const [juryProgress, setJuryProgress] = createSignal('')
   const [escrow, setEscrow] = createSignal('')
+  // guard so re-broadcast RoomInfo doesn't spawn a second zafu popup
+  let dkgStartedFor = ''
   const [pendingRules, setPendingRules] = createSignal<{ buyin: number; smallBlind: number; bigBlind: number; turnTimeout: number; fromSelf: boolean } | null>(null)
   const [oppDisconnected, setOppDisconnected] = createSignal(false)
   const [reconnectCountdown, setReconnectCountdown] = createSignal(0)
@@ -296,6 +299,30 @@ export default function App() {
         }
         if (msg.escrow && msg.escrow.length > 5) {
           setEscrow(msg.escrow)
+        }
+        // DKG-mode escrow: kick off zafu's join flow once per table
+        if (
+          msg.frost_relay_url && msg.frost_room_code &&
+          (!msg.escrow || msg.escrow.length === 0) &&
+          dkgStartedFor !== msg.code
+        ) {
+          dkgStartedFor = msg.code
+          log('setting up multisig escrow (zafu)...', 'c-zec-yellow')
+          void requestPokerDkg({
+            relayUrl: msg.frost_relay_url,
+            roomCode: msg.frost_room_code,
+            threshold: 2,
+            maxSigners: 3,
+            labelPrefix: `POKER-${msg.code}`,
+          }).then(res => {
+            if (res.success) {
+              log(`multisig ready: ${res.address.slice(0, 16)}…`, 'c-green')
+              send({ type: 'DkgComplete', escrow_ua: res.address, orchard_fvk: res.orchardFvk })
+            } else {
+              log(`multisig setup failed: ${res.error}`, 'c-red')
+              dkgStartedFor = ''
+            }
+          })
         }
         break
       case 'GameOver': {

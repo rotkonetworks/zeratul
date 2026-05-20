@@ -24,7 +24,7 @@ export type ServerMsg =
   | { type: 'JurySettlement'; verified: boolean; threshold: number; contributions: number }
   | { type: 'RulesProposed'; buyin: number; smallBlind: number; bigBlind: number; fromSelf: boolean }
   | { type: 'RulesAccepted' }
-  | { type: 'RoomInfo'; code: string; jury_nodes: number; jury_threshold: number; escrow: string }
+  | { type: 'RoomInfo'; code: string; jury_nodes: number; jury_threshold: number; escrow: string; frost_relay_url?: string; frost_room_code?: string }
   | { type: 'InviteLink'; url: string }
   | { type: 'Status'; phase: 'connecting' | 'encrypting' | 'shuffling' | 'dealing' | 'playing' | 'showdown' | 'settling'; message: string }
   | { type: 'Chat'; from: string; text: string }

@@ -5,6 +5,7 @@
 //! - narsil: calls live narsild validators over HTTP (production)
 
 mod jury;
+mod escrow_client;
 
 use axum::{
     Router,
@@ -52,6 +53,8 @@ enum ClientMsg {
     /// player broadcasts filtered game state to spectators
     Broadcast { data: String },
     Dispute,
+    /// zafu_poker_dkg finished: this seat's view of the escrow UA + UFVK
+    DkgComplete { escrow_ua: String, orchard_fvk: String },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -83,7 +86,17 @@ enum ServerMsg {
     /// jury settlement complete
     JurySettlement { verified: bool, threshold: u8, contributions: u8 },
     /// room info (sent on connect)
-    RoomInfo { code: String, jury_nodes: u8, jury_threshold: u8, escrow: String },
+    RoomInfo {
+        code: String,
+        jury_nodes: u8,
+        jury_threshold: u8,
+        escrow: String,
+        /// FROST relay URL — `Some` when escrow is running in DKG mode; clients use this to join the DKG room.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        frost_relay_url: Option<String>,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        frost_room_code: Option<String>,
+    },
     /// invite link
     InviteLink { url: String },
     /// game status (shuffle progress, deck verification, etc.)
@@ -245,7 +258,13 @@ struct Room {
     community_cards: Vec<Card>,
     jury: Arc<dyn jury::JuryService>,
     action_log: ActionLog,
-    escrow_address: [u8; 32],
+    /// what we display to clients — Zcash UA (`u1...`) when external escrow is wired, hex of the in-process Pallas point otherwise
+    escrow_address: String,
+    /// FROST relay coords — `Some` only when escrow runs in DKG mode; forwarded to clients via RoomInfo
+    frost_relay_url: Option<String>,
+    frost_room_code: Option<String>,
+    /// per-seat DKG UA report — must agree across seats before we trust it as escrow_address
+    dkg_reported_ua: Vec<Option<String>>,
     player_a_share: SecretShare<PallasScalar>,
     player_b_share: SecretShare<PallasScalar>,
     action_deadline: Option<(u8, tokio::time::Instant)>,
@@ -253,10 +272,10 @@ struct Room {
 
 impl Room {
     fn new(code: String) -> Self {
-        Self::with_settings(code, 5, 10, 1000, 30, 2, TableAccess::Public, false)
+        Self::with_settings(code, 5, 10, 1000, 30, 2, TableAccess::Public, false, RemoteEscrow::default())
     }
 
-    fn with_settings(code: String, sb: u64, bb: u64, buyin: u64, timeout: u32, seats: usize, access: TableAccess, bot_friendly: bool) -> Self {
+    fn with_settings(code: String, sb: u64, bb: u64, buyin: u64, timeout: u32, seats: usize, access: TableAccess, bot_friendly: bool, external_escrow: RemoteEscrow) -> Self {
         let seats = seats.clamp(2, 9);
         let rules = TableRules {
             small_blind: sb as u128, big_blind: bb as u128, ante: 0,
@@ -274,11 +293,18 @@ impl Room {
             redpallas::setup_escrow(JURY_N, JURY_T, &mut rng)
                 .expect("interleaved DKG should succeed");
 
-        let escrow_address = redpallas::derive_address_bytes(&group_pubkey);
+        let local_addr_hex = hex::encode(redpallas::derive_address_bytes(&group_pubkey));
+        let frost_relay_url = external_escrow.frost_relay_url;
+        let frost_room_code = external_escrow.frost_room_code;
+        // DKG mode: escrow_address stays empty until players' DkgComplete agrees on a UA
+        let dkg_mode = frost_relay_url.is_some() && frost_room_code.is_some();
+        let escrow_address = external_escrow.address.unwrap_or_else(
+            || if dkg_mode { String::new() } else { local_addr_hex },
+        );
 
         tracing::info!(
             "room {} created: 2-of-3 nested escrow (frostito/pallas), {}-of-{} jury, escrow {}",
-            code, JURY_T, JURY_N, hex::encode(&escrow_address[..8])
+            code, JURY_T, JURY_N, &escrow_address[..escrow_address.len().min(24)]
         );
 
         let jury: Arc<dyn jury::JuryService> = match std::env::var("NARSIL_ENDPOINT") {
@@ -313,6 +339,9 @@ impl Room {
             community_cards: Vec::new(),
             jury, action_log: ActionLog::new(),
             escrow_address,
+            frost_relay_url,
+            frost_room_code,
+            dkg_reported_ua: vec![None; seats],
             player_a_share, player_b_share,
             action_deadline: None,
         }
@@ -589,6 +618,8 @@ struct AppState {
     rooms: Rooms,
     lobby_users: LobbyUsers,
     static_dir: String,
+    /// base url of the poker-escrow service, e.g. http://127.0.0.1:3034; None disables remote escrow
+    escrow_url: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -769,6 +800,49 @@ struct CreateTableParams {
     allowed: Option<String>,
     /// open to bot autojoin (only meaningful on public tables)
     bot: Option<bool>,
+    /// rake fee in basis points (e.g. 250 = 2.5%), forwarded to poker-escrow
+    rake_bps: Option<u16>,
+}
+
+/// Result of asking poker-escrow to provision a room: optional UA (None when DKG-pending)
+/// plus optional FROST relay coords that clients need to participate in DKG.
+#[derive(Default)]
+struct RemoteEscrow {
+    address: Option<String>,
+    frost_relay_url: Option<String>,
+    frost_room_code: Option<String>,
+}
+
+/// fetch escrow setup from poker-escrow if configured; logs and returns default on failure.
+async fn remote_escrow_for(
+    escrow_url: &Option<String>,
+    code: &str,
+    required_deposit: u64,
+    rake_bps: u16,
+) -> RemoteEscrow {
+    let Some(url) = escrow_url.as_deref() else { return RemoteEscrow::default(); };
+    match escrow_client::create_escrow(url, code, required_deposit, rake_bps).await {
+        Ok(setup) => {
+            if setup.dkg_mode {
+                tracing::info!(
+                    "escrow provisioned room {} in DKG mode (relay={:?} room={:?})",
+                    code, setup.frost_relay_url, setup.frost_room_code,
+                );
+            } else if let Some(ref addr) = setup.escrow_address {
+                let preview = &addr[..addr.len().min(24)];
+                tracing::info!("escrow service provisioned room {} -> {}", code, preview);
+            }
+            RemoteEscrow {
+                address: setup.escrow_address,
+                frost_relay_url: setup.frost_relay_url,
+                frost_room_code: setup.frost_room_code,
+            }
+        }
+        Err(e) => {
+            tracing::warn!("escrow service unreachable for room {}: {} — falling back to in-process", code, e);
+            RemoteEscrow::default()
+        }
+    }
 }
 
 async fn create_room(
@@ -792,7 +866,14 @@ async fn create_room(
     };
 
     let bot_friendly = params.bot.unwrap_or(false) && matches!(access, TableAccess::Public);
-    let room = Arc::new(Mutex::new(Room::with_settings(code.clone(), sb, bb, buyin, timeout, seats, access, bot_friendly)));
+    let rake_bps = params.rake_bps.unwrap_or(0);
+    // bot tables are chip-only demos — no FROST escrow, no DKG, no on-chain anything
+    let external_escrow = if bot_friendly {
+        RemoteEscrow { address: Some(String::new()), ..Default::default() }
+    } else {
+        remote_escrow_for(&state.escrow_url, &code, buyin, rake_bps).await
+    };
+    let room = Arc::new(Mutex::new(Room::with_settings(code.clone(), sb, bb, buyin, timeout, seats, access, bot_friendly, external_escrow)));
     state.rooms.lock().await.insert(code.clone(), room);
     notify_lobby_tables(&state.rooms, &state.lobby_users).await;
     axum::response::Redirect::to(&format!("/{}", code))
@@ -808,12 +889,12 @@ async fn room_page(
         return (axum::http::StatusCode::NOT_FOUND, "not found").into_response();
     }
 
-    // create room if it doesn't exist (joining via invite link)
-    {
-        let mut rooms = state.rooms.lock().await;
-        if !rooms.contains_key(&code) {
-            rooms.insert(code.clone(), Arc::new(Mutex::new(Room::new(code.clone()))));
-        }
+    // create room if it doesn't exist (joining via invite link or crawler hit)
+    let needs_create = !state.rooms.lock().await.contains_key(&code);
+    if needs_create {
+        let external_escrow = remote_escrow_for(&state.escrow_url, &code, 1000, 0).await;
+        let room = Room::with_settings(code.clone(), 5, 10, 1000, 30, 2, TableAccess::Public, false, external_escrow);
+        state.rooms.lock().await.entry(code.clone()).or_insert_with(|| Arc::new(Mutex::new(room)));
     }
     // serve index.html
     let index = std::path::PathBuf::from(&state.static_dir).join("index.html");
@@ -910,7 +991,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
             code: code.clone(),
             jury_nodes: JURY_N as u8,
             jury_threshold: JURY_T as u8,
-            escrow: hex::encode(r.escrow_address),
+            escrow: r.escrow_address.clone(),
+            frost_relay_url: r.frost_relay_url.clone(),
+            frost_room_code: r.frost_room_code.clone(),
         });
     }
 
@@ -1211,7 +1294,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
 
                         // broadcast deposit status
                         r.broadcast(&ServerMsg::DepositStatus {
-                            escrow_address: hex::encode(r.escrow_address),
+                            escrow_address: r.escrow_address.clone(),
                             player_a_deposit: r.deposits.get(0).copied().unwrap_or(0),
                             player_b_deposit: r.deposits.get(1).copied().unwrap_or(0),
                             required: r.required_deposit,
@@ -1229,6 +1312,42 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                 // player sends filtered game state — fan out to all spectators
                 let mut r = room.lock().await;
                 r.spectators.retain(|tx| tx.send(data.clone()).is_ok());
+            }
+            ClientMsg::DkgComplete { escrow_ua, orchard_fvk } => {
+                let Some(seat) = my_seat else {
+                    let _ = tx.send(ServerMsg::Error { message: "not seated".into() });
+                    continue;
+                };
+                let mut r = room.lock().await;
+                if r.frost_room_code.is_none() || (seat as usize) >= r.dkg_reported_ua.len() {
+                    continue;
+                }
+                tracing::info!(
+                    "room {} seat {}: dkg complete ua={} fvk_tail=…{}",
+                    r.code, seat, &escrow_ua[..escrow_ua.len().min(24)],
+                    &orchard_fvk[orchard_fvk.len().saturating_sub(8)..],
+                );
+                r.dkg_reported_ua[seat as usize] = Some(escrow_ua.clone());
+
+                let seated: Vec<usize> = r.players.iter().enumerate()
+                    .filter_map(|(i, p)| p.as_ref().map(|_| i))
+                    .collect();
+                let all_match = seated.len() >= 2 && seated.iter().all(|&i| {
+                    r.dkg_reported_ua.get(i).and_then(|u| u.as_deref()) == Some(escrow_ua.as_str())
+                });
+                if all_match && r.escrow_address != escrow_ua {
+                    tracing::info!("room {}: escrow UA agreed by all players: {}", r.code, escrow_ua);
+                    r.escrow_address = escrow_ua.clone();
+                    let info = ServerMsg::RoomInfo {
+                        code: r.code.clone(),
+                        jury_nodes: JURY_N as u8,
+                        jury_threshold: JURY_T as u8,
+                        escrow: r.escrow_address.clone(),
+                        frost_relay_url: r.frost_relay_url.clone(),
+                        frost_room_code: r.frost_room_code.clone(),
+                    };
+                    r.broadcast(&info);
+                }
             }
             ClientMsg::Dispute => {
                 let (jury, payload, player_a_share, txs, payload_hash) = {
@@ -1310,14 +1429,21 @@ async fn main() {
         else { "static".to_string() }
     });
 
+    let escrow_url = std::env::var("ESCROW_URL").ok().filter(|s| !s.is_empty());
+
     let state = AppState {
         rooms: Arc::new(Mutex::new(HashMap::new())),
         lobby_users: Arc::new(Mutex::new(HashMap::new())),
         static_dir: static_dir.clone(),
+        escrow_url: escrow_url.clone(),
     };
 
     tracing::info!("serving static files from {}", static_dir);
     tracing::info!("jury config: {}-of-{} frostito nested FROST (pallas)", JURY_T, JURY_N);
+    match &escrow_url {
+        Some(u) => tracing::info!("escrow service: {}", u),
+        None => tracing::info!("escrow service: disabled (set ESCROW_URL to enable)"),
+    }
 
     let app = Router::new()
         .route("/ws/lobby", axum::routing::get(lobby_ws_handler))

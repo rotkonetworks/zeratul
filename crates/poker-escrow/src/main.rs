@@ -30,6 +30,11 @@ use tokio::sync::Mutex;
 use osst::redpallas::zcash as frost;
 use pasta_curves::pallas::Scalar as PallasScalar;
 
+mod orchard_ua;
+mod frost_relay;
+mod frost_dkg;
+mod dkg_room;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -77,6 +82,19 @@ struct PayoutPlan {
 
 struct EscrowRoom {
     code: String,
+    /// Orchard UA (`u1...`) — `Some` once derivation is done. In trusted-dealer mode this is
+    /// set synchronously inside `create_room`. In DKG mode it lands when the background
+    /// DKG task finishes.
+    escrow_ua: Option<String>,
+    /// FROST relay coords for DKG mode — `Some` only when ESCROW_USE_DKG=true. Forwarded
+    /// to clients so they can join the relay room and participate.
+    frost_relay_url: Option<String>,
+    frost_room_code: Option<String>,
+    /// poker-escrow's own DKG piece (private). `Some` after DKG completes.
+    dkg_key_package_hex: Option<String>,
+    /// group's public key package — `Some` after DKG completes. Same on every party.
+    dkg_public_key_package_hex: Option<String>,
+    /// legacy 32-byte raw-hex form (osst-derived); retained for the unmigrated /sign endpoints
     escrow_address: [u8; 32],
     group_pubkey: pasta_curves::pallas::Point,
     // server's key share (signer #3)
@@ -110,6 +128,11 @@ pub struct AppState {
     house_address: String,
     zidecar_url: String,
     verify_deposits: bool,
+    network: zcash_address::Network,
+    /// when true, /room runs DKG via the FROST relay instead of trusted-dealer keygen
+    use_dkg: bool,
+    /// FROST relay WebSocket URL (used in DKG mode)
+    frost_relay_url: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -131,60 +154,149 @@ struct CreateRoomResp {
     public_key_package: String,
 }
 
+/// Derive a real Orchard Unified Address for an escrow room via frost-spend's
+/// trusted-dealer keygen. Returns the `u1...` string. Trusted-dealer is the
+/// pragmatic shortcut for Phase 2.1 — Phase 2.2 replaces this with DKG.
+fn derive_escrow_ua(network: zcash_address::Network) -> Result<String, String> {
+    let dealer = frost_spend::orchestrate::dealer_keygen(2, 3)
+        .map_err(|e| format!("dealer_keygen: {:?}", e))?;
+    let raw = frost_spend::orchestrate::derive_address_raw(&dealer.public_key_package_hex, 0)
+        .map_err(|e| format!("derive_address_raw: {:?}", e))?;
+    orchard_ua::encode_unified(raw, network)
+}
+
+/// Build the osst-derived legacy bits (will be removed in Phase 2.4). Pure / sync /
+/// rng-not-Send — must run before any `.await`.
+fn make_legacy_osst(req: &CreateRoomReq) -> Result<(dkg_room::LegacyOsstShim, String, String, String), String> {
+    let mut rng = rand::thread_rng();
+    let (player_a_share, player_b_share, jury_network, group_pubkey) =
+        frost::setup_escrow(1, 1, &mut rng)
+            .map_err(|e| format!("osst setup_escrow: {:?}", e))?;
+    let escrow_address = frost::derive_address_bytes(&group_pubkey);
+    let a_hex = hex::encode(&share_to_bytes(&player_a_share));
+    let b_hex = hex::encode(&share_to_bytes(&player_b_share));
+    let pubkey_hex = hex::encode(&point_to_bytes(&group_pubkey));
+    let server_share = jury_network.node_shares.into_iter().next()
+        .expect("jury_n=1 should produce exactly 1 share");
+    let shim = dkg_room::LegacyOsstShim {
+        escrow_address,
+        group_pubkey,
+        server_share,
+        player_a_share_hex: a_hex.clone(),
+        player_b_share_hex: b_hex.clone(),
+    };
+    let _ = req; // silence unused warning if req fields aren't used here yet
+    Ok((shim, a_hex, b_hex, pubkey_hex))
+}
+
 async fn create_room(
     State(state): State<AppState>,
     Json(req): Json<CreateRoomReq>,
 ) -> impl IntoResponse {
-    // do all crypto BEFORE any await (rng is not Send)
-    let (room, a_share_hex, b_share_hex, pubkey_hex, escrow_hex) = {
-        let mut rng = rand::thread_rng();
-        let result = frost::setup_escrow(1, 1, &mut rng);
-        let (player_a_share, player_b_share, jury_network, group_pubkey) = match result {
-            Ok(r) => r,
-            Err(e) => return Json(serde_json::json!({"error": format!("{:?}", e)})),
-        };
+    let (shim, a_share_hex, b_share_hex, pubkey_hex) = match make_legacy_osst(&req) {
+        Ok(v) => v,
+        Err(e) => return Json(serde_json::json!({"error": e})),
+    };
 
-        let escrow_address = frost::derive_address_bytes(&group_pubkey);
-        let escrow_hex = hex::encode(&escrow_address);
-        let a_share_hex = hex::encode(&share_to_bytes(&player_a_share));
-        let b_share_hex = hex::encode(&share_to_bytes(&player_b_share));
-        let pubkey_hex = hex::encode(&point_to_bytes(&group_pubkey));
+    if state.use_dkg {
+        create_room_dkg(state, req, shim, a_share_hex, b_share_hex, pubkey_hex).await
+    } else {
+        create_room_trusted_dealer(state, req, shim, a_share_hex, b_share_hex, pubkey_hex).await
+    }
+}
 
-        let server_share = jury_network.node_shares.into_iter().next()
-            .expect("jury_n=1 should produce exactly 1 share");
+async fn create_room_trusted_dealer(
+    state: AppState,
+    req: CreateRoomReq,
+    shim: dkg_room::LegacyOsstShim,
+    a_share_hex: String,
+    b_share_hex: String,
+    pubkey_hex: String,
+) -> Json<serde_json::Value> {
+    let escrow_ua = match derive_escrow_ua(state.network) {
+        Ok(u) => u,
+        Err(e) => return Json(serde_json::json!({"error": e})),
+    };
 
-        let room = EscrowRoom {
-            code: req.code.clone(),
-            escrow_address,
-            group_pubkey,
-            server_share,
-            player_a_share_hex: a_share_hex.clone(),
-            player_b_share_hex: b_share_hex.clone(),
-            player_a_deposit: 0,
-            player_b_deposit: 0,
-            required_deposit: req.required_deposit,
-            rake_bps: req.rake_bps,
-            rake_paid: false,
-            game_active: false,
-            player_a_address: None,
-            player_b_address: None,
-            final_stacks: None,
-            payout_plan: None,
-            pending_nonces: None,
-            created_at: now_ms(),
-        };
-        (room, a_share_hex, b_share_hex, pubkey_hex, escrow_hex)
+    let room = EscrowRoom {
+        code: req.code.clone(),
+        escrow_ua: Some(escrow_ua.clone()),
+        frost_relay_url: None,
+        frost_room_code: None,
+        dkg_key_package_hex: None,
+        dkg_public_key_package_hex: None,
+        escrow_address: shim.escrow_address,
+        group_pubkey: shim.group_pubkey,
+        server_share: shim.server_share,
+        player_a_share_hex: shim.player_a_share_hex,
+        player_b_share_hex: shim.player_b_share_hex,
+        player_a_deposit: 0,
+        player_b_deposit: 0,
+        required_deposit: req.required_deposit,
+        rake_bps: req.rake_bps,
+        rake_paid: false,
+        game_active: false,
+        player_a_address: None,
+        player_b_address: None,
+        final_stacks: None,
+        payout_plan: None,
+        pending_nonces: None,
+        created_at: now_ms(),
     };
 
     state.rooms.lock().await.insert(req.code.clone(), room);
-
-    tracing::info!("escrow created: {} -> {}", req.code, &escrow_hex[..16]);
+    tracing::info!("escrow created (trusted-dealer): {} -> {}", req.code, &escrow_ua);
 
     Json(serde_json::json!({
-        "escrow_address": escrow_hex,
+        "escrow_address": escrow_ua,
         "player_a_share": a_share_hex,
         "player_b_share": b_share_hex,
         "public_key_package": pubkey_hex,
+        "dkg_mode": false,
+    }))
+}
+
+async fn create_room_dkg(
+    state: AppState,
+    req: CreateRoomReq,
+    shim: dkg_room::LegacyOsstShim,
+    a_share_hex: String,
+    b_share_hex: String,
+    pubkey_hex: String,
+) -> Json<serde_json::Value> {
+    let prov = match dkg_room::provision(
+        state.rooms.clone(),
+        req.code.clone(),
+        state.frost_relay_url.clone(),
+        state.network,
+    ).await {
+        Ok(p) => p,
+        Err(e) => return Json(serde_json::json!({"error": format!("dkg provision: {}", e)})),
+    };
+
+    let room = dkg_room::empty_room(
+        req.code.clone(),
+        req.required_deposit,
+        req.rake_bps,
+        state.frost_relay_url.clone(),
+        prov.frost_room_code.clone(),
+        shim,
+    );
+    state.rooms.lock().await.insert(req.code.clone(), room);
+
+    tracing::info!(
+        "escrow created (dkg): {} -> frost_room={} (UA pending until peers join)",
+        req.code, prov.frost_room_code
+    );
+
+    Json(serde_json::json!({
+        "escrow_address": serde_json::Value::Null,
+        "player_a_share": a_share_hex,
+        "player_b_share": b_share_hex,
+        "public_key_package": pubkey_hex,
+        "dkg_mode": true,
+        "frost_relay_url": state.frost_relay_url,
+        "frost_room_code": prov.frost_room_code,
     }))
 }
 
@@ -196,7 +308,10 @@ async fn get_room(
     match rooms.get(&code) {
         Some(room) => Json(serde_json::json!({
             "code": room.code,
-            "escrow_address": hex::encode(&room.escrow_address),
+            "escrow_address": room.escrow_ua,
+            "dkg_pending": room.frost_relay_url.is_some() && room.escrow_ua.is_none(),
+            "frost_relay_url": room.frost_relay_url,
+            "frost_room_code": room.frost_room_code,
             "player_a_deposit": room.player_a_deposit,
             "player_b_deposit": room.player_b_deposit,
             "required_deposit": room.required_deposit,
@@ -605,17 +720,30 @@ async fn main() {
     let verify_deposits = std::env::var("ESCROW_VERIFY_DEPOSITS")
         .map(|v| v == "true" || v == "1")
         .unwrap_or(false);
+    let network = orchard_ua::network_from_str(
+        &std::env::var("ESCROW_NETWORK").unwrap_or_else(|_| "test".to_string())
+    );
+    let use_dkg = std::env::var("ESCROW_USE_DKG")
+        .map(|v| v == "true" || v == "1")
+        .unwrap_or(false);
+    let frost_relay_url = std::env::var("ESCROW_RELAY_URL")
+        .unwrap_or_else(|_| "ws://127.0.0.1:50053/ws".to_string());
 
     let state = AppState {
         rooms: Arc::new(Mutex::new(HashMap::new())),
         house_address,
         zidecar_url,
         verify_deposits,
+        network,
+        use_dkg,
+        frost_relay_url,
     };
 
     tracing::info!("house address: {}", state.house_address);
     tracing::info!("zidecar: {}", state.zidecar_url);
     tracing::info!("verify_deposits: {}", state.verify_deposits);
+    tracing::info!("network: {:?}", state.network);
+    tracing::info!("use_dkg: {} (relay: {})", state.use_dkg, state.frost_relay_url);
 
     // spawn background deposit monitor (checks every 5s)
     tokio::spawn(deposit_monitor(state.clone()));
