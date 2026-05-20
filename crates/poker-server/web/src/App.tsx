@@ -622,17 +622,7 @@ export default function App() {
                   >
                     {escrow()}
                   </div>
-                  <div class="text-neutral-600 text-8px mb-3">send buy-in to this address · 0-conf accepted</div>
-                  <div class="flex gap-2 justify-center">
-                    <button
-                      class="btn text-9px px-4 py-1"
-                      onClick={() => {
-                        // for demo: report a deposit large enough for any buyin (10 ZEC)
-                        send({ type: 'ReportDeposit', txid: 'demo_' + Date.now(), amount: 1_000_000_000 })
-                        log('deposit reported (demo)', 'c-zec-yellow')
-                      }}
-                    >report deposit</button>
-                  </div>
+                  <div class="text-neutral-600 text-8px">deposit flow disabled — playing for chips until real ZEC is wired</div>
                 </div>
               </Show>
 
