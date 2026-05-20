@@ -87,6 +87,7 @@ type LiveTable = {
   max_players: number
   waiting: boolean
   access: string
+  bot_friendly?: boolean
   live: boolean
   blinds: string
   hand_number: number
@@ -94,7 +95,7 @@ type LiveTable = {
 }
 
 export default function Lobby(props: {
-  onJoin: (table: Table, name: string) => void
+  onJoin: (table: Table, name: string, bot: boolean) => void
   onJoinCode: (code: string, name: string) => void
   onChat?: (msg: string) => void
   hasWallet: boolean
@@ -182,10 +183,10 @@ export default function Lobby(props: {
     if (chatEl) chatEl.scrollTop = chatEl.scrollHeight
   })
 
-  function joinTable(i: number) {
+  function joinTable(i: number, bot: boolean = false) {
     if (!props.hasWallet) return // zafu required
     const n = name().trim() || 'anon'
-    props.onJoin(TABLES[i], n)
+    props.onJoin(TABLES[i], n, bot)
   }
 
   function joinByCode() {
@@ -263,19 +264,27 @@ export default function Lobby(props: {
           <div class="flex flex-col gap-2">
               <For each={TABLES}>
                 {(table, i) => (
-                  <button
-                    class="flex items-center justify-between p-3 bg-zec-surface border border-neutral-800 rounded-lg active:border-zec-yellow transition-colors"
-                    onClick={() => joinTable(i())}
-                  >
-                    <div>
-                      <div class="text-12px font-semibold">{table.name}</div>
-                      <div class="text-9px text-neutral-500">{table.blinds} ZEC blinds</div>
-                    </div>
-                    <div class="text-right">
-                      <div class="text-10px font-mono text-zec-yellow">{fmtZec(table.buyin)}</div>
-                      <div class="text-7px text-neutral-600">buy-in · {table.rakeBps/100}% fee</div>
-                    </div>
-                  </button>
+                  <div class="flex items-stretch gap-2">
+                    <button
+                      class="flex-1 flex items-center justify-between p-3 bg-zec-surface border border-neutral-800 rounded-lg active:border-zec-yellow transition-colors"
+                      onClick={() => joinTable(i(), false)}
+                      title="private table — share invite link"
+                    >
+                      <div>
+                        <div class="text-12px font-semibold">{table.name}</div>
+                        <div class="text-9px text-neutral-500">{table.blinds} ZEC blinds</div>
+                      </div>
+                      <div class="text-right">
+                        <div class="text-10px font-mono text-zec-yellow">{fmtZec(table.buyin)}</div>
+                        <div class="text-7px text-neutral-600">buy-in · {table.rakeBps/100}% fee</div>
+                      </div>
+                    </button>
+                    <button
+                      class="px-3 bg-zec-surface border border-neutral-800 rounded-lg active:border-zec-yellow transition-colors text-9px text-zec-yellow uppercase tracking-wider whitespace-nowrap"
+                      onClick={() => joinTable(i(), true)}
+                      title="public table — a bot will autojoin"
+                    >[bot]</button>
+                  </div>
                 )}
               </For>
             </div>
@@ -298,7 +307,12 @@ export default function Lobby(props: {
                     onClick={() => joinLive(table)}
                   >
                     <div>
-                      <div class="text-11px font-mono text-white">{table.code}</div>
+                      <div class="flex items-center gap-2">
+                        <span class="text-11px font-mono text-white">{table.code}</span>
+                        <Show when={table.bot_friendly}>
+                          <span class="text-7px text-zec-yellow border border-zec-yellow rounded px-1 uppercase tracking-wider">bot</span>
+                        </Show>
+                      </div>
                       <div class="text-9px text-neutral-500">{table.blinds} blinds</div>
                     </div>
                     <div class="flex items-center gap-2">

@@ -229,6 +229,8 @@ struct Room {
     code: String,
     max_seats: usize,
     access: TableAccess,
+    /// table is open to autojoin by bots
+    bot_friendly: bool,
     host_seat: Option<u8>,
     players: Vec<Option<Player>>,
     /// spectator channels
@@ -251,10 +253,10 @@ struct Room {
 
 impl Room {
     fn new(code: String) -> Self {
-        Self::with_settings(code, 5, 10, 1000, 30, 2, TableAccess::Public)
+        Self::with_settings(code, 5, 10, 1000, 30, 2, TableAccess::Public, false)
     }
 
-    fn with_settings(code: String, sb: u64, bb: u64, buyin: u64, timeout: u32, seats: usize, access: TableAccess) -> Self {
+    fn with_settings(code: String, sb: u64, bb: u64, buyin: u64, timeout: u32, seats: usize, access: TableAccess, bot_friendly: bool) -> Self {
         let seats = seats.clamp(2, 9);
         let rules = TableRules {
             small_blind: sb as u128, big_blind: bb as u128, ante: 0,
@@ -301,7 +303,7 @@ impl Room {
         };
 
         Room {
-            code, max_seats: seats, access, host_seat: None,
+            code, max_seats: seats, access, bot_friendly, host_seat: None,
             players: (0..seats).map(|_| None).collect(),
             spectators: Vec::new(),
             deposits: vec![0; seats],
@@ -737,6 +739,7 @@ async fn get_table_list(rooms: &Rooms) -> Vec<serde_json::Value> {
                 TableAccess::Public => "public",
                 _ => "private",
             },
+            "bot_friendly": r.bot_friendly,
             "live": has_spectators,
             "blinds": format!("{}/{}", r.engine.rules.small_blind, r.engine.rules.big_blind),
             "hand_number": r.hand_number,
@@ -764,6 +767,8 @@ struct CreateTableParams {
     access: Option<String>,
     /// comma-separated session pubkeys for mutuals mode
     allowed: Option<String>,
+    /// open to bot autojoin (only meaningful on public tables)
+    bot: Option<bool>,
 }
 
 async fn create_room(
@@ -786,7 +791,8 @@ async fn create_room(
         _ => TableAccess::Public,
     };
 
-    let room = Arc::new(Mutex::new(Room::with_settings(code.clone(), sb, bb, buyin, timeout, seats, access)));
+    let bot_friendly = params.bot.unwrap_or(false) && matches!(access, TableAccess::Public);
+    let room = Arc::new(Mutex::new(Room::with_settings(code.clone(), sb, bb, buyin, timeout, seats, access, bot_friendly)));
     state.rooms.lock().await.insert(code.clone(), room);
     notify_lobby_tables(&state.rooms, &state.lobby_users).await;
     axum::response::Redirect::to(&format!("/{}", code))

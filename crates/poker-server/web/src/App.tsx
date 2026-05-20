@@ -478,14 +478,15 @@ export default function App() {
             <Lobby
               hasWallet={hasWallet()}
               pubkey={walletPubkey()}
-              onJoin={(table, playerName) => {
+              onJoin={(table, playerName, bot) => {
                 setSelectedTable(table)
                 setName(playerName)
                 const params = new URLSearchParams({
                   sb: String(table.sb), bb: String(table.bb),
                   buyin: String(table.buyin), timeout: String(table.timeout),
                   rake_bps: String(table.rakeBps), rake_cap: String(table.rakeCap),
-                  access: 'private',
+                  access: bot ? 'public' : 'private',
+                  ...(bot ? { bot: 'true' } : {}),
                 })
                 fetch(`/new?${params}`, { redirect: 'follow' }).then(resp => {
                   const url = resp.url || resp.headers.get('location') || ''
