@@ -341,6 +341,59 @@ fn to_server_action(action: poker_pvm::Action, amount: u32, valid: Option<&Vec<s
     }
 }
 
+/// connects to /ws/lobby, autojoins waiting bot_friendly tables, one thread per table.
+fn run_lobby_watcher(config: Arc<BotConfig>, lobby_url: &str) {
+    let (mut socket, _) = match tungstenite::connect(lobby_url) {
+        Ok(s) => s,
+        Err(e) => { eprintln!("[lobby] connect failed: {}", e); return; }
+    };
+    println!("[lobby] connected to {}", lobby_url);
+
+    let join = serde_json::json!({"type": "Join", "name": &config.base_name});
+    let _ = socket.send(tungstenite::Message::Text(join.to_string().into()));
+
+    let mut joined: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut bot_counter = 0u32;
+
+    loop {
+        let msg = match socket.read() {
+            Ok(tungstenite::Message::Text(t)) => t.to_string(),
+            Ok(tungstenite::Message::Close(_)) => { println!("[lobby] disconnected"); break; }
+            Ok(_) => continue,
+            Err(e) => { eprintln!("[lobby] read error: {}", e); break; }
+        };
+
+        let v: serde_json::Value = match serde_json::from_str(&msg) {
+            Ok(v) => v, Err(_) => continue,
+        };
+        if v["type"].as_str() != Some("Tables") { continue; }
+
+        let tables = match v["tables"].as_array() { Some(t) => t, None => continue };
+        for table in tables {
+            if !table["waiting"].as_bool().unwrap_or(false) { continue; }
+            if !table["bot_friendly"].as_bool().unwrap_or(false) { continue; }
+            let players = table["players"].as_u64().unwrap_or(0);
+            let max = table["max_players"].as_u64().unwrap_or(2);
+            if players >= max { continue; }
+            let code = match table["code"].as_str() { Some(c) => c.to_string(), None => continue };
+            if joined.contains(&code) { continue; }
+            joined.insert(code.clone());
+
+            bot_counter += 1;
+            let bot_name = format!("{}_{}", config.base_name, bot_counter);
+            // build game ws url from lobby url: /ws/lobby → /{code}/ws
+            let game_url = lobby_url.replace("/ws/lobby", &format!("/{}/ws", code));
+            println!("[lobby] joining {} as {}", code, bot_name);
+
+            let config = config.clone();
+            std::thread::spawn(move || {
+                run_bot(&config, &game_url, &bot_name);
+                println!("[lobby] {} session ended", bot_name);
+            });
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main: single table or multi-table mode
 // ---------------------------------------------------------------------------
@@ -349,6 +402,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
 
     let mut servers: Vec<String> = Vec::new();
+    let mut lobby_url: Option<String> = None;
     let mut strategy_path = "strategy.bin".to_string();
     let mut base_name = "bot".to_string();
     let mut _moe_dir: Option<String> = None;
@@ -358,6 +412,7 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "--server" => { if i+1 < args.len() { servers.push(args[i+1].clone()); i += 1; } }
+            "--lobby" => { if i+1 < args.len() { lobby_url = Some(args[i+1].clone()); i += 1; } }
             "--strategy" => { if i+1 < args.len() { strategy_path = args[i+1].clone(); i += 1; } }
             "--name" => { if i+1 < args.len() { base_name = args[i+1].clone(); i += 1; } }
             "--moe-dir" => { if i+1 < args.len() { _moe_dir = Some(args[i+1].clone()); i += 1; } }
@@ -389,17 +444,21 @@ fn main() {
         base_name: base_name.clone(),
     });
 
-    if servers.is_empty() {
-        eprintln!("usage: cfr-bot --server ws://host/room/ws --strategy strategy.bin");
+    if servers.is_empty() && lobby_url.is_none() {
+        eprintln!("usage: cfr-bot --server ws://host/room/ws [--strategy strategy.bin]");
         eprintln!("       cfr-bot --server ws://host/room1/ws --server ws://host/room2/ws");
+        eprintln!("       cfr-bot --lobby ws://host/ws/lobby   (autojoin bot_friendly tables)");
         std::process::exit(1);
     }
 
+    if let Some(url) = lobby_url {
+        run_lobby_watcher(config, &url);
+        return;
+    }
+
     if servers.len() == 1 {
-        // single table — run in main thread
         run_bot(&config, &servers[0], &base_name);
     } else {
-        // multi-table — one thread per table
         println!("multi-table: {} tables", servers.len());
         let mut handles = Vec::new();
         for (idx, url) in servers.iter().enumerate() {
