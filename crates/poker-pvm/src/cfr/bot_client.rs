@@ -193,12 +193,18 @@ fn run_bot(config: &BotConfig, server_url: &str, bot_name: &str) {
                 let cards = my_cards.unwrap_or([0, 0]);
                 let decision = brain.decide(&gs, &cards, &community_cards);
 
-                let (action, amount) = match decision.sample(rng_f()) {
-                    Some(a) => a,
-                    None => (poker_pvm::Action::Check, 0),
-                };
+                let (mut action, mut amount) = decision.sample(rng_f())
+                    .unwrap_or((poker_pvm::Action::Fold, 0));
 
                 let valid = v.get("valid_actions").and_then(|a| a.as_array());
+                // brain may suggest an action the server doesn't accept (e.g. check preflop as SB);
+                // coerce to a legal one: call > check > fold
+                if !action_is_valid(action, valid) {
+                    if has_valid(valid, "call") { action = poker_pvm::Action::Call; amount = 0; }
+                    else if has_valid(valid, "check") { action = poker_pvm::Action::Check; amount = 0; }
+                    else { action = poker_pvm::Action::Fold; amount = 0; }
+                }
+
                 let action_json = to_server_action(action, amount, valid);
                 println!("[act] {} (thought {}ms)", action_json, think_ms);
                 let _ = socket.send(tungstenite::Message::Text(action_json.into()));
@@ -296,6 +302,22 @@ fn build_game_state(
         last_action_hash: [0; 32], rake: 0,
         rules: poker_pvm::Rules { buyin: 1000, small_blind: 5, big_blind: 10, turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0 },
     }
+}
+
+fn has_valid(valid: Option<&Vec<serde_json::Value>>, kind: &str) -> bool {
+    valid.map(|arr| arr.iter().any(|a| a["kind"].as_str() == Some(kind))).unwrap_or(false)
+}
+
+fn action_is_valid(action: poker_pvm::Action, valid: Option<&Vec<serde_json::Value>>) -> bool {
+    let kind = match action {
+        poker_pvm::Action::Fold => "fold",
+        poker_pvm::Action::Check => "check",
+        poker_pvm::Action::Call => "call",
+        poker_pvm::Action::Bet => "bet",
+        poker_pvm::Action::Raise => "raise",
+        poker_pvm::Action::AllIn => "allin",
+    };
+    has_valid(valid, kind)
 }
 
 fn to_server_action(action: poker_pvm::Action, amount: u32, valid: Option<&Vec<serde_json::Value>>) -> String {
