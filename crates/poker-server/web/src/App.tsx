@@ -274,6 +274,7 @@ export default function App() {
       case 'RoomInfo':
         if (msg.code && msg.code !== roomCode()) {
           setRoomCode(msg.code)
+          setLogs([])
           log(`table: ${msg.code}`, 'c-green')
         }
         if (msg.escrow && msg.escrow.length > 5) {
