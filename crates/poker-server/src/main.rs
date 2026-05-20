@@ -388,10 +388,13 @@ impl Room {
                 }
                 EngineEvent::HoleCardsDealt { seat, cards } => {
                     self.hole_cards[*seat as usize] = Some(*cards);
+                    let live_stacks: Vec<u64> = self.engine.hand_state()
+                        .map(|h| h.seats.iter().map(|s| s.chips).collect())
+                        .unwrap_or_else(|| self.engine.stacks().to_vec());
                     self.send_to(*seat, ServerMsg::HandStarted {
                         hand_number: self.hand_number as u64, button: self.button,
                         your_cards: Some([card_json(&cards[0]), card_json(&cards[1])]),
-                        stacks: self.engine.stacks().to_vec(),
+                        stacks: live_stacks,
                     });
                 }
                 EngineEvent::ActionRequired { seat, valid_actions } => {
@@ -995,14 +998,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     tracing::info!("room {}: seat {} ({}) reconnected", r.code, seat, name);
                     let _ = tx.send(ServerMsg::Seated { seat, name: name.clone() });
 
-                    // send current game state to reconnecting player
+                    // send current game state to reconnecting player.
+                    let live_stacks: Vec<u64> = r.engine.hand_state()
+                        .map(|h| h.seats.iter().map(|s| s.chips).collect())
+                        .unwrap_or_else(|| r.engine.stacks().to_vec());
                     let _ = tx.send(ServerMsg::HandStarted {
                         hand_number: r.hand_number as u64,
                         button: r.button,
                         your_cards: r.hole_cards[seat as usize].as_ref().map(|c| {
                             [card_json(&c[0]), card_json(&c[1])]
                         }),
-                        stacks: r.engine.stacks().to_vec(),
+                        stacks: live_stacks,
                     });
                     if !r.community_cards.is_empty() {
                         let phase = r.engine.hand_state().map(|h| format!("{:?}", h.phase).to_lowercase())

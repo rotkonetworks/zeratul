@@ -143,7 +143,6 @@ export default function App() {
       case 'HandStarted':
         setView('game')
         setStacks(msg.stacks)
-        setBets([0, 0])
         setButton(msg.button)
         setHandNum(msg.hand_number)
         setBoard([])
@@ -214,12 +213,13 @@ export default function App() {
       case 'PlayerActed': {
         setActing(-1)
         setActions([])
+        const stackBefore = stacks()[msg.seat] ?? 0
         const s = [...stacks()]
         s[msg.seat] = msg.new_stack
         setStacks(s)
+        const increment = stackBefore - msg.new_stack
         const b = [...bets()]
-        if (msg.action === 'bet' || msg.action === 'raise') b[msg.seat] = msg.amount
-        else if (msg.action === 'call') b[msg.seat] = Math.max(...b)
+        if (increment > 0) b[msg.seat] = (b[msg.seat] ?? 0) + increment
         setBets(b)
         const pos = msg.seat === button() ? 'BTN' : 'BB'
         const who = msg.seat === mySeat() ? `you(${pos})` : `opp(${pos})`
@@ -700,15 +700,19 @@ export default function App() {
                 </Show>
 
                 {/* opponent (top) */}
-                <div class="absolute top--4 left-50% -translate-x-50% text-center w-44">
-                  <div class={`inline-block px-3 py-1 bg-zec-surface border ${acting() === opp() ? 'border-zec-yellow shadow-[0_0_8px_rgba(244,183,40,0.3)]' : oppDisconnected() ? 'border-red-800' : 'border-neutral-800'}`}>
-                    <div class={`text-9px font-semibold uppercase tracking-wider ${acting() === opp() ? 'text-zec-yellow' : oppDisconnected() ? 'text-red-400' : 'text-neutral-500'}`}>
-                      {oppName()} <span class="text-neutral-600">{getPositionShort(opp(), button(), maxSeats())}</span> {oppDisconnected() ? '(dc)' : ''}
+                <div class="absolute top--4 left-50% -translate-x-50% text-center">
+                  <div class="flex items-center justify-center gap-2">
+                    <div class="font-mono text-11px text-zec-yellow whitespace-nowrap w-16 text-right">bet: {oppBet()}</div>
+                    <div class={`inline-block px-3 py-1 bg-zec-surface border ${acting() === opp() ? 'border-zec-yellow shadow-[0_0_8px_rgba(244,183,40,0.3)]' : oppDisconnected() ? 'border-red-800' : 'border-neutral-800'}`}>
+                      <div class={`text-9px font-semibold uppercase tracking-wider ${acting() === opp() ? 'text-zec-yellow' : oppDisconnected() ? 'text-red-400' : 'text-neutral-500'}`}>
+                        {oppName()} <span class="text-neutral-600">{getPositionShort(opp(), button(), maxSeats())}</span> {oppDisconnected() ? '(dc)' : ''}
+                      </div>
+                      <div class="font-mono text-13px text-zec-yellow">{oppStack()}</div>
+                      <Show when={acting() === opp() && actionTimer() > 0}>
+                        <div class={`font-mono text-11px font-bold ${actionTimer() <= 5 ? 'text-red-500 animate-pulse' : actionTimer() <= 10 ? 'text-orange-400' : actionTimer() <= 20 ? 'text-zec-yellow' : 'text-neutral-400'}`}>{actionTimer()}s</div>
+                      </Show>
                     </div>
-                    <div class="font-mono text-13px text-zec-yellow">{oppStack()}</div>
-                    <Show when={acting() === opp() && actionTimer() > 0}>
-                      <div class={`font-mono text-11px font-bold ${actionTimer() <= 5 ? 'text-red-500 animate-pulse' : actionTimer() <= 10 ? 'text-orange-400' : actionTimer() <= 20 ? 'text-zec-yellow' : 'text-neutral-400'}`}>{actionTimer()}s</div>
-                    </Show>
+                    <div class="w-16" aria-hidden="true"></div>
                   </div>
                   <div class="flex gap-1 justify-center mt-1.5">
                     <Show when={oppRevealed() && oppCards()} fallback={
@@ -720,7 +724,6 @@ export default function App() {
                       <Card card={oppCards()![1]} />
                     </Show>
                   </div>
-                  <div class="font-mono text-11px text-neutral-400 mt-0.5 h-4">{oppBet() > 0 ? oppBet() : ''}</div>
                 </div>
 
                 {/* dealer chip */}
@@ -733,8 +736,16 @@ export default function App() {
                     style="left: calc(50% + 55px)">D</div>
                 </Show>
 
-                {/* deck + board */}
-                <div class="flex gap-1.5 justify-center items-center my-13">
+                {/* pot + deck + board — pot sits left of the community cards,
+                    invisible spacer on the right keeps cards page-centered */}
+                <div class="flex gap-3 justify-center items-center my-13">
+                  <div class="font-mono text-13px font-500 text-zec-yellow whitespace-nowrap w-20 text-right">
+                    <Show when={lastResult()} fallback={<>pot: {pot()}</>}>
+                      <span class={`animate-pulse ${lastResult()!.won ? 'text-green-400' : 'text-red-400'}`}>
+                        {lastResult()!.won ? '+' : ''}{lastResult()!.amount}
+                      </span>
+                    </Show>
+                  </div>
                   {/* deck on table — shows shuffle status */}
                   <Show when={board().length === 0}>
                     <div class="relative w-12 h-17 mr-2" title={deckVerified() ? 'deck verified (Chaum-Pedersen)' : gameStatus() || 'deck'}>
@@ -756,36 +767,29 @@ export default function App() {
                   <For each={board()}>
                     {c => <Card card={c} size="lg" />}
                   </For>
-                </div>
-
-                {/* pot + result */}
-                <div class="text-center font-mono text-14px font-500 min-h-5 relative">
-                  <Show when={lastResult()} fallback={
-                    <span class="text-zec-yellow">{pot() > 0 ? pot() : ''}</span>
-                  }>
-                    <span class={`animate-pulse ${lastResult()!.won ? 'text-green-400' : 'text-red-400'}`}>
-                      {lastResult()!.won ? '+' : ''}{lastResult()!.amount}
-                    </span>
-                  </Show>
+                  <div class="w-20" aria-hidden="true"></div>
                 </div>
 
                 {/* you (bottom) */}
-                <div class="absolute bottom--4 left-50% -translate-x-50% text-center w-44">
-                  <div class="font-mono text-11px text-neutral-400 mb-0.5 h-4">{myBet() > 0 ? myBet() : ''}</div>
+                <div class="absolute bottom--4 left-50% -translate-x-50% text-center">
                   <div class="flex gap-1 justify-center mb-1.5">
                     <Show when={myCards()}>
                       <Card card={myCards()![0]} />
                       <Card card={myCards()![1]} />
                     </Show>
                   </div>
-                  <div class={`inline-block px-3 py-1 bg-zec-surface border ${acting() === mySeat() ? 'border-zec-yellow shadow-[0_0_8px_rgba(244,183,40,0.3)]' : 'border-neutral-800'}`}>
-                    <Show when={acting() === mySeat() && actionTimer() > 0}>
-                      <div class={`font-mono text-11px font-bold ${actionTimer() <= 5 ? 'text-red-500 animate-pulse' : actionTimer() <= 10 ? 'text-orange-400' : actionTimer() <= 20 ? 'text-zec-yellow' : 'text-neutral-400'}`}>{actionTimer()}s</div>
-                    </Show>
-                    <div class="font-mono text-13px text-zec-yellow">{myStack()}</div>
-                    <div class={`text-9px font-semibold uppercase tracking-wider ${acting() === mySeat() ? 'text-zec-yellow' : 'text-neutral-500'}`}>
-                      {name() || 'you'} <span class="text-neutral-600">{button() === mySeat() ? 'BTN/SB' : 'BB'}</span>
+                  <div class="flex items-center justify-center gap-2">
+                    <div class="font-mono text-11px text-zec-yellow whitespace-nowrap w-16 text-right">bet: {myBet()}</div>
+                    <div class={`inline-block px-3 py-1 bg-zec-surface border ${acting() === mySeat() ? 'border-zec-yellow shadow-[0_0_8px_rgba(244,183,40,0.3)]' : 'border-neutral-800'}`}>
+                      <Show when={acting() === mySeat() && actionTimer() > 0}>
+                        <div class={`font-mono text-11px font-bold ${actionTimer() <= 5 ? 'text-red-500 animate-pulse' : actionTimer() <= 10 ? 'text-orange-400' : actionTimer() <= 20 ? 'text-zec-yellow' : 'text-neutral-400'}`}>{actionTimer()}s</div>
+                      </Show>
+                      <div class="font-mono text-13px text-zec-yellow">{myStack()}</div>
+                      <div class={`text-9px font-semibold uppercase tracking-wider ${acting() === mySeat() ? 'text-zec-yellow' : 'text-neutral-500'}`}>
+                        {name() || 'you'} <span class="text-neutral-600">{button() === mySeat() ? 'BTN/SB' : 'BB'}</span>
+                      </div>
                     </div>
+                    <div class="w-16" aria-hidden="true"></div>
                   </div>
                 </div>
               </div>
