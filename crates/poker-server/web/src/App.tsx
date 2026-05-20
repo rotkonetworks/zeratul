@@ -334,6 +334,15 @@ export default function App() {
     setActions([])
   }
 
+  function leaveTable() {
+    if (!confirm('Leave table and cash out?')) return
+    send({ type: 'Leave' })
+    setActions([])
+    setActing(-1)
+    history.pushState(null, '', '/')
+    setView('casino')
+  }
+
   // keybinding modes
   const [keyMode, setKeyMode] = createSignal<'classic' | 'vim'>('classic')
 
@@ -532,7 +541,12 @@ export default function App() {
 
           {/* waiting */}
           <Show when={view() === 'waiting'}>
-            <div class="p-10 text-center">
+            <div class="p-10 text-center relative">
+              <button
+                class="absolute top-2 right-2 px-1.5 py-0.5 rounded text-7px border border-red-900 text-red-400 hover:bg-red-900/20"
+                onClick={leaveTable}
+                title="leave table — settles escrow and pays out"
+              >leave</button>
               <div class="text-zec-yellow text-11px uppercase tracking-2px mb-4">
                 waiting for players
               </div>
@@ -650,7 +664,7 @@ export default function App() {
                   </Show>
                   <button
                     class="px-1.5 py-0.5 rounded text-7px border border-red-900 text-red-400 hover:bg-red-900/20"
-                    onClick={() => { if (confirm('Leave table and cash out?')) send({ type: 'Leave' }) }}
+                    onClick={leaveTable}
                     title="leave table — settles escrow and pays out"
                   >leave</button>
                 </span>
