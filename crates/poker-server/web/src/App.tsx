@@ -26,7 +26,18 @@ export default function App() {
     const iv = setTimeout(check, 1500)
     return () => clearTimeout(iv)
   })())
-  const [name, setName] = createSignal('')
+  const currentRoom = () => location.pathname.replace(/^\/+|\/+$/g, '')
+  // last_session: {room, name} saved on Seated, cleared on Leave — used to detect reconnect
+  const initialLastSession = (() => {
+    try { return JSON.parse(localStorage.getItem('poker_last_session') || 'null') as { room: string; name: string } | null } catch { return null }
+  })()
+  const [lastSession, setLastSession] = createSignal(initialLastSession)
+  const isReconnect = () => {
+    const s = lastSession()
+    return !!s && !!currentRoom() && s.room === currentRoom()
+  }
+  const initialName = (isReconnect() && initialLastSession?.name) || localStorage.getItem('poker_nickname') || ''
+  const [name, setName] = createSignal(initialName)
   const [mySeat, setMySeat] = createSignal(-1)
   const [maxSeats, setMaxSeats] = createSignal(2)
   const [oppName, setOppName] = createSignal('\u2014')
@@ -87,6 +98,12 @@ export default function App() {
       case 'Seated':
         setMySeat(msg.seat)
         setView('waiting')
+        // remember the seat so a future visit to this room shows reconnect UI
+        if (currentRoom() && msg.name) {
+          const s = { room: currentRoom(), name: msg.name }
+          localStorage.setItem('poker_last_session', JSON.stringify(s))
+          setLastSession(s)
+        }
         break
       case 'Waiting':
         setView('waiting')
@@ -340,6 +357,9 @@ export default function App() {
     send({ type: 'Leave' })
     setActions([])
     setActing(-1)
+    // leaving is intentional — don't offer reconnect later
+    localStorage.removeItem('poker_last_session')
+    setLastSession(null)
     history.pushState(null, '', '/')
     setView('casino')
   }
@@ -473,7 +493,6 @@ export default function App() {
                   if (code) {
                     history.pushState(null, '', '/' + code)
                     setView('lobby')
-                    setTimeout(() => sit(), 200)
                   }
                 })
               }}
@@ -481,7 +500,6 @@ export default function App() {
                 setName(playerName)
                 history.pushState(null, '', '/' + code)
                 setView('lobby')
-                setTimeout(() => sit(), 200)
               }}
             />
           </Show>
@@ -494,9 +512,14 @@ export default function App() {
               </div>
               {/* game parameters — only for host (creating table) */}
               <Show when={location.pathname.length <= 1} fallback={
-                <div class="text-neutral-500 text-11px tracking-wider mb-4">
-                  joining table &middot; host sets rules
-                </div>
+                <Show when={isReconnect()} fallback={
+                  <div class="text-neutral-500 text-11px tracking-wider mb-4">
+                    joining table &middot; host sets rules
+                  </div>
+                }>
+                  <div class="text-zec-yellow text-11px tracking-wider mb-1 uppercase">reconnecting</div>
+                  <div class="text-neutral-400 text-10px mb-4">as {lastSession()!.name}</div>
+                </Show>
               }>
                 <div class="flex items-center justify-center gap-4 mb-3">
                   <label class="flex flex-col items-center gap-1">
@@ -533,7 +556,7 @@ export default function App() {
                     autofocus
                   />
                   <button class="btn btn-primary" onClick={sit}>
-                    {location.pathname.length > 1 ? 'sit down' : 'create table'}
+                    {isReconnect() ? 'reconnect' : location.pathname.length > 1 ? 'sit down' : 'create table'}
                   </button>
                 </div>
               </div>

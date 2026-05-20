@@ -202,6 +202,14 @@ impl GameEngine {
         self.hand.as_ref()
     }
 
+    /// current actor's seat + their valid actions, if any (used for reconnect resync)
+    pub fn pending_action(&self) -> Option<(u8, Vec<ValidAction>)> {
+        let hand = self.hand.as_ref()?;
+        let idx = hand.betting.action_on?;
+        let seat = hand.seats[idx].seat;
+        Some((seat, compute_valid_actions(hand, idx)))
+    }
+
     /// start a new hand. `deck` must have enough cards for hole cards + 5 community.
     pub fn new_hand(&mut self, button: u8, deck: &[Card]) -> Result<Vec<EngineEvent>, EngineError> {
         if self.hand.is_some() {

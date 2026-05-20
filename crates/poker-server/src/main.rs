@@ -1019,6 +1019,19 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                         });
                     }
 
+                    // resync turn: if it's this seat's action, re-emit ActionRequired
+                    if let Some((act_seat, valid)) = r.engine.pending_action() {
+                        if act_seat == seat {
+                            let _ = tx.send(ServerMsg::ActionRequired {
+                                seat: act_seat,
+                                valid_actions: valid.iter().map(|va| ValidActionJson {
+                                    kind: format!("{:?}", va.kind).to_lowercase(),
+                                    min_amount: va.min_amount, max_amount: va.max_amount,
+                                }).collect(),
+                            });
+                        }
+                    }
+
                     // notify all other players of reconnect
                     for i in 0..r.max_seats as u8 {
                         if i != seat { r.send_to(i, ServerMsg::OpponentReconnected { seat }); }

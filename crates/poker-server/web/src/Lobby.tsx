@@ -230,17 +230,10 @@ export default function Lobby(props: {
           </div>
         </Show>
 
-        {/* identity — editable nickname, saved to localStorage */}
+        {/* identity — display only; name is set on /{code} */}
         <Show when={props.hasWallet}>
           <div class="flex items-center justify-center gap-2 mb-3">
-            <input
-              class="input-field text-11px text-zec-yellow font-mono text-center w-32"
-              placeholder={props.pubkey?.slice(0, 8) || 'anon'}
-              maxLength={16}
-              spellcheck={false}
-              value={name()}
-              onInput={e => updateName(e.currentTarget.value)}
-            />
+            <span class="text-11px text-zec-yellow font-mono">{name() || props.pubkey?.slice(0, 8) || 'anon'}</span>
             <Show when={props.pubkey}>
               <span class="text-7px text-neutral-700 font-mono" title={props.pubkey}>
                 {props.pubkey!.slice(0, 6)}..
