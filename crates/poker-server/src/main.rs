@@ -1063,9 +1063,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                             url: format!("/{}", r.code),
                         });
                         let _ = tx.send(ServerMsg::Waiting);
-                    } else if r.engine.hand_state().is_none() {
-                        r.start_hand();
                     }
+                    // game does not auto-start on Join — players must both
+                    // report deposits (see ClientMsg::ReportDeposit handler)
+                    // before the first hand begins.
                     drop(r);
                     notify_lobby_tables(&state.rooms, &state.lobby_users).await;
                 } else {

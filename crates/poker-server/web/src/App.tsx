@@ -604,8 +604,8 @@ export default function App() {
                     <button
                       class="btn text-9px px-4 py-1"
                       onClick={() => {
-                        // for demo: simulate deposit report
-                        send({ type: 'ReportDeposit', txid: 'demo_' + Date.now(), amount: 1000 })
+                        // for demo: report a deposit large enough for any buyin (10 ZEC)
+                        send({ type: 'ReportDeposit', txid: 'demo_' + Date.now(), amount: 1_000_000_000 })
                         log('deposit reported (demo)', 'c-zec-yellow')
                       }}
                     >report deposit</button>
