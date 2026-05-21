@@ -157,6 +157,20 @@ async fn run_deposit_poll(
                         1 => room.player_b_deposit = room.player_b_deposit.saturating_add(n.value_zat),
                         _ => {}
                     }
+                    if let (Some(addr), Some(slot)) = (
+                        n.payout_address.as_ref(),
+                        room.seat_payout_address.get_mut(n.seat as usize),
+                    ) {
+                        if slot.is_none() {
+                            *slot = Some(addr.clone());
+                            tracing::info!("deposit room={} seat={} payout_address={}", code, n.seat, addr);
+                        }
+                    } else if n.payout_address.is_none() {
+                        tracing::warn!(
+                            "deposit room={} seat={} val={} MISSING payout memo — game cannot start until top-up with `zk.poker/v1/payout:<addr>`",
+                            code, n.seat, n.value_zat,
+                        );
+                    }
                     tracing::info!(
                         "deposit room={} seat={} val={} tx={} h={}",
                         code, n.seat, n.value_zat, txid_short, n.block_height,
@@ -217,6 +231,7 @@ pub fn empty_room(
         dkg_sk_hex: None,
         seat_addresses: vec![None, None],
         seat_addr_bytes: vec![None, None],
+        seat_payout_address: vec![None, None],
         last_scanned_height: 0,
         escrow_address: legacy_osst.escrow_address,
         group_pubkey: legacy_osst.group_pubkey,

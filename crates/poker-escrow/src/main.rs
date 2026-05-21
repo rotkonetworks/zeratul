@@ -103,6 +103,10 @@ struct EscrowRoom {
     seat_addresses: Vec<Option<String>>,
     /// per-seat 43-byte raw addresses for matching decrypted notes back to a seat
     seat_addr_bytes: Vec<Option<[u8; 43]>>,
+    /// per-seat refund/payout destination — recovered from the `zk.poker/v1/payout:` memo
+    /// on the first valid deposit. `None` means the depositor forgot the memo; deposits still
+    /// accrue but the game won't start until we know where to refund/pay.
+    seat_payout_address: Vec<Option<String>>,
     /// resume point for the deposit scanner — last block whose actions we've trial-decrypted
     last_scanned_height: u32,
     /// legacy 32-byte raw-hex form (osst-derived); retained for the unmigrated /sign endpoints
@@ -240,6 +244,7 @@ async fn create_room_trusted_dealer(
         dkg_sk_hex: None,
         seat_addresses: vec![None, None],
         seat_addr_bytes: vec![None, None],
+        seat_payout_address: vec![None, None],
         last_scanned_height: 0,
         escrow_address: shim.escrow_address,
         group_pubkey: shim.group_pubkey,
@@ -330,6 +335,7 @@ async fn get_room(
             "frost_relay_url": room.frost_relay_url,
             "frost_room_code": room.frost_room_code,
             "seat_addresses": room.seat_addresses,
+            "seat_payout_addresses": room.seat_payout_address,
             "last_scanned_height": room.last_scanned_height,
             "player_a_deposit": room.player_a_deposit,
             "player_b_deposit": room.player_b_deposit,
@@ -340,6 +346,7 @@ async fn get_room(
             "settled": room.payout_plan.is_some(),
             "both_deposited": room.player_a_deposit >= room.required_deposit
                 && room.player_b_deposit >= room.required_deposit,
+            "both_payout_addresses_known": room.seat_payout_address.iter().take(2).all(|a| a.is_some()),
         })),
         None => Json(serde_json::json!({"error": "room not found"})),
     }

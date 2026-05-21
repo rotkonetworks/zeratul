@@ -275,6 +275,8 @@ struct Room {
     dkg_reported_ua: Vec<Option<String>>,
     /// per-seat deposit UAs synced from poker-escrow's /room/{code}
     seat_deposit_addresses: Vec<Option<String>>,
+    /// per-seat personal payout addresses (recovered from deposit memo)
+    seat_payout_addresses: Vec<Option<String>>,
     /// last DepositStatus we broadcast — so the 5s poll only re-broadcasts on change
     last_deposit_broadcast: Option<(u64, u64, bool)>,
     player_a_share: SecretShare<PallasScalar>,
@@ -355,6 +357,7 @@ impl Room {
             frost_room_code,
             dkg_reported_ua: vec![None; seats],
             seat_deposit_addresses: vec![None; seats],
+            seat_payout_addresses: vec![None; seats],
             last_deposit_broadcast: None,
             player_a_share, player_b_share,
             action_deadline: None,
@@ -405,10 +408,12 @@ impl Room {
         out
     }
 
-    /// every seated player has deposited at least required_deposit into escrow
+    /// every seated player has deposited the required amount AND we have their refund address
     fn deposits_satisfied(&self) -> bool {
         self.players.iter().enumerate().all(|(i, p)| {
-            p.is_none() || self.deposits.get(i).copied().unwrap_or(0) >= self.required_deposit
+            if p.is_none() { return true; }
+            self.deposits.get(i).copied().unwrap_or(0) >= self.required_deposit
+                && self.seat_payout_addresses.get(i).and_then(|a| a.as_ref()).is_some()
         })
     }
 
@@ -659,6 +664,11 @@ fn spawn_deposit_poller(rooms: Rooms, escrow_url: Option<String>, code: String) 
             for (i, addr) in state.seat_addresses.iter().enumerate() {
                 if i < r.seat_deposit_addresses.len() && r.seat_deposit_addresses[i].is_none() {
                     r.seat_deposit_addresses[i] = addr.clone();
+                }
+            }
+            for (i, addr) in state.seat_payout_addresses.iter().enumerate() {
+                if i < r.seat_payout_addresses.len() && r.seat_payout_addresses[i].is_none() {
+                    r.seat_payout_addresses[i] = addr.clone();
                 }
             }
             if r.deposits.len() >= 2 {

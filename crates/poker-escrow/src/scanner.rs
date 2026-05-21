@@ -12,9 +12,14 @@ use std::io::Cursor;
 use orchard::keys::{FullViewingKey, PreparedIncomingViewingKey, Scope};
 use orchard::note_encryption::OrchardDomain;
 use zcash_note_encryption::{
-    try_compact_note_decryption, EphemeralKeyBytes, ShieldedOutput, COMPACT_NOTE_SIZE,
+    try_compact_note_decryption, try_note_decryption, EphemeralKeyBytes, ShieldedOutput,
+    COMPACT_NOTE_SIZE, ENC_CIPHERTEXT_SIZE,
 };
 use zecli::client::ZidecarClient;
+
+/// Memo prefix every poker-escrow deposit must carry; the suffix is the depositor's personal
+/// Orchard receiver so we know where to send refunds + payouts later.
+pub const PAYOUT_MEMO_PREFIX: &str = "zk.poker/v1/payout:";
 
 /// Orchard NU5 activation on Zcash mainnet.
 const ORCHARD_ACTIVATION_MAINNET: u32 = 1_687_104;
@@ -27,6 +32,10 @@ pub struct DepositNote {
     pub value_zat: u64,
     pub txid: Vec<u8>,
     pub block_height: u32,
+    /// `Some(u1...)` when the deposit's memo started with `PAYOUT_MEMO_PREFIX` — that's where
+    /// refunds / payouts go for this seat. `None` means the depositor forgot the memo and the
+    /// game cannot start until a memo-bearing top-up arrives.
+    pub payout_address: Option<String>,
 }
 
 pub fn parse_fvk(hex_str: &str) -> Result<FullViewingKey, String> {
@@ -45,6 +54,52 @@ impl ShieldedOutput<OrchardDomain, COMPACT_NOTE_SIZE> for CompactOutput {
     fn ephemeral_key(&self) -> EphemeralKeyBytes { EphemeralKeyBytes(self.epk) }
     fn cmstar_bytes(&self) -> [u8; 32] { self.cmx }
     fn enc_ciphertext(&self) -> &[u8; COMPACT_NOTE_SIZE] { &self.ct }
+}
+
+struct FullOutput {
+    epk: [u8; 32],
+    cmx: [u8; 32],
+    enc: [u8; ENC_CIPHERTEXT_SIZE],
+}
+
+impl ShieldedOutput<OrchardDomain, ENC_CIPHERTEXT_SIZE> for FullOutput {
+    fn ephemeral_key(&self) -> EphemeralKeyBytes { EphemeralKeyBytes(self.epk) }
+    fn cmstar_bytes(&self) -> [u8; 32] { self.cmx }
+    fn enc_ciphertext(&self) -> &[u8; ENC_CIPHERTEXT_SIZE] { &self.enc }
+}
+
+/// Locate the 580-byte enc_ciphertext for an action matching `(cmx, epk)` within a raw V5
+/// orchard tx. Each action lays out as cv(32) + nf(32) + rk(32) + cmx(32) + epk(32) + enc(580)
+/// + out(80) — so once we find cmx+epk back-to-back, enc follows immediately.
+/// (Inlined from `zync-core::sync::extract_enc_ciphertext`; same logic, no extra dep.)
+fn extract_enc_ciphertext(
+    raw_tx: &[u8],
+    cmx: &[u8; 32],
+    epk: &[u8; 32],
+) -> Option<[u8; ENC_CIPHERTEXT_SIZE]> {
+    for i in 0..raw_tx.len().saturating_sub(64 + ENC_CIPHERTEXT_SIZE) {
+        if &raw_tx[i..i + 32] == cmx && &raw_tx[i + 32..i + 64] == epk {
+            let start = i + 64;
+            let end = start + ENC_CIPHERTEXT_SIZE;
+            if end <= raw_tx.len() {
+                let mut enc = [0u8; ENC_CIPHERTEXT_SIZE];
+                enc.copy_from_slice(&raw_tx[start..end]);
+                return Some(enc);
+            }
+        }
+    }
+    None
+}
+
+fn parse_payout_memo(memo_bytes: &[u8]) -> Option<String> {
+    let end = memo_bytes.iter().rposition(|&b| b != 0).map(|i| i + 1).unwrap_or(0);
+    let text = std::str::from_utf8(&memo_bytes[..end]).ok()?;
+    let suffix = text.strip_prefix(PAYOUT_MEMO_PREFIX)?.trim();
+    if !(suffix.starts_with("u1") || suffix.starts_with("utest1") || suffix.starts_with("uregtest1")) {
+        return None;
+    }
+    if suffix.len() < 20 || suffix.len() > 256 { return None; }
+    Some(suffix.to_string())
 }
 
 /// Scan from `last_height + 1` to tip and return every note that landed at one of
@@ -103,11 +158,28 @@ pub async fn scan(
                     continue;
                 };
 
+                // re-decrypt the full ciphertext to recover the 512-byte memo. extra round-trip
+                // per matched action only; the vast majority of blocks have no hits, so cost
+                // stays bounded in practice.
+                let payout_address = match client.get_transaction(&action.txid).await {
+                    Ok(raw_tx) => extract_enc_ciphertext(&raw_tx, &action.cmx, &action.ephemeral_key)
+                        .and_then(|enc| {
+                            let full = FullOutput { epk: action.ephemeral_key, cmx: action.cmx, enc };
+                            try_note_decryption(&domain, &ivk_ext, &full)
+                                .and_then(|(_, _, memo)| parse_payout_memo(&memo))
+                        }),
+                    Err(e) => {
+                        tracing::warn!("scanner: get_transaction failed, leaving memo unparsed: {}", e);
+                        None
+                    }
+                };
+
                 found.push(DepositNote {
                     seat: seat as u8,
                     value_zat: note.value().inner(),
                     txid: action.txid.clone(),
                     block_height: block.height,
+                    payout_address,
                 });
             }
         }

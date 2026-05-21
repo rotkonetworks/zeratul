@@ -31,6 +31,9 @@ pub struct EscrowState {
     pub escrow_address: Option<String>,
     #[serde(default)]
     pub seat_addresses: Vec<Option<String>>,
+    /// per-seat personal payout addresses recovered from the `zk.poker/v1/payout:` memo
+    #[serde(default)]
+    pub seat_payout_addresses: Vec<Option<String>>,
     #[serde(default)]
     pub player_a_deposit: u64,
     #[serde(default)]
@@ -39,6 +42,8 @@ pub struct EscrowState {
     pub required_deposit: u64,
     #[serde(default)]
     pub both_deposited: bool,
+    #[serde(default)]
+    pub both_payout_addresses_known: bool,
 }
 
 /// GET /room/{code} — current escrow + deposit state for the poker-server poll loop.
