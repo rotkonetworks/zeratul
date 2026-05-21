@@ -377,6 +377,34 @@ impl Room {
         }
     }
 
+    /// payout plan for the room — `(seat, zatoshi)` pairs. Derived from real deposits, not
+    /// engine defaults: a seat that never deposited is excluded outright. Pre-game leave
+    /// refunds the deposit verbatim; post-hand the chip delta (engine stack ± initial buy-in)
+    /// is added to the deposit so winners get their winnings and losers see their losses.
+    fn settlement_plan(&self) -> Vec<(u8, u64)> {
+        let initial = self.engine.rules.min_buy_in as u64;
+        let stacks = self.engine.stacks();
+        let hand_played = self.hand_number > 0;
+        let mut out = Vec::new();
+        for i in 0..self.max_seats {
+            let deposited = self.deposits.get(i).copied().unwrap_or(0);
+            if deposited == 0 {
+                continue;
+            }
+            let amount = if hand_played {
+                let stack = stacks.get(i).copied().unwrap_or(0);
+                let delta = (stack as i128) - (initial as i128);
+                ((deposited as i128) + delta).max(0) as u64
+            } else {
+                deposited
+            };
+            if amount > 0 {
+                out.push((i as u8, amount));
+            }
+        }
+        out
+    }
+
     /// every seated player has deposited at least required_deposit into escrow
     fn deposits_satisfied(&self) -> bool {
         self.players.iter().enumerate().all(|(i, p)| {
@@ -1351,31 +1379,21 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     let mut r = room.lock().await;
                     tracing::info!("room {}: seat {} leaving", r.code, seat);
 
-                    // compute payouts from current stacks
-                    let stacks = r.engine.stacks();
-                    let mut payouts = Vec::new();
-                    for i in 0..r.max_seats {
-                        if r.players[i].is_some() && stacks[i] > 0 {
-                            payouts.push((i as u8, stacks[i]));
-                        }
-                    }
+                    let payouts = r.settlement_plan();
 
                     r.broadcast(&ServerMsg::GameOver {
                         reason: format!("seat {} left the table", seat),
                         payouts: payouts.clone(),
                     });
 
-                    // log settlement
                     let payout_str: Vec<String> = payouts.iter()
                         .map(|(s, a)| format!("seat{}={}", s, a)).collect();
                     tracing::info!("settlement: room={} payouts=[{}]",
                         r.code, payout_str.join(", "));
 
-                    // remove player
                     r.players[seat as usize] = None;
                     r.action_deadline = None;
 
-                    // notify
                     r.broadcast(&ServerMsg::OpponentLeft { seat });
                     drop(r);
                     notify_lobby_tables(&state.rooms, &state.lobby_users).await;
