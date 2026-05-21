@@ -175,6 +175,9 @@ async fn run_deposit_poll(
                         "deposit room={} seat={} val={} tx={} h={}",
                         code, n.seat, n.value_zat, txid_short, n.block_height,
                     );
+                    if !room.notes.iter().any(|existing| existing.nullifier == n.nullifier) {
+                        room.notes.push(n);
+                    }
                 }
             }
             Err(e) => tracing::warn!("deposit poll {}: scan: {}", code, e),
@@ -232,6 +235,7 @@ pub fn empty_room(
         seat_addresses: vec![None, None],
         seat_addr_bytes: vec![None, None],
         seat_payout_address: vec![None, None],
+        notes: Vec::new(),
         last_scanned_height: 0,
         escrow_address: legacy_osst.escrow_address,
         group_pubkey: legacy_osst.group_pubkey,

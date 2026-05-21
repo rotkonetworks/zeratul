@@ -36,6 +36,16 @@ pub struct DepositNote {
     /// refunds / payouts go for this seat. `None` means the depositor forgot the memo and the
     /// game cannot start until a memo-bearing top-up arrives.
     pub payout_address: Option<String>,
+    /// 32-byte note nullifier; used to mark the note spent when we sign a payout tx.
+    pub nullifier: [u8; 32],
+    /// 32-byte note commitment (`cmx`). zidecar's `GetCommitmentProofs` keys on this.
+    pub cmx: [u8; 32],
+    /// raw 43-byte recipient address (diversifier + pk_d). orchard `Note::from_parts` needs it.
+    pub recipient: [u8; 43],
+    /// `rho` is the action-binding randomness; needed to reconstruct the orchard `Note` at payout.
+    pub rho: [u8; 32],
+    /// `rseed` is the per-note random seed; together with `rho` it reconstructs the `Note`.
+    pub rseed: [u8; 32],
 }
 
 pub fn parse_fvk(hex_str: &str) -> Result<FullViewingKey, String> {
@@ -180,6 +190,11 @@ pub async fn scan(
                     txid: action.txid.clone(),
                     block_height: block.height,
                     payout_address,
+                    nullifier: action.nullifier,
+                    cmx: action.cmx,
+                    recipient: addr_bytes,
+                    rho: note.rho().to_bytes(),
+                    rseed: *note.rseed().as_bytes(),
                 });
             }
         }

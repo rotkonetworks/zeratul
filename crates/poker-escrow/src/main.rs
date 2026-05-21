@@ -35,6 +35,7 @@ mod frost_relay;
 mod frost_dkg;
 mod dkg_room;
 mod scanner;
+mod payout_signing;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -107,6 +108,10 @@ struct EscrowRoom {
     /// on the first valid deposit. `None` means the depositor forgot the memo; deposits still
     /// accrue but the game won't start until we know where to refund/pay.
     seat_payout_address: Vec<Option<String>>,
+    /// every scanned incoming note kept around so the payout tx builder can spend it later.
+    /// Position (orchard merkle tree leaf index) lands here when the tx builder fetches a
+    /// witness from zidecar via `GetCommitmentProofs` keyed on `cmx`.
+    notes: Vec<scanner::DepositNote>,
     /// resume point for the deposit scanner — last block whose actions we've trial-decrypted
     last_scanned_height: u32,
     /// legacy 32-byte raw-hex form (osst-derived); retained for the unmigrated /sign endpoints
@@ -245,6 +250,7 @@ async fn create_room_trusted_dealer(
         seat_addresses: vec![None, None],
         seat_addr_bytes: vec![None, None],
         seat_payout_address: vec![None, None],
+        notes: Vec::new(),
         last_scanned_height: 0,
         escrow_address: shim.escrow_address,
         group_pubkey: shim.group_pubkey,
@@ -336,6 +342,7 @@ async fn get_room(
             "frost_room_code": room.frost_room_code,
             "seat_addresses": room.seat_addresses,
             "seat_payout_addresses": room.seat_payout_address,
+            "unspent_notes_count": room.notes.len(),
             "last_scanned_height": room.last_scanned_height,
             "player_a_deposit": room.player_a_deposit,
             "player_b_deposit": room.player_b_deposit,
