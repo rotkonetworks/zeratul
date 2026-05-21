@@ -34,6 +34,7 @@ mod orchard_ua;
 mod frost_relay;
 mod frost_dkg;
 mod dkg_room;
+mod scanner;
 
 // ---------------------------------------------------------------------------
 // Types
@@ -94,6 +95,16 @@ struct EscrowRoom {
     dkg_key_package_hex: Option<String>,
     /// group's public key package — `Some` after DKG completes. Same on every party.
     dkg_public_key_package_hex: Option<String>,
+    /// raw 96-byte FVK hex used by the zidecar compact-block scanner
+    dkg_orchard_fvk_hex: Option<String>,
+    /// host-broadcast sk; lets us derive new diversified addresses anytime
+    dkg_sk_hex: Option<String>,
+    /// per-seat deposit UAs (`u1…`) derived at diversifier_index 1, 2
+    seat_addresses: Vec<Option<String>>,
+    /// per-seat 43-byte raw addresses for matching decrypted notes back to a seat
+    seat_addr_bytes: Vec<Option<[u8; 43]>>,
+    /// resume point for the deposit scanner — last block whose actions we've trial-decrypted
+    last_scanned_height: u32,
     /// legacy 32-byte raw-hex form (osst-derived); retained for the unmigrated /sign endpoints
     escrow_address: [u8; 32],
     group_pubkey: pasta_curves::pallas::Point,
@@ -225,6 +236,11 @@ async fn create_room_trusted_dealer(
         frost_room_code: None,
         dkg_key_package_hex: None,
         dkg_public_key_package_hex: None,
+        dkg_orchard_fvk_hex: None,
+        dkg_sk_hex: None,
+        seat_addresses: vec![None, None],
+        seat_addr_bytes: vec![None, None],
+        last_scanned_height: 0,
         escrow_address: shim.escrow_address,
         group_pubkey: shim.group_pubkey,
         server_share: shim.server_share,
@@ -269,6 +285,7 @@ async fn create_room_dkg(
         req.code.clone(),
         state.frost_relay_url.clone(),
         state.network,
+        state.zidecar_url.clone(),
     ).await {
         Ok(p) => p,
         Err(e) => return Json(serde_json::json!({"error": format!("dkg provision: {}", e)})),
@@ -312,6 +329,8 @@ async fn get_room(
             "dkg_pending": room.frost_relay_url.is_some() && room.escrow_ua.is_none(),
             "frost_relay_url": room.frost_relay_url,
             "frost_room_code": room.frost_room_code,
+            "seat_addresses": room.seat_addresses,
+            "last_scanned_height": room.last_scanned_height,
             "player_a_deposit": room.player_a_deposit,
             "player_b_deposit": room.player_b_deposit,
             "required_deposit": room.required_deposit,

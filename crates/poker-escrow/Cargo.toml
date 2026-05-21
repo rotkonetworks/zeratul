@@ -17,6 +17,11 @@ rand = "0.8"
 frost-spend = { git = "https://github.com/rotkonetworks/zcli", rev = "17dae92be6a05f48199231fec19b2ec3c97fd335" }
 zcash_address = "0.6"
 
+# zidecar gRPC client + Orchard compact-block scanner (mirrors zcli/bin/license-server)
+zecli = { git = "https://github.com/rotkonetworks/zcli", rev = "17dae92be6a05f48199231fec19b2ec3c97fd335" }
+orchard = { version = "0.12", default-features = false, features = ["circuit"] }
+zcash_note_encryption = "0.4"
+
 # web server
 axum = { version = "0.8", features = ["ws", "macros"] }
 tokio = { version = "1", features = ["full"] }

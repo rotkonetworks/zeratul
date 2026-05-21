@@ -8,9 +8,15 @@ import { requestPokerDkg } from './dkg'
 import type { ServerMsg, CardJson, ValidAction } from './types'
 
 export default function App() {
-  const [view, setView] = createSignal<'casino' | 'lobby' | 'waiting' | 'game'>(
+  const [view, setView] = createSignal<'casino' | 'lobby' | 'waiting' | 'deposit' | 'game'>(
     location.pathname.length > 1 ? 'lobby' : 'casino'
   )
+  // deposit-panel state — populated by RoomInfo + DepositStatus
+  const [requiredDeposit, setRequiredDeposit] = createSignal(0)
+  const [seatAddresses, setSeatAddresses] = createSignal<(string | null)[]>([])
+  const [depositA, setDepositA] = createSignal(0)
+  const [depositB, setDepositB] = createSignal(0)
+  const [depositReady, setDepositReady] = createSignal(false)
   const [selectedTable, setSelectedTable] = createSignal<Table | null>(null)
   const [hasWallet, setHasWallet] = createSignal(false)
   const [walletPubkey, setWalletPubkey] = createSignal<string | undefined>(undefined)
@@ -300,6 +306,10 @@ export default function App() {
         if (msg.escrow && msg.escrow.length > 5) {
           setEscrow(msg.escrow)
         }
+        if (msg.required_deposit) setRequiredDeposit(msg.required_deposit)
+        if (msg.seat_addresses && msg.seat_addresses.length > 0) {
+          setSeatAddresses(msg.seat_addresses)
+        }
         // DKG-mode escrow: kick off zafu's join flow once per table
         if (
           msg.frost_relay_url && msg.frost_room_code &&
@@ -325,6 +335,21 @@ export default function App() {
           })
         }
         break
+      case 'DepositStatus': {
+        if (msg.seat_addresses && msg.seat_addresses.length > 0) {
+          setSeatAddresses(msg.seat_addresses)
+        }
+        if (msg.escrow_address) setEscrow(msg.escrow_address)
+        setDepositA(msg.player_a_deposit)
+        setDepositB(msg.player_b_deposit)
+        setRequiredDeposit(msg.required)
+        setDepositReady(msg.ready)
+        // once DKG produced seat addresses, sit users in the deposit view
+        if (mySeat() >= 0 && !msg.ready && view() !== 'game' && msg.seat_addresses && msg.seat_addresses.some(a => a)) {
+          setView('deposit')
+        }
+        break
+      }
       case 'GameOver': {
         const myPayout = msg.payouts.find((p: any) => p[0] === mySeat())
         log(`game over: ${msg.reason}`, 'c-red font-500')
@@ -639,21 +664,6 @@ export default function App() {
                   <div class="text-neutral-600 text-8px mt-1">click to copy</div>
                 </div>
               </Show>
-              {/* escrow deposit */}
-              <Show when={escrow() && escrow().length > 10}>
-                <div class="mb-4 p-3 border border-neutral-800 rounded-lg bg-zec-surface">
-                  <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">escrow address (2-of-3 multisig)</div>
-                  <div
-                    class="font-mono text-9px text-zec-yellow break-all cursor-pointer select-all mb-2"
-                    onClick={() => { navigator.clipboard?.writeText(escrow()); log('copied escrow address', 'c-green') }}
-                    title="click to copy"
-                  >
-                    {escrow()}
-                  </div>
-                  <div class="text-neutral-600 text-8px">deposit flow disabled — playing for chips until real ZEC is wired</div>
-                </div>
-              </Show>
-
               <Show when={pendingRules() && !pendingRules()?.fromSelf}>
                 <div class="mt-4 p-4 border border-neutral-700 rounded">
                   <div class="text-neutral-400 text-10px uppercase tracking-wider mb-2">opponent proposes</div>
@@ -672,6 +682,84 @@ export default function App() {
                   </For>
                 </div>
               </Show>
+            </div>
+          </Show>
+
+          {/* deposit */}
+          <Show when={view() === 'deposit'}>
+            <div class="p-6 relative">
+              <button
+                class="absolute top-2 right-2 px-1.5 py-0.5 rounded text-7px border border-red-900 text-red-400 hover:bg-red-900/20"
+                onClick={leaveTable}
+                title="leave table — refund both deposits"
+              >leave</button>
+              <div class="text-zec-yellow text-11px uppercase tracking-2px mb-1 text-center">deposit to play</div>
+              <div class="text-neutral-500 text-9px text-center mb-4">2-of-3 multisig escrow (you + opp + house)</div>
+
+              {(() => {
+                const seat = mySeat()
+                const myAddr = seatAddresses()[seat] ?? null
+                const myDep = seat === 0 ? depositA() : depositB()
+                const oppDep = seat === 0 ? depositB() : depositA()
+                const req = requiredDeposit()
+                const myReady = myDep >= req
+                const oppReady = oppDep >= req
+                const reqZec = (req / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')
+                const myZec = (myDep / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')
+                const oppZec = (oppDep / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')
+                return <>
+                  <div class="mb-4 p-3 border border-neutral-800 rounded-lg bg-zec-surface">
+                    <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">your deposit address</div>
+                    <Show when={myAddr} fallback={
+                      <div class="text-neutral-600 text-9px">waiting for multisig setup…</div>
+                    }>
+                      <div
+                        class="font-mono text-9px text-zec-yellow break-all cursor-pointer select-all"
+                        onClick={() => { navigator.clipboard?.writeText(myAddr!); log('copied deposit address', 'c-green') }}
+                        title="click to copy"
+                      >{myAddr}</div>
+                      <div class="mt-2 flex items-center gap-2">
+                        <span class="text-neutral-500 text-9px uppercase tracking-wider">send</span>
+                        <span class="text-zec-yellow text-11px tabular">{reqZec} ZEC</span>
+                      </div>
+                      <button
+                        class="mt-3 w-full btn btn-secondary text-10px"
+                        onClick={() => {
+                          try {
+                            const providers = (window as any)[Symbol.for('penumbra')]
+                            const extId = providers ? (Object.keys(providers)[0]?.replace('chrome-extension://','').replace(/\/$/, '')) : null
+                            if (!extId) { log('zafu not detected', 'c-red'); return }
+                            chrome.runtime.sendMessage(extId, { type: 'send', address: myAddr, amount_zat: req }, () => {})
+                          } catch (e: any) { log(`zafu send failed: ${e?.message ?? e}`, 'c-red') }
+                        }}
+                      >Send with zafu</button>
+                    </Show>
+                  </div>
+
+                  <div class="grid grid-cols-2 gap-3 mb-4">
+                    <div class="p-2 border border-neutral-800 rounded bg-zec-surface">
+                      <div class="text-neutral-500 text-8px uppercase">you</div>
+                      <div class="tabular text-11px mt-1">
+                        <span class={myReady ? 'c-green' : 'c-zec-yellow'}>{myZec}</span>
+                        <span class="text-neutral-600"> / {reqZec} ZEC</span>
+                      </div>
+                      <div class={`text-9px mt-1 ${myReady ? 'c-green' : 'text-neutral-500'}`}>{myReady ? '✓ deposited' : '⌛ waiting'}</div>
+                    </div>
+                    <div class="p-2 border border-neutral-800 rounded bg-zec-surface">
+                      <div class="text-neutral-500 text-8px uppercase">opponent</div>
+                      <div class="tabular text-11px mt-1">
+                        <span class={oppReady ? 'c-green' : 'c-zec-yellow'}>{oppZec}</span>
+                        <span class="text-neutral-600"> / {reqZec} ZEC</span>
+                      </div>
+                      <div class={`text-9px mt-1 ${oppReady ? 'c-green' : 'text-neutral-500'}`}>{oppReady ? '✓ deposited' : '⌛ waiting'}</div>
+                    </div>
+                  </div>
+
+                  <div class="text-center text-neutral-500 text-9px">
+                    table starts when both players have deposited
+                  </div>
+                </>
+              })()}
             </div>
           </Show>
 

@@ -96,6 +96,11 @@ enum ServerMsg {
         frost_relay_url: Option<String>,
         #[serde(skip_serializing_if = "Option::is_none")]
         frost_room_code: Option<String>,
+        /// per-seat diversified deposit UAs — present once escrow has surfaced them
+        #[serde(skip_serializing_if = "Vec::is_empty")]
+        seat_addresses: Vec<Option<String>>,
+        /// minimum buy-in for the table (in zatoshi)
+        required_deposit: u64,
     },
     /// invite link
     InviteLink { url: String },
@@ -108,9 +113,12 @@ enum ServerMsg {
         reason: String,
         payouts: Vec<(u8, u64)>,  // (seat, amount)
     },
-    /// deposit status update
+    /// deposit status update — broadcast on change by the server's escrow-poll loop
     DepositStatus {
         escrow_address: String,
+        /// per-seat diversified deposit UAs (None if escrow hasn't surfaced them yet)
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        seat_addresses: Vec<Option<String>>,
         player_a_deposit: u64,
         player_b_deposit: u64,
         required: u64,
@@ -265,6 +273,10 @@ struct Room {
     frost_room_code: Option<String>,
     /// per-seat DKG UA report — must agree across seats before we trust it as escrow_address
     dkg_reported_ua: Vec<Option<String>>,
+    /// per-seat deposit UAs synced from poker-escrow's /room/{code}
+    seat_deposit_addresses: Vec<Option<String>>,
+    /// last DepositStatus we broadcast — so the 5s poll only re-broadcasts on change
+    last_deposit_broadcast: Option<(u64, u64, bool)>,
     player_a_share: SecretShare<PallasScalar>,
     player_b_share: SecretShare<PallasScalar>,
     action_deadline: Option<(u8, tokio::time::Instant)>,
@@ -342,6 +354,8 @@ impl Room {
             frost_relay_url,
             frost_room_code,
             dkg_reported_ua: vec![None; seats],
+            seat_deposit_addresses: vec![None; seats],
+            last_deposit_broadcast: None,
             player_a_share, player_b_share,
             action_deadline: None,
         }
@@ -363,7 +377,19 @@ impl Room {
         }
     }
 
+    /// every seated player has deposited at least required_deposit into escrow
+    fn deposits_satisfied(&self) -> bool {
+        self.players.iter().enumerate().all(|(i, p)| {
+            p.is_none() || self.deposits.get(i).copied().unwrap_or(0) >= self.required_deposit
+        })
+    }
+
     fn start_hand(&mut self) {
+        // bot tables play chip-only — no deposit gate. Real-ZEC tables wait until escrow confirms deposits.
+        if !self.bot_friendly && !self.deposits_satisfied() {
+            tracing::debug!("room {}: start_hand blocked — deposits not satisfied", self.code);
+            return;
+        }
         // seat players who need buy-in
         let buyin = self.engine.rules.min_buy_in as u64;
         for i in 0..self.max_seats as u8 {
@@ -565,6 +591,76 @@ fn generate_room_code() -> String {
     let w2 = WORDLIST[rng.gen_range(0..64)];
     let n: u8 = rng.gen_range(0..100);
     format!("{}-{}-{}", n, w1, w2)
+}
+
+/// Cadence at which poker-server polls poker-escrow's GET /room/{code} to sync deposit state.
+const DEPOSIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// Per-room background task: every 5s pulls the latest escrow state, mirrors seat addresses
+/// + per-seat deposit amounts into Room, broadcasts a DepositStatus on any change, and auto-
+/// starts the hand once both players have deposited. Exits when the room disappears.
+fn spawn_deposit_poller(rooms: Rooms, escrow_url: Option<String>, code: String) {
+    let Some(escrow_url) = escrow_url else {
+        tracing::warn!("deposit poller {}: ESCROW_URL not configured, skipping", code);
+        return;
+    };
+    tokio::spawn(async move {
+        loop {
+            tokio::time::sleep(DEPOSIT_POLL_INTERVAL).await;
+            let room_arc = match rooms.lock().await.get(&code).cloned() {
+                Some(r) => r,
+                None => {
+                    tracing::info!("deposit poller {}: room gone, exiting", code);
+                    return;
+                }
+            };
+            let state = match escrow_client::get_room_state(&escrow_url, &code).await {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::debug!("deposit poller {}: {}", code, e);
+                    continue;
+                }
+            };
+            // escrow still doing DKG — nothing to sync yet
+            let Some(escrow_ua) = state.escrow_address.clone() else { continue; };
+
+            let mut r = room_arc.lock().await;
+            if r.escrow_address.is_empty() && !escrow_ua.is_empty() {
+                r.escrow_address = escrow_ua;
+            }
+            for (i, addr) in state.seat_addresses.iter().enumerate() {
+                if i < r.seat_deposit_addresses.len() && r.seat_deposit_addresses[i].is_none() {
+                    r.seat_deposit_addresses[i] = addr.clone();
+                }
+            }
+            if r.deposits.len() >= 2 {
+                r.deposits[0] = state.player_a_deposit;
+                r.deposits[1] = state.player_b_deposit;
+            }
+
+            let ready = r.deposits_satisfied() && r.player_count() >= 2;
+            let snapshot = (state.player_a_deposit, state.player_b_deposit, ready);
+            if r.last_deposit_broadcast != Some(snapshot) {
+                r.last_deposit_broadcast = Some(snapshot);
+                r.broadcast(&ServerMsg::DepositStatus {
+                    escrow_address: r.escrow_address.clone(),
+                    seat_addresses: r.seat_deposit_addresses.clone(),
+                    player_a_deposit: state.player_a_deposit,
+                    player_b_deposit: state.player_b_deposit,
+                    required: r.required_deposit,
+                    ready,
+                });
+                tracing::info!(
+                    "deposit sync room={}: a={} b={} ready={}",
+                    code, state.player_a_deposit, state.player_b_deposit, ready,
+                );
+            }
+
+            if ready && r.engine.hand_state().is_none() {
+                r.start_hand();
+            }
+        }
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -875,6 +971,9 @@ async fn create_room(
     };
     let room = Arc::new(Mutex::new(Room::with_settings(code.clone(), sb, bb, buyin, timeout, seats, access, bot_friendly, external_escrow)));
     state.rooms.lock().await.insert(code.clone(), room);
+    if !bot_friendly {
+        spawn_deposit_poller(state.rooms.clone(), state.escrow_url.clone(), code.clone());
+    }
     notify_lobby_tables(&state.rooms, &state.lobby_users).await;
     axum::response::Redirect::to(&format!("/{}", code))
 }
@@ -895,6 +994,7 @@ async fn room_page(
         let external_escrow = remote_escrow_for(&state.escrow_url, &code, 1000, 0).await;
         let room = Room::with_settings(code.clone(), 5, 10, 1000, 30, 2, TableAccess::Public, false, external_escrow);
         state.rooms.lock().await.entry(code.clone()).or_insert_with(|| Arc::new(Mutex::new(room)));
+        spawn_deposit_poller(state.rooms.clone(), state.escrow_url.clone(), code.clone());
     }
     // serve index.html
     let index = std::path::PathBuf::from(&state.static_dir).join("index.html");
@@ -994,6 +1094,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
             escrow: r.escrow_address.clone(),
             frost_relay_url: r.frost_relay_url.clone(),
             frost_room_code: r.frost_room_code.clone(),
+            seat_addresses: r.seat_deposit_addresses.clone(),
+            required_deposit: r.required_deposit,
         });
     }
 
@@ -1295,6 +1397,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                         // broadcast deposit status
                         r.broadcast(&ServerMsg::DepositStatus {
                             escrow_address: r.escrow_address.clone(),
+                            seat_addresses: r.seat_deposit_addresses.clone(),
                             player_a_deposit: r.deposits.get(0).copied().unwrap_or(0),
                             player_b_deposit: r.deposits.get(1).copied().unwrap_or(0),
                             required: r.required_deposit,
@@ -1345,6 +1448,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                         escrow: r.escrow_address.clone(),
                         frost_relay_url: r.frost_relay_url.clone(),
                         frost_room_code: r.frost_room_code.clone(),
+                        seat_addresses: r.seat_deposit_addresses.clone(),
+                        required_deposit: r.required_deposit,
                     };
                     r.broadcast(&info);
                 }

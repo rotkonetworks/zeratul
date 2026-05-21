@@ -18,6 +18,10 @@ pub struct DkgOutput {
     pub public_key_package_hex: String,
     pub orchard_ua: String,
     pub orchard_ufvk: String,
+    /// raw 96-byte FVK hex — feeds the zidecar compact-block scanner
+    pub orchard_fvk_hex: String,
+    /// host-generated sk for nk/rivk; needed to derive diversified addresses post-DKG
+    pub sk_hex: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -82,6 +86,8 @@ pub async fn run_dkg(
     let addr_bytes = fs::derive_address_from_sk(&r3.public_key_package_hex, sk_bytes, 0)
         .map_err(|e| DkgError::Frost(format!("derive_address_from_sk: {:?}", e)))?;
     let ua = crate::orchard_ua::encode_unified(addr_bytes, network).map_err(DkgError::Ua)?;
+    let fvk_bytes = crate::orchard_ua::fvk_bytes_from_sk(&r3.public_key_package_hex, sk_bytes)
+        .map_err(DkgError::Ua)?;
     let ufvk = crate::orchard_ua::encode_ufvk_from_sk(&r3.public_key_package_hex, sk_bytes, network)
         .map_err(DkgError::Ua)?;
 
@@ -104,6 +110,8 @@ pub async fn run_dkg(
         public_key_package_hex: r3.public_key_package_hex,
         orchard_ua: ua,
         orchard_ufvk: ufvk,
+        orchard_fvk_hex: hex::encode(fvk_bytes),
+        sk_hex,
     })
 }
 

@@ -24,6 +24,42 @@ pub struct EscrowSetup {
     pub dkg_mode: bool,
 }
 
+/// Subset of `GET /room/{code}` we care about for deposit gating.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EscrowState {
+    #[serde(default)]
+    pub escrow_address: Option<String>,
+    #[serde(default)]
+    pub seat_addresses: Vec<Option<String>>,
+    #[serde(default)]
+    pub player_a_deposit: u64,
+    #[serde(default)]
+    pub player_b_deposit: u64,
+    #[serde(default)]
+    pub required_deposit: u64,
+    #[serde(default)]
+    pub both_deposited: bool,
+}
+
+/// GET /room/{code} — current escrow + deposit state for the poker-server poll loop.
+pub async fn get_room_state(base_url: &str, code: &str) -> Result<EscrowState, String> {
+    let url = format!("{}/room/{}", base_url.trim_end_matches('/'), code);
+    let resp = reqwest::Client::new()
+        .get(&url)
+        .timeout(Duration::from_secs(5))
+        .send()
+        .await
+        .map_err(|e| format!("escrow GET failed: {}", e))?;
+    let v: serde_json::Value = resp
+        .json()
+        .await
+        .map_err(|e| format!("escrow response not JSON: {}", e))?;
+    if let Some(err) = v.get("error") {
+        return Err(format!("escrow service error: {}", err));
+    }
+    serde_json::from_value(v).map_err(|e| format!("escrow state shape mismatch: {}", e))
+}
+
 /// POST /room — ask poker-escrow to generate a fresh FROST escrow for a room.
 pub async fn create_escrow(
     base_url: &str,
