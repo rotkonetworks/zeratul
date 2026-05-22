@@ -36,6 +36,7 @@ mod frost_dkg;
 mod dkg_room;
 mod scanner;
 mod payout_signing;
+mod tx_build;
 
 // ---------------------------------------------------------------------------
 // Types

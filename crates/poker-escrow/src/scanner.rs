@@ -46,6 +46,9 @@ pub struct DepositNote {
     pub rho: [u8; 32],
     /// `rseed` is the per-note random seed; together with `rho` it reconstructs the `Note`.
     pub rseed: [u8; 32],
+    /// Leaf index of this note's `cmx` in the global Orchard commitment tree. Required by
+    /// `zecli::witness::build_witnesses` to construct a merkle path at payout time.
+    pub position: u64,
 }
 
 pub fn parse_fvk(hex_str: &str) -> Result<FullViewingKey, String> {
@@ -128,6 +131,23 @@ pub async fn scan(
     let mut found = Vec::new();
     let mut current = start;
 
+    // position counter = total orchard cmx commitments before our scan window. seed it from
+    // zidecar's tree state at the height we already finished scanning; then bump it once per
+    // action as we walk through the new blocks in chain order. payout-time merkle paths key
+    // off this leaf index.
+    let mut position_counter: u64 = if last_height > 0 {
+        match client.get_tree_state(last_height).await {
+            Ok((hex, _)) => match hex::decode(&hex) {
+                Ok(bytes) => zecli::witness::frontier_tree_size(&bytes).unwrap_or(0),
+                Err(_) => 0,
+            },
+            Err(e) => {
+                tracing::warn!("scanner: get_tree_state({}) failed, positions start at 0: {}", last_height, e);
+                0
+            }
+        }
+    } else { 0 };
+
     while current <= tip {
         let end = (current + BATCH_SIZE - 1).min(tip);
         let blocks = client.get_compact_blocks(current, end).await
@@ -135,6 +155,8 @@ pub async fn scan(
 
         for block in &blocks {
             for action in &block.actions {
+                let action_position = position_counter;
+                position_counter = position_counter.saturating_add(1);
                 if action.ciphertext.len() < 52 { continue; }
                 let mut ct = [0u8; 52];
                 ct.copy_from_slice(&action.ciphertext[..52]);
@@ -195,6 +217,7 @@ pub async fn scan(
                     recipient: addr_bytes,
                     rho: note.rho().to_bytes(),
                     rseed: *note.rseed().as_bytes(),
+                    position: action_position,
                 });
             }
         }
