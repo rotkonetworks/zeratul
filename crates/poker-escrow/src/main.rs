@@ -667,13 +667,23 @@ async fn initiate_payout(
     }
     tracing::info!("payout initiated for {}: relay_room={} actions={}", code, relay_room, pczt_state.alphas.len());
 
+    // display fields for the SIGN: payload — pick the first non-zero output as the headline
+    // recipient/amount; the OVK verifier in zafu would catch divergence if we published the
+    // unsigned tx hex too (not yet — PcztState doesn't expose pre-sign bytes).
+    let (disp_recipient, disp_amount) = req.outputs.iter()
+        .find(|o| o.amount_zat > 0)
+        .map(|o| (o.address.clone(), o.amount_zat))
+        .unwrap_or_else(|| (String::new(), 0));
+
     let bg_rooms = state.rooms.clone();
     let bg_code = code.clone();
     let bg_relay_room = relay_room.clone();
     let bg_zidecar_url = state.zidecar_url.clone();
+    let bg_fee_zat = fee_zat;
     tokio::spawn(async move {
         run_payout_signing(bg_rooms, bg_code, bg_relay_room, bg_zidecar_url, relay,
-            pkg_hex, kp_hex, seed_hex, pczt_state).await;
+            pkg_hex, kp_hex, seed_hex, pczt_state,
+            disp_recipient, disp_amount, bg_fee_zat).await;
     });
 
     Json(serde_json::json!({"relay_room": relay_room}))
@@ -690,6 +700,9 @@ async fn run_payout_signing(
     kp_hex: String,
     seed_hex: String,
     pczt_state: zecli::pczt::PcztState,
+    disp_recipient: String,
+    disp_amount_zat: u64,
+    fee_zat: u64,
 ) {
     let secrets = crate::payout_signing::PayoutSignSecrets {
         key_package_hex: kp_hex,
@@ -698,6 +711,7 @@ async fn run_payout_signing(
     let sigs = match crate::payout_signing::host_sign_pczt(
         &mut relay, &pkg_hex, &secrets,
         pczt_state.sighash, &pczt_state.alphas,
+        &disp_recipient, disp_amount_zat, fee_zat,
         std::time::Duration::from_secs(600),
     ).await {
         Ok(s) => s,

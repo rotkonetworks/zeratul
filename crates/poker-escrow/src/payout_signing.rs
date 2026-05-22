@@ -47,12 +47,12 @@ pub struct SignOutput {
 }
 
 // ────────────────────────────────────────────────────────────────────────────
-// PCZT-driven multi-action signing (mirrors zafu's mnemonic-sign.ts protocol)
+// PCZT-driven multi-action signing (unified wire with zafu mnemonic-sign / multisig/sign)
 // ────────────────────────────────────────────────────────────────────────────
-// Wire:
-//   INIT-MULTI:<pkg>:<sighash>:<alpha1>,<alpha2>,...   (host, once)
-//   COMMITS:<commit1>,<commit2>,...                    (both, once — N commits each)
-//   SHARE:<action_idx>:<share>                         (both, N times, one per action)
+// Wire (matches zafu/apps/extension/src/routes/popup/send/frost-multisig/relay-protocol.ts):
+//   SIGN:<sighash hex>:<alpha1,alpha2,...>:<recipient>:<amount_zat>:<fee_zat>   (host, once)
+//   C:<commit1>|<commit2>|...                                                   (both, once — N commits each, pipe-separated)
+//   S:<action_idx>:<share>                                                      (both, N times, one per action)
 
 #[derive(Debug, Clone)]
 pub struct PayoutSignSecrets {
@@ -65,38 +65,50 @@ pub struct PayoutSignSecrets {
 pub type ActionSigs = Vec<[u8; 64]>;
 
 /// Host the multi-action signing for a PCZT we built. `sighash` + `alphas` come from
-/// `zecli::pczt::PcztState` after `tx_build::build_payout_pczt`.
+/// `zecli::pczt::PcztState` after `tx_build::build_payout_pczt`. `display_*` fields are
+/// what zafu's approval popup shows to the user (recipient = first non-zero output's UA,
+/// amount = first non-zero output's zat). The on-chain bundle can have additional outputs;
+/// the OVK-decrypt verifier in zafu would catch divergence (skipped here until we publish
+/// the unsigned tx hex with the SIGN message).
+#[allow(clippy::too_many_arguments)]
 pub async fn host_sign_pczt(
     client: &mut FrostRelayClient,
     public_key_package_hex: &str,
     secrets: &PayoutSignSecrets,
     sighash: [u8; 32],
     alphas: &[[u8; 32]],
+    display_recipient: &str,
+    display_amount_zat: u64,
+    fee_zat: u64,
     timeout: Duration,
 ) -> Result<ActionSigs, SignError> {
     let deadline = Instant::now() + timeout;
     wait_for_peer(client, &deadline).await?;
 
-    let init = format!(
-        "INIT-MULTI:{}:{}:{}",
-        public_key_package_hex,
+    let sign_msg = format!(
+        "SIGN:{}:{}:{}:{}:{}",
         hex::encode(sighash),
         alphas.iter().map(hex::encode).collect::<Vec<_>>().join(","),
+        display_recipient,
+        display_amount_zat,
+        fee_zat,
     );
-    client.send_message(init.as_bytes()).await?;
+    client.send_message(sign_msg.as_bytes()).await?;
     run_multi_rounds(client, public_key_package_hex, secrets, sighash, alphas, &deadline).await
 }
 
-/// Join an existing PCZT signing session as a peer. Parses INIT-MULTI off the wire to learn
-/// the sighash + alphas, then runs the rounds.
+/// Join an existing PCZT signing session as a peer. Parses SIGN off the wire to learn
+/// the sighash + alphas, then runs the rounds. The peer must supply the
+/// `public_key_package_hex` locally (stored in the multisig vault from DKG).
 pub async fn join_sign_pczt(
     client: &mut FrostRelayClient,
+    public_key_package_hex: &str,
     secrets: &PayoutSignSecrets,
     timeout: Duration,
 ) -> Result<ActionSigs, SignError> {
     let deadline = Instant::now() + timeout;
-    let (pkg, sighash, alphas) = wait_for_init_multi(client, &deadline).await?;
-    run_multi_rounds(client, &pkg, secrets, sighash, &alphas, &deadline).await
+    let (sighash, alphas) = wait_for_sign(client, &deadline).await?;
+    run_multi_rounds(client, public_key_package_hex, secrets, sighash, &alphas, &deadline).await
 }
 
 async fn run_multi_rounds(
@@ -119,10 +131,10 @@ async fn run_multi_rounds(
         my_nonces.push(nonces);
         my_commits.push(signed_commit);
     }
-    client.send_message(format!("COMMITS:{}", my_commits.join(",")).as_bytes()).await?;
-    let peer_commits_csv = collect_tagged(client, "COMMITS:", 1, deadline).await?
+    client.send_message(format!("C:{}", my_commits.join("|")).as_bytes()).await?;
+    let peer_commits_csv = collect_tagged(client, "C:", 1, deadline).await?
         .into_iter().next().unwrap();
-    let peer_commits: Vec<String> = peer_commits_csv.split(',').map(|s| s.to_string()).collect();
+    let peer_commits: Vec<String> = peer_commits_csv.split('|').map(|s| s.to_string()).collect();
     if peer_commits.len() != n {
         return Err(SignError::Protocol(format!(
             "peer sent {} commits, expected {}", peer_commits.len(), n,
@@ -137,7 +149,7 @@ async fn run_multi_rounds(
             &seed_bytes, &secrets.key_package_hex, &my_nonces[i],
             &sighash, &alphas[i], &all_commits,
         ).map_err(|e| SignError::Frost(format!("round2 action {}: {:?}", i, e)))?;
-        client.send_message(format!("SHARE:{}:{}", i, signed_share).as_bytes()).await?;
+        client.send_message(format!("S:{}:{}", i, signed_share).as_bytes()).await?;
         let peer_share = wait_share_for(client, i, deadline).await?;
         let all_shares = vec![signed_share, peer_share];
         let sig_hex = fs::spend_aggregate(
@@ -148,31 +160,31 @@ async fn run_multi_rounds(
     Ok(out)
 }
 
-async fn wait_for_init_multi(
+async fn wait_for_sign(
     client: &mut FrostRelayClient,
     deadline: &Instant,
-) -> Result<(String, [u8; 32], Vec<[u8; 32]>), SignError> {
+) -> Result<([u8; 32], Vec<[u8; 32]>), SignError> {
     loop {
-        let remaining = remaining_or_timeout(deadline, "waiting for INIT-MULTI")?;
+        let remaining = remaining_or_timeout(deadline, "waiting for SIGN")?;
         match client.recv_event_timeout(remaining).await? {
             Some(RelayEvent::Message { payload, .. }) => {
                 let text = String::from_utf8(payload)
-                    .map_err(|e| SignError::Decode(format!("non-utf8 init: {}", e)))?;
-                let body = text.strip_prefix("INIT-MULTI:")
-                    .ok_or_else(|| SignError::Protocol(format!("expected INIT-MULTI, got: {}", short(&text))))?;
-                let mut parts = body.splitn(3, ':');
-                let pkg = parts.next().ok_or_else(|| SignError::Protocol("missing pkg".into()))?;
+                    .map_err(|e| SignError::Decode(format!("non-utf8 sign: {}", e)))?;
+                let body = text.strip_prefix("SIGN:")
+                    .ok_or_else(|| SignError::Protocol(format!("expected SIGN, got: {}", short(&text))))?;
+                // SIGN:<sighash>:<alphas>:<recipient>:<amount>:<fee>[:<unsignedTxHex>] — only need first two for crypto
+                let mut parts = body.splitn(5, ':');
                 let sighash_hex = parts.next().ok_or_else(|| SignError::Protocol("missing sighash".into()))?;
                 let alphas_csv = parts.next().ok_or_else(|| SignError::Protocol("missing alphas".into()))?;
                 let sighash = decode_32(sighash_hex, "sighash")?;
                 let alphas: Vec<[u8; 32]> = alphas_csv.split(',')
                     .map(|h| decode_32(h, "alpha"))
                     .collect::<Result<_, _>>()?;
-                return Ok((pkg.to_string(), sighash, alphas));
+                return Ok((sighash, alphas));
             }
             Some(RelayEvent::PeerJoined { .. }) => continue,
             Some(RelayEvent::Closed { reason }) => return Err(SignError::Closed(reason)),
-            None => return Err(SignError::Timeout("waiting for INIT-MULTI".into())),
+            None => return Err(SignError::Timeout("waiting for SIGN".into())),
         }
     }
 }
@@ -182,7 +194,7 @@ async fn wait_share_for(
     idx: usize,
     deadline: &Instant,
 ) -> Result<String, SignError> {
-    let prefix = format!("SHARE:{}:", idx);
+    let prefix = format!("S:{}:", idx);
     loop {
         let remaining = remaining_or_timeout(deadline, &format!("share {}", idx))?;
         match client.recv_event_timeout(remaining).await? {
@@ -497,13 +509,14 @@ mod tests {
         let secrets_a = PayoutSignSecrets { key_package_hex: kp_a, ephemeral_seed_hex: seed_a };
         let secrets_b = PayoutSignSecrets { key_package_hex: kp_b, ephemeral_seed_hex: seed_b };
         let pkg_for_host = pkg_hex.clone();
+        let pkg_for_join = pkg_hex.clone();
         let alphas_for_host = alphas.clone();
         let host = tokio::spawn(async move {
             host_sign_pczt(&mut alice, &pkg_for_host, &secrets_a, sighash, &alphas_for_host,
-                Duration::from_secs(30)).await
+                "u1test", 1234, 10_000, Duration::from_secs(30)).await
         });
         let join = tokio::spawn(async move {
-            join_sign_pczt(&mut bob, &secrets_b, Duration::from_secs(30)).await
+            join_sign_pczt(&mut bob, &pkg_for_join, &secrets_b, Duration::from_secs(30)).await
         });
 
         let a = host.await.unwrap().expect("host_sign_pczt");
