@@ -100,6 +100,7 @@ async fn write_dkg_result(
         room.dkg_public_key_package_hex = Some(out.public_key_package_hex);
         room.dkg_orchard_fvk_hex = Some(out.orchard_fvk_hex);
         room.dkg_sk_hex = Some(out.sk_hex);
+        room.dkg_ephemeral_seed_hex = Some(out.ephemeral_seed_hex);
         room.seat_addresses = vec![Some(seat_uas[0].clone()), Some(seat_uas[1].clone())];
         room.seat_addr_bytes = vec![Some(seat_bytes[0]), Some(seat_bytes[1])];
     }
@@ -232,11 +233,13 @@ pub fn empty_room(
         dkg_public_key_package_hex: None,
         dkg_orchard_fvk_hex: None,
         dkg_sk_hex: None,
+        dkg_ephemeral_seed_hex: None,
         seat_addresses: vec![None, None],
         seat_addr_bytes: vec![None, None],
         seat_payout_address: vec![None, None],
         notes: Vec::new(),
         last_scanned_height: 0,
+        payout_status: crate::PayoutStatus::None,
         escrow_address: legacy_osst.escrow_address,
         group_pubkey: legacy_osst.group_pubkey,
         server_share: legacy_osst.server_share,

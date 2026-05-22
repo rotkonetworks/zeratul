@@ -723,7 +723,7 @@ export default function App() {
                       >{myAddr}</div>
                       <div class="mt-2 flex items-center gap-2">
                         <span class="text-neutral-500 text-9px uppercase tracking-wider">send</span>
-                        <span class="text-zec-yellow text-11px tabular">{reqZec} ZEC</span>
+                        <span class="text-zec-yellow text-11px tabular" title="buy-in + your share of the on-chain payout fee">{reqZec} ZEC</span>
                       </div>
                       <div class="mt-3 pt-2 border-t border-neutral-800">
                         <div class="text-neutral-500 text-9px uppercase tracking-wider mb-1">payouts will go to</div>

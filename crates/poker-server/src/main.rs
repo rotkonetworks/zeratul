@@ -126,6 +126,25 @@ enum ServerMsg {
     },
     Error { message: String },
     Waiting,
+    /// FROST relay coords + payout plan + priority signer — sent when a payout is initiated
+    /// (Leave button or 60s timeout). The SPA shows the plan; the priority signer's zafu
+    /// runs `join_sign_pczt` against the relay room.
+    PayoutSigningRequest {
+        relay_room: String,
+        plan: Vec<PayoutLineJson>,
+        priority_seat: u8,
+    },
+    /// Final payout state — tx is on chain.
+    PayoutComplete { txid: String },
+    /// Payout never completed (player didn't approve, signing timed out, broadcast rejected).
+    PayoutFailed { reason: String },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PayoutLineJson {
+    pub seat: u8,
+    pub address: String,
+    pub amount_zat: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -246,6 +265,10 @@ impl Default for TableAccess {
 const RECONNECT_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 const ACTION_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 
+/// On-chain fee zafu/zcli use for Orchard-only txes (matches `complete_pczt_tx` default).
+/// Players collectively pre-fund this at deposit time so the payout never goes underwater.
+const TX_PAYOUT_FEE_ZAT: u64 = 10_000;
+
 struct Room {
     code: String,
     max_seats: usize,
@@ -258,7 +281,13 @@ struct Room {
     spectators: Vec<mpsc::UnboundedSender<String>>,
     /// deposit tracking (zatoshis per seat)
     deposits: Vec<u64>,
+    /// what each seated player must deposit = buyin + `fee_per_seat`. The extra `fee_per_seat`
+    /// portion is pooled across players to cover the on-chain payout tx fee at settlement; the
+    /// game engine still treats only `buyin` as chips.
     required_deposit: u64,
+    /// per-seat share of the payout tx fee, baked into `required_deposit`. settlement_plan
+    /// subtracts this from each seat's deposit basis so total outputs + fee = total deposits.
+    fee_per_seat: u64,
     engine: GameEngine,
     hand_number: u64,
     button: u8,
@@ -342,12 +371,18 @@ impl Room {
             }
         };
 
+        // ceil-div so total covers the on-chain fee even when fee doesn't divide evenly
+        // across seats (e.g. 3 seats × ceil(10000/3) = 3 × 3334 = 10002 ≥ 10000)
+        let fee_per_seat = (TX_PAYOUT_FEE_ZAT + seats as u64 - 1) / seats as u64;
+        let required_deposit = if bot_friendly { buyin } else { buyin + fee_per_seat };
+
         Room {
             code, max_seats: seats, access, bot_friendly, host_seat: None,
             players: (0..seats).map(|_| None).collect(),
             spectators: Vec::new(),
             deposits: vec![0; seats],
-            required_deposit: buyin,
+            required_deposit,
+            fee_per_seat: if bot_friendly { 0 } else { fee_per_seat },
             engine, hand_number: 0, button: 0,
             hole_cards: (0..seats).map(|_| None).collect(),
             community_cards: Vec::new(),
@@ -381,9 +416,10 @@ impl Room {
     }
 
     /// payout plan for the room — `(seat, zatoshi)` pairs. Derived from real deposits, not
-    /// engine defaults: a seat that never deposited is excluded outright. Pre-game leave
-    /// refunds the deposit verbatim; post-hand the chip delta (engine stack ± initial buy-in)
-    /// is added to the deposit so winners get their winnings and losers see their losses.
+    /// engine defaults: a seat that never deposited is excluded outright. Each seat's basis is
+    /// `deposit - fee_per_seat` so the per-player share of the on-chain fee comes out of the
+    /// pre-funded amount rather than reducing winnings post-hoc. Total of all outputs +
+    /// `TX_PAYOUT_FEE_ZAT` equals total deposits.
     fn settlement_plan(&self) -> Vec<(u8, u64)> {
         let initial = self.engine.rules.min_buy_in as u64;
         let stacks = self.engine.stacks();
@@ -394,12 +430,13 @@ impl Room {
             if deposited == 0 {
                 continue;
             }
+            let basis = deposited.saturating_sub(self.fee_per_seat);
             let amount = if hand_played {
                 let stack = stacks.get(i).copied().unwrap_or(0);
                 let delta = (stack as i128) - (initial as i128);
-                ((deposited as i128) + delta).max(0) as u64
+                ((basis as i128) + delta).max(0) as u64
             } else {
-                deposited
+                basis
             };
             if amount > 0 {
                 out.push((i as u8, amount));
@@ -628,6 +665,66 @@ fn generate_room_code() -> String {
 
 /// Cadence at which poker-server polls poker-escrow's GET /room/{code} to sync deposit state.
 const DEPOSIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// POST `/payout/initiate` to escrow, broadcast `PayoutSigningRequest`, then poll
+/// `/payout/status` until Broadcast or Failed; broadcast the final result.
+async fn trigger_payout(
+    room: Arc<Mutex<Room>>,
+    escrow_url: String,
+    code: String,
+    plan: Vec<PayoutLineJson>,
+    priority_seat: u8,
+) {
+    let outputs: Vec<escrow_client::PayoutOutputReq> = plan.iter()
+        .map(|p| escrow_client::PayoutOutputReq { address: p.address.clone(), amount_zat: p.amount_zat })
+        .collect();
+    let req = escrow_client::InitiatePayoutReq {
+        outputs,
+        fee_zat: Some(TX_PAYOUT_FEE_ZAT),
+        anchor_height: None,
+    };
+
+    let relay_room = match escrow_client::initiate_payout(&escrow_url, &code, &req).await {
+        Ok(resp) => resp.relay_room,
+        Err(e) => {
+            tracing::error!("payout {}: initiate failed: {}", code, e);
+            let mut r = room.lock().await;
+            r.broadcast(&ServerMsg::PayoutFailed { reason: format!("initiate: {}", e) });
+            return;
+        }
+    };
+    tracing::info!("payout {}: signing room={} priority_seat={}", code, relay_room, priority_seat);
+
+    {
+        let mut r = room.lock().await;
+        r.broadcast(&ServerMsg::PayoutSigningRequest {
+            relay_room: relay_room.clone(),
+            plan: plan.clone(),
+            priority_seat,
+        });
+    }
+
+    // poll status until terminal
+    loop {
+        tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+        match escrow_client::get_payout_status(&escrow_url, &code).await {
+            Ok(escrow_client::PayoutStatus::Broadcast { txid, .. }) => {
+                tracing::info!("payout {} broadcast: tx={}", code, txid);
+                let mut r = room.lock().await;
+                r.broadcast(&ServerMsg::PayoutComplete { txid });
+                return;
+            }
+            Ok(escrow_client::PayoutStatus::Failed { reason }) => {
+                tracing::error!("payout {} failed: {}", code, reason);
+                let mut r = room.lock().await;
+                r.broadcast(&ServerMsg::PayoutFailed { reason });
+                return;
+            }
+            Ok(_) => {} // Pending / None — keep polling
+            Err(e) => tracing::warn!("payout {} status poll error: {}", code, e),
+        }
+    }
+}
 
 /// Per-room background task: every 5s pulls the latest escrow state, mirrors seat addresses
 /// + per-seat deposit amounts into Room, broadcasts a DepositStatus on any change, and auto-
@@ -1401,11 +1498,42 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     tracing::info!("settlement: room={} payouts=[{}]",
                         r.code, payout_str.join(", "));
 
+                    // build the PCZT payout plan (seat, address, amount) — skip for bot tables
+                    // or when nothing was actually deposited
+                    let pczt_plan: Vec<PayoutLineJson> = if r.bot_friendly {
+                        Vec::new()
+                    } else {
+                        payouts.iter().filter_map(|(s, amt)| {
+                            r.seat_payout_addresses.get(*s as usize)
+                                .and_then(|opt| opt.as_ref())
+                                .map(|addr| PayoutLineJson {
+                                    seat: *s, address: addr.clone(), amount_zat: *amt,
+                                })
+                        }).collect()
+                    };
+
+                    let code = r.code.clone();
+                    let leaving_seat = seat;
+
                     r.players[seat as usize] = None;
                     r.action_deadline = None;
 
                     r.broadcast(&ServerMsg::OpponentLeft { seat });
                     drop(r);
+
+                    // trigger on-chain payout if there's anything to pay out + escrow is wired
+                    if !pczt_plan.is_empty() {
+                        if let Some(escrow_url) = state.escrow_url.clone() {
+                            let room_clone = room.clone();
+                            let plan_clone = pczt_plan.clone();
+                            tokio::spawn(async move {
+                                trigger_payout(room_clone, escrow_url, code, plan_clone, leaving_seat).await;
+                            });
+                        } else {
+                            tracing::warn!("no ESCROW_URL configured — skipping on-chain payout");
+                        }
+                    }
+
                     notify_lobby_tables(&state.rooms, &state.lobby_users).await;
                 }
             }

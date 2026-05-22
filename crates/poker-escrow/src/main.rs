@@ -83,6 +83,21 @@ struct PayoutPlan {
     settled_at: u64,
 }
 
+/// State of the PCZT-based payout flow for a room. Set by `POST /room/{code}/payout/initiate`,
+/// advanced by the background signing task, read by `GET /room/{code}/payout/status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "phase")]
+pub enum PayoutStatus {
+    /// no payout requested yet
+    None,
+    /// signing room opened; waiting for the player to FROST-sign their share
+    Pending { relay_room: String },
+    /// tx broadcast to zidecar; `txid` is the lowercase hex
+    Broadcast { txid: String, relay_room: String },
+    /// signing or broadcast failed; payout can be retried with a fresh /initiate
+    Failed { reason: String },
+}
+
 struct EscrowRoom {
     code: String,
     /// Orchard UA (`u1...`) — `Some` once derivation is done. In trusted-dealer mode this is
@@ -101,6 +116,8 @@ struct EscrowRoom {
     dkg_orchard_fvk_hex: Option<String>,
     /// host-broadcast sk; lets us derive new diversified addresses anytime
     dkg_sk_hex: Option<String>,
+    /// our FROST identity seed (from dkg_part3) — needed to sign payouts
+    dkg_ephemeral_seed_hex: Option<String>,
     /// per-seat deposit UAs (`u1…`) derived at diversifier_index 1, 2
     seat_addresses: Vec<Option<String>>,
     /// per-seat 43-byte raw addresses for matching decrypted notes back to a seat
@@ -115,6 +132,8 @@ struct EscrowRoom {
     notes: Vec<scanner::DepositNote>,
     /// resume point for the deposit scanner — last block whose actions we've trial-decrypted
     last_scanned_height: u32,
+    /// current state of the PCZT payout flow; advances Pending → Broadcast (or Failed)
+    payout_status: PayoutStatus,
     /// legacy 32-byte raw-hex form (osst-derived); retained for the unmigrated /sign endpoints
     escrow_address: [u8; 32],
     group_pubkey: pasta_curves::pallas::Point,
@@ -248,11 +267,13 @@ async fn create_room_trusted_dealer(
         dkg_public_key_package_hex: None,
         dkg_orchard_fvk_hex: None,
         dkg_sk_hex: None,
+        dkg_ephemeral_seed_hex: None,
         seat_addresses: vec![None, None],
         seat_addr_bytes: vec![None, None],
         seat_payout_address: vec![None, None],
         notes: Vec::new(),
         last_scanned_height: 0,
+        payout_status: PayoutStatus::None,
         escrow_address: shim.escrow_address,
         group_pubkey: shim.group_pubkey,
         server_share: shim.server_share,
@@ -528,6 +549,218 @@ async fn get_payout(
     }
 }
 
+// ── PCZT-based payout (Phase 5.2-LEAVE) ────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct InitiatePayoutReq {
+    outputs: Vec<PayoutOutputReq>,
+    #[serde(default)]
+    fee_zat: u64,
+    #[serde(default)]
+    anchor_height: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PayoutOutputReq {
+    address: String,
+    amount_zat: u64,
+}
+
+async fn initiate_payout(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    Json(req): Json<InitiatePayoutReq>,
+) -> impl IntoResponse {
+    // snapshot key material + notes; reject if DKG never completed or a payout is already underway
+    let snap = {
+        let rooms = state.rooms.lock().await;
+        let Some(room) = rooms.get(&code) else {
+            return Json(serde_json::json!({"error": "room not found"}));
+        };
+        match &room.payout_status {
+            PayoutStatus::Pending { relay_room } => {
+                return Json(serde_json::json!({"error": "payout already pending", "relay_room": relay_room}));
+            }
+            PayoutStatus::Broadcast { txid, .. } => {
+                return Json(serde_json::json!({"error": "payout already broadcast", "txid": txid}));
+            }
+            _ => {}
+        }
+        match (
+            room.dkg_orchard_fvk_hex.as_ref(),
+            room.dkg_key_package_hex.as_ref(),
+            room.dkg_ephemeral_seed_hex.as_ref(),
+            room.dkg_public_key_package_hex.as_ref(),
+        ) {
+            (Some(fvk), Some(kp), Some(seed), Some(pkg)) => {
+                (fvk.clone(), kp.clone(), seed.clone(), pkg.clone(), room.notes.clone())
+            }
+            _ => return Json(serde_json::json!({"error": "DKG not complete; no key material to sign with"})),
+        }
+    };
+    let (fvk_hex, kp_hex, seed_hex, pkg_hex, notes) = snap;
+
+    if notes.is_empty() {
+        return Json(serde_json::json!({"error": "no unspent notes — nothing to spend"}));
+    }
+
+    // 96-byte FVK
+    let fvk_bytes = match hex::decode(&fvk_hex) {
+        Ok(b) if b.len() == 96 => {
+            let mut a = [0u8; 96];
+            a.copy_from_slice(&b);
+            a
+        }
+        _ => return Json(serde_json::json!({"error": "stored FVK is not 96 bytes"})),
+    };
+
+    let mainnet = matches!(state.network, zcash_address::Network::Main);
+    let mut outputs = Vec::with_capacity(req.outputs.len());
+    for (i, out) in req.outputs.iter().enumerate() {
+        let addr = match tx_build::parse_orchard_ua(&out.address, mainnet) {
+            Ok(a) => a,
+            Err(e) => return Json(serde_json::json!({"error": format!("output {} address: {}", i, e)})),
+        };
+        outputs.push(tx_build::PayoutOutput {
+            address: addr,
+            amount_zat: out.amount_zat,
+            memo: [0u8; 512],
+        });
+    }
+    let fee_zat = if req.fee_zat == 0 { 10_000 } else { req.fee_zat };
+    let plan = tx_build::PayoutPlan { outputs, fee_zat };
+
+    let zidecar = match zecli::client::ZidecarClient::connect(&state.zidecar_url).await {
+        Ok(c) => c,
+        Err(e) => return Json(serde_json::json!({"error": format!("zidecar connect: {}", e)})),
+    };
+    let anchor_height = match req.anchor_height {
+        Some(h) => h,
+        None => match zidecar.get_tip().await {
+            Ok((tip, _)) => tip,
+            Err(e) => return Json(serde_json::json!({"error": format!("get_tip: {}", e)})),
+        },
+    };
+
+    let pczt_state = match tx_build::build_payout_pczt(
+        &zidecar, &fvk_bytes, &notes, &plan, anchor_height, mainnet,
+    ).await {
+        Ok(s) => s,
+        Err(e) => return Json(serde_json::json!({"error": format!("build_pczt: {}", e)})),
+    };
+
+    let nick = format!("escrow-payout-{}", code);
+    let mut relay = match crate::frost_relay::FrostRelayClient::connect(&state.frost_relay_url, nick).await {
+        Ok(c) => c,
+        Err(e) => return Json(serde_json::json!({"error": format!("relay connect: {:?}", e)})),
+    };
+    let relay_room = match relay.create_room().await {
+        Ok(r) => r,
+        Err(e) => return Json(serde_json::json!({"error": format!("relay create_room: {:?}", e)})),
+    };
+
+    {
+        let mut rooms = state.rooms.lock().await;
+        if let Some(room) = rooms.get_mut(&code) {
+            room.payout_status = PayoutStatus::Pending { relay_room: relay_room.clone() };
+        }
+    }
+    tracing::info!("payout initiated for {}: relay_room={} actions={}", code, relay_room, pczt_state.alphas.len());
+
+    let bg_rooms = state.rooms.clone();
+    let bg_code = code.clone();
+    let bg_relay_room = relay_room.clone();
+    let bg_zidecar_url = state.zidecar_url.clone();
+    tokio::spawn(async move {
+        run_payout_signing(bg_rooms, bg_code, bg_relay_room, bg_zidecar_url, relay,
+            pkg_hex, kp_hex, seed_hex, pczt_state).await;
+    });
+
+    Json(serde_json::json!({"relay_room": relay_room}))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_payout_signing(
+    rooms: Rooms,
+    code: String,
+    relay_room: String,
+    zidecar_url: String,
+    mut relay: crate::frost_relay::FrostRelayClient,
+    pkg_hex: String,
+    kp_hex: String,
+    seed_hex: String,
+    pczt_state: zecli::pczt::PcztState,
+) {
+    let secrets = crate::payout_signing::PayoutSignSecrets {
+        key_package_hex: kp_hex,
+        ephemeral_seed_hex: seed_hex,
+    };
+    let sigs = match crate::payout_signing::host_sign_pczt(
+        &mut relay, &pkg_hex, &secrets,
+        pczt_state.sighash, &pczt_state.alphas,
+        std::time::Duration::from_secs(600),
+    ).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("payout host_sign for {}: {:?}", code, e);
+            mark_payout_failed(rooms, code, format!("host_sign_pczt: {:?}", e)).await;
+            return;
+        }
+    };
+
+    let tx_bytes = match zecli::pczt::complete_pczt_tx(pczt_state, &sigs) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("complete_pczt_tx for {}: {}", code, e);
+            mark_payout_failed(rooms, code, format!("complete_pczt_tx: {}", e)).await;
+            return;
+        }
+    };
+
+    let zidecar = match zecli::client::ZidecarClient::connect(&zidecar_url).await {
+        Ok(c) => c,
+        Err(e) => {
+            mark_payout_failed(rooms, code, format!("zidecar connect: {}", e)).await;
+            return;
+        }
+    };
+    match zidecar.send_transaction(tx_bytes).await {
+        Ok(res) if res.is_success() => {
+            tracing::info!("payout broadcast for {}: tx={}", code, res.txid);
+            let mut rl = rooms.lock().await;
+            if let Some(room) = rl.get_mut(&code) {
+                room.payout_status = PayoutStatus::Broadcast { txid: res.txid, relay_room };
+            }
+        }
+        Ok(res) => {
+            mark_payout_failed(rooms, code,
+                format!("zidecar rejected tx ({}): {}", res.error_code, res.error_message)).await;
+        }
+        Err(e) => {
+            mark_payout_failed(rooms, code, format!("send_transaction: {}", e)).await;
+        }
+    }
+}
+
+async fn mark_payout_failed(rooms: Rooms, code: String, reason: String) {
+    let mut rl = rooms.lock().await;
+    if let Some(room) = rl.get_mut(&code) {
+        room.payout_status = PayoutStatus::Failed { reason };
+    }
+}
+
+async fn payout_status(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+) -> impl IntoResponse {
+    let rooms = state.rooms.lock().await;
+    match rooms.get(&code) {
+        Some(room) => Json(serde_json::to_value(&room.payout_status)
+            .unwrap_or_else(|_| serde_json::json!({"error": "serialize"}))),
+        None => Json(serde_json::json!({"error": "room not found"})),
+    }
+}
+
 /// FROST signing -- escrow provides its signature share for a transaction.
 /// Client sends: sighash + their commitments. Server returns its commitment + share.
 #[derive(Deserialize)]
@@ -788,6 +1021,8 @@ async fn main() {
         .route("/room/{code}/deposit", axum::routing::post(report_deposit))
         .route("/room/{code}/settle", axum::routing::post(settle))
         .route("/room/{code}/payout", axum::routing::get(get_payout))
+        .route("/room/{code}/payout/initiate", axum::routing::post(initiate_payout))
+        .route("/room/{code}/payout/status", axum::routing::get(payout_status))
         .route("/room/{code}/sign", axum::routing::post(frost_sign))
         .route("/room/{code}/sign-round2", axum::routing::post(frost_sign_round2))
         .route("/health", axum::routing::get(health))

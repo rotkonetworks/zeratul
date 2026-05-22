@@ -22,6 +22,9 @@ pub struct DkgOutput {
     pub orchard_fvk_hex: String,
     /// host-generated sk for nk/rivk; needed to derive diversified addresses post-DKG
     pub sk_hex: String,
+    /// FROST identity seed produced by dkg_part3 — required by `sign_round1` for fresh
+    /// per-action nonces during payout signing.
+    pub ephemeral_seed_hex: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -112,6 +115,7 @@ pub async fn run_dkg(
         orchard_ufvk: ufvk,
         orchard_fvk_hex: hex::encode(fvk_bytes),
         sk_hex,
+        ephemeral_seed_hex: r3.ephemeral_seed_hex,
     })
 }
 
