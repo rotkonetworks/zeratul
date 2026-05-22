@@ -74,13 +74,15 @@ pub async fn build_payout_pczt(
     }
     let change = total_in - need;
 
-    // merkle witnesses + anchor from zidecar
+    // sync_height must predate every input note so the replay (sync_height..=anchor] visits the block each note was committed in
     let wallet_notes: Vec<WalletNote> = notes.iter().map(deposit_to_wallet_note).collect();
+    let min_note_height = notes.iter().map(|n| n.block_height).min().unwrap_or(anchor_height);
+    let sync_height = min_note_height.saturating_sub(1).max(1);
     let (anchor, paths) = zecli::witness::build_witnesses(
         client, &wallet_notes, anchor_height, mainnet,
         /* json */ false,
         /* cached_frontier */ None,
-        /* sync_height */ anchor_height,
+        sync_height,
     ).await.map_err(|e| TxBuildError::Witness(e.to_string()))?;
     if paths.len() != notes.len() {
         return Err(TxBuildError::Witness(format!(
