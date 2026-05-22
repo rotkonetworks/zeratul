@@ -13,6 +13,8 @@ export default function App() {
   )
   // deposit-panel state — populated by RoomInfo + DepositStatus
   const [requiredDeposit, setRequiredDeposit] = createSignal(0)
+  const [depositBuyinZat, setDepositBuyinZat] = createSignal(0)
+  const [depositFeePerSeat, setDepositFeePerSeat] = createSignal(0)
   const [seatAddresses, setSeatAddresses] = createSignal<(string | null)[]>([])
   const [depositA, setDepositA] = createSignal(0)
   const [depositB, setDepositB] = createSignal(0)
@@ -310,6 +312,8 @@ export default function App() {
           setEscrow(msg.escrow)
         }
         if (msg.required_deposit) setRequiredDeposit(msg.required_deposit)
+        if (typeof msg.buyin_zat === 'number') setDepositBuyinZat(msg.buyin_zat)
+        if (typeof msg.fee_per_seat === 'number') setDepositFeePerSeat(msg.fee_per_seat)
         if (msg.seat_addresses && msg.seat_addresses.length > 0) {
           setSeatAddresses(msg.seat_addresses)
         }
@@ -725,6 +729,13 @@ export default function App() {
                         <span class="text-neutral-500 text-9px uppercase tracking-wider">send</span>
                         <span class="text-zec-yellow text-11px tabular" title="buy-in + your share of the on-chain payout fee">{reqZec} ZEC</span>
                       </div>
+                      {depositFeePerSeat() > 0 && (
+                        <div class="mt-1 text-neutral-500 text-9px tabular">
+                          = {(depositBuyinZat() / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')} buy-in
+                          {' + '}
+                          {(depositFeePerSeat() / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')} payout fee
+                        </div>
+                      )}
                       <div class="mt-3 pt-2 border-t border-neutral-800">
                         <div class="text-neutral-500 text-9px uppercase tracking-wider mb-1">payouts will go to</div>
                         <input

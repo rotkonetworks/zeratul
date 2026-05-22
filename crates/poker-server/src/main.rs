@@ -99,8 +99,14 @@ enum ServerMsg {
         /// per-seat diversified deposit UAs — present once escrow has surfaced them
         #[serde(skip_serializing_if = "Vec::is_empty")]
         seat_addresses: Vec<Option<String>>,
-        /// minimum buy-in for the table (in zatoshi)
+        /// total each player must deposit (buyin + fee_per_seat), in zatoshi
         required_deposit: u64,
+        /// table buy-in component of `required_deposit`, in zatoshi
+        #[serde(default)]
+        buyin_zat: u64,
+        /// per-seat share of the on-chain payout fee component, in zatoshi
+        #[serde(default)]
+        fee_per_seat: u64,
     },
     /// invite link
     InviteLink { url: String },
@@ -311,6 +317,11 @@ struct Room {
     player_a_share: SecretShare<PallasScalar>,
     player_b_share: SecretShare<PallasScalar>,
     action_deadline: Option<(u8, tokio::time::Instant)>,
+    /// table buy-in in zatoshi (= engine.rules.min_buy_in, kept for RoomInfo breakdown)
+    buyin_zat: u64,
+    /// once a settlement has been triggered (Leave OR bust), no new hands start and the
+    /// auto-rebuy at start_hand is dead. Stays true until the room is recycled.
+    payout_triggered: bool,
 }
 
 impl Room {
@@ -396,6 +407,8 @@ impl Room {
             last_deposit_broadcast: None,
             player_a_share, player_b_share,
             action_deadline: None,
+            buyin_zat: buyin,
+            payout_triggered: false,
         }
     }
 
@@ -445,6 +458,22 @@ impl Room {
         out
     }
 
+    /// Real-table bust check: after a hand ends, if exactly one seated player has chips > 0
+    /// and the rest are at 0, the table is settled. Returns the winning seat. Bot tables and
+    /// rooms already in payout return None.
+    fn winner_after_bust(&self) -> Option<u8> {
+        if self.bot_friendly || self.payout_triggered { return None; }
+        let stacks = self.engine.stacks();
+        let mut alive = Vec::new();
+        for i in 0..self.max_seats {
+            if self.players[i].is_some() && stacks.get(i).copied().unwrap_or(0) > 0 {
+                alive.push(i as u8);
+            }
+        }
+        let seated = self.players.iter().filter(|p| p.is_some()).count();
+        if seated >= 2 && alive.len() == 1 { Some(alive[0]) } else { None }
+    }
+
     /// every seated player has deposited the required amount AND we have their refund address
     fn deposits_satisfied(&self) -> bool {
         self.players.iter().enumerate().all(|(i, p)| {
@@ -455,16 +484,25 @@ impl Room {
     }
 
     fn start_hand(&mut self) {
+        if self.payout_triggered {
+            tracing::debug!("room {}: start_hand blocked — payout already triggered", self.code);
+            return;
+        }
         // bot tables play chip-only — no deposit gate. Real-ZEC tables wait until escrow confirms deposits.
         if !self.bot_friendly && !self.deposits_satisfied() {
             tracing::debug!("room {}: start_hand blocked — deposits not satisfied", self.code);
             return;
         }
-        // seat players who need buy-in
+        // bot tables auto-rebuy busted players for endless demo play. real tables follow real poker:
+        // bust = out, no free chips. winner_after_bust() upstream catches that case and triggers payout
+        // before we get here on real tables, so any 0-stack seat reaching this loop on a real table
+        // would block the engine — by intent.
         let buyin = self.engine.rules.min_buy_in as u64;
-        for i in 0..self.max_seats as u8 {
-            if self.players[i as usize].is_some() && self.engine.stacks()[i as usize] == 0 {
-                let _ = self.engine.seat_player(i, buyin);
+        if self.bot_friendly {
+            for i in 0..self.max_seats as u8 {
+                if self.players[i as usize].is_some() && self.engine.stacks()[i as usize] == 0 {
+                    let _ = self.engine.seat_player(i, buyin);
+                }
             }
         }
         self.hand_number += 1;
@@ -643,6 +681,40 @@ fn shuffled_deck_with_proof() -> (Vec<Card>, [u8; 32]) {
     (deck, commitment)
 }
 
+/// Real-table heads-up bust handler: build the settlement plan, mark the room payout-triggered,
+/// broadcast GameOver, and spawn the on-chain payout flow with the winner as priority signer.
+/// Caller must hold the room mutex. No-op for bot tables or when payout already triggered.
+fn finish_table_after_bust(r: &mut Room, state: &AppState, room: Arc<Mutex<Room>>, winner_seat: u8) {
+    if r.bot_friendly || r.payout_triggered { return; }
+    r.payout_triggered = true;
+
+    let payouts = r.settlement_plan();
+    let payout_str: Vec<String> = payouts.iter().map(|(s, a)| format!("seat{}={}", s, a)).collect();
+    tracing::info!("settlement (bust): room={} winner=seat{} payouts=[{}]",
+        r.code, winner_seat, payout_str.join(", "));
+    r.broadcast(&ServerMsg::GameOver {
+        reason: format!("seat {} busted; settling to winner", 1 - winner_seat),
+        payouts: payouts.clone(),
+    });
+    r.action_deadline = None;
+
+    let pczt_plan: Vec<PayoutLineJson> = payouts.iter().filter_map(|(s, amt)| {
+        r.seat_payout_addresses.get(*s as usize)
+            .and_then(|opt| opt.as_ref())
+            .map(|addr| PayoutLineJson { seat: *s, address: addr.clone(), amount_zat: *amt })
+    }).collect();
+
+    if pczt_plan.is_empty() { return; }
+    let Some(escrow_url) = state.escrow_url.clone() else {
+        tracing::warn!("no ESCROW_URL configured — skipping on-chain payout");
+        return;
+    };
+    let code = r.code.clone();
+    tokio::spawn(async move {
+        trigger_payout(room, escrow_url, code, pczt_plan, winner_seat).await;
+    });
+}
+
 /// PGP-style wordlist for invite codes
 const WORDLIST: [&str; 64] = [
     "ace", "bet", "bluff", "board", "burn", "bust", "call", "card",
@@ -785,13 +857,17 @@ fn spawn_deposit_poller(rooms: Rooms, escrow_url: Option<String>, code: String) 
                     required: r.required_deposit,
                     ready,
                 });
+                let breakdown = if r.fee_per_seat > 0 {
+                    format!(" (={} buyin + {} fee per seat)", r.buyin_zat, r.fee_per_seat)
+                } else { String::new() };
                 tracing::info!(
-                    "deposit sync room={}: a={} b={} ready={}",
-                    code, state.player_a_deposit, state.player_b_deposit, ready,
+                    "deposit sync room={}: a={} b={} required={}{} ready={}",
+                    code, state.player_a_deposit, state.player_b_deposit,
+                    r.required_deposit, breakdown, ready,
                 );
             }
 
-            if ready && r.engine.hand_state().is_none() {
+            if ready && !r.payout_triggered && r.engine.hand_state().is_none() {
                 r.start_hand();
             }
         }
@@ -1227,6 +1303,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
             jury_nodes: JURY_N as u8,
             jury_threshold: JURY_T as u8,
             escrow: r.escrow_address.clone(),
+            buyin_zat: r.buyin_zat,
+            fee_per_seat: r.fee_per_seat,
             frost_relay_url: r.frost_relay_url.clone(),
             frost_room_code: r.frost_room_code.clone(),
             seat_addresses: r.seat_deposit_addresses.clone(),
@@ -1236,6 +1314,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
 
     // spawn action timeout watcher
     let timeout_room = room.clone();
+    let timeout_state = state.clone();
     let timeout_handle = tokio::spawn(async move {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
@@ -1277,12 +1356,17 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
 
             // start next hand after timeout fold ended the hand
             if hand_ended {
+                if let Some(winner) = r.winner_after_bust() {
+                    finish_table_after_bust(&mut r, &timeout_state, timeout_room.clone(), winner);
+                    drop(r);
+                    continue;
+                }
                 drop(r);
                 let rc = timeout_room.clone();
                 tokio::spawn(async move {
                     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                     let mut r = rc.lock().await;
-                    if r.engine.hand_state().is_none() && r.player_count() >= 2 {
+                    if !r.payout_triggered && r.engine.hand_state().is_none() && r.player_count() >= 2 {
                         r.start_hand();
                     }
                 });
@@ -1441,12 +1525,19 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
 
                 // hand complete — happy path, no jury needed
                 if r.engine.hand_state().is_none() {
+                    // real tables: if a player just busted (heads-up bust), settle to the winner.
+                    // bot tables fall through and auto-rebuy in start_hand for endless demo play.
+                    if let Some(winner) = r.winner_after_bust() {
+                        finish_table_after_bust(&mut r, &state, room.clone(), winner);
+                        drop(r);
+                        continue;
+                    }
                     let room_clone = room.clone();
                     drop(r);
                     tokio::spawn(async move {
                         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
                         let mut r = room_clone.lock().await;
-                        if r.engine.hand_state().is_none() && r.player_count() >= 2 {
+                        if !r.payout_triggered && r.engine.hand_state().is_none() && r.player_count() >= 2 {
                             r.start_hand();
                         }
                     });
@@ -1484,7 +1575,12 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
             ClientMsg::Leave => {
                 if let Some(seat) = my_seat {
                     let mut r = room.lock().await;
+                    if r.payout_triggered {
+                        tracing::info!("room {}: seat {} leave ignored — payout already in flight", r.code, seat);
+                        continue;
+                    }
                     tracing::info!("room {}: seat {} leaving", r.code, seat);
+                    r.payout_triggered = !r.bot_friendly;
 
                     let payouts = r.settlement_plan();
 
@@ -1602,6 +1698,8 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                         jury_nodes: JURY_N as u8,
                         jury_threshold: JURY_T as u8,
                         escrow: r.escrow_address.clone(),
+                        buyin_zat: r.buyin_zat,
+                        fee_per_seat: r.fee_per_seat,
                         frost_relay_url: r.frost_relay_url.clone(),
                         frost_room_code: r.frost_room_code.clone(),
                         seat_addresses: r.seat_deposit_addresses.clone(),
