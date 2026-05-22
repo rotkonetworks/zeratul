@@ -17,10 +17,9 @@ export default function App() {
   const [depositA, setDepositA] = createSignal(0)
   const [depositB, setDepositB] = createSignal(0)
   const [depositReady, setDepositReady] = createSignal(false)
-  // if set, the SPA passes this literal address in the deposit memo instead of the
-  // `[primary]` token (which zafu expands to the user's oldest non-multisig wallet).
+  // payout address the player pastes in the deposit panel; required before "Send with zafu"
+  // is enabled. embedded into the deposit memo so the escrow scanner knows where to refund.
   const [payoutOverride, setPayoutOverride] = createSignal<string | null>(null)
-  const [showPayoutChange, setShowPayoutChange] = createSignal(false)
   const [selectedTable, setSelectedTable] = createSignal<Table | null>(null)
   const [hasWallet, setHasWallet] = createSignal(false)
   const [walletPubkey, setWalletPubkey] = createSignal<string | undefined>(undefined)
@@ -726,47 +725,43 @@ export default function App() {
                         <span class="text-neutral-500 text-9px uppercase tracking-wider">send</span>
                         <span class="text-zec-yellow text-11px tabular">{reqZec} ZEC</span>
                       </div>
+                      <div class="mt-3 pt-2 border-t border-neutral-800">
+                        <div class="text-neutral-500 text-9px uppercase tracking-wider mb-1">payouts will go to</div>
+                        <input
+                          class="w-full bg-zec-bg border border-neutral-700 rounded px-2 py-1 font-mono text-10px text-zec-yellow"
+                          placeholder="u1... (your orchard UA)"
+                          value={payoutOverride() ?? ''}
+                          onInput={(e) => {
+                            const v = e.currentTarget.value.trim()
+                            if (v === '') setPayoutOverride(null)
+                            else if (v.startsWith('u1') || v.startsWith('utest1') || v.startsWith('uregtest1')) setPayoutOverride(v)
+                            else setPayoutOverride(null)
+                          }}
+                        />
+                        <div class="mt-1 text-neutral-600 text-9px">refunds and winnings land here. paste your zafu / wallet orchard UA.</div>
+                      </div>
                       <button
-                        class="mt-3 w-full btn btn-secondary text-10px"
+                        class="mt-3 w-full btn btn-secondary text-10px disabled:opacity-40 disabled:cursor-not-allowed"
+                        disabled={!payoutOverride()}
                         onClick={() => {
                           try {
+                            const addr = payoutOverride()
+                            if (!addr) { log('paste a payout address first', 'c-red'); return }
                             const providers = (window as any)[Symbol.for('penumbra')]
                             const extId = providers ? (Object.keys(providers)[0]?.replace('chrome-extension://','').replace(/\/$/, '')) : null
                             if (!extId) { log('zafu not detected', 'c-red'); return }
-                            const payoutToken = payoutOverride() ?? '[primary]'
                             chrome.runtime.sendMessage(extId, {
                               type: 'send',
                               address: myAddr,
                               amount_zat: req,
-                              memo: `zk.poker/v1/payout:${payoutToken}`,
+                              memo: `zk.poker/v1/payout:${addr}`,
                             }, () => {})
                           } catch (e: any) { log(`zafu send failed: ${e?.message ?? e}`, 'c-red') }
                         }}
                       >Send with zafu</button>
-                      <div class="mt-3 pt-2 border-t border-neutral-800 text-9px text-neutral-500">
-                        <Show when={!showPayoutChange()}>
-                          <span>payouts go to your <b class="text-neutral-400">zafu primary wallet</b></span>
-                          {' · '}
-                          <button class="underline text-zec-yellow" onClick={() => setShowPayoutChange(true)}>use a different address</button>
-                        </Show>
-                        <Show when={showPayoutChange()}>
-                          <div class="text-neutral-400 mb-1">payouts will go to:</div>
-                          <input
-                            class="w-full bg-zec-bg border border-neutral-700 rounded px-2 py-1 font-mono text-9px text-zec-yellow"
-                            placeholder="u1... (your orchard UA)"
-                            value={payoutOverride() ?? ''}
-                            onInput={(e) => {
-                              const v = e.currentTarget.value.trim()
-                              if (v === '') setPayoutOverride(null)
-                              else if (v.startsWith('u1') || v.startsWith('utest1') || v.startsWith('uregtest1')) setPayoutOverride(v)
-                              else setPayoutOverride(null)
-                            }}
-                          />
-                          <div class="mt-1 flex justify-between">
-                            <span class="text-neutral-600">leave blank to use your primary wallet</span>
-                            <button class="text-neutral-500 underline" onClick={() => { setShowPayoutChange(false); setPayoutOverride(null) }}>cancel</button>
-                          </div>
-                        </Show>
+                      <div class="mt-2 text-neutral-600 text-9px leading-relaxed">
+                        sending from an external wallet? attach memo:{' '}
+                        <span class="font-mono text-neutral-500">zk.poker/v1/payout:&lt;your-u1-address&gt;</span>
                       </div>
                     </Show>
                   </div>
