@@ -4,7 +4,7 @@ import { Card } from './Card'
 import Lobby, { type Table } from './Lobby'
 import { detectZafu } from './zid/provider'
 import { getPositionShort } from './positions'
-import { requestPokerDkg } from './dkg'
+import { requestPokerDkg, requestDeletePokerMultisig } from './dkg'
 import type { ServerMsg, CardJson, ValidAction } from './types'
 
 export default function App() {
@@ -363,6 +363,24 @@ export default function App() {
         if (myPayout) log(`your payout: ${myPayout[1]}`, 'c-zec-yellow font-500')
         setActions([])
         setActing(-1)
+        break
+      }
+      case 'PayoutSigningRequest': {
+        // full settlement UI lands in 5.2d; for now we just log so the wire is observable
+        log(`payout signing room: ${msg.relay_room} (priority seat ${msg.priority_seat})`, 'c-zec-yellow')
+        break
+      }
+      case 'PayoutComplete': {
+        log(`✓ paid out: tx ${msg.txid}`, 'c-green font-500')
+        // schedule deletion of the multisig vault 24h from now — it's spent + useless
+        void requestDeletePokerMultisig({
+          multisigLabel: `POKER-${roomCode()}`,
+          delayMs: 24 * 60 * 60 * 1000,
+        })
+        break
+      }
+      case 'PayoutFailed': {
+        log(`✗ payout failed: ${msg.reason}`, 'c-red font-500')
         break
       }
       case 'DepositStatus':

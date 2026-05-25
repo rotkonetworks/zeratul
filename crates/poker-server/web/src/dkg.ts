@@ -7,6 +7,8 @@ export interface PokerDkgRequest {
   maxSigners?: number
   /** wallet label prefix; zafu appends "-YYYY-MM-DD-HHMM" */
   labelPrefix?: string
+  /** hide the resulting multisig from zafu's wallet UI (default true for poker) */
+  hide?: boolean
 }
 
 export interface PokerDkgResult {
@@ -31,6 +33,41 @@ function findZafuExtensionId(): string | null {
   return origin.replace('chrome-extension://', '').replace(/\/$/, '')
 }
 
+export interface PokerDeleteRequest {
+  /** label prefix used at DKG (e.g. "POKER-{code}"); most-recent match is deleted */
+  multisigLabel: string
+  /** ms from now until deletion fires; 0 = immediate */
+  delayMs?: number
+}
+
+/** schedule (or immediately do) deletion of a poker-table multisig vault on zafu.
+ *  fired on PayoutComplete with a 24h delay so the user can verify on-chain first;
+ *  the vault evaporates next time zafu's service worker wakes after the deadline. */
+export async function requestDeletePokerMultisig(req: PokerDeleteRequest): Promise<{ success: boolean; error?: string }> {
+  const extId = findZafuExtensionId()
+  if (!extId) return { success: false, error: 'zafu extension not detected' }
+  if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+    return { success: false, error: 'chrome.runtime.sendMessage unavailable' }
+  }
+  return new Promise(resolve => {
+    chrome.runtime.sendMessage(
+      extId,
+      {
+        type: 'zafu_delete_multisig',
+        multisigLabel: req.multisigLabel,
+        delayMs: req.delayMs ?? 0,
+      },
+      (resp: any) => {
+        if (chrome.runtime.lastError) {
+          resolve({ success: false, error: chrome.runtime.lastError.message ?? 'sendMessage failed' })
+          return
+        }
+        resolve({ success: !!resp?.success, error: resp?.error })
+      },
+    )
+  })
+}
+
 export async function requestPokerDkg(req: PokerDkgRequest): Promise<PokerDkgResult | PokerDkgError> {
   const extId = findZafuExtensionId()
   if (!extId) {
@@ -50,6 +87,7 @@ export async function requestPokerDkg(req: PokerDkgRequest): Promise<PokerDkgRes
         threshold: req.threshold ?? 2,
         maxSigners: req.maxSigners ?? 3,
         labelPrefix: req.labelPrefix ?? 'POKER',
+        hide: req.hide ?? true,
       },
       (resp: any) => {
         if (chrome.runtime.lastError) {
