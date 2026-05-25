@@ -88,6 +88,11 @@ export default function App() {
   const [pendingRules, setPendingRules] = createSignal<{ buyin: number; smallBlind: number; bigBlind: number; turnTimeout: number; fromSelf: boolean } | null>(null)
   const [oppDisconnected, setOppDisconnected] = createSignal(false)
   const [reconnectCountdown, setReconnectCountdown] = createSignal(0)
+  // tracked so OpponentReconnected / Seated / OpponentLeft can clear the running tick
+  let reconnectInterval: ReturnType<typeof setInterval> | null = null
+  const clearReconnectInterval = () => {
+    if (reconnectInterval !== null) { clearInterval(reconnectInterval); reconnectInterval = null }
+  }
   const [actionTimer, setActionTimer] = createSignal(0)
   const [autoAction, setAutoAction] = createSignal<'none' | 'check/fold' | 'check' | 'fold' | 'call any'>('none')
   const [deckVerified, setDeckVerified] = createSignal(false)
@@ -124,6 +129,12 @@ export default function App() {
       case 'Seated':
         setMySeat(msg.seat)
         setView('waiting')
+        // clear stale connection state — server only sends OpponentDisconnected when an opp
+        // *transitions* offline, never a snapshot. On our own reconnect, we'd otherwise carry
+        // over any oppDisconnected=true from before our WS bounced.
+        clearReconnectInterval()
+        setOppDisconnected(false)
+        setReconnectCountdown(0)
         // remember the seat so a future visit to this room shows reconnect UI
         if (currentRoom() && msg.name) {
           const s = { room: currentRoom(), name: msg.name }
@@ -151,27 +162,30 @@ export default function App() {
         log('rules accepted', 'c-green')
         break
       case 'OpponentLeft':
-        setOppName('\u2014')
+        clearReconnectInterval()
         setOppDisconnected(false)
         setReconnectCountdown(0)
+        setOppName('\u2014')
         setActions([])
         setView('waiting')
         log('opponent left')
         break
       case 'OpponentDisconnected': {
+        // clear any prior countdown so we don't end up with two racing intervals
+        clearReconnectInterval()
         setOppDisconnected(true)
         setReconnectCountdown(msg.reconnect_secs)
         log(`opponent disconnected (${msg.reconnect_secs}s to reconnect)`, 'c-red')
-        // countdown timer
-        const iv = setInterval(() => {
+        reconnectInterval = setInterval(() => {
           setReconnectCountdown(c => {
-            if (c <= 1) { clearInterval(iv); return 0 }
+            if (c <= 1) { clearReconnectInterval(); return 0 }
             return c - 1
           })
         }, 1000)
         break
       }
       case 'OpponentReconnected':
+        clearReconnectInterval()
         setOppDisconnected(false)
         setReconnectCountdown(0)
         log('opponent reconnected', 'c-green')
