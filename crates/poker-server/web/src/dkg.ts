@@ -33,6 +33,43 @@ function findZafuExtensionId(): string | null {
   return origin.replace('chrome-extension://', '').replace(/\/$/, '')
 }
 
+export interface PokerSignRequest {
+  relayUrl: string
+  roomCode: string                              // FROST relay room (NOT the poker room code)
+  plan: { address: string; amount_zat: number }[]
+  feeZat?: number
+  /** label prefix (e.g. "POKER-{code}") so zafu auto-picks the matching multisig */
+  multisigLabel: string
+}
+
+export async function requestPokerSign(req: PokerSignRequest): Promise<{ success: boolean; signed?: boolean; error?: string }> {
+  const extId = findZafuExtensionId()
+  if (!extId) return { success: false, error: 'zafu extension not detected' }
+  if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+    return { success: false, error: 'chrome.runtime.sendMessage unavailable' }
+  }
+  return new Promise(resolve => {
+    chrome.runtime.sendMessage(
+      extId,
+      {
+        type: 'zafu_frost_sign_orchard',
+        relayUrl: req.relayUrl,
+        roomCode: req.roomCode,
+        plan: req.plan,
+        feeZat: req.feeZat ?? 10_000,
+        multisigLabel: req.multisigLabel,
+      },
+      (resp: any) => {
+        if (chrome.runtime.lastError) {
+          resolve({ success: false, error: chrome.runtime.lastError.message ?? 'sendMessage failed' })
+          return
+        }
+        resolve({ success: !!resp?.success, signed: !!resp?.signed, error: resp?.error })
+      },
+    )
+  })
+}
+
 export interface PokerDeleteRequest {
   /** label prefix used at DKG (e.g. "POKER-{code}"); most-recent match is deleted */
   multisigLabel: string

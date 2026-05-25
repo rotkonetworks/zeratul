@@ -4,13 +4,25 @@ import { Card } from './Card'
 import Lobby, { type Table } from './Lobby'
 import { detectZafu } from './zid/provider'
 import { getPositionShort } from './positions'
-import { requestPokerDkg, requestDeletePokerMultisig } from './dkg'
+import { requestPokerDkg, requestDeletePokerMultisig, requestPokerSign } from './dkg'
 import type { ServerMsg, CardJson, ValidAction } from './types'
 
 export default function App() {
-  const [view, setView] = createSignal<'casino' | 'lobby' | 'waiting' | 'deposit' | 'game'>(
+  const [view, setView] = createSignal<'casino' | 'lobby' | 'waiting' | 'deposit' | 'game' | 'settlement'>(
     location.pathname.length > 1 ? 'lobby' : 'casino'
   )
+  // settlement state: populated by PayoutSigningRequest, transitions on PayoutComplete/PayoutFailed
+  type SettlementStatus =
+    | { phase: 'pending' }
+    | { phase: 'signing' }
+    | { phase: 'complete'; txid: string }
+    | { phase: 'failed'; reason: string }
+  const [settleStatus, setSettleStatus] = createSignal<SettlementStatus>({ phase: 'pending' })
+  const [settleRelayRoom, setSettleRelayRoom] = createSignal('')
+  const [settlePlan, setSettlePlan] = createSignal<{ seat: number; address: string; amount_zat: number }[]>([])
+  const [settlePrioritySeat, setSettlePrioritySeat] = createSignal(-1)
+  const [settleReason, setSettleReason] = createSignal('')
+  const [settleFrostRelay, setSettleFrostRelay] = createSignal('')
   // deposit-panel state — populated by RoomInfo + DepositStatus
   const [requiredDeposit, setRequiredDeposit] = createSignal(0)
   const [depositBuyinZat, setDepositBuyinZat] = createSignal(0)
@@ -314,6 +326,7 @@ export default function App() {
         if (msg.required_deposit) setRequiredDeposit(msg.required_deposit)
         if (typeof msg.buyin_zat === 'number') setDepositBuyinZat(msg.buyin_zat)
         if (typeof msg.fee_per_seat === 'number') setDepositFeePerSeat(msg.fee_per_seat)
+        if (typeof msg.frost_relay_url === 'string') setSettleFrostRelay(msg.frost_relay_url)
         if (msg.seat_addresses && msg.seat_addresses.length > 0) {
           setSeatAddresses(msg.seat_addresses)
         }
@@ -363,15 +376,30 @@ export default function App() {
         if (myPayout) log(`your payout: ${myPayout[1]}`, 'c-zec-yellow font-500')
         setActions([])
         setActing(-1)
+        setSettleReason(msg.reason)
         break
       }
       case 'PayoutSigningRequest': {
-        // full settlement UI lands in 5.2d; for now we just log so the wire is observable
-        log(`payout signing room: ${msg.relay_room} (priority seat ${msg.priority_seat})`, 'c-zec-yellow')
+        log(`settling: ${msg.plan.map(p => `seat${p.seat}=${p.amount_zat}`).join(', ')}`, 'c-zec-yellow')
+        setSettleRelayRoom(msg.relay_room)
+        setSettlePlan(msg.plan)
+        setSettlePrioritySeat(msg.priority_seat)
+        setSettleStatus({ phase: 'pending' })
+        setView('settlement')
+        setActions([])
+        setActing(-1)
+        break
+      }
+      case 'OpponentAbandoned': {
+        log(`opponent (seat ${msg.seat}) disconnected and didn't return`, 'c-red')
+        setSettleReason(`seat ${msg.seat} abandoned`)
+        // PayoutSigningRequest follows from the server's auto-settle path; view-flip happens there
         break
       }
       case 'PayoutComplete': {
         log(`✓ paid out: tx ${msg.txid}`, 'c-green font-500')
+        setSettleStatus({ phase: 'complete', txid: msg.txid })
+        setView('settlement')
         // schedule deletion of the multisig vault 24h from now — it's spent + useless
         void requestDeletePokerMultisig({
           multisigLabel: `POKER-${roomCode()}`,
@@ -381,6 +409,8 @@ export default function App() {
       }
       case 'PayoutFailed': {
         log(`✗ payout failed: ${msg.reason}`, 'c-red font-500')
+        setSettleStatus({ phase: 'failed', reason: msg.reason })
+        setView('settlement')
         break
       }
       case 'DepositStatus':
@@ -1159,6 +1189,119 @@ export default function App() {
                 <button type="submit" class="text-8px px-2 py-0.5 rounded border border-neutral-700 text-neutral-600 hover:text-neutral-400">send</button>
               </form>
               </div>{/* end sidebar */}
+            </div>
+          </Show>
+
+          {/* settlement view — on-chain payout in progress / complete / failed */}
+          <Show when={view() === 'settlement'}>
+            <div class="mx-auto max-w-md p-4 mt-2">
+              <div class="text-center mb-3">
+                <div class="text-zec-yellow text-12px uppercase tracking-2px">table closed</div>
+                <div class="text-neutral-500 text-9px mt-1">settling on-chain</div>
+                <Show when={settleReason()}>
+                  <div class="text-neutral-400 text-9px mt-1">{settleReason()}</div>
+                </Show>
+              </div>
+
+              <div class="rounded-md border border-neutral-800 bg-zec-surface p-3 mb-3">
+                <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">payout plan</div>
+                <For each={settlePlan()}>
+                  {(line) => {
+                    const isMe = line.seat === mySeat()
+                    const zec = (line.amount_zat / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')
+                    return (
+                      <div class="flex items-center justify-between text-10px tabular py-1">
+                        <span class={isMe ? 'c-green' : 'text-neutral-400'}>
+                          seat {line.seat}{isMe ? ' (you)' : ''} → {line.address.slice(0, 12)}…{line.address.slice(-6)}
+                        </span>
+                        <span class={isMe ? 'c-zec-yellow font-500' : 'text-neutral-500'}>{zec} ZEC</span>
+                      </div>
+                    )
+                  }}
+                </For>
+              </div>
+
+              <Show when={settleStatus().phase === 'pending' || settleStatus().phase === 'signing'}>
+                <Show when={mySeat() === settlePrioritySeat()}>
+                  <button
+                    class="w-full btn btn-primary text-11px py-2"
+                    disabled={settleStatus().phase === 'signing'}
+                    onClick={() => {
+                      setSettleStatus({ phase: 'signing' })
+                      const code = roomCode()
+                      const relayUrl = settleFrostRelay() || 'wss://zrelay.rotko.net'
+                      void requestPokerSign({
+                        relayUrl,
+                        roomCode: settleRelayRoom(),
+                        plan: settlePlan().map(p => ({ address: p.address, amount_zat: p.amount_zat })),
+                        feeZat: 10_000,
+                        multisigLabel: `POKER-${code}`,
+                      }).then(res => {
+                        if (!res.success) {
+                          log(`zafu sign failed: ${res.error}`, 'c-red')
+                          // back to pending so user can retry; PayoutFailed will land via WS too
+                          setSettleStatus({ phase: 'pending' })
+                        } else {
+                          log('signing shares sent — waiting for escrow to broadcast', 'c-green')
+                        }
+                      })
+                    }}
+                  >
+                    {settleStatus().phase === 'signing' ? 'signing…' : 'approve payout in zafu'}
+                  </button>
+                </Show>
+                <Show when={mySeat() !== settlePrioritySeat()}>
+                  <div class="text-center py-3">
+                    <div class="i-lucide-loader-2 animate-spin mx-auto h-5 w-5 text-zec-yellow" />
+                    <div class="text-neutral-400 text-10px mt-2">waiting for opponent to approve payout</div>
+                  </div>
+                </Show>
+              </Show>
+
+              <Show when={settleStatus().phase === 'complete'}>
+                {(() => {
+                  const status = settleStatus()
+                  if (status.phase !== 'complete') return null
+                  return (
+                    <div class="text-center">
+                      <div class="text-green-400 text-11px mb-2">✓ paid out on-chain</div>
+                      <div class="text-neutral-500 text-9px uppercase mb-1">tx</div>
+                      <div class="font-mono text-9px text-zec-yellow break-all px-2 mb-3">{status.txid}</div>
+                      <button
+                        class="w-full btn btn-secondary text-10px py-1.5"
+                        onClick={() => {
+                          setView('casino')
+                          setSettleStatus({ phase: 'pending' })
+                          setSettlePlan([])
+                          setSettleRelayRoom('')
+                          setSettlePrioritySeat(-1)
+                          setSettleReason('')
+                          history.replaceState(null, '', '/')
+                        }}
+                      >return to lobby</button>
+                    </div>
+                  )
+                })()}
+              </Show>
+
+              <Show when={settleStatus().phase === 'failed'}>
+                {(() => {
+                  const status = settleStatus()
+                  if (status.phase !== 'failed') return null
+                  return (
+                    <div class="text-center">
+                      <div class="text-red-400 text-11px mb-2">✗ payout failed</div>
+                      <div class="text-neutral-400 text-9px mb-3 break-words">{status.reason}</div>
+                      <Show when={mySeat() === settlePrioritySeat()}>
+                        <button
+                          class="w-full btn btn-primary text-11px py-2"
+                          onClick={() => setSettleStatus({ phase: 'pending' })}
+                        >retry approval</button>
+                      </Show>
+                    </div>
+                  )
+                })()}
+              </Show>
             </div>
           </Show>
 

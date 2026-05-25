@@ -63,6 +63,10 @@ enum ServerMsg {
     Seated { seat: u8, name: String },
     OpponentJoined { seat: u8, name: String },
     OpponentLeft { seat: u8 },
+    /// reconnect window expired during settlement — remaining player should sign payout.
+    /// distinct from OpponentLeft because the abandoner didn't choose to leave, and the
+    /// settlement view shows different copy ("opponent disconnected and didn't return").
+    OpponentAbandoned { seat: u8 },
     OpponentDisconnected { seat: u8, reconnect_secs: u64 },
     OpponentReconnected { seat: u8 },
     ActionTimeout { seat: u8 },
@@ -710,8 +714,9 @@ fn finish_table_after_bust(r: &mut Room, state: &AppState, room: Arc<Mutex<Room>
         return;
     };
     let code = r.code.clone();
+    let rooms = state.rooms.clone();
     tokio::spawn(async move {
-        trigger_payout(room, escrow_url, code, pczt_plan, winner_seat).await;
+        trigger_payout(rooms, room, escrow_url, code, pczt_plan, winner_seat).await;
     });
 }
 
@@ -738,9 +743,24 @@ fn generate_room_code() -> String {
 /// Cadence at which poker-server polls poker-escrow's GET /room/{code} to sync deposit state.
 const DEPOSIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// 5-minute delay then remove the room from the global map. Lets clients still
+/// fetch the txid + lobby see the result for a window; after that the room is gone.
+fn schedule_room_cleanup(rooms: Rooms, code: String, delay: std::time::Duration) {
+    tokio::spawn(async move {
+        tokio::time::sleep(delay).await;
+        let mut map = rooms.lock().await;
+        if map.remove(&code).is_some() {
+            tracing::info!("room {}: cleanup removed from rooms map (post-payout)", code);
+        }
+    });
+}
+
 /// POST `/payout/initiate` to escrow, broadcast `PayoutSigningRequest`, then poll
-/// `/payout/status` until Broadcast or Failed; broadcast the final result.
+/// `/payout/status` until Broadcast or Failed; broadcast the final result. After a
+/// successful broadcast, schedules a 5-min cleanup that removes the room from `rooms`
+/// so it stops showing in the lobby and the escrow scanner can spin down.
 async fn trigger_payout(
+    rooms: Rooms,
     room: Arc<Mutex<Room>>,
     escrow_url: String,
     code: String,
@@ -782,8 +802,11 @@ async fn trigger_payout(
         match escrow_client::get_payout_status(&escrow_url, &code).await {
             Ok(escrow_client::PayoutStatus::Broadcast { txid, .. }) => {
                 tracing::info!("payout {} broadcast: tx={}", code, txid);
-                let mut r = room.lock().await;
-                r.broadcast(&ServerMsg::PayoutComplete { txid });
+                {
+                    let mut r = room.lock().await;
+                    r.broadcast(&ServerMsg::PayoutComplete { txid });
+                }
+                schedule_room_cleanup(rooms.clone(), code.clone(), std::time::Duration::from_secs(300));
                 return;
             }
             Ok(escrow_client::PayoutStatus::Failed { reason }) => {
@@ -827,6 +850,8 @@ fn spawn_deposit_poller(rooms: Rooms, escrow_url: Option<String>, code: String) 
             let Some(escrow_ua) = state.escrow_address.clone() else { continue; };
 
             let mut r = room_arc.lock().await;
+            // settlement in flight — no further sync, no log noise, no DepositStatus broadcasts
+            if r.payout_triggered { continue; }
             if r.escrow_address.is_empty() && !escrow_ua.is_empty() {
                 r.escrow_address = escrow_ua;
             }
@@ -1340,18 +1365,51 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                 }
             }
 
-            // check reconnect window expiry
+            // check reconnect window expiry. During payout (post-settlement), don't auto-evict
+            // disconnected players — they're going to settlement view; the room cleanup task
+            // tears the whole room down on PayoutComplete anyway.
+            //
+            // For real tables NOT yet in settlement: abandoning past the window auto-triggers
+            // settlement with the remaining online player as priority signer. Bot tables and
+            // pre-deposit rooms fall back to the legacy OpponentLeft behavior.
+            let in_settlement = r.payout_triggered;
+            let mut abandoners: Vec<u8> = Vec::new();
             for seat_idx in 0..r.players.len() {
                 if let Some(ref p) = r.players[seat_idx] {
                     if let Some(disc_at) = p.disconnected_at {
                         if disc_at.elapsed() > RECONNECT_WINDOW {
-                            let seat = seat_idx as u8;
-                            tracing::info!("room: seat {} reconnect window expired, removing", seat);
-                            r.players[seat_idx] = None;
-                            r.broadcast(&ServerMsg::OpponentLeft { seat });
+                            abandoners.push(seat_idx as u8);
                         }
                     }
                 }
+            }
+            for seat in &abandoners {
+                let seat_idx = *seat as usize;
+                if in_settlement {
+                    // silent drop; settlement UI is the user's surface now
+                    r.players[seat_idx] = None;
+                    continue;
+                }
+                // remove abandoner first so winner_after_abandon sees the remaining alone
+                r.players[seat_idx] = None;
+                if r.bot_friendly {
+                    tracing::info!("room: seat {} reconnect window expired (bot table), removing", seat);
+                    r.broadcast(&ServerMsg::OpponentLeft { seat: *seat });
+                    continue;
+                }
+                // find remaining online seat; if none, room is empty — just leave it
+                let remaining: Vec<u8> = r.players.iter().enumerate()
+                    .filter_map(|(i, p)| p.as_ref().filter(|pl| pl.disconnected_at.is_none()).map(|_| i as u8))
+                    .collect();
+                if remaining.len() != 1 {
+                    tracing::info!("room: seat {} abandoned but no single remaining online seat — skip auto-settle", seat);
+                    r.broadcast(&ServerMsg::OpponentLeft { seat: *seat });
+                    continue;
+                }
+                let winner_seat = remaining[0];
+                tracing::info!("room {}: seat {} abandoned mid-game; auto-settling to seat {}", r.code, seat, winner_seat);
+                r.broadcast(&ServerMsg::OpponentAbandoned { seat: *seat });
+                finish_table_after_bust(&mut r, &timeout_state, timeout_room.clone(), winner_seat);
             }
 
             // start next hand after timeout fold ended the hand
@@ -1391,6 +1449,19 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
         match client_msg {
             ClientMsg::Join { name, pubkey, zcash_address } => {
                 let mut r = room.lock().await;
+
+                // settlement in flight — table is closed to new joiners + non-reconnect entries.
+                // We still allow a previously-seated player to come back (their seat slot is
+                // matched below via disconnected_at), so they can land in the settlement view.
+                if r.payout_triggered {
+                    let was_seated = r.players.iter().any(|p| matches!(p, Some(p) if p.name == name));
+                    if !was_seated {
+                        let _ = tx.send(ServerMsg::Error {
+                            message: "table closed — payout in progress".into(),
+                        });
+                        continue;
+                    }
+                }
 
                 // check for reconnect: same name, seat has disconnected_at set
                 let reconnect_seat = r.players.iter().position(|p| {
@@ -1621,9 +1692,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     if !pczt_plan.is_empty() {
                         if let Some(escrow_url) = state.escrow_url.clone() {
                             let room_clone = room.clone();
+                            let rooms_clone = state.rooms.clone();
                             let plan_clone = pczt_plan.clone();
                             tokio::spawn(async move {
-                                trigger_payout(room_clone, escrow_url, code, plan_clone, leaving_seat).await;
+                                trigger_payout(rooms_clone, room_clone, escrow_url, code, plan_clone, leaving_seat).await;
                             });
                         } else {
                             tracing::warn!("no ESCROW_URL configured — skipping on-chain payout");
