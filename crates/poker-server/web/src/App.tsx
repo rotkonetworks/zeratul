@@ -118,7 +118,7 @@ export default function App() {
   const oppStack = () => stacks()[opp()] ?? 0
   const myBet = () => bets()[mySeat()] ?? 0
   const oppBet = () => bets()[opp()] ?? 0
-  const isMyTurn = () => acting() === mySeat()
+  const isMyTurn = () => acting() === mySeat() && !oppDisconnected()
 
   function log(text: string, cls = '') {
     setLogs(l => [...l.slice(-60), { text, cls }])
@@ -192,6 +192,15 @@ export default function App() {
         break
       case 'TimerTick':
         setActionTimer(msg.seconds_left)
+        break
+      case 'ActionPaused':
+        // freeze the visible action timer; the OPPONENT DISCONNECTED overlay covers the table
+        setActionTimer(0)
+        log(`hand paused while seat ${msg.seat} is offline`, 'c-zec-yellow')
+        break
+      case 'ActionResumed':
+        setActionTimer(msg.seconds_left)
+        log(`hand resumed (seat ${msg.seat} to act, ${msg.seconds_left}s)`, 'c-green')
         break
       case 'ActionTimeout':
         log(`${msg.seat === mySeat() ? 'you' : 'opp'} timed out (auto-fold)`, 'c-red')
@@ -1038,7 +1047,9 @@ export default function App() {
               <div class="flex gap-1 sm:gap-1.5 justify-center items-center py-2 sm:py-3 min-h-11 flex-wrap">
                 <Show when={isMyTurn() && actions().length > 0} fallback={
                   <Show when={acting() >= 0 && !isMyTurn()}>
-                    <span class="text-neutral-600 text-10px uppercase tracking-wider">opponent to act</span>
+                    <span class="text-neutral-600 text-10px uppercase tracking-wider">
+                      {oppDisconnected() ? 'hand paused — opponent offline' : 'opponent to act'}
+                    </span>
                   </Show>
                 }>
                   {/* sizing buttons — Pluribus-style: 1/4, 1/2, 3/4, pot, 2x */}

@@ -9,8 +9,10 @@ export type ServerMsg =
   | { type: 'OpponentLeft'; seat: number }
   | { type: 'OpponentDisconnected'; seat: number; reconnect_secs: number }
   | { type: 'OpponentReconnected'; seat: number }
+  | { type: 'ActionPaused'; seat: number }
+  | { type: 'ActionResumed'; seat: number; seconds_left: number }
   | { type: 'ActionTimeout'; seat: number }
-  | { type: 'TimerTick'; secondsLeft: number }
+  | { type: 'TimerTick'; seat: number; seconds_left: number }
   | { type: 'HandStarted'; hand_number: number; button: number; your_cards: [CardJson, CardJson] | null; stacks: number[] }
   | { type: 'BlindsPosted'; small_blind: [number, number]; big_blind: [number, number] }
   | { type: 'ActionRequired'; seat: number; valid_actions: ValidAction[] }

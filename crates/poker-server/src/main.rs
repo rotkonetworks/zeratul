@@ -68,6 +68,11 @@ enum ServerMsg {
     /// settlement view shows different copy ("opponent disconnected and didn't return").
     OpponentAbandoned { seat: u8 },
     OpponentDisconnected { seat: u8, reconnect_secs: u64 },
+    /// Hand action is paused while ≥1 seated player is in their reconnect window.
+    /// SPA stops the local action-timer countdown until ActionResumed arrives.
+    ActionPaused { seat: u8 },
+    /// All disconnected players returned; action timer for `seat` resumes with `seconds_left`.
+    ActionResumed { seat: u8, seconds_left: u64 },
     OpponentReconnected { seat: u8 },
     ActionTimeout { seat: u8 },
     TimerTick { seat: u8, seconds_left: u64 },
@@ -318,6 +323,8 @@ struct Room {
     seat_payout_addresses: Vec<Option<String>>,
     /// last DepositStatus we broadcast — so the 5s poll only re-broadcasts on change
     last_deposit_broadcast: Option<(u64, u64, bool)>,
+    /// last broadcast pause state — so we only emit ActionPaused/Resumed on transitions
+    last_paused: bool,
     player_a_share: SecretShare<PallasScalar>,
     player_b_share: SecretShare<PallasScalar>,
     action_deadline: Option<(u8, tokio::time::Instant)>,
@@ -409,6 +416,7 @@ impl Room {
             seat_deposit_addresses: vec![None; seats],
             seat_payout_addresses: vec![None; seats],
             last_deposit_broadcast: None,
+            last_paused: false,
             player_a_share, player_b_share,
             action_deadline: None,
             buyin_zat: buyin,
@@ -1345,24 +1353,52 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
             let mut r = timeout_room.lock().await;
 
-            // check action timeout
-            let mut hand_ended = false;
-            if let Some((seat, deadline)) = r.action_deadline {
-                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-                let secs_left = remaining.as_secs();
+            // Pause the action timer entirely while any seated player is in their reconnect
+            // window. Reasoning: if A is acting but B disconnects, A's choice still depends
+            // on game state B will see when they return; ticking down or auto-folding either
+            // way penalises a network blip. The reconnect-window check below still runs, so
+            // a player who never returns hits abandonment after 60s and the game settles.
+            let any_disconnected = r.players.iter()
+                .any(|p| matches!(p, Some(pl) if pl.disconnected_at.is_some()));
 
-                if remaining.is_zero() {
-                    tracing::info!("room: seat {} timed out, auto-folding", seat);
-                    r.action_deadline = None;
-                    r.broadcast(&ServerMsg::ActionTimeout { seat });
-                    if r.engine.hand_state().is_some() {
-                        r.apply_action(seat, ActionType::Fold);
-                        hand_ended = r.engine.hand_state().is_none();
+            // emit edge transitions for the SPA to swap between "paused" overlay + live timer
+            if any_disconnected != r.last_paused {
+                r.last_paused = any_disconnected;
+                if any_disconnected {
+                    if let Some((seat, _)) = r.action_deadline {
+                        r.broadcast(&ServerMsg::ActionPaused { seat });
                     }
-                } else {
-                    // send timer tick every second so frontend shows countdown
-                    r.broadcast(&ServerMsg::TimerTick { seat, seconds_left: secs_left });
+                } else if let Some((seat, deadline)) = r.action_deadline {
+                    let secs_left = deadline.saturating_duration_since(tokio::time::Instant::now()).as_secs();
+                    r.broadcast(&ServerMsg::ActionResumed { seat, seconds_left: secs_left });
                 }
+            }
+
+            // check action timeout (skipped while paused)
+            let mut hand_ended = false;
+            if !any_disconnected {
+                if let Some((seat, deadline)) = r.action_deadline {
+                    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                    let secs_left = remaining.as_secs();
+
+                    if remaining.is_zero() {
+                        tracing::info!("room: seat {} timed out, auto-folding", seat);
+                        r.action_deadline = None;
+                        r.broadcast(&ServerMsg::ActionTimeout { seat });
+                        if r.engine.hand_state().is_some() {
+                            r.apply_action(seat, ActionType::Fold);
+                            hand_ended = r.engine.hand_state().is_none();
+                        }
+                    } else {
+                        // send timer tick every second so frontend shows countdown
+                        r.broadcast(&ServerMsg::TimerTick { seat, seconds_left: secs_left });
+                    }
+                }
+            } else if let Some((seat, deadline)) = r.action_deadline {
+                // hold the deadline steady while paused — slide it forward by one second per
+                // tick so when everyone reconnects, the actor still has the same time-left
+                // as when the pause started.
+                r.action_deadline = Some((seat, deadline + std::time::Duration::from_secs(1)));
             }
 
             // check reconnect window expiry. During payout (post-settlement), don't auto-evict
@@ -1592,6 +1628,15 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                 };
 
                 let mut r = room.lock().await;
+                // refuse to advance engine state while any seated player is in the reconnect
+                // window. mirrors the SPA's button-disabled state; defensive against a buggy
+                // / malicious client that submits an action despite the paused overlay.
+                let any_disconnected = r.players.iter()
+                    .any(|p| matches!(p, Some(pl) if pl.disconnected_at.is_some()));
+                if any_disconnected {
+                    let _ = tx.send(ServerMsg::Error { message: "hand paused — opponent offline".into() });
+                    continue;
+                }
                 r.apply_action(seat, action);
 
                 // hand complete — happy path, no jury needed
