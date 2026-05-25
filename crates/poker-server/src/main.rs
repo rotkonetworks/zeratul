@@ -333,6 +333,24 @@ struct Room {
     /// once a settlement has been triggered (Leave OR bust), no new hands start and the
     /// auto-rebuy at start_hand is dead. Stays true until the room is recycled.
     payout_triggered: bool,
+    /// Cached `PayoutSigningRequest` payload so reconnecting clients can be replayed into
+    /// the settlement view instead of the live table. Set when the request is broadcast,
+    /// cleared when PayoutComplete / PayoutFailed lands.
+    payout_signing_state: Option<PayoutSigningState>,
+    /// Set after `PayoutComplete{txid}` is broadcast so a late reconnect can still see the
+    /// final txid + settlement summary.
+    payout_complete_txid: Option<String>,
+    /// Set after `PayoutFailed{reason}` is broadcast.
+    payout_failed_reason: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct PayoutSigningState {
+    relay_room: String,
+    plan: Vec<PayoutLineJson>,
+    priority_seat: u8,
+    /// time we last bumped priority_seat (or first broadcast). Used by the fallback timer.
+    broadcast_at: tokio::time::Instant,
 }
 
 impl Room {
@@ -421,6 +439,9 @@ impl Room {
             action_deadline: None,
             buyin_zat: buyin,
             payout_triggered: false,
+            payout_signing_state: None,
+            payout_complete_txid: None,
+            payout_failed_reason: None,
         }
     }
 
@@ -802,9 +823,19 @@ async fn trigger_payout(
             plan: plan.clone(),
             priority_seat,
         });
+        // remember the broadcast so reconnecting clients can be replayed into the settlement view
+        r.payout_signing_state = Some(PayoutSigningState {
+            relay_room: relay_room.clone(),
+            plan: plan.clone(),
+            priority_seat,
+            broadcast_at: tokio::time::Instant::now(),
+        });
     }
 
-    // poll status until terminal
+    // poll status until terminal. Also acts as the fallback timer: every 30s of pending,
+    // check if PRIORITY_SIGNER_FALLBACK_SECS has elapsed since the LAST priority broadcast;
+    // if yes, swap to the other seat so the responsive player can sign instead.
+    const PRIORITY_SIGNER_FALLBACK_SECS: u64 = 90;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         match escrow_client::get_payout_status(&escrow_url, &code).await {
@@ -812,7 +843,9 @@ async fn trigger_payout(
                 tracing::info!("payout {} broadcast: tx={}", code, txid);
                 {
                     let mut r = room.lock().await;
-                    r.broadcast(&ServerMsg::PayoutComplete { txid });
+                    r.broadcast(&ServerMsg::PayoutComplete { txid: txid.clone() });
+                    r.payout_signing_state = None;
+                    r.payout_complete_txid = Some(txid);
                 }
                 schedule_room_cleanup(rooms.clone(), code.clone(), std::time::Duration::from_secs(300));
                 return;
@@ -820,10 +853,40 @@ async fn trigger_payout(
             Ok(escrow_client::PayoutStatus::Failed { reason }) => {
                 tracing::error!("payout {} failed: {}", code, reason);
                 let mut r = room.lock().await;
-                r.broadcast(&ServerMsg::PayoutFailed { reason });
+                r.broadcast(&ServerMsg::PayoutFailed { reason: reason.clone() });
+                r.payout_signing_state = None;
+                r.payout_failed_reason = Some(reason);
                 return;
             }
-            Ok(_) => {} // Pending / None — keep polling
+            Ok(_) => {
+                // still pending — check if it's time to swap priority signer
+                let swap = {
+                    let r = room.lock().await;
+                    match &r.payout_signing_state {
+                        Some(s) if s.broadcast_at.elapsed() >= std::time::Duration::from_secs(PRIORITY_SIGNER_FALLBACK_SECS) => {
+                            // find a seat to swap to. Heads-up: just flip 0↔1.
+                            let new_seat = if s.priority_seat == 0 { 1 } else { 0 };
+                            Some((new_seat, s.relay_room.clone(), s.plan.clone()))
+                        }
+                        _ => None,
+                    }
+                };
+                if let Some((new_seat, relay_room, plan)) = swap {
+                    tracing::info!("payout {}: priority-signer fallback fired, swapping to seat {}", code, new_seat);
+                    let mut r = room.lock().await;
+                    r.broadcast(&ServerMsg::PayoutSigningRequest {
+                        relay_room: relay_room.clone(),
+                        plan: plan.clone(),
+                        priority_seat: new_seat,
+                    });
+                    r.payout_signing_state = Some(PayoutSigningState {
+                        relay_room,
+                        plan,
+                        priority_seat: new_seat,
+                        broadcast_at: tokio::time::Instant::now(),
+                    });
+                }
+            }
             Err(e) => tracing::warn!("payout {} status poll error: {}", code, e),
         }
     }
@@ -1515,6 +1578,31 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     tracing::info!("room {}: seat {} ({}) reconnected", r.code, seat, name);
                     let _ = tx.send(ServerMsg::Seated { seat, name: name.clone() });
 
+                    // Settlement-mode reconnect: replay the payout state instead of resuming
+                    // the live table. This handles the leaver-reloads-during-settlement case
+                    // (they should land in the settlement view to finish signing), and any
+                    // intermediate reconnect after PayoutComplete / PayoutFailed.
+                    if r.payout_triggered {
+                        if let Some(s) = r.payout_signing_state.clone() {
+                            let _ = tx.send(ServerMsg::PayoutSigningRequest {
+                                relay_room: s.relay_room,
+                                plan: s.plan,
+                                priority_seat: s.priority_seat,
+                            });
+                        }
+                        if let Some(txid) = r.payout_complete_txid.clone() {
+                            let _ = tx.send(ServerMsg::PayoutComplete { txid });
+                        }
+                        if let Some(reason) = r.payout_failed_reason.clone() {
+                            let _ = tx.send(ServerMsg::PayoutFailed { reason });
+                        }
+                        // notify peers we're back but don't re-send game state
+                        for i in 0..r.max_seats as u8 {
+                            if i != seat { r.send_to(i, ServerMsg::OpponentReconnected { seat }); }
+                        }
+                        continue;
+                    }
+
                     // send current game state to reconnecting player.
                     let live_stacks: Vec<u64> = r.engine.hand_state()
                         .map(|h| h.seats.iter().map(|s| s.chips).collect())
@@ -1735,7 +1823,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     // cleared on the cleanup pass (5min post-PayoutComplete) when the room itself
                     // is removed. On bot tables (no payout), drop immediately as before.
                     if !pczt_plan.is_empty() {
-                        r.broadcast(&ServerMsg::OpponentLeft { seat });
+                        // notify OTHER seats only — the leaver doesn't need to know they left,
+                        // and broadcasting to them flips their SPA's view to 'waiting' for ~3s
+                        // before the PayoutSigningRequest arrives, which looks like a deposit
+                        // re-prompt.
+                        for i in 0..r.max_seats as u8 {
+                            if i != seat { r.send_to(i, ServerMsg::OpponentLeft { seat }); }
+                        }
                     } else {
                         r.players[seat as usize] = None;
                         r.broadcast(&ServerMsg::OpponentLeft { seat });

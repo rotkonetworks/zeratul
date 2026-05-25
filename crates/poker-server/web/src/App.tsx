@@ -23,6 +23,23 @@ export default function App() {
   const [settlePrioritySeat, setSettlePrioritySeat] = createSignal(-1)
   const [settleReason, setSettleReason] = createSignal('')
   const [settleFrostRelay, setSettleFrostRelay] = createSignal('')
+  // tick for the fallback-signer countdown. Server swaps priority every 90s of inactivity;
+  // the SPA tracks Date.now() at each PayoutSigningRequest and renders 90 - elapsed.
+  const SETTLE_FALLBACK_SECS = 90
+  const [settleBroadcastAt, setSettleBroadcastAt] = createSignal(0)
+  const [settleFallbackTick, setSettleFallbackTick] = createSignal(SETTLE_FALLBACK_SECS)
+  createEffect(() => {
+    const baseAt = settleBroadcastAt()
+    const phase = settleStatus().phase
+    if (!baseAt || (phase !== 'pending' && phase !== 'signing')) return
+    const tick = () => {
+      const left = Math.max(0, SETTLE_FALLBACK_SECS - Math.floor((Date.now() - baseAt) / 1000))
+      setSettleFallbackTick(left)
+    }
+    tick()
+    const iv = setInterval(tick, 1000)
+    onCleanup(() => clearInterval(iv))
+  })
   // deposit-panel state — populated by RoomInfo + DepositStatus
   const [requiredDeposit, setRequiredDeposit] = createSignal(0)
   const [depositBuyinZat, setDepositBuyinZat] = createSignal(0)
@@ -408,6 +425,10 @@ export default function App() {
         setSettlePlan(msg.plan)
         setSettlePrioritySeat(msg.priority_seat)
         setSettleStatus({ phase: 'pending' })
+        // reset the fallback countdown; server will re-broadcast PayoutSigningRequest with
+        // a flipped priority_seat in SETTLE_FALLBACK_SECS if the current signer doesn't act
+        setSettleBroadcastAt(Date.now())
+        setSettleFallbackTick(SETTLE_FALLBACK_SECS)
         setView('settlement')
         setActions([])
         setActing(-1)
@@ -423,6 +444,10 @@ export default function App() {
         log(`✓ paid out: tx ${msg.txid}`, 'c-green font-500')
         setSettleStatus({ phase: 'complete', txid: msg.txid })
         setView('settlement')
+        // settlement done — drop the reconnect marker; the "return to lobby" button can
+        // safely take the user home without auto-rejoining a settled room
+        localStorage.removeItem('poker_last_session')
+        setLastSession(null)
         // schedule deletion of the multisig vault 24h from now — it's spent + useless
         void requestDeletePokerMultisig({
           multisigLabel: `POKER-${roomCode()}`,
@@ -487,15 +512,16 @@ export default function App() {
     send({ type: 'Leave' })
     setActions([])
     setActing(-1)
-    // leaving is intentional — don't offer reconnect later
-    localStorage.removeItem('poker_last_session')
-    setLastSession(null)
-    // for real tables, server will broadcast PayoutSigningRequest and flip the view to
-    // 'settlement' so the leaver can co-sign their refund/payout. for bot tables, GameOver
-    // arrives without a follow-up payout, and the GameOver handler bounces to lobby. We
-    // schedule a fallback bounce here so a server-side hiccup can't strand the leaver.
+    // KEEP `poker_last_session` so a reload during settlement triggers reconnect (server
+    // replays PayoutSigningRequest into the settlement view rather than dumping us at the
+    // rename UI). PayoutComplete / PayoutFailed handlers + the manual "return to lobby"
+    // button clear it. For bot tables we still want a quick bounce to lobby; the 5s
+    // fallback below handles that.
     setTimeout(() => {
       if (view() !== 'settlement') {
+        // bot table or server didn't open a settlement → safe to scrub session + bounce
+        localStorage.removeItem('poker_last_session')
+        setLastSession(null)
         history.pushState(null, '', '/')
         setView('casino')
       }
@@ -1255,6 +1281,12 @@ export default function App() {
               </div>
 
               <Show when={settleStatus().phase === 'pending' || settleStatus().phase === 'signing'}>
+                <div class="text-center text-9px tabular text-neutral-500 mb-2">
+                  {mySeat() === settlePrioritySeat()
+                    ? <>you have <span class="c-zec-yellow">{settleFallbackTick()}s</span> to approve before the signer flips to your opponent</>
+                    : <>opponent can sign for <span class="c-zec-yellow">{settleFallbackTick()}s</span>; after that you can take over</>
+                  }
+                </div>
                 <Show when={mySeat() === settlePrioritySeat()}>
                   <button
                     class="w-full btn btn-primary text-11px py-2"
