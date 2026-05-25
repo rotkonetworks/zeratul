@@ -467,8 +467,16 @@ export default function App() {
     // leaving is intentional — don't offer reconnect later
     localStorage.removeItem('poker_last_session')
     setLastSession(null)
-    history.pushState(null, '', '/')
-    setView('casino')
+    // for real tables, server will broadcast PayoutSigningRequest and flip the view to
+    // 'settlement' so the leaver can co-sign their refund/payout. for bot tables, GameOver
+    // arrives without a follow-up payout, and the GameOver handler bounces to lobby. We
+    // schedule a fallback bounce here so a server-side hiccup can't strand the leaver.
+    setTimeout(() => {
+      if (view() !== 'settlement') {
+        history.pushState(null, '', '/')
+        setView('casino')
+      }
+    }, 5000)
   }
 
   // keybinding modes

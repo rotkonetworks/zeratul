@@ -1682,10 +1682,19 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     let code = r.code.clone();
                     let leaving_seat = seat;
 
-                    r.players[seat as usize] = None;
                     r.action_deadline = None;
 
-                    r.broadcast(&ServerMsg::OpponentLeft { seat });
+                    // Keep the leaver seated through settlement on real tables so they receive
+                    // PayoutSigningRequest / PayoutComplete / PayoutFailed broadcasts. Their
+                    // websocket tx must stay in r.players to be hit by broadcast(). The seat is
+                    // cleared on the cleanup pass (5min post-PayoutComplete) when the room itself
+                    // is removed. On bot tables (no payout), drop immediately as before.
+                    if !pczt_plan.is_empty() {
+                        r.broadcast(&ServerMsg::OpponentLeft { seat });
+                    } else {
+                        r.players[seat as usize] = None;
+                        r.broadcast(&ServerMsg::OpponentLeft { seat });
+                    }
                     drop(r);
 
                     // trigger on-chain payout if there's anything to pay out + escrow is wired
