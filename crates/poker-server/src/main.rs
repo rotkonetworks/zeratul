@@ -1562,10 +1562,30 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     }
                 }
 
-                // check for reconnect: same name, seat has disconnected_at set
+                // reconnect match: name + disconnected_at + pubkey (if originally set)
+                // pubkey check: anon joins (pubkey=None) keep name-only fallback; pubkey-set joins require the same pubkey
                 let reconnect_seat = r.players.iter().position(|p| {
-                    matches!(p, Some(p) if p.name == name && p.disconnected_at.is_some())
+                    matches!(p, Some(p) if
+                        p.name == name &&
+                        p.disconnected_at.is_some() &&
+                        (p.pubkey.is_none() || p.pubkey.as_deref() == pubkey.as_deref())
+                    )
                 });
+                // detect a hijack attempt: name matches a seated player but pubkey doesn't (and
+                // they registered with one). Reject with a clear error rather than silently
+                // sliding into the fresh-join path (which would hit "table full" anyway, but
+                // the message wouldn't tell them why).
+                if reconnect_seat.is_none() {
+                    let hijack = r.players.iter().any(|p| matches!(p, Some(p) if
+                        p.name == name && p.pubkey.is_some() && p.pubkey.as_deref() != pubkey.as_deref()
+                    ));
+                    if hijack {
+                        let _ = tx.send(ServerMsg::Error {
+                            message: "name in use by another player on this table".into(),
+                        });
+                        continue;
+                    }
+                }
 
                 if let Some(seat_idx) = reconnect_seat {
                     // reconnect to existing seat
@@ -1603,39 +1623,53 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                         continue;
                     }
 
-                    // send current game state to reconnecting player.
-                    let live_stacks: Vec<u64> = r.engine.hand_state()
-                        .map(|h| h.seats.iter().map(|s| s.chips).collect())
-                        .unwrap_or_else(|| r.engine.stacks().to_vec());
-                    let _ = tx.send(ServerMsg::HandStarted {
-                        hand_number: r.hand_number as u64,
-                        button: r.button,
-                        your_cards: r.hole_cards[seat as usize].as_ref().map(|c| {
-                            [card_json(&c[0]), card_json(&c[1])]
-                        }),
-                        stacks: live_stacks,
-                    });
-                    if !r.community_cards.is_empty() {
-                        let phase = r.engine.hand_state().map(|h| format!("{:?}", h.phase).to_lowercase())
-                            .unwrap_or_else(|| "unknown".into());
-                        let _ = tx.send(ServerMsg::CommunityCards {
-                            phase,
-                            cards: r.community_cards.iter().map(card_json).collect(),
+                    // phase-aware reconnect: pick the message set that drives the SPA to the
+                    // correct view (waiting / deposit / game). Settlement-mode case is handled above.
+                    if r.engine.hand_state().is_some() {
+                        // hand running: resume game view
+                        let live_stacks: Vec<u64> = r.engine.hand_state()
+                            .map(|h| h.seats.iter().map(|s| s.chips).collect())
+                            .unwrap_or_else(|| r.engine.stacks().to_vec());
+                        let _ = tx.send(ServerMsg::HandStarted {
+                            hand_number: r.hand_number as u64,
+                            button: r.button,
+                            your_cards: r.hole_cards[seat as usize].as_ref().map(|c| {
+                                [card_json(&c[0]), card_json(&c[1])]
+                            }),
+                            stacks: live_stacks,
                         });
-                    }
-
-                    // resync turn: if it's this seat's action, re-emit ActionRequired
-                    if let Some((act_seat, valid)) = r.engine.pending_action() {
-                        if act_seat == seat {
-                            let _ = tx.send(ServerMsg::ActionRequired {
-                                seat: act_seat,
-                                valid_actions: valid.iter().map(|va| ValidActionJson {
-                                    kind: format!("{:?}", va.kind).to_lowercase(),
-                                    min_amount: va.min_amount, max_amount: va.max_amount,
-                                }).collect(),
+                        if !r.community_cards.is_empty() {
+                            let phase = r.engine.hand_state().map(|h| format!("{:?}", h.phase).to_lowercase())
+                                .unwrap_or_else(|| "unknown".into());
+                            let _ = tx.send(ServerMsg::CommunityCards {
+                                phase,
+                                cards: r.community_cards.iter().map(card_json).collect(),
                             });
                         }
+                        if let Some((act_seat, valid)) = r.engine.pending_action() {
+                            if act_seat == seat {
+                                let _ = tx.send(ServerMsg::ActionRequired {
+                                    seat: act_seat,
+                                    valid_actions: valid.iter().map(|va| ValidActionJson {
+                                        kind: format!("{:?}", va.kind).to_lowercase(),
+                                        min_amount: va.min_amount, max_amount: va.max_amount,
+                                    }).collect(),
+                                });
+                            }
+                        }
+                    } else if !r.bot_friendly && !r.deposits_satisfied() {
+                        // real table, deposits pending: push to deposit view via DepositStatus
+                        let ready = r.deposits_satisfied() && r.player_count() >= 2;
+                        let _ = tx.send(ServerMsg::DepositStatus {
+                            escrow_address: r.escrow_address.clone(),
+                            seat_addresses: r.seat_deposit_addresses.clone(),
+                            player_a_deposit: r.deposits.get(0).copied().unwrap_or(0),
+                            player_b_deposit: r.deposits.get(1).copied().unwrap_or(0),
+                            required: r.required_deposit,
+                            ready,
+                        });
                     }
+                    // else: SPA stays on whatever it was (waiting / lobby). Seated above is enough.
 
                     // notify all other players of reconnect
                     for i in 0..r.max_seats as u8 {
@@ -1823,13 +1857,11 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     // cleared on the cleanup pass (5min post-PayoutComplete) when the room itself
                     // is removed. On bot tables (no payout), drop immediately as before.
                     if !pczt_plan.is_empty() {
-                        // notify OTHER seats only — the leaver doesn't need to know they left,
-                        // and broadcasting to them flips their SPA's view to 'waiting' for ~3s
-                        // before the PayoutSigningRequest arrives, which looks like a deposit
-                        // re-prompt.
-                        for i in 0..r.max_seats as u8 {
-                            if i != seat { r.send_to(i, ServerMsg::OpponentLeft { seat }); }
-                        }
+                        // real tables: skip OpponentLeft entirely. GameOver (already broadcast
+                        // above) + PayoutSigningRequest (incoming from trigger_payout) drive
+                        // both browsers straight into the settlement view. Sending OpponentLeft
+                        // would flip the non-leaver's SPA through the 'waiting' (sharelink +
+                        // deposit) screen for ~3s before settlement arrives.
                     } else {
                         r.players[seat as usize] = None;
                         r.broadcast(&ServerMsg::OpponentLeft { seat });

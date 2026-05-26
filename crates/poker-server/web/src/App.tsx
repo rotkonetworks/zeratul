@@ -11,8 +11,10 @@ export default function App() {
   const [view, setView] = createSignal<'casino' | 'lobby' | 'waiting' | 'deposit' | 'game' | 'settlement'>(
     location.pathname.length > 1 ? 'lobby' : 'casino'
   )
-  // settlement state: populated by PayoutSigningRequest, transitions on PayoutComplete/PayoutFailed
+  // settlement state: starts at 'preparing' on GameOver while escrow builds the PCZT,
+  // transitions on PayoutSigningRequest → 'pending' → user signs → 'complete' / 'failed'.
   type SettlementStatus =
+    | { phase: 'preparing' }
     | { phase: 'pending' }
     | { phase: 'signing' }
     | { phase: 'complete'; txid: string }
@@ -404,8 +406,10 @@ export default function App() {
         setDepositB(msg.player_b_deposit)
         setRequiredDeposit(msg.required)
         setDepositReady(msg.ready)
-        // once DKG produced seat addresses, sit users in the deposit view
-        if (mySeat() >= 0 && !msg.ready && view() !== 'game' && msg.seat_addresses && msg.seat_addresses.some(a => a)) {
+        // once DKG produced seat addresses + deposits still pending, sit users in the deposit
+        // view. Do NOT flip away from settlement (payout in flight) or game (active hand).
+        const v = view()
+        if (mySeat() >= 0 && !msg.ready && v !== 'game' && v !== 'settlement' && msg.seat_addresses && msg.seat_addresses.some(a => a)) {
           setView('deposit')
         }
         break
@@ -417,6 +421,19 @@ export default function App() {
         setActions([])
         setActing(-1)
         setSettleReason(msg.reason)
+        // real tables: flip to settlement immediately with a 'preparing' spinner. PCZT build
+        // + relay-room provisioning takes ~3-5s so GameOver lands well before PayoutSigningRequest.
+        // Pre-populate the plan from GameOver.payouts so the user sees per-seat amounts right away;
+        // addresses get filled in by the real PayoutSigningRequest a few seconds later.
+        if (escrow() && escrow().length > 0) {
+          const planPreview = msg.payouts.map(([seat, amt]: [number, number]) => ({
+            seat, address: '', amount_zat: amt,
+          }))
+          setSettlePlan(planPreview)
+          setSettlePrioritySeat(-1) // unknown until PayoutSigningRequest
+          setSettleStatus({ phase: 'preparing' })
+          setView('settlement')
+        }
         break
       }
       case 'PayoutSigningRequest': {
@@ -1279,6 +1296,14 @@ export default function App() {
                   }}
                 </For>
               </div>
+
+              <Show when={settleStatus().phase === 'preparing'}>
+                <div class="text-center py-4">
+                  <div class="i-lucide-loader-2 animate-spin h-6 w-6 mx-auto text-zec-yellow" />
+                  <div class="text-neutral-400 text-10px mt-2">preparing on-chain payout…</div>
+                  <div class="text-neutral-600 text-9px mt-1">building the multisig transaction (~3-5s)</div>
+                </div>
+              </Show>
 
               <Show when={settleStatus().phase === 'pending' || settleStatus().phase === 'signing'}>
                 <div class="text-center text-9px tabular text-neutral-500 mb-2">

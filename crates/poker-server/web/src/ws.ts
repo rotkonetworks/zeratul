@@ -32,7 +32,7 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
   let media: MediaState | null = null
 
   /** direct WebSocket to server (centralized mode, not P2P) */
-  async function connectDirect(name: string) {
+  async function connectDirect(name: string, pubkey?: string, zcashAddress?: string) {
     const room = getRoomFromUrl()
     if (!room) return
 
@@ -41,7 +41,12 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
 
     ws.onopen = () => {
       setConnected(true)
-      ws.send(JSON.stringify({ type: 'Join', name }))
+      // pubkey gates reconnect server-side: a later reload with a different pubkey is
+      // refused, defeating name-based seat hijack. Falls back to name-only if undefined.
+      const join: Record<string, unknown> = { type: 'Join', name }
+      if (pubkey) join.pubkey = pubkey
+      if (zcashAddress) join.zcash_address = zcashAddress
+      ws.send(JSON.stringify(join))
     }
 
     ws.onmessage = (ev) => {
@@ -68,7 +73,25 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
     const directRoom = getRoomFromUrl()
     if (directRoom) {
       onMsg({ type: 'Status', phase: 'connecting', message: 'connecting to table...' })
-      const ws = await connectDirect(name)
+      // resolve zid identity BEFORE the WS so we can pass pubkey on Join. Pubkey gates
+      // server-side reconnect so the seat can't be hijacked by a same-name attacker.
+      // identity() also exposes the pubkey to App.tsx for the UI badge.
+      let pubkey: string | undefined
+      try {
+        const zidIdentity = await zid.connect({ appName: 'poker.zk.bot', tradingMode: true })
+        if (name) zid.setName(name)
+        const sess: SessionIdentity = {
+          ...zidIdentity,
+          sessionPubKey: zidIdentity.pubkey,
+          nick: zidIdentity.name,
+        }
+        setIdentity(sess)
+        // walletPubkey is the persistent zafu identity; session pubkey is regenerated every connect()
+        pubkey = zidIdentity.walletPubkey || zidIdentity.pubkey
+      } catch (e) {
+        console.warn('[ws] zid.connect failed, joining anon:', e)
+      }
+      const ws = await connectDirect(name, pubkey)
       if (ws) {
         directWs = ws
         return
