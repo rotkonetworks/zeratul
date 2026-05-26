@@ -43,3 +43,7 @@ thiserror = "1"
 # logging
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# CLI / env
+clap = { version = "4", features = ["derive", "env"] }
+dotenvy = "0.15"

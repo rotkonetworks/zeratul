@@ -987,37 +987,52 @@ fn now_ms() -> u64 {
 // Main
 // ---------------------------------------------------------------------------
 
+/// Args resolve in order: CLI flag → env var → default. Values also load from a `.env`
+/// in the working directory at startup (silent if absent).
+#[derive(clap::Parser, Debug)]
+#[command(version, about = "Poker escrow — FROST 2-of-3 key management, deposit tracking, payout signing")]
+struct Args {
+    /// House rake address (placeholder until prod wallet wired)
+    #[arg(long, env = "HOUSE_ADDRESS", default_value = "ztestsapling1...")]
+    house_address: String,
+    /// zidecar gRPC-web endpoint
+    #[arg(long, env = "ZIDECAR_URL", default_value = "https://zcash.rotko.net")]
+    zidecar_url: String,
+    /// On-chain deposit verification (vs. self-reported counters)
+    #[arg(long, env = "ESCROW_VERIFY_DEPOSITS", default_value_t = false)]
+    verify_deposits: bool,
+    /// Network: `main` / `test` / `regtest`
+    #[arg(long, env = "ESCROW_NETWORK", default_value = "test")]
+    network: String,
+    /// Use DKG mode (vs. trusted-dealer) for key generation
+    #[arg(long, env = "ESCROW_USE_DKG", default_value_t = false)]
+    use_dkg: bool,
+    /// FROST relay WebSocket URL (used for DKG + payout signing)
+    #[arg(long, env = "ESCROW_RELAY_URL", default_value = "ws://127.0.0.1:50053/ws")]
+    relay_url: String,
+    /// HTTP port to bind
+    #[arg(long, env = "ESCROW_PORT", default_value_t = 3034)]
+    port: u16,
+}
+
 #[tokio::main]
 async fn main() {
+    let _ = dotenvy::dotenv();
+    let args = <Args as clap::Parser>::parse();
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
             .add_directive("poker_escrow=info".parse().unwrap()))
         .init();
 
-    let house_address = std::env::var("HOUSE_ADDRESS")
-        .unwrap_or_else(|_| "ztestsapling1...".to_string());
-    let zidecar_url = std::env::var("ZIDECAR_URL")
-        .unwrap_or_else(|_| "https://zcash.rotko.net".to_string());
-    let verify_deposits = std::env::var("ESCROW_VERIFY_DEPOSITS")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
-    let network = orchard_ua::network_from_str(
-        &std::env::var("ESCROW_NETWORK").unwrap_or_else(|_| "test".to_string())
-    );
-    let use_dkg = std::env::var("ESCROW_USE_DKG")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
-    let frost_relay_url = std::env::var("ESCROW_RELAY_URL")
-        .unwrap_or_else(|_| "ws://127.0.0.1:50053/ws".to_string());
-
     let state = AppState {
         rooms: Arc::new(Mutex::new(HashMap::new())),
-        house_address,
-        zidecar_url,
-        verify_deposits,
-        network,
-        use_dkg,
-        frost_relay_url,
+        house_address: args.house_address,
+        zidecar_url: args.zidecar_url,
+        verify_deposits: args.verify_deposits,
+        network: orchard_ua::network_from_str(&args.network),
+        use_dkg: args.use_dkg,
+        frost_relay_url: args.relay_url,
     };
 
     tracing::info!("house address: {}", state.house_address);
@@ -1042,8 +1057,7 @@ async fn main() {
         .route("/health", axum::routing::get(health))
         .with_state(state);
 
-    let port = std::env::var("ESCROW_PORT").unwrap_or_else(|_| "3034".to_string());
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = format!("0.0.0.0:{}", args.port);
     tracing::info!("poker-escrow listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

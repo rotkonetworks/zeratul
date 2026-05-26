@@ -1994,21 +1994,40 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
 // Main
 // ---------------------------------------------------------------------------
 
+/// Args resolve in order: CLI flag → env var → default. Values also load from a `.env`
+/// in the working directory at startup (silent if absent).
+#[derive(clap::Parser, Debug)]
+#[command(version, about = "WebSocket poker server for browser-based heads-up play")]
+struct Args {
+    /// Static asset directory (SPA bundle). Defaults to a `static/` next to the binary, else `./static`.
+    #[arg(long, env = "POKER_STATIC_DIR")]
+    static_dir: Option<String>,
+    /// poker-escrow base URL; unset = real-ZEC features disabled
+    #[arg(long, env = "ESCROW_URL")]
+    escrow_url: Option<String>,
+    /// HTTP port to bind
+    #[arg(long, env = "PORT", default_value_t = 3000)]
+    port: u16,
+}
+
+fn default_static_dir() -> String {
+    let exe = std::env::current_exe().unwrap_or_default();
+    let dir = exe.parent().unwrap_or(std::path::Path::new("."));
+    let beside_bin = dir.join("static");
+    if beside_bin.exists() { beside_bin.to_string_lossy().to_string() } else { "static".to_string() }
+}
+
 #[tokio::main]
 async fn main() {
+    let _ = dotenvy::dotenv();
+    let args = <Args as clap::Parser>::parse();
+
     tracing_subscriber::fmt()
         .with_env_filter("poker_server=info")
         .init();
 
-    let static_dir = std::env::var("POKER_STATIC_DIR").unwrap_or_else(|_| {
-        let exe = std::env::current_exe().unwrap_or_default();
-        let dir = exe.parent().unwrap_or(std::path::Path::new("."));
-        let beside_bin = dir.join("static");
-        if beside_bin.exists() { beside_bin.to_string_lossy().to_string() }
-        else { "static".to_string() }
-    });
-
-    let escrow_url = std::env::var("ESCROW_URL").ok().filter(|s| !s.is_empty());
+    let static_dir = args.static_dir.unwrap_or_else(default_static_dir);
+    let escrow_url = args.escrow_url.filter(|s| !s.is_empty());
 
     let state = AppState {
         rooms: Arc::new(Mutex::new(HashMap::new())),
@@ -2034,8 +2053,7 @@ async fn main() {
         .fallback_service(ServeDir::new(&static_dir))
         .with_state(state);
 
-    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = format!("0.0.0.0:{}", args.port);
     tracing::info!("poker server listening on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
