@@ -50,6 +50,9 @@ export default function App() {
   const [depositA, setDepositA] = createSignal(0)
   const [depositB, setDepositB] = createSignal(0)
   const [depositReady, setDepositReady] = createSignal(false)
+  // set true once the player has triggered a Send-with-zafu — used to warn against double-sending
+  // while the tx is still in mempool. cleared when deposit confirms (myReady) or table leaves.
+  const [sendTriggered, setSendTriggered] = createSignal(false)
   // payout address the player pastes in the deposit panel; required before "Send with zafu"
   // is enabled. embedded into the deposit memo so the escrow scanner knows where to refund.
   const [payoutOverride, setPayoutOverride] = createSignal<string | null>(null)
@@ -442,10 +445,11 @@ export default function App() {
         setSettlePlan(msg.plan)
         setSettlePrioritySeat(msg.priority_seat)
         setSettleStatus({ phase: 'pending' })
-        // reset the fallback countdown; server will re-broadcast PayoutSigningRequest with
-        // a flipped priority_seat in SETTLE_FALLBACK_SECS if the current signer doesn't act
-        setSettleBroadcastAt(Date.now())
-        setSettleFallbackTick(SETTLE_FALLBACK_SECS)
+        // server is the source of truth for the fallback timer — it sends remaining seconds
+        // so a reconnect mid-wait resumes the correct value instead of restarting at 90
+        const remaining = Math.max(0, Math.min(SETTLE_FALLBACK_SECS, msg.fallback_secs_remaining ?? SETTLE_FALLBACK_SECS))
+        setSettleBroadcastAt(Date.now() - (SETTLE_FALLBACK_SECS - remaining) * 1000)
+        setSettleFallbackTick(remaining)
         setView('settlement')
         setActions([])
         setActing(-1)
@@ -741,6 +745,11 @@ export default function App() {
                     {isReconnect() ? 'reconnect' : location.pathname.length > 1 ? 'sit down' : 'create table'}
                   </button>
                 </div>
+                <Show when={hasWallet()}>
+                  <div class="text-neutral-600 text-9px tracking-wide max-w-72 text-center leading-relaxed">
+                    your zafu pubkey is bound to this seat &mdash; nobody else with the same name can hijack it on reconnect
+                  </div>
+                </Show>
               </div>
             </div>
           </Show>
@@ -889,6 +898,7 @@ export default function App() {
                               amount_zat: req,
                               memo: `zk.poker/v1/payout:${addr}`,
                             }, () => {})
+                            setSendTriggered(true)
                           } catch (e: any) { log(`zafu send failed: ${e?.message ?? e}`, 'c-red') }
                         }}
                       >Send with zafu</button>
@@ -906,7 +916,11 @@ export default function App() {
                         <span class={myReady ? 'c-green' : 'c-zec-yellow'}>{myZec}</span>
                         <span class="text-neutral-600"> / {reqZec} ZEC</span>
                       </div>
-                      <div class={`text-9px mt-1 ${myReady ? 'c-green' : 'text-neutral-500'}`}>{myReady ? '✓ deposited' : '⌛ waiting'}</div>
+                      <div class={`text-9px mt-1 flex items-center gap-1 ${myReady ? 'c-green' : 'text-neutral-500'}`}>
+                        <Show when={myReady} fallback={<><div class="i-lucide-loader-2 animate-spin h-3 w-3" /><span>waiting for tx in block</span></>}>
+                          <span>✓ deposited</span>
+                        </Show>
+                      </div>
                     </div>
                     <div class="p-2 border border-neutral-800 rounded bg-zec-surface">
                       <div class="text-neutral-500 text-8px uppercase">opponent</div>
@@ -914,10 +928,19 @@ export default function App() {
                         <span class={oppReady ? 'c-green' : 'c-zec-yellow'}>{oppZec}</span>
                         <span class="text-neutral-600"> / {reqZec} ZEC</span>
                       </div>
-                      <div class={`text-9px mt-1 ${oppReady ? 'c-green' : 'text-neutral-500'}`}>{oppReady ? '✓ deposited' : '⌛ waiting'}</div>
+                      <div class={`text-9px mt-1 flex items-center gap-1 ${oppReady ? 'c-green' : 'text-neutral-500'}`}>
+                        <Show when={oppReady} fallback={<><div class="i-lucide-loader-2 animate-spin h-3 w-3" /><span>waiting for tx in block</span></>}>
+                          <span>✓ deposited</span>
+                        </Show>
+                      </div>
                     </div>
                   </div>
 
+                  <Show when={sendTriggered() && !myReady}>
+                    <div class="text-center text-zec-yellow/80 text-9px mb-2">
+                      tx sent — confirms in 1-2 blocks (~75s). don't send again.
+                    </div>
+                  </Show>
                   <div class="text-center text-neutral-500 text-9px">
                     table starts when both players have deposited
                   </div>

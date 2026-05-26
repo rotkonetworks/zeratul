@@ -28,7 +28,7 @@ export type ServerMsg =
   | { type: 'RulesAccepted' }
   | { type: 'RoomInfo'; code: string; jury_nodes: number; jury_threshold: number; escrow: string; frost_relay_url?: string; frost_room_code?: string; seat_addresses?: (string | null)[]; required_deposit: number; buyin_zat?: number; fee_per_seat?: number }
   | { type: 'GameOver'; reason: string; payouts: [number, number][] }
-  | { type: 'PayoutSigningRequest'; relay_room: string; plan: { seat: number; address: string; amount_zat: number }[]; priority_seat: number }
+  | { type: 'PayoutSigningRequest'; relay_room: string; plan: { seat: number; address: string; amount_zat: number }[]; priority_seat: number; fallback_secs_remaining: number }
   | { type: 'PayoutComplete'; txid: string }
   | { type: 'PayoutFailed'; reason: string }
   | { type: 'OpponentAbandoned'; seat: number }

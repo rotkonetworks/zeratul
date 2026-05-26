@@ -148,6 +148,10 @@ enum ServerMsg {
         relay_room: String,
         plan: Vec<PayoutLineJson>,
         priority_seat: u8,
+        /// Seconds left before the server flips priority to the other seat. SPA renders this
+        /// directly instead of running its own 90s counter — so a reconnect mid-wait resumes
+        /// the right value instead of restarting at 90.
+        fallback_secs_remaining: u64,
     },
     /// Final payout state — tx is on chain.
     PayoutComplete { txid: String },
@@ -771,6 +775,7 @@ fn generate_room_code() -> String {
 
 /// Cadence at which poker-server polls poker-escrow's GET /room/{code} to sync deposit state.
 const DEPOSIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(5);
+const PRIORITY_SIGNER_FALLBACK_SECS: u64 = 90;
 
 /// 5-minute delay then remove the room from the global map. Lets clients still
 /// fetch the txid + lobby see the result for a window; after that the room is gone.
@@ -822,6 +827,7 @@ async fn trigger_payout(
             relay_room: relay_room.clone(),
             plan: plan.clone(),
             priority_seat,
+            fallback_secs_remaining: PRIORITY_SIGNER_FALLBACK_SECS,
         });
         // remember the broadcast so reconnecting clients can be replayed into the settlement view
         r.payout_signing_state = Some(PayoutSigningState {
@@ -835,7 +841,6 @@ async fn trigger_payout(
     // poll status until terminal. Also acts as the fallback timer: every 30s of pending,
     // check if PRIORITY_SIGNER_FALLBACK_SECS has elapsed since the LAST priority broadcast;
     // if yes, swap to the other seat so the responsive player can sign instead.
-    const PRIORITY_SIGNER_FALLBACK_SECS: u64 = 90;
     loop {
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         match escrow_client::get_payout_status(&escrow_url, &code).await {
@@ -878,6 +883,7 @@ async fn trigger_payout(
                         relay_room: relay_room.clone(),
                         plan: plan.clone(),
                         priority_seat: new_seat,
+                        fallback_secs_remaining: PRIORITY_SIGNER_FALLBACK_SECS,
                     });
                     r.payout_signing_state = Some(PayoutSigningState {
                         relay_room,
@@ -1604,10 +1610,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     // intermediate reconnect after PayoutComplete / PayoutFailed.
                     if r.payout_triggered {
                         if let Some(s) = r.payout_signing_state.clone() {
+                            let elapsed = s.broadcast_at.elapsed().as_secs();
+                            let remaining = PRIORITY_SIGNER_FALLBACK_SECS.saturating_sub(elapsed);
                             let _ = tx.send(ServerMsg::PayoutSigningRequest {
                                 relay_room: s.relay_room,
                                 plan: s.plan,
                                 priority_seat: s.priority_seat,
+                                fallback_secs_remaining: remaining,
                             });
                         }
                         if let Some(txid) = r.payout_complete_txid.clone() {
