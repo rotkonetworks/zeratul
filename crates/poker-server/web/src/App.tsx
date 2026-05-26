@@ -375,13 +375,17 @@ export default function App() {
         if (msg.seat_addresses && msg.seat_addresses.length > 0) {
           setSeatAddresses(msg.seat_addresses)
         }
-        // DKG-mode escrow: kick off zafu's join flow once per table
+        // cache-on-fire: reload mid-DKG must not spawn a second zafu popup conflicting with the first
+        const dkgFiredKey = `poker_dkg_fired:${msg.code}`
+        const dkgAlreadyFired = !!localStorage.getItem(dkgFiredKey)
         if (
           msg.frost_relay_url && msg.frost_room_code &&
           (!msg.escrow || msg.escrow.length === 0) &&
-          dkgStartedFor !== msg.code
+          dkgStartedFor !== msg.code &&
+          !dkgAlreadyFired
         ) {
           dkgStartedFor = msg.code
+          localStorage.setItem(dkgFiredKey, '1')
           log('setting up multisig escrow (zafu)...', 'c-zec-yellow')
           void requestPokerDkg({
             relayUrl: msg.frost_relay_url,
@@ -395,9 +399,13 @@ export default function App() {
               send({ type: 'DkgComplete', escrow_ua: res.address, orchard_fvk: res.orchardFvk })
             } else {
               log(`multisig setup failed: ${res.error}`, 'c-red')
+              localStorage.removeItem(dkgFiredKey)
               dkgStartedFor = ''
             }
           })
+        } else if (dkgAlreadyFired && (!msg.escrow || msg.escrow.length === 0)) {
+          dkgStartedFor = msg.code
+          log('multisig setup in progress — waiting for escrow…', 'c-zec-yellow')
         }
         break
       case 'DepositStatus': {
@@ -468,6 +476,7 @@ export default function App() {
         // settlement done — drop the reconnect marker; the "return to lobby" button can
         // safely take the user home without auto-rejoining a settled room
         localStorage.removeItem('poker_last_session')
+        localStorage.removeItem(`poker_dkg_fired:${roomCode()}`)
         setLastSession(null)
         // schedule deletion of the multisig vault 24h from now — it's spent + useless
         void requestDeletePokerMultisig({
@@ -542,6 +551,7 @@ export default function App() {
       if (view() !== 'settlement') {
         // bot table or server didn't open a settlement → safe to scrub session + bounce
         localStorage.removeItem('poker_last_session')
+        localStorage.removeItem(`poker_dkg_fired:${roomCode()}`)
         setLastSession(null)
         history.pushState(null, '', '/')
         setView('casino')
