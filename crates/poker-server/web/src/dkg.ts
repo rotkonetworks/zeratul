@@ -1,4 +1,40 @@
 // poker escrow DKG via zafu's generic zafu_dkg_join API.
+//
+// All FROST/DKG/delete operations are gated by zafu on the 'frost' capability.
+// Before any of these calls, we ensure the user has granted that capability
+// to this origin via zafu_request_capability. The user sees a permission
+// popup once (per browser profile, per origin) and approves; subsequent calls
+// proceed without re-prompting.
+
+/**
+ * Ensure the user has granted the 'frost' capability to this origin. Idempotent:
+ * if already granted, the zafu side resolves without a popup. Resolves to true
+ * on grant, false on user denial / extension missing.
+ *
+ * Caches the result for the session to avoid repeated round-trips.
+ */
+let frostCapabilityGranted: boolean | null = null
+export async function ensureFrostCapability(): Promise<boolean> {
+  if (frostCapabilityGranted === true) return true
+  const extId = findZafuExtensionId()
+  if (!extId) return false
+  if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return false
+  const granted = await new Promise<boolean>(resolve => {
+    chrome.runtime.sendMessage(
+      extId,
+      { type: 'zafu_request_capability', capability: 'frost' },
+      (resp: any) => {
+        if (chrome.runtime.lastError) {
+          resolve(false)
+          return
+        }
+        resolve(!!resp?.granted || !!resp?.success)
+      },
+    )
+  })
+  frostCapabilityGranted = granted
+  return granted
+}
 
 export interface PokerDkgRequest {
   relayUrl: string
@@ -48,6 +84,9 @@ export async function requestPokerSign(req: PokerSignRequest): Promise<{ success
   if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
     return { success: false, error: 'chrome.runtime.sendMessage unavailable' }
   }
+  if (!(await ensureFrostCapability())) {
+    return { success: false, error: 'frost capability denied' }
+  }
   return new Promise(resolve => {
     chrome.runtime.sendMessage(
       extId,
@@ -86,6 +125,9 @@ export async function requestDeletePokerMultisig(req: PokerDeleteRequest): Promi
   if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
     return { success: false, error: 'chrome.runtime.sendMessage unavailable' }
   }
+  if (!(await ensureFrostCapability())) {
+    return { success: false, error: 'frost capability denied' }
+  }
   return new Promise(resolve => {
     chrome.runtime.sendMessage(
       extId,
@@ -112,6 +154,9 @@ export async function requestPokerDkg(req: PokerDkgRequest): Promise<PokerDkgRes
   }
   if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
     return { success: false, error: 'chrome.runtime.sendMessage unavailable' }
+  }
+  if (!(await ensureFrostCapability())) {
+    return { success: false, error: 'frost capability denied' }
   }
 
   return new Promise(resolve => {
