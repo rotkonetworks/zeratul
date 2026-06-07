@@ -9,7 +9,6 @@
 //!   Named:         cfr-bot --server ws://host/room/ws --name "alice"
 
 use std::sync::Arc;
-use std::time::Duration;
 
 /// shared config across all bot threads
 struct BotConfig {
@@ -59,7 +58,7 @@ fn run_bot(config: &BotConfig, server_url: &str, bot_name: &str) {
 
     let mut rng_state: u64 = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos() as u64;
-    // xorshift64 → u32 → [0, 1) — must cast to u32 before dividing or sleeps balloon to hours
+    // xorshift64 → u32 → [0, 1). Used for action sampling from decision probabilities.
     let mut rng_f = move || -> f64 {
         rng_state ^= rng_state << 13;
         rng_state ^= rng_state >> 7;
@@ -184,9 +183,6 @@ fn run_bot(config: &BotConfig, server_url: &str, bot_name: &str) {
                 let seat = v["seat"].as_u64().unwrap_or(255) as u8;
                 if my_seat != Some(seat) { continue; }
 
-                let think_ms = 1000 + (rng_f() * 7000.0) as u64;
-                std::thread::sleep(Duration::from_millis(think_ms));
-
                 let cc = community_cards.iter().filter(|&&c| c > 0).count() as u8;
                 let gs = build_game_state(&stacks, &bets, pot, &community_cards,
                     cc, phase_from_count(cc), seat, 2, hand_number, button);
@@ -206,7 +202,7 @@ fn run_bot(config: &BotConfig, server_url: &str, bot_name: &str) {
                 }
 
                 let action_json = to_server_action(action, amount, valid);
-                println!("[act] {} (thought {}ms)", action_json, think_ms);
+                println!("[act] {}", action_json);
                 let _ = socket.send(tungstenite::Message::Text(action_json.into()));
             }
             "PotAwarded" => {
