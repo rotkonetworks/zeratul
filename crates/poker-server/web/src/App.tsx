@@ -4,12 +4,58 @@ import { Card } from './Card'
 import Lobby, { type Table } from './Lobby'
 import { detectZafu } from './zid/provider'
 import { getPositionShort } from './positions'
+import { requestPokerDkg, requestDeletePokerMultisig, requestPokerSign } from './dkg'
 import type { ServerMsg, CardJson, ValidAction } from './types'
 
 export default function App() {
-  const [view, setView] = createSignal<'casino' | 'lobby' | 'waiting' | 'game'>(
+  const [view, setView] = createSignal<'casino' | 'lobby' | 'waiting' | 'deposit' | 'game' | 'settlement'>(
     location.pathname.length > 1 ? 'lobby' : 'casino'
   )
+  // settlement state: starts at 'preparing' on GameOver while escrow builds the PCZT,
+  // transitions on PayoutSigningRequest → 'pending' → user signs → 'complete' / 'failed'.
+  type SettlementStatus =
+    | { phase: 'preparing' }
+    | { phase: 'pending' }
+    | { phase: 'signing' }
+    | { phase: 'complete'; txid: string }
+    | { phase: 'failed'; reason: string }
+  const [settleStatus, setSettleStatus] = createSignal<SettlementStatus>({ phase: 'pending' })
+  const [settleRelayRoom, setSettleRelayRoom] = createSignal('')
+  const [settlePlan, setSettlePlan] = createSignal<{ seat: number; address: string; amount_zat: number }[]>([])
+  const [settlePrioritySeat, setSettlePrioritySeat] = createSignal(-1)
+  const [settleReason, setSettleReason] = createSignal('')
+  const [settleFrostRelay, setSettleFrostRelay] = createSignal('')
+  // tick for the fallback-signer countdown. Server swaps priority every 90s of inactivity;
+  // the SPA tracks Date.now() at each PayoutSigningRequest and renders 90 - elapsed.
+  const SETTLE_FALLBACK_SECS = 90
+  const [settleBroadcastAt, setSettleBroadcastAt] = createSignal(0)
+  const [settleFallbackTick, setSettleFallbackTick] = createSignal(SETTLE_FALLBACK_SECS)
+  createEffect(() => {
+    const baseAt = settleBroadcastAt()
+    const phase = settleStatus().phase
+    if (!baseAt || (phase !== 'pending' && phase !== 'signing')) return
+    const tick = () => {
+      const left = Math.max(0, SETTLE_FALLBACK_SECS - Math.floor((Date.now() - baseAt) / 1000))
+      setSettleFallbackTick(left)
+    }
+    tick()
+    const iv = setInterval(tick, 1000)
+    onCleanup(() => clearInterval(iv))
+  })
+  // deposit-panel state — populated by RoomInfo + DepositStatus
+  const [requiredDeposit, setRequiredDeposit] = createSignal(0)
+  const [depositBuyinZat, setDepositBuyinZat] = createSignal(0)
+  const [depositFeePerSeat, setDepositFeePerSeat] = createSignal(0)
+  const [seatAddresses, setSeatAddresses] = createSignal<(string | null)[]>([])
+  const [depositA, setDepositA] = createSignal(0)
+  const [depositB, setDepositB] = createSignal(0)
+  const [depositReady, setDepositReady] = createSignal(false)
+  // set true once the player has triggered a Send-with-zafu — used to warn against double-sending
+  // while the tx is still in mempool. cleared when deposit confirms (myReady) or table leaves.
+  const [sendTriggered, setSendTriggered] = createSignal(false)
+  // payout address the player pastes in the deposit panel; required before "Send with zafu"
+  // is enabled. embedded into the deposit memo so the escrow scanner knows where to refund.
+  const [payoutOverride, setPayoutOverride] = createSignal<string | null>(null)
   const [selectedTable, setSelectedTable] = createSignal<Table | null>(null)
   const [hasWallet, setHasWallet] = createSignal(false)
   const [walletPubkey, setWalletPubkey] = createSignal<string | undefined>(undefined)
@@ -26,7 +72,18 @@ export default function App() {
     const iv = setTimeout(check, 1500)
     return () => clearTimeout(iv)
   })())
-  const [name, setName] = createSignal('')
+  const currentRoom = () => location.pathname.replace(/^\/+|\/+$/g, '')
+  // last_session: {room, name} saved on Seated, cleared on Leave — used to detect reconnect
+  const initialLastSession = (() => {
+    try { return JSON.parse(localStorage.getItem('poker_last_session') || 'null') as { room: string; name: string } | null } catch { return null }
+  })()
+  const [lastSession, setLastSession] = createSignal(initialLastSession)
+  const isReconnect = () => {
+    const s = lastSession()
+    return !!s && !!currentRoom() && s.room === currentRoom()
+  }
+  const initialName = (isReconnect() && initialLastSession?.name) || localStorage.getItem('poker_nickname') || ''
+  const [name, setName] = createSignal(initialName)
   const [mySeat, setMySeat] = createSignal(-1)
   const [maxSeats, setMaxSeats] = createSignal(2)
   const [oppName, setOppName] = createSignal('\u2014')
@@ -48,11 +105,18 @@ export default function App() {
   const [inviteUrl, setInviteUrl] = createSignal('')
   const [juryProgress, setJuryProgress] = createSignal('')
   const [escrow, setEscrow] = createSignal('')
+  // guard so re-broadcast RoomInfo doesn't spawn a second zafu popup
+  let dkgStartedFor = ''
   const [pendingRules, setPendingRules] = createSignal<{ buyin: number; smallBlind: number; bigBlind: number; turnTimeout: number; fromSelf: boolean } | null>(null)
   const [oppDisconnected, setOppDisconnected] = createSignal(false)
   const [reconnectCountdown, setReconnectCountdown] = createSignal(0)
+  // tracked so OpponentReconnected / Seated / OpponentLeft can clear the running tick
+  let reconnectInterval: ReturnType<typeof setInterval> | null = null
+  const clearReconnectInterval = () => {
+    if (reconnectInterval !== null) { clearInterval(reconnectInterval); reconnectInterval = null }
+  }
   const [actionTimer, setActionTimer] = createSignal(0)
-  const [autoAction, setAutoAction] = createSignal<'none' | 'check/fold' | 'check' | 'fold' | 'call any'>('check/fold')
+  const [autoAction, setAutoAction] = createSignal<'none' | 'check/fold' | 'check' | 'fold' | 'call any'>('none')
   const [deckVerified, setDeckVerified] = createSignal(false)
   const [gameStatus, setGameStatus] = createSignal('')
   const [lastResult, setLastResult] = createSignal<{ won: boolean; amount: number } | null>(null)
@@ -76,7 +140,7 @@ export default function App() {
   const oppStack = () => stacks()[opp()] ?? 0
   const myBet = () => bets()[mySeat()] ?? 0
   const oppBet = () => bets()[opp()] ?? 0
-  const isMyTurn = () => acting() === mySeat()
+  const isMyTurn = () => acting() === mySeat() && !oppDisconnected()
 
   function log(text: string, cls = '') {
     setLogs(l => [...l.slice(-60), { text, cls }])
@@ -87,6 +151,18 @@ export default function App() {
       case 'Seated':
         setMySeat(msg.seat)
         setView('waiting')
+        // clear stale connection state — server only sends OpponentDisconnected when an opp
+        // *transitions* offline, never a snapshot. On our own reconnect, we'd otherwise carry
+        // over any oppDisconnected=true from before our WS bounced.
+        clearReconnectInterval()
+        setOppDisconnected(false)
+        setReconnectCountdown(0)
+        // remember the seat so a future visit to this room shows reconnect UI
+        if (currentRoom() && msg.name) {
+          const s = { room: currentRoom(), name: msg.name }
+          localStorage.setItem('poker_last_session', JSON.stringify(s))
+          setLastSession(s)
+        }
         break
       case 'Waiting':
         setView('waiting')
@@ -108,33 +184,45 @@ export default function App() {
         log('rules accepted', 'c-green')
         break
       case 'OpponentLeft':
-        setOppName('\u2014')
+        clearReconnectInterval()
         setOppDisconnected(false)
         setReconnectCountdown(0)
+        setOppName('\u2014')
         setActions([])
         setView('waiting')
         log('opponent left')
         break
       case 'OpponentDisconnected': {
+        // clear any prior countdown so we don't end up with two racing intervals
+        clearReconnectInterval()
         setOppDisconnected(true)
         setReconnectCountdown(msg.reconnect_secs)
         log(`opponent disconnected (${msg.reconnect_secs}s to reconnect)`, 'c-red')
-        // countdown timer
-        const iv = setInterval(() => {
+        reconnectInterval = setInterval(() => {
           setReconnectCountdown(c => {
-            if (c <= 1) { clearInterval(iv); return 0 }
+            if (c <= 1) { clearReconnectInterval(); return 0 }
             return c - 1
           })
         }, 1000)
         break
       }
       case 'OpponentReconnected':
+        clearReconnectInterval()
         setOppDisconnected(false)
         setReconnectCountdown(0)
         log('opponent reconnected', 'c-green')
         break
       case 'TimerTick':
         setActionTimer(msg.seconds_left)
+        break
+      case 'ActionPaused':
+        // freeze the visible action timer; the OPPONENT DISCONNECTED overlay covers the table
+        setActionTimer(0)
+        log(`hand paused while seat ${msg.seat} is offline`, 'c-zec-yellow')
+        break
+      case 'ActionResumed':
+        setActionTimer(msg.seconds_left)
+        log(`hand resumed (seat ${msg.seat} to act, ${msg.seconds_left}s)`, 'c-green')
         break
       case 'ActionTimeout':
         log(`${msg.seat === mySeat() ? 'you' : 'opp'} timed out (auto-fold)`, 'c-red')
@@ -143,7 +231,6 @@ export default function App() {
       case 'HandStarted':
         setView('game')
         setStacks(msg.stacks)
-        setBets([0, 0])
         setButton(msg.button)
         setHandNum(msg.hand_number)
         setBoard([])
@@ -214,12 +301,13 @@ export default function App() {
       case 'PlayerActed': {
         setActing(-1)
         setActions([])
+        const stackBefore = stacks()[msg.seat] ?? 0
         const s = [...stacks()]
         s[msg.seat] = msg.new_stack
         setStacks(s)
+        const increment = stackBefore - msg.new_stack
         const b = [...bets()]
-        if (msg.action === 'bet' || msg.action === 'raise') b[msg.seat] = msg.amount
-        else if (msg.action === 'call') b[msg.seat] = Math.max(...b)
+        if (increment > 0) b[msg.seat] = (b[msg.seat] ?? 0) + increment
         setBets(b)
         const pos = msg.seat === button() ? 'BTN' : 'BB'
         const who = msg.seat === mySeat() ? `you(${pos})` : `opp(${pos})`
@@ -274,18 +362,133 @@ export default function App() {
       case 'RoomInfo':
         if (msg.code && msg.code !== roomCode()) {
           setRoomCode(msg.code)
+          setLogs([])
           log(`table: ${msg.code}`, 'c-green')
         }
         if (msg.escrow && msg.escrow.length > 5) {
           setEscrow(msg.escrow)
         }
+        if (msg.required_deposit) setRequiredDeposit(msg.required_deposit)
+        if (typeof msg.buyin_zat === 'number') setDepositBuyinZat(msg.buyin_zat)
+        if (typeof msg.fee_per_seat === 'number') setDepositFeePerSeat(msg.fee_per_seat)
+        if (typeof msg.frost_relay_url === 'string') setSettleFrostRelay(msg.frost_relay_url)
+        if (msg.seat_addresses && msg.seat_addresses.length > 0) {
+          setSeatAddresses(msg.seat_addresses)
+        }
+        // cache-on-fire: reload mid-DKG must not spawn a second zafu popup conflicting with the first
+        const dkgFiredKey = `poker_dkg_fired:${msg.code}`
+        const dkgAlreadyFired = !!localStorage.getItem(dkgFiredKey)
+        if (
+          msg.frost_relay_url && msg.frost_room_code &&
+          (!msg.escrow || msg.escrow.length === 0) &&
+          dkgStartedFor !== msg.code &&
+          !dkgAlreadyFired
+        ) {
+          dkgStartedFor = msg.code
+          localStorage.setItem(dkgFiredKey, '1')
+          log('setting up multisig escrow (zafu)...', 'c-zec-yellow')
+          void requestPokerDkg({
+            relayUrl: msg.frost_relay_url,
+            roomCode: msg.frost_room_code,
+            threshold: 2,
+            maxSigners: 3,
+            labelPrefix: `POKER-${msg.code}`,
+          }).then(res => {
+            if (res.success) {
+              log(`multisig ready: ${res.address.slice(0, 16)}…`, 'c-green')
+              send({ type: 'DkgComplete', escrow_ua: res.address, orchard_fvk: res.orchardFvk })
+            } else {
+              log(`multisig setup failed: ${res.error}`, 'c-red')
+              localStorage.removeItem(dkgFiredKey)
+              dkgStartedFor = ''
+            }
+          })
+        } else if (dkgAlreadyFired && (!msg.escrow || msg.escrow.length === 0)) {
+          dkgStartedFor = msg.code
+          log('multisig setup in progress — waiting for escrow…', 'c-zec-yellow')
+        }
         break
+      case 'DepositStatus': {
+        if (msg.seat_addresses && msg.seat_addresses.length > 0) {
+          setSeatAddresses(msg.seat_addresses)
+        }
+        if (msg.escrow_address) setEscrow(msg.escrow_address)
+        setDepositA(msg.player_a_deposit)
+        setDepositB(msg.player_b_deposit)
+        setRequiredDeposit(msg.required)
+        setDepositReady(msg.ready)
+        // once DKG produced seat addresses + deposits still pending, sit users in the deposit
+        // view. Do NOT flip away from settlement (payout in flight) or game (active hand).
+        const v = view()
+        if (mySeat() >= 0 && !msg.ready && v !== 'game' && v !== 'settlement' && msg.seat_addresses && msg.seat_addresses.some(a => a)) {
+          setView('deposit')
+        }
+        break
+      }
       case 'GameOver': {
         const myPayout = msg.payouts.find((p: any) => p[0] === mySeat())
         log(`game over: ${msg.reason}`, 'c-red font-500')
         if (myPayout) log(`your payout: ${myPayout[1]}`, 'c-zec-yellow font-500')
         setActions([])
         setActing(-1)
+        setSettleReason(msg.reason)
+        // real tables: flip to settlement immediately with a 'preparing' spinner. PCZT build
+        // + relay-room provisioning takes ~3-5s so GameOver lands well before PayoutSigningRequest.
+        // Pre-populate the plan from GameOver.payouts so the user sees per-seat amounts right away;
+        // addresses get filled in by the real PayoutSigningRequest a few seconds later.
+        if (escrow() && escrow().length > 0) {
+          const planPreview = msg.payouts.map(([seat, amt]: [number, number]) => ({
+            seat, address: '', amount_zat: amt,
+          }))
+          setSettlePlan(planPreview)
+          setSettlePrioritySeat(-1) // unknown until PayoutSigningRequest
+          setSettleStatus({ phase: 'preparing' })
+          setView('settlement')
+        }
+        break
+      }
+      case 'PayoutSigningRequest': {
+        log(`settling: ${msg.plan.map(p => `seat${p.seat}=${p.amount_zat}`).join(', ')}`, 'c-zec-yellow')
+        setSettleRelayRoom(msg.relay_room)
+        setSettlePlan(msg.plan)
+        setSettlePrioritySeat(msg.priority_seat)
+        setSettleStatus({ phase: 'pending' })
+        // server is the source of truth for the fallback timer — it sends remaining seconds
+        // so a reconnect mid-wait resumes the correct value instead of restarting at 90
+        const remaining = Math.max(0, Math.min(SETTLE_FALLBACK_SECS, msg.fallback_secs_remaining ?? SETTLE_FALLBACK_SECS))
+        setSettleBroadcastAt(Date.now() - (SETTLE_FALLBACK_SECS - remaining) * 1000)
+        setSettleFallbackTick(remaining)
+        setView('settlement')
+        setActions([])
+        setActing(-1)
+        break
+      }
+      case 'OpponentAbandoned': {
+        log(`opponent (seat ${msg.seat}) disconnected and didn't return`, 'c-red')
+        setSettleReason(`seat ${msg.seat} abandoned`)
+        // PayoutSigningRequest follows from the server's auto-settle path; view-flip happens there
+        break
+      }
+      case 'PayoutComplete': {
+        log(`✓ paid out: tx ${msg.txid}`, 'c-green font-500')
+        setSettleStatus({ phase: 'complete', txid: msg.txid })
+        setView('settlement')
+        // settlement done — drop the reconnect marker; the "return to lobby" button can
+        // safely take the user home without auto-rejoining a settled room
+        localStorage.removeItem('poker_last_session')
+        localStorage.removeItem(`poker_dkg_fired:${roomCode()}`)
+        setLastSession(null)
+        // schedule deletion of the multisig vault 24h from now — it's spent + useless
+        void requestDeletePokerMultisig({
+          multisigLabel: `POKER-${roomCode()}`,
+          delayMs: 24 * 60 * 60 * 1000,
+        })
+        break
+      }
+      case 'PayoutFailed': {
+        log(`✗ payout failed: ${msg.reason}`, 'c-red font-500')
+        setSettleStatus({ phase: 'failed', reason: msg.reason })
+        setView('settlement')
         break
       }
       case 'DepositStatus':
@@ -332,6 +535,28 @@ export default function App() {
   function act(action: string, amount?: number) {
     send({ type: 'Action', action, ...(amount !== undefined && { amount }) })
     setActions([])
+  }
+
+  function leaveTable() {
+    if (!confirm('Leave table and cash out?')) return
+    send({ type: 'Leave' })
+    setActions([])
+    setActing(-1)
+    // KEEP `poker_last_session` so a reload during settlement triggers reconnect (server
+    // replays PayoutSigningRequest into the settlement view rather than dumping us at the
+    // rename UI). PayoutComplete / PayoutFailed handlers + the manual "return to lobby"
+    // button clear it. For bot tables we still want a quick bounce to lobby; the 5s
+    // fallback below handles that.
+    setTimeout(() => {
+      if (view() !== 'settlement') {
+        // bot table or server didn't open a settlement → safe to scrub session + bounce
+        localStorage.removeItem('poker_last_session')
+        localStorage.removeItem(`poker_dkg_fired:${roomCode()}`)
+        setLastSession(null)
+        history.pushState(null, '', '/')
+        setView('casino')
+      }
+    }, 5000)
   }
 
   // keybinding modes
@@ -448,14 +673,15 @@ export default function App() {
             <Lobby
               hasWallet={hasWallet()}
               pubkey={walletPubkey()}
-              onJoin={(table, playerName) => {
+              onJoin={(table, playerName, bot) => {
                 setSelectedTable(table)
                 setName(playerName)
                 const params = new URLSearchParams({
                   sb: String(table.sb), bb: String(table.bb),
                   buyin: String(table.buyin), timeout: String(table.timeout),
                   rake_bps: String(table.rakeBps), rake_cap: String(table.rakeCap),
-                  access: 'private',
+                  access: bot ? 'public' : 'private',
+                  ...(bot ? { bot: 'true' } : {}),
                 })
                 fetch(`/new?${params}`, { redirect: 'follow' }).then(resp => {
                   const url = resp.url || resp.headers.get('location') || ''
@@ -463,7 +689,6 @@ export default function App() {
                   if (code) {
                     history.pushState(null, '', '/' + code)
                     setView('lobby')
-                    setTimeout(() => sit(), 200)
                   }
                 })
               }}
@@ -471,7 +696,6 @@ export default function App() {
                 setName(playerName)
                 history.pushState(null, '', '/' + code)
                 setView('lobby')
-                setTimeout(() => sit(), 200)
               }}
             />
           </Show>
@@ -484,9 +708,14 @@ export default function App() {
               </div>
               {/* game parameters — only for host (creating table) */}
               <Show when={location.pathname.length <= 1} fallback={
-                <div class="text-neutral-500 text-11px tracking-wider mb-4">
-                  joining table &middot; host sets rules
-                </div>
+                <Show when={isReconnect()} fallback={
+                  <div class="text-neutral-500 text-11px tracking-wider mb-4">
+                    joining table &middot; host sets rules
+                  </div>
+                }>
+                  <div class="text-zec-yellow text-11px tracking-wider mb-1 uppercase">reconnecting</div>
+                  <div class="text-neutral-400 text-10px mb-4">as {lastSession()!.name}</div>
+                </Show>
               }>
                 <div class="flex items-center justify-center gap-4 mb-3">
                   <label class="flex flex-col items-center gap-1">
@@ -523,16 +752,26 @@ export default function App() {
                     autofocus
                   />
                   <button class="btn btn-primary" onClick={sit}>
-                    {location.pathname.length > 1 ? 'sit down' : 'create table'}
+                    {isReconnect() ? 'reconnect' : location.pathname.length > 1 ? 'sit down' : 'create table'}
                   </button>
                 </div>
+                <Show when={hasWallet()}>
+                  <div class="text-neutral-600 text-9px tracking-wide max-w-72 text-center leading-relaxed">
+                    your zafu pubkey is bound to this seat &mdash; nobody else with the same name can hijack it on reconnect
+                  </div>
+                </Show>
               </div>
             </div>
           </Show>
 
           {/* waiting */}
           <Show when={view() === 'waiting'}>
-            <div class="p-10 text-center">
+            <div class="p-10 text-center relative">
+              <button
+                class="absolute top-2 right-2 px-1.5 py-0.5 rounded text-7px border border-red-900 text-red-400 hover:bg-red-900/20"
+                onClick={leaveTable}
+                title="leave table — settles escrow and pays out"
+              >leave</button>
               <div class="text-zec-yellow text-11px uppercase tracking-2px mb-4">
                 waiting for players
               </div>
@@ -573,31 +812,6 @@ export default function App() {
                   <div class="text-neutral-600 text-8px mt-1">click to copy</div>
                 </div>
               </Show>
-              {/* escrow deposit */}
-              <Show when={escrow() && escrow().length > 10}>
-                <div class="mb-4 p-3 border border-neutral-800 rounded-lg bg-zec-surface">
-                  <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">escrow address (2-of-3 multisig)</div>
-                  <div
-                    class="font-mono text-9px text-zec-yellow break-all cursor-pointer select-all mb-2"
-                    onClick={() => { navigator.clipboard?.writeText(escrow()); log('copied escrow address', 'c-green') }}
-                    title="click to copy"
-                  >
-                    {escrow()}
-                  </div>
-                  <div class="text-neutral-600 text-8px mb-3">send buy-in to this address · 0-conf accepted</div>
-                  <div class="flex gap-2 justify-center">
-                    <button
-                      class="btn text-9px px-4 py-1"
-                      onClick={() => {
-                        // for demo: simulate deposit report
-                        send({ type: 'ReportDeposit', txid: 'demo_' + Date.now(), amount: 1000 })
-                        log('deposit reported (demo)', 'c-zec-yellow')
-                      }}
-                    >report deposit</button>
-                  </div>
-                </div>
-              </Show>
-
               <Show when={pendingRules() && !pendingRules()?.fromSelf}>
                 <div class="mt-4 p-4 border border-neutral-700 rounded">
                   <div class="text-neutral-400 text-10px uppercase tracking-wider mb-2">opponent proposes</div>
@@ -616,6 +830,132 @@ export default function App() {
                   </For>
                 </div>
               </Show>
+            </div>
+          </Show>
+
+          {/* deposit */}
+          <Show when={view() === 'deposit'}>
+            <div class="p-6 relative">
+              <button
+                class="absolute top-2 right-2 px-1.5 py-0.5 rounded text-7px border border-red-900 text-red-400 hover:bg-red-900/20"
+                onClick={leaveTable}
+                title="leave table — refund both deposits"
+              >leave</button>
+              <div class="text-zec-yellow text-11px uppercase tracking-2px mb-1 text-center">deposit to play</div>
+              <div class="text-neutral-500 text-9px text-center mb-4">2-of-3 multisig escrow (you + opp + house)</div>
+
+              {(() => {
+                const seat = mySeat()
+                const myAddr = seatAddresses()[seat] ?? null
+                const myDep = seat === 0 ? depositA() : depositB()
+                const oppDep = seat === 0 ? depositB() : depositA()
+                const req = requiredDeposit()
+                const myReady = myDep >= req
+                const oppReady = oppDep >= req
+                const reqZec = (req / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')
+                const myZec = (myDep / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')
+                const oppZec = (oppDep / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')
+                return <>
+                  <div class="mb-4 p-3 border border-neutral-800 rounded-lg bg-zec-surface">
+                    <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">your deposit address</div>
+                    <Show when={myAddr} fallback={
+                      <div class="text-neutral-600 text-9px">waiting for multisig setup…</div>
+                    }>
+                      <div
+                        class="font-mono text-9px text-zec-yellow break-all cursor-pointer select-all"
+                        onClick={() => { navigator.clipboard?.writeText(myAddr!); log('copied deposit address', 'c-green') }}
+                        title="click to copy"
+                      >{myAddr}</div>
+                      <div class="mt-2 flex items-center gap-2">
+                        <span class="text-neutral-500 text-9px uppercase tracking-wider">send</span>
+                        <span class="text-zec-yellow text-11px tabular" title="buy-in + your share of the on-chain payout fee">{reqZec} ZEC</span>
+                      </div>
+                      {depositFeePerSeat() > 0 && (
+                        <div class="mt-1 text-neutral-500 text-9px tabular">
+                          = {(depositBuyinZat() / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')} buy-in
+                          {' + '}
+                          {(depositFeePerSeat() / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')} payout fee
+                        </div>
+                      )}
+                      <div class="mt-3 pt-2 border-t border-neutral-800">
+                        <div class="text-neutral-500 text-9px uppercase tracking-wider mb-1">payouts will go to</div>
+                        <input
+                          class="w-full bg-zec-bg border border-neutral-700 rounded px-2 py-1 font-mono text-10px text-zec-yellow"
+                          placeholder="u1... (your orchard UA)"
+                          value={payoutOverride() ?? ''}
+                          onInput={(e) => {
+                            const v = e.currentTarget.value.trim()
+                            if (v === '') setPayoutOverride(null)
+                            else if (v.startsWith('u1') || v.startsWith('utest1') || v.startsWith('uregtest1')) setPayoutOverride(v)
+                            else setPayoutOverride(null)
+                          }}
+                        />
+                        <div class="mt-1 text-neutral-600 text-9px">refunds and winnings land here. paste your zafu / wallet orchard UA.</div>
+                      </div>
+                      <button
+                        class="mt-3 w-full btn btn-secondary text-10px disabled:opacity-40 disabled:cursor-not-allowed"
+                        disabled={!payoutOverride()}
+                        onClick={() => {
+                          try {
+                            const addr = payoutOverride()
+                            if (!addr) { log('paste a payout address first', 'c-red'); return }
+                            const providers = (window as any)[Symbol.for('penumbra')]
+                            const extId = providers ? (Object.keys(providers)[0]?.replace('chrome-extension://','').replace(/\/$/, '')) : null
+                            if (!extId) { log('zafu not detected', 'c-red'); return }
+                            chrome.runtime.sendMessage(extId, {
+                              type: 'send',
+                              address: myAddr,
+                              amount_zat: req,
+                              memo: `zk.poker/v1/payout:${addr}`,
+                            }, () => {})
+                            setSendTriggered(true)
+                          } catch (e: any) { log(`zafu send failed: ${e?.message ?? e}`, 'c-red') }
+                        }}
+                      >Send with zafu</button>
+                      <div class="mt-2 text-neutral-600 text-9px leading-relaxed">
+                        sending from an external wallet? attach memo:{' '}
+                        <span class="font-mono text-neutral-500">zk.poker/v1/payout:&lt;your-u1-address&gt;</span>
+                      </div>
+                    </Show>
+                  </div>
+
+                  <div class="grid grid-cols-2 gap-3 mb-4">
+                    <div class="p-2 border border-neutral-800 rounded bg-zec-surface">
+                      <div class="text-neutral-500 text-8px uppercase">you</div>
+                      <div class="tabular text-11px mt-1">
+                        <span class={myReady ? 'c-green' : 'c-zec-yellow'}>{myZec}</span>
+                        <span class="text-neutral-600"> / {reqZec} ZEC</span>
+                      </div>
+                      <div class={`text-9px mt-1 flex items-center gap-1 ${myReady ? 'c-green' : 'text-neutral-500'}`}>
+                        <Show when={myReady} fallback={<><div class="i-lucide-loader-2 animate-spin h-3 w-3" /><span>waiting for tx in block</span></>}>
+                          <span>✓ deposited</span>
+                        </Show>
+                      </div>
+                    </div>
+                    <div class="p-2 border border-neutral-800 rounded bg-zec-surface">
+                      <div class="text-neutral-500 text-8px uppercase">opponent</div>
+                      <div class="tabular text-11px mt-1">
+                        <span class={oppReady ? 'c-green' : 'c-zec-yellow'}>{oppZec}</span>
+                        <span class="text-neutral-600"> / {reqZec} ZEC</span>
+                      </div>
+                      <div class={`text-9px mt-1 flex items-center gap-1 ${oppReady ? 'c-green' : 'text-neutral-500'}`}>
+                        <Show when={oppReady} fallback={<><div class="i-lucide-loader-2 animate-spin h-3 w-3" /><span>waiting for tx in block</span></>}>
+                          <span>✓ deposited</span>
+                        </Show>
+                      </div>
+                    </div>
+                  </div>
+
+                  <Show when={sendTriggered() && !myReady}>
+                    <div class="text-center text-zec-yellow/80 text-9px mb-2">
+                      tx sent — confirms in 1-2 blocks (~75s). don't send again.
+                    </div>
+                  </Show>
+                  <div class="text-center text-neutral-500 text-9px">
+                    table starts when both players have deposited
+                  </div>
+                </>
+              })()}
             </div>
           </Show>
 
@@ -650,7 +990,7 @@ export default function App() {
                   </Show>
                   <button
                     class="px-1.5 py-0.5 rounded text-7px border border-red-900 text-red-400 hover:bg-red-900/20"
-                    onClick={() => { if (confirm('Leave table and cash out?')) send({ type: 'Leave' }) }}
+                    onClick={leaveTable}
                     title="leave table — settles escrow and pays out"
                   >leave</button>
                 </span>
@@ -685,15 +1025,19 @@ export default function App() {
                 </Show>
 
                 {/* opponent (top) */}
-                <div class="absolute top--4 left-50% -translate-x-50% text-center w-44">
-                  <div class={`inline-block px-3 py-1 bg-zec-surface border ${acting() === opp() ? 'border-zec-yellow shadow-[0_0_8px_rgba(244,183,40,0.3)]' : oppDisconnected() ? 'border-red-800' : 'border-neutral-800'}`}>
-                    <div class={`text-9px font-semibold uppercase tracking-wider ${acting() === opp() ? 'text-zec-yellow' : oppDisconnected() ? 'text-red-400' : 'text-neutral-500'}`}>
-                      {oppName()} <span class="text-neutral-600">{getPositionShort(opp(), button(), maxSeats())}</span> {oppDisconnected() ? '(dc)' : ''}
+                <div class="absolute top--4 left-50% -translate-x-50% text-center">
+                  <div class="flex items-center justify-center gap-2">
+                    <div class="font-mono text-11px text-zec-yellow whitespace-nowrap w-16 text-right">bet: {oppBet()}</div>
+                    <div class={`inline-block px-3 py-1 bg-zec-surface border ${acting() === opp() ? 'border-zec-yellow shadow-[0_0_8px_rgba(244,183,40,0.3)]' : oppDisconnected() ? 'border-red-800' : 'border-neutral-800'}`}>
+                      <div class={`text-9px font-semibold uppercase tracking-wider ${acting() === opp() ? 'text-zec-yellow' : oppDisconnected() ? 'text-red-400' : 'text-neutral-500'}`}>
+                        {oppName()} <span class="text-neutral-600">{getPositionShort(opp(), button(), maxSeats())}</span> {oppDisconnected() ? '(dc)' : ''}
+                      </div>
+                      <div class="font-mono text-13px text-zec-yellow">{oppStack()}</div>
+                      <Show when={acting() === opp() && actionTimer() > 0}>
+                        <div class={`font-mono text-11px font-bold ${actionTimer() <= 5 ? 'text-red-500 animate-pulse' : actionTimer() <= 10 ? 'text-orange-400' : actionTimer() <= 20 ? 'text-zec-yellow' : 'text-neutral-400'}`}>{actionTimer()}s</div>
+                      </Show>
                     </div>
-                    <div class="font-mono text-13px text-zec-yellow">{oppStack()}</div>
-                    <Show when={acting() === opp() && actionTimer() > 0}>
-                      <div class={`font-mono text-11px font-bold ${actionTimer() <= 5 ? 'text-red-500 animate-pulse' : actionTimer() <= 10 ? 'text-orange-400' : actionTimer() <= 20 ? 'text-zec-yellow' : 'text-neutral-400'}`}>{actionTimer()}s</div>
-                    </Show>
+                    <div class="w-16" aria-hidden="true"></div>
                   </div>
                   <div class="flex gap-1 justify-center mt-1.5">
                     <Show when={oppRevealed() && oppCards()} fallback={
@@ -705,7 +1049,6 @@ export default function App() {
                       <Card card={oppCards()![1]} />
                     </Show>
                   </div>
-                  <div class="font-mono text-11px text-neutral-400 mt-0.5 h-4">{oppBet() > 0 ? oppBet() : ''}</div>
                 </div>
 
                 {/* dealer chip */}
@@ -718,8 +1061,16 @@ export default function App() {
                     style="left: calc(50% + 55px)">D</div>
                 </Show>
 
-                {/* deck + board */}
-                <div class="flex gap-1.5 justify-center items-center my-13">
+                {/* pot + deck + board — pot sits left of the community cards,
+                    invisible spacer on the right keeps cards page-centered */}
+                <div class="flex gap-3 justify-center items-center my-13">
+                  <div class="font-mono text-13px font-500 text-zec-yellow whitespace-nowrap w-20 text-right">
+                    <Show when={lastResult()} fallback={<>pot: {pot()}</>}>
+                      <span class={`animate-pulse ${lastResult()!.won ? 'text-green-400' : 'text-red-400'}`}>
+                        {lastResult()!.won ? '+' : ''}{lastResult()!.amount}
+                      </span>
+                    </Show>
+                  </div>
                   {/* deck on table — shows shuffle status */}
                   <Show when={board().length === 0}>
                     <div class="relative w-12 h-17 mr-2" title={deckVerified() ? 'deck verified (Chaum-Pedersen)' : gameStatus() || 'deck'}>
@@ -741,36 +1092,29 @@ export default function App() {
                   <For each={board()}>
                     {c => <Card card={c} size="lg" />}
                   </For>
-                </div>
-
-                {/* pot + result */}
-                <div class="text-center font-mono text-14px font-500 min-h-5 relative">
-                  <Show when={lastResult()} fallback={
-                    <span class="text-zec-yellow">{pot() > 0 ? pot() : ''}</span>
-                  }>
-                    <span class={`animate-pulse ${lastResult()!.won ? 'text-green-400' : 'text-red-400'}`}>
-                      {lastResult()!.won ? '+' : ''}{lastResult()!.amount}
-                    </span>
-                  </Show>
+                  <div class="w-20" aria-hidden="true"></div>
                 </div>
 
                 {/* you (bottom) */}
-                <div class="absolute bottom--4 left-50% -translate-x-50% text-center w-44">
-                  <div class="font-mono text-11px text-neutral-400 mb-0.5 h-4">{myBet() > 0 ? myBet() : ''}</div>
+                <div class="absolute bottom--4 left-50% -translate-x-50% text-center">
                   <div class="flex gap-1 justify-center mb-1.5">
                     <Show when={myCards()}>
                       <Card card={myCards()![0]} />
                       <Card card={myCards()![1]} />
                     </Show>
                   </div>
-                  <div class={`inline-block px-3 py-1 bg-zec-surface border ${acting() === mySeat() ? 'border-zec-yellow shadow-[0_0_8px_rgba(244,183,40,0.3)]' : 'border-neutral-800'}`}>
-                    <Show when={acting() === mySeat() && actionTimer() > 0}>
-                      <div class={`font-mono text-11px font-bold ${actionTimer() <= 5 ? 'text-red-500 animate-pulse' : actionTimer() <= 10 ? 'text-orange-400' : actionTimer() <= 20 ? 'text-zec-yellow' : 'text-neutral-400'}`}>{actionTimer()}s</div>
-                    </Show>
-                    <div class="font-mono text-13px text-zec-yellow">{myStack()}</div>
-                    <div class={`text-9px font-semibold uppercase tracking-wider ${acting() === mySeat() ? 'text-zec-yellow' : 'text-neutral-500'}`}>
-                      {name() || 'you'} <span class="text-neutral-600">{button() === mySeat() ? 'BTN/SB' : 'BB'}</span>
+                  <div class="flex items-center justify-center gap-2">
+                    <div class="font-mono text-11px text-zec-yellow whitespace-nowrap w-16 text-right">bet: {myBet()}</div>
+                    <div class={`inline-block px-3 py-1 bg-zec-surface border ${acting() === mySeat() ? 'border-zec-yellow shadow-[0_0_8px_rgba(244,183,40,0.3)]' : 'border-neutral-800'}`}>
+                      <Show when={acting() === mySeat() && actionTimer() > 0}>
+                        <div class={`font-mono text-11px font-bold ${actionTimer() <= 5 ? 'text-red-500 animate-pulse' : actionTimer() <= 10 ? 'text-orange-400' : actionTimer() <= 20 ? 'text-zec-yellow' : 'text-neutral-400'}`}>{actionTimer()}s</div>
+                      </Show>
+                      <div class="font-mono text-13px text-zec-yellow">{myStack()}</div>
+                      <div class={`text-9px font-semibold uppercase tracking-wider ${acting() === mySeat() ? 'text-zec-yellow' : 'text-neutral-500'}`}>
+                        {name() || 'you'} <span class="text-neutral-600">{button() === mySeat() ? 'BTN/SB' : 'BB'}</span>
+                      </div>
                     </div>
+                    <div class="w-16" aria-hidden="true"></div>
                   </div>
                 </div>
               </div>
@@ -779,7 +1123,9 @@ export default function App() {
               <div class="flex gap-1 sm:gap-1.5 justify-center items-center py-2 sm:py-3 min-h-11 flex-wrap">
                 <Show when={isMyTurn() && actions().length > 0} fallback={
                   <Show when={acting() >= 0 && !isMyTurn()}>
-                    <span class="text-neutral-600 text-10px uppercase tracking-wider">opponent to act</span>
+                    <span class="text-neutral-600 text-10px uppercase tracking-wider">
+                      {oppDisconnected() ? 'hand paused — opponent offline' : 'opponent to act'}
+                    </span>
                   </Show>
                 }>
                   {/* sizing buttons — Pluribus-style: 1/4, 1/2, 3/4, pot, 2x */}
@@ -952,6 +1298,133 @@ export default function App() {
                 <button type="submit" class="text-8px px-2 py-0.5 rounded border border-neutral-700 text-neutral-600 hover:text-neutral-400">send</button>
               </form>
               </div>{/* end sidebar */}
+            </div>
+          </Show>
+
+          {/* settlement view — on-chain payout in progress / complete / failed */}
+          <Show when={view() === 'settlement'}>
+            <div class="mx-auto max-w-md p-4 mt-2">
+              <div class="text-center mb-3">
+                <div class="text-zec-yellow text-12px uppercase tracking-2px">table closed</div>
+                <div class="text-neutral-500 text-9px mt-1">settling on-chain</div>
+                <Show when={settleReason()}>
+                  <div class="text-neutral-400 text-9px mt-1">{settleReason()}</div>
+                </Show>
+              </div>
+
+              <div class="rounded-md border border-neutral-800 bg-zec-surface p-3 mb-3">
+                <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">payout plan</div>
+                <For each={settlePlan()}>
+                  {(line) => {
+                    const isMe = line.seat === mySeat()
+                    const zec = (line.amount_zat / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')
+                    return (
+                      <div class="flex items-center justify-between text-10px tabular py-1">
+                        <span class={isMe ? 'c-green' : 'text-neutral-400'}>
+                          seat {line.seat}{isMe ? ' (you)' : ''} → {line.address.slice(0, 12)}…{line.address.slice(-6)}
+                        </span>
+                        <span class={isMe ? 'c-zec-yellow font-500' : 'text-neutral-500'}>{zec} ZEC</span>
+                      </div>
+                    )
+                  }}
+                </For>
+              </div>
+
+              <Show when={settleStatus().phase === 'preparing'}>
+                <div class="text-center py-4">
+                  <div class="i-lucide-loader-2 animate-spin h-6 w-6 mx-auto text-zec-yellow" />
+                  <div class="text-neutral-400 text-10px mt-2">preparing on-chain payout…</div>
+                  <div class="text-neutral-600 text-9px mt-1">building the multisig transaction (~3-5s)</div>
+                </div>
+              </Show>
+
+              <Show when={settleStatus().phase === 'pending' || settleStatus().phase === 'signing'}>
+                <div class="text-center text-9px tabular text-neutral-500 mb-2">
+                  {mySeat() === settlePrioritySeat()
+                    ? <>you have <span class="c-zec-yellow">{settleFallbackTick()}s</span> to approve before the signer flips to your opponent</>
+                    : <>opponent can sign for <span class="c-zec-yellow">{settleFallbackTick()}s</span>; after that you can take over</>
+                  }
+                </div>
+                <Show when={mySeat() === settlePrioritySeat()}>
+                  <button
+                    class="w-full btn btn-primary text-11px py-2"
+                    disabled={settleStatus().phase === 'signing'}
+                    onClick={() => {
+                      setSettleStatus({ phase: 'signing' })
+                      const code = roomCode()
+                      const relayUrl = settleFrostRelay() || 'wss://zrelay.rotko.net'
+                      void requestPokerSign({
+                        relayUrl,
+                        roomCode: settleRelayRoom(),
+                        plan: settlePlan().map(p => ({ address: p.address, amount_zat: p.amount_zat })),
+                        feeZat: 10_000,
+                        multisigLabel: `POKER-${code}`,
+                      }).then(res => {
+                        if (!res.success) {
+                          log(`zafu sign failed: ${res.error}`, 'c-red')
+                          // back to pending so user can retry; PayoutFailed will land via WS too
+                          setSettleStatus({ phase: 'pending' })
+                        } else {
+                          log('signing shares sent — waiting for escrow to broadcast', 'c-green')
+                        }
+                      })
+                    }}
+                  >
+                    {settleStatus().phase === 'signing' ? 'signing…' : 'approve payout in zafu'}
+                  </button>
+                </Show>
+                <Show when={mySeat() !== settlePrioritySeat()}>
+                  <div class="text-center py-3">
+                    <div class="i-lucide-loader-2 animate-spin mx-auto h-5 w-5 text-zec-yellow" />
+                    <div class="text-neutral-400 text-10px mt-2">waiting for opponent to approve payout</div>
+                  </div>
+                </Show>
+              </Show>
+
+              <Show when={settleStatus().phase === 'complete'}>
+                {(() => {
+                  const status = settleStatus()
+                  if (status.phase !== 'complete') return null
+                  return (
+                    <div class="text-center">
+                      <div class="text-green-400 text-11px mb-2">✓ paid out on-chain</div>
+                      <div class="text-neutral-500 text-9px uppercase mb-1">tx</div>
+                      <div class="font-mono text-9px text-zec-yellow break-all px-2 mb-3">{status.txid}</div>
+                      <button
+                        class="w-full btn btn-secondary text-10px py-1.5"
+                        onClick={() => {
+                          setView('casino')
+                          setSettleStatus({ phase: 'pending' })
+                          setSettlePlan([])
+                          setSettleRelayRoom('')
+                          setSettlePrioritySeat(-1)
+                          setSettleReason('')
+                          history.replaceState(null, '', '/')
+                        }}
+                      >return to lobby</button>
+                    </div>
+                  )
+                })()}
+              </Show>
+
+              <Show when={settleStatus().phase === 'failed'}>
+                {(() => {
+                  const status = settleStatus()
+                  if (status.phase !== 'failed') return null
+                  return (
+                    <div class="text-center">
+                      <div class="text-red-400 text-11px mb-2">✗ payout failed</div>
+                      <div class="text-neutral-400 text-9px mb-3 break-words">{status.reason}</div>
+                      <Show when={mySeat() === settlePrioritySeat()}>
+                        <button
+                          class="w-full btn btn-primary text-11px py-2"
+                          onClick={() => setSettleStatus({ phase: 'pending' })}
+                        >retry approval</button>
+                      </Show>
+                    </div>
+                  )
+                })()}
+              </Show>
             </div>
           </Show>
 

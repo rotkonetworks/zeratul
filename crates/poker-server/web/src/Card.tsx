@@ -1,3 +1,4 @@
+import { Show } from 'solid-js'
 import type { CardJson } from './types'
 
 const suits: Record<string, string> = { c: '\u2663', d: '\u2666', h: '\u2665', s: '\u2660' }
@@ -10,20 +11,18 @@ export function Card(p: { card?: CardJson; size?: 'sm' | 'lg' }) {
   const h = lg ? 'h-14 sm:h-17' : 'h-11 sm:h-14'
   const text = lg ? 'text-14px sm:text-17px' : 'text-11px sm:text-14px'
 
-  if (!p.card) {
-    return (
-      <div class={`${w} ${h} rounded-sm border border-neutral-700 bg-zec-surface inline-flex items-center justify-center`}
-        style="background-image: repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(244,183,40,0.05) 3px,rgba(244,183,40,0.05) 4px)">
-      </div>
-    )
-  }
-
-  const c = p.card
-  const color = red(c.suit) ? 'text-red-500' : 'text-neutral-900'
-
   return (
-    <div class={`${w} ${h} rounded-sm border border-stone-300 bg-stone-100 inline-flex items-center justify-center font-mono font-medium ${text} ${color}`}>
-      {c.rank}{suits[c.suit]}
-    </div>
+    <Show
+      when={p.card}
+      fallback={
+        <div class={`${w} ${h} rounded-sm border border-neutral-700 bg-zec-surface inline-flex items-center justify-center`}
+          style="background-image: repeating-linear-gradient(45deg,transparent,transparent 3px,rgba(244,183,40,0.05) 3px,rgba(244,183,40,0.05) 4px)">
+        </div>
+      }
+    >
+      <div class={`${w} ${h} rounded-sm border border-stone-300 bg-stone-100 inline-flex items-center justify-center font-mono font-medium ${text} ${red(p.card!.suit) ? 'text-red-500' : 'text-neutral-900'}`}>
+        {p.card!.rank}{suits[p.card!.suit]}
+      </div>
+    </Show>
   )
 }

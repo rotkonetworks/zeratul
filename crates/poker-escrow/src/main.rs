@@ -30,6 +30,14 @@ use tokio::sync::Mutex;
 use osst::redpallas::zcash as frost;
 use pasta_curves::pallas::Scalar as PallasScalar;
 
+mod orchard_ua;
+mod frost_relay;
+mod frost_dkg;
+mod dkg_room;
+mod scanner;
+mod payout_signing;
+mod tx_build;
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -75,8 +83,58 @@ struct PayoutPlan {
     settled_at: u64,
 }
 
+/// State of the PCZT-based payout flow for a room. Set by `POST /room/{code}/payout/initiate`,
+/// advanced by the background signing task, read by `GET /room/{code}/payout/status`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "phase")]
+pub enum PayoutStatus {
+    /// no payout requested yet
+    None,
+    /// signing room opened; waiting for the player to FROST-sign their share
+    Pending { relay_room: String },
+    /// tx broadcast to zidecar; `txid` is the lowercase hex
+    Broadcast { txid: String, relay_room: String },
+    /// signing or broadcast failed; payout can be retried with a fresh /initiate
+    Failed { reason: String },
+}
+
 struct EscrowRoom {
     code: String,
+    /// Orchard UA (`u1...`) — `Some` once derivation is done. In trusted-dealer mode this is
+    /// set synchronously inside `create_room`. In DKG mode it lands when the background
+    /// DKG task finishes.
+    escrow_ua: Option<String>,
+    /// FROST relay coords for DKG mode — `Some` only when ESCROW_USE_DKG=true. Forwarded
+    /// to clients so they can join the relay room and participate.
+    frost_relay_url: Option<String>,
+    frost_room_code: Option<String>,
+    /// poker-escrow's own DKG piece (private). `Some` after DKG completes.
+    dkg_key_package_hex: Option<String>,
+    /// group's public key package — `Some` after DKG completes. Same on every party.
+    dkg_public_key_package_hex: Option<String>,
+    /// raw 96-byte FVK hex used by the zidecar compact-block scanner
+    dkg_orchard_fvk_hex: Option<String>,
+    /// host-broadcast sk; lets us derive new diversified addresses anytime
+    dkg_sk_hex: Option<String>,
+    /// our FROST identity seed (from dkg_part3) — needed to sign payouts
+    dkg_ephemeral_seed_hex: Option<String>,
+    /// per-seat deposit UAs (`u1…`) derived at diversifier_index 1, 2
+    seat_addresses: Vec<Option<String>>,
+    /// per-seat 43-byte raw addresses for matching decrypted notes back to a seat
+    seat_addr_bytes: Vec<Option<[u8; 43]>>,
+    /// per-seat refund/payout destination — recovered from the `zk.poker/v1/payout:` memo
+    /// on the first valid deposit. `None` means the depositor forgot the memo; deposits still
+    /// accrue but the game won't start until we know where to refund/pay.
+    seat_payout_address: Vec<Option<String>>,
+    /// every scanned incoming note kept around so the payout tx builder can spend it later.
+    /// Position (orchard merkle tree leaf index) lands here when the tx builder fetches a
+    /// witness from zidecar via `GetCommitmentProofs` keyed on `cmx`.
+    notes: Vec<scanner::DepositNote>,
+    /// resume point for the deposit scanner — last block whose actions we've trial-decrypted
+    last_scanned_height: u32,
+    /// current state of the PCZT payout flow; advances Pending → Broadcast (or Failed)
+    payout_status: PayoutStatus,
+    /// legacy 32-byte raw-hex form (osst-derived); retained for the unmigrated /sign endpoints
     escrow_address: [u8; 32],
     group_pubkey: pasta_curves::pallas::Point,
     // server's key share (signer #3)
@@ -110,6 +168,11 @@ pub struct AppState {
     house_address: String,
     zidecar_url: String,
     verify_deposits: bool,
+    network: zcash_address::Network,
+    /// when true, /room runs DKG via the FROST relay instead of trusted-dealer keygen
+    use_dkg: bool,
+    /// FROST relay WebSocket URL (used in DKG mode)
+    frost_relay_url: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -131,60 +194,159 @@ struct CreateRoomResp {
     public_key_package: String,
 }
 
+/// Derive a real Orchard Unified Address for an escrow room via frost-spend's
+/// trusted-dealer keygen. Returns the `u1...` string. Trusted-dealer is the
+/// pragmatic shortcut for Phase 2.1 — Phase 2.2 replaces this with DKG.
+fn derive_escrow_ua(network: zcash_address::Network) -> Result<String, String> {
+    let dealer = frost_spend::orchestrate::dealer_keygen(2, 3)
+        .map_err(|e| format!("dealer_keygen: {:?}", e))?;
+    let raw = frost_spend::orchestrate::derive_address_raw(&dealer.public_key_package_hex, 0)
+        .map_err(|e| format!("derive_address_raw: {:?}", e))?;
+    orchard_ua::encode_unified(raw, network)
+}
+
+/// Build the osst-derived legacy bits (will be removed in Phase 2.4). Pure / sync /
+/// rng-not-Send — must run before any `.await`.
+fn make_legacy_osst(req: &CreateRoomReq) -> Result<(dkg_room::LegacyOsstShim, String, String, String), String> {
+    let mut rng = rand::thread_rng();
+    let (player_a_share, player_b_share, jury_network, group_pubkey) =
+        frost::setup_escrow(1, 1, &mut rng)
+            .map_err(|e| format!("osst setup_escrow: {:?}", e))?;
+    let escrow_address = frost::derive_address_bytes(&group_pubkey);
+    let a_hex = hex::encode(&share_to_bytes(&player_a_share));
+    let b_hex = hex::encode(&share_to_bytes(&player_b_share));
+    let pubkey_hex = hex::encode(&point_to_bytes(&group_pubkey));
+    let server_share = jury_network.node_shares.into_iter().next()
+        .expect("jury_n=1 should produce exactly 1 share");
+    let shim = dkg_room::LegacyOsstShim {
+        escrow_address,
+        group_pubkey,
+        server_share,
+        player_a_share_hex: a_hex.clone(),
+        player_b_share_hex: b_hex.clone(),
+    };
+    let _ = req; // silence unused warning if req fields aren't used here yet
+    Ok((shim, a_hex, b_hex, pubkey_hex))
+}
+
 async fn create_room(
     State(state): State<AppState>,
     Json(req): Json<CreateRoomReq>,
 ) -> impl IntoResponse {
-    // do all crypto BEFORE any await (rng is not Send)
-    let (room, a_share_hex, b_share_hex, pubkey_hex, escrow_hex) = {
-        let mut rng = rand::thread_rng();
-        let result = frost::setup_escrow(1, 1, &mut rng);
-        let (player_a_share, player_b_share, jury_network, group_pubkey) = match result {
-            Ok(r) => r,
-            Err(e) => return Json(serde_json::json!({"error": format!("{:?}", e)})),
-        };
+    let (shim, a_share_hex, b_share_hex, pubkey_hex) = match make_legacy_osst(&req) {
+        Ok(v) => v,
+        Err(e) => return Json(serde_json::json!({"error": e})),
+    };
 
-        let escrow_address = frost::derive_address_bytes(&group_pubkey);
-        let escrow_hex = hex::encode(&escrow_address);
-        let a_share_hex = hex::encode(&share_to_bytes(&player_a_share));
-        let b_share_hex = hex::encode(&share_to_bytes(&player_b_share));
-        let pubkey_hex = hex::encode(&point_to_bytes(&group_pubkey));
+    if state.use_dkg {
+        create_room_dkg(state, req, shim, a_share_hex, b_share_hex, pubkey_hex).await
+    } else {
+        create_room_trusted_dealer(state, req, shim, a_share_hex, b_share_hex, pubkey_hex).await
+    }
+}
 
-        let server_share = jury_network.node_shares.into_iter().next()
-            .expect("jury_n=1 should produce exactly 1 share");
+async fn create_room_trusted_dealer(
+    state: AppState,
+    req: CreateRoomReq,
+    shim: dkg_room::LegacyOsstShim,
+    a_share_hex: String,
+    b_share_hex: String,
+    pubkey_hex: String,
+) -> Json<serde_json::Value> {
+    let escrow_ua = match derive_escrow_ua(state.network) {
+        Ok(u) => u,
+        Err(e) => return Json(serde_json::json!({"error": e})),
+    };
 
-        let room = EscrowRoom {
-            code: req.code.clone(),
-            escrow_address,
-            group_pubkey,
-            server_share,
-            player_a_share_hex: a_share_hex.clone(),
-            player_b_share_hex: b_share_hex.clone(),
-            player_a_deposit: 0,
-            player_b_deposit: 0,
-            required_deposit: req.required_deposit,
-            rake_bps: req.rake_bps,
-            rake_paid: false,
-            game_active: false,
-            player_a_address: None,
-            player_b_address: None,
-            final_stacks: None,
-            payout_plan: None,
-            pending_nonces: None,
-            created_at: now_ms(),
-        };
-        (room, a_share_hex, b_share_hex, pubkey_hex, escrow_hex)
+    let room = EscrowRoom {
+        code: req.code.clone(),
+        escrow_ua: Some(escrow_ua.clone()),
+        frost_relay_url: None,
+        frost_room_code: None,
+        dkg_key_package_hex: None,
+        dkg_public_key_package_hex: None,
+        dkg_orchard_fvk_hex: None,
+        dkg_sk_hex: None,
+        dkg_ephemeral_seed_hex: None,
+        seat_addresses: vec![None, None],
+        seat_addr_bytes: vec![None, None],
+        seat_payout_address: vec![None, None],
+        notes: Vec::new(),
+        last_scanned_height: 0,
+        payout_status: PayoutStatus::None,
+        escrow_address: shim.escrow_address,
+        group_pubkey: shim.group_pubkey,
+        server_share: shim.server_share,
+        player_a_share_hex: shim.player_a_share_hex,
+        player_b_share_hex: shim.player_b_share_hex,
+        player_a_deposit: 0,
+        player_b_deposit: 0,
+        required_deposit: req.required_deposit,
+        rake_bps: req.rake_bps,
+        rake_paid: false,
+        game_active: false,
+        player_a_address: None,
+        player_b_address: None,
+        final_stacks: None,
+        payout_plan: None,
+        pending_nonces: None,
+        created_at: now_ms(),
     };
 
     state.rooms.lock().await.insert(req.code.clone(), room);
-
-    tracing::info!("escrow created: {} -> {}", req.code, &escrow_hex[..16]);
+    tracing::info!("escrow created (trusted-dealer): {} -> {}", req.code, &escrow_ua);
 
     Json(serde_json::json!({
-        "escrow_address": escrow_hex,
+        "escrow_address": escrow_ua,
         "player_a_share": a_share_hex,
         "player_b_share": b_share_hex,
         "public_key_package": pubkey_hex,
+        "dkg_mode": false,
+    }))
+}
+
+async fn create_room_dkg(
+    state: AppState,
+    req: CreateRoomReq,
+    shim: dkg_room::LegacyOsstShim,
+    a_share_hex: String,
+    b_share_hex: String,
+    pubkey_hex: String,
+) -> Json<serde_json::Value> {
+    let prov = match dkg_room::provision(
+        state.rooms.clone(),
+        req.code.clone(),
+        state.frost_relay_url.clone(),
+        state.network,
+        state.zidecar_url.clone(),
+    ).await {
+        Ok(p) => p,
+        Err(e) => return Json(serde_json::json!({"error": format!("dkg provision: {}", e)})),
+    };
+
+    let room = dkg_room::empty_room(
+        req.code.clone(),
+        req.required_deposit,
+        req.rake_bps,
+        state.frost_relay_url.clone(),
+        prov.frost_room_code.clone(),
+        shim,
+    );
+    state.rooms.lock().await.insert(req.code.clone(), room);
+
+    tracing::info!(
+        "escrow created (dkg): {} -> frost_room={} (UA pending until peers join)",
+        req.code, prov.frost_room_code
+    );
+
+    Json(serde_json::json!({
+        "escrow_address": serde_json::Value::Null,
+        "player_a_share": a_share_hex,
+        "player_b_share": b_share_hex,
+        "public_key_package": pubkey_hex,
+        "dkg_mode": true,
+        "frost_relay_url": state.frost_relay_url,
+        "frost_room_code": prov.frost_room_code,
     }))
 }
 
@@ -196,7 +358,14 @@ async fn get_room(
     match rooms.get(&code) {
         Some(room) => Json(serde_json::json!({
             "code": room.code,
-            "escrow_address": hex::encode(&room.escrow_address),
+            "escrow_address": room.escrow_ua,
+            "dkg_pending": room.frost_relay_url.is_some() && room.escrow_ua.is_none(),
+            "frost_relay_url": room.frost_relay_url,
+            "frost_room_code": room.frost_room_code,
+            "seat_addresses": room.seat_addresses,
+            "seat_payout_addresses": room.seat_payout_address,
+            "unspent_notes_count": room.notes.len(),
+            "last_scanned_height": room.last_scanned_height,
             "player_a_deposit": room.player_a_deposit,
             "player_b_deposit": room.player_b_deposit,
             "required_deposit": room.required_deposit,
@@ -206,6 +375,7 @@ async fn get_room(
             "settled": room.payout_plan.is_some(),
             "both_deposited": room.player_a_deposit >= room.required_deposit
                 && room.player_b_deposit >= room.required_deposit,
+            "both_payout_addresses_known": room.seat_payout_address.iter().take(2).all(|a| a.is_some()),
         })),
         None => Json(serde_json::json!({"error": "room not found"})),
     }
@@ -376,6 +546,232 @@ async fn get_payout(
             "group_pubkey": hex::encode(&point_to_bytes(&room.group_pubkey)),
         })),
         None => Json(serde_json::json!({"error": "game not settled yet"})),
+    }
+}
+
+// ── PCZT-based payout (Phase 5.2-LEAVE) ────────────────────────────────────
+
+#[derive(Debug, Deserialize)]
+struct InitiatePayoutReq {
+    outputs: Vec<PayoutOutputReq>,
+    #[serde(default)]
+    fee_zat: u64,
+    #[serde(default)]
+    anchor_height: Option<u32>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PayoutOutputReq {
+    address: String,
+    amount_zat: u64,
+}
+
+async fn initiate_payout(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    Json(req): Json<InitiatePayoutReq>,
+) -> impl IntoResponse {
+    // snapshot key material + notes; reject if DKG never completed or a payout is already underway
+    let snap = {
+        let rooms = state.rooms.lock().await;
+        let Some(room) = rooms.get(&code) else {
+            return Json(serde_json::json!({"error": "room not found"}));
+        };
+        match &room.payout_status {
+            PayoutStatus::Pending { relay_room } => {
+                return Json(serde_json::json!({"error": "payout already pending", "relay_room": relay_room}));
+            }
+            PayoutStatus::Broadcast { txid, .. } => {
+                return Json(serde_json::json!({"error": "payout already broadcast", "txid": txid}));
+            }
+            _ => {}
+        }
+        match (
+            room.dkg_orchard_fvk_hex.as_ref(),
+            room.dkg_key_package_hex.as_ref(),
+            room.dkg_ephemeral_seed_hex.as_ref(),
+            room.dkg_public_key_package_hex.as_ref(),
+        ) {
+            (Some(fvk), Some(kp), Some(seed), Some(pkg)) => {
+                (fvk.clone(), kp.clone(), seed.clone(), pkg.clone(), room.notes.clone())
+            }
+            _ => return Json(serde_json::json!({"error": "DKG not complete; no key material to sign with"})),
+        }
+    };
+    let (fvk_hex, kp_hex, seed_hex, pkg_hex, notes) = snap;
+
+    if notes.is_empty() {
+        return Json(serde_json::json!({"error": "no unspent notes — nothing to spend"}));
+    }
+
+    // 96-byte FVK
+    let fvk_bytes = match hex::decode(&fvk_hex) {
+        Ok(b) if b.len() == 96 => {
+            let mut a = [0u8; 96];
+            a.copy_from_slice(&b);
+            a
+        }
+        _ => return Json(serde_json::json!({"error": "stored FVK is not 96 bytes"})),
+    };
+
+    let mainnet = matches!(state.network, zcash_address::Network::Main);
+    let mut outputs = Vec::with_capacity(req.outputs.len());
+    for (i, out) in req.outputs.iter().enumerate() {
+        let addr = match tx_build::parse_orchard_ua(&out.address, mainnet) {
+            Ok(a) => a,
+            Err(e) => return Json(serde_json::json!({"error": format!("output {} address: {}", i, e)})),
+        };
+        outputs.push(tx_build::PayoutOutput {
+            address: addr,
+            amount_zat: out.amount_zat,
+            memo: [0u8; 512],
+        });
+    }
+    let fee_zat = if req.fee_zat == 0 { 10_000 } else { req.fee_zat };
+    let plan = tx_build::PayoutPlan { outputs, fee_zat };
+
+    let zidecar = match zecli::client::ZidecarClient::connect(&state.zidecar_url).await {
+        Ok(c) => c,
+        Err(e) => return Json(serde_json::json!({"error": format!("zidecar connect: {}", e)})),
+    };
+    let anchor_height = match req.anchor_height {
+        Some(h) => h,
+        None => match zidecar.get_tip().await {
+            Ok((tip, _)) => tip,
+            Err(e) => return Json(serde_json::json!({"error": format!("get_tip: {}", e)})),
+        },
+    };
+
+    let pczt_state = match tx_build::build_payout_pczt(
+        &zidecar, &fvk_bytes, &notes, &plan, anchor_height, mainnet,
+    ).await {
+        Ok(s) => s,
+        Err(e) => return Json(serde_json::json!({"error": format!("build_pczt: {}", e)})),
+    };
+
+    let nick = format!("escrow-payout-{}", code);
+    let mut relay = match crate::frost_relay::FrostRelayClient::connect(&state.frost_relay_url, nick).await {
+        Ok(c) => c,
+        Err(e) => return Json(serde_json::json!({"error": format!("relay connect: {:?}", e)})),
+    };
+    let relay_room = match relay.create_room().await {
+        Ok(r) => r,
+        Err(e) => return Json(serde_json::json!({"error": format!("relay create_room: {:?}", e)})),
+    };
+
+    {
+        let mut rooms = state.rooms.lock().await;
+        if let Some(room) = rooms.get_mut(&code) {
+            room.payout_status = PayoutStatus::Pending { relay_room: relay_room.clone() };
+        }
+    }
+    tracing::info!("payout initiated for {}: relay_room={} actions={}", code, relay_room, pczt_state.alphas.len());
+
+    // display fields for the SIGN: payload — pick the first non-zero output as the headline
+    // recipient/amount; the OVK verifier in zafu would catch divergence if we published the
+    // unsigned tx hex too (not yet — PcztState doesn't expose pre-sign bytes).
+    let (disp_recipient, disp_amount) = req.outputs.iter()
+        .find(|o| o.amount_zat > 0)
+        .map(|o| (o.address.clone(), o.amount_zat))
+        .unwrap_or_else(|| (String::new(), 0));
+
+    let bg_rooms = state.rooms.clone();
+    let bg_code = code.clone();
+    let bg_relay_room = relay_room.clone();
+    let bg_zidecar_url = state.zidecar_url.clone();
+    let bg_fee_zat = fee_zat;
+    tokio::spawn(async move {
+        run_payout_signing(bg_rooms, bg_code, bg_relay_room, bg_zidecar_url, relay,
+            pkg_hex, kp_hex, seed_hex, pczt_state,
+            disp_recipient, disp_amount, bg_fee_zat).await;
+    });
+
+    Json(serde_json::json!({"relay_room": relay_room}))
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_payout_signing(
+    rooms: Rooms,
+    code: String,
+    relay_room: String,
+    zidecar_url: String,
+    mut relay: crate::frost_relay::FrostRelayClient,
+    pkg_hex: String,
+    kp_hex: String,
+    seed_hex: String,
+    pczt_state: zecli::pczt::PcztState,
+    disp_recipient: String,
+    disp_amount_zat: u64,
+    fee_zat: u64,
+) {
+    let secrets = crate::payout_signing::PayoutSignSecrets {
+        key_package_hex: kp_hex,
+        ephemeral_seed_hex: seed_hex,
+    };
+    let sigs = match crate::payout_signing::host_sign_pczt(
+        &mut relay, &pkg_hex, &secrets,
+        pczt_state.sighash, &pczt_state.alphas,
+        &disp_recipient, disp_amount_zat, fee_zat,
+        std::time::Duration::from_secs(600),
+    ).await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::error!("payout host_sign for {}: {:?}", code, e);
+            mark_payout_failed(rooms, code, format!("host_sign_pczt: {:?}", e)).await;
+            return;
+        }
+    };
+
+    let tx_bytes = match zecli::pczt::complete_pczt_tx(pczt_state, &sigs) {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::error!("complete_pczt_tx for {}: {}", code, e);
+            mark_payout_failed(rooms, code, format!("complete_pczt_tx: {}", e)).await;
+            return;
+        }
+    };
+
+    let zidecar = match zecli::client::ZidecarClient::connect(&zidecar_url).await {
+        Ok(c) => c,
+        Err(e) => {
+            mark_payout_failed(rooms, code, format!("zidecar connect: {}", e)).await;
+            return;
+        }
+    };
+    match zidecar.send_transaction(tx_bytes).await {
+        Ok(res) if res.is_success() => {
+            tracing::info!("payout broadcast for {}: tx={}", code, res.txid);
+            let mut rl = rooms.lock().await;
+            if let Some(room) = rl.get_mut(&code) {
+                room.payout_status = PayoutStatus::Broadcast { txid: res.txid, relay_room };
+            }
+        }
+        Ok(res) => {
+            mark_payout_failed(rooms, code,
+                format!("zidecar rejected tx ({}): {}", res.error_code, res.error_message)).await;
+        }
+        Err(e) => {
+            mark_payout_failed(rooms, code, format!("send_transaction: {}", e)).await;
+        }
+    }
+}
+
+async fn mark_payout_failed(rooms: Rooms, code: String, reason: String) {
+    let mut rl = rooms.lock().await;
+    if let Some(room) = rl.get_mut(&code) {
+        room.payout_status = PayoutStatus::Failed { reason };
+    }
+}
+
+async fn payout_status(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+) -> impl IntoResponse {
+    let rooms = state.rooms.lock().await;
+    match rooms.get(&code) {
+        Some(room) => Json(serde_json::to_value(&room.payout_status)
+            .unwrap_or_else(|_| serde_json::json!({"error": "serialize"}))),
+        None => Json(serde_json::json!({"error": "room not found"})),
     }
 }
 
@@ -591,31 +987,59 @@ fn now_ms() -> u64 {
 // Main
 // ---------------------------------------------------------------------------
 
+/// Args resolve in order: CLI flag → env var → default. Values also load from a `.env`
+/// in the working directory at startup (silent if absent).
+#[derive(clap::Parser, Debug)]
+#[command(version, about = "Poker escrow — FROST 2-of-3 key management, deposit tracking, payout signing")]
+struct Args {
+    /// House rake address (placeholder until prod wallet wired)
+    #[arg(long, env = "HOUSE_ADDRESS", default_value = "ztestsapling1...")]
+    house_address: String,
+    /// zidecar gRPC-web endpoint
+    #[arg(long, env = "ZIDECAR_URL", default_value = "https://zcash.rotko.net")]
+    zidecar_url: String,
+    /// On-chain deposit verification (vs. self-reported counters)
+    #[arg(long, env = "ESCROW_VERIFY_DEPOSITS", default_value_t = false)]
+    verify_deposits: bool,
+    /// Network: `main` / `test` / `regtest`
+    #[arg(long, env = "ESCROW_NETWORK", default_value = "test")]
+    network: String,
+    /// Use DKG mode (vs. trusted-dealer) for key generation
+    #[arg(long, env = "ESCROW_USE_DKG", default_value_t = false)]
+    use_dkg: bool,
+    /// FROST relay WebSocket URL (used for DKG + payout signing)
+    #[arg(long, env = "ESCROW_RELAY_URL", default_value = "ws://127.0.0.1:50053/ws")]
+    relay_url: String,
+    /// HTTP port to bind
+    #[arg(long, env = "ESCROW_PORT", default_value_t = 3034)]
+    port: u16,
+}
+
 #[tokio::main]
 async fn main() {
+    let _ = dotenvy::dotenv();
+    let args = <Args as clap::Parser>::parse();
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env()
             .add_directive("poker_escrow=info".parse().unwrap()))
         .init();
 
-    let house_address = std::env::var("HOUSE_ADDRESS")
-        .unwrap_or_else(|_| "ztestsapling1...".to_string());
-    let zidecar_url = std::env::var("ZIDECAR_URL")
-        .unwrap_or_else(|_| "https://zcash.rotko.net".to_string());
-    let verify_deposits = std::env::var("ESCROW_VERIFY_DEPOSITS")
-        .map(|v| v == "true" || v == "1")
-        .unwrap_or(false);
-
     let state = AppState {
         rooms: Arc::new(Mutex::new(HashMap::new())),
-        house_address,
-        zidecar_url,
-        verify_deposits,
+        house_address: args.house_address,
+        zidecar_url: args.zidecar_url,
+        verify_deposits: args.verify_deposits,
+        network: orchard_ua::network_from_str(&args.network),
+        use_dkg: args.use_dkg,
+        frost_relay_url: args.relay_url,
     };
 
     tracing::info!("house address: {}", state.house_address);
     tracing::info!("zidecar: {}", state.zidecar_url);
     tracing::info!("verify_deposits: {}", state.verify_deposits);
+    tracing::info!("network: {:?}", state.network);
+    tracing::info!("use_dkg: {} (relay: {})", state.use_dkg, state.frost_relay_url);
 
     // spawn background deposit monitor (checks every 5s)
     tokio::spawn(deposit_monitor(state.clone()));
@@ -626,13 +1050,14 @@ async fn main() {
         .route("/room/{code}/deposit", axum::routing::post(report_deposit))
         .route("/room/{code}/settle", axum::routing::post(settle))
         .route("/room/{code}/payout", axum::routing::get(get_payout))
+        .route("/room/{code}/payout/initiate", axum::routing::post(initiate_payout))
+        .route("/room/{code}/payout/status", axum::routing::get(payout_status))
         .route("/room/{code}/sign", axum::routing::post(frost_sign))
         .route("/room/{code}/sign-round2", axum::routing::post(frost_sign_round2))
         .route("/health", axum::routing::get(health))
         .with_state(state);
 
-    let port = std::env::var("ESCROW_PORT").unwrap_or_else(|_| "3034".to_string());
-    let addr = format!("0.0.0.0:{}", port);
+    let addr = format!("0.0.0.0:{}", args.port);
     tracing::info!("poker-escrow listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();

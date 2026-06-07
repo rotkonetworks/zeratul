@@ -30,7 +30,6 @@ members = [
     "crates/zk-shuffle",
     # WIM (Witness Indistinguishable Machine) - PVM execution proofs
     "crates/wim",
-    "crates/wimius",
     # Poker PVM (deterministic game engine, provable via WIM)
     "crates/poker-pvm",
 ]
@@ -52,6 +51,7 @@ exclude = [
     "crates/poker-chain-wasm",    # wasm target, different build
     "crates/poker-shuffle-wasm",  # wasm target, mental poker shuffle
     "crates/zeratul-blockchain",   # depends on uncommitted crates
+    "crates/wimius",                # depends on binius64 at /steam/rotko/jar/binius64 (not on this machine)
 ]
 resolver = "2"
 
