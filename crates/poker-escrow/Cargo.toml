@@ -14,11 +14,11 @@ hex = "0.4"
 rand = "0.8"
 
 # FROST + Orchard UA derivation (shared with zcli, zafu, zigner)
-frost-spend = { git = "https://github.com/rotkonetworks/zcli", branch = "feat/pczt-builder" }
+frost-spend = { git = "https://github.com/rotkonetworks/zcli", branch = "staging" }
 zcash_address = "0.6"
 
 # zidecar gRPC client + Orchard compact-block scanner (mirrors zcli/bin/license-server)
-zecli = { git = "https://github.com/rotkonetworks/zcli", branch = "feat/pczt-builder" }
+zecli = { git = "https://github.com/rotkonetworks/zcli", branch = "staging" }
 orchard = { version = "0.12", default-features = false, features = ["circuit", "unstable-frost"] }
 zcash_note_encryption = "0.4"
 zcash_protocol = { version = "0.7", default-features = false }

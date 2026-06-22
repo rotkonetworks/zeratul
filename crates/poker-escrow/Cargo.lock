@@ -1250,7 +1250,7 @@ dependencies = [
 [[package]]
 name = "frost-spend"
 version = "0.1.0"
-source = "git+https://github.com/rotkonetworks/zcli?branch=feat%2Fpczt-builder#2038eb6e1e91ba68c1bef9150596a978db9ec483"
+source = "git+https://github.com/rotkonetworks/zcli?branch=staging#4e7b7c3447c3ede41182fde923f0c0429764ee7e"
 dependencies = [
  "blake2b_simd",
  "ed25519-consensus",
@@ -2120,7 +2120,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "ligerito"
 version = "0.6.2"
-source = "git+https://github.com/rotkonetworks/zcli?branch=feat%2Fpczt-builder#2038eb6e1e91ba68c1bef9150596a978db9ec483"
+source = "git+https://github.com/rotkonetworks/zcli?branch=staging#4e7b7c3447c3ede41182fde923f0c0429764ee7e"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2148,7 +2148,7 @@ dependencies = [
 [[package]]
 name = "ligerito-binary-fields"
 version = "0.6.2"
-source = "git+https://github.com/rotkonetworks/zcli?branch=feat%2Fpczt-builder#2038eb6e1e91ba68c1bef9150596a978db9ec483"
+source = "git+https://github.com/rotkonetworks/zcli?branch=staging#4e7b7c3447c3ede41182fde923f0c0429764ee7e"
 dependencies = [
  "bytemuck",
  "parity-scale-codec",
@@ -2161,7 +2161,7 @@ dependencies = [
 [[package]]
 name = "ligerito-merkle"
 version = "0.6.1"
-source = "git+https://github.com/rotkonetworks/zcli?branch=feat%2Fpczt-builder#2038eb6e1e91ba68c1bef9150596a978db9ec483"
+source = "git+https://github.com/rotkonetworks/zcli?branch=staging#4e7b7c3447c3ede41182fde923f0c0429764ee7e"
 dependencies = [
  "blake3",
  "bytemuck",
@@ -2174,7 +2174,7 @@ dependencies = [
 [[package]]
 name = "ligerito-reed-solomon"
 version = "0.6.2"
-source = "git+https://github.com/rotkonetworks/zcli?branch=feat%2Fpczt-builder#2038eb6e1e91ba68c1bef9150596a978db9ec483"
+source = "git+https://github.com/rotkonetworks/zcli?branch=staging#4e7b7c3447c3ede41182fde923f0c0429764ee7e"
 dependencies = [
  "ligerito-binary-fields",
  "rayon",
@@ -5291,7 +5291,7 @@ dependencies = [
 [[package]]
 name = "zecli"
 version = "0.6.0"
-source = "git+https://github.com/rotkonetworks/zcli?branch=feat%2Fpczt-builder#2038eb6e1e91ba68c1bef9150596a978db9ec483"
+source = "git+https://github.com/rotkonetworks/zcli?branch=staging#4e7b7c3447c3ede41182fde923f0c0429764ee7e"
 dependencies = [
  "anyhow",
  "bip39",
@@ -5471,7 +5471,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 [[package]]
 name = "zoda-vss"
 version = "0.1.0"
-source = "git+https://github.com/rotkonetworks/zcli?branch=feat%2Fpczt-builder#2038eb6e1e91ba68c1bef9150596a978db9ec483"
+source = "git+https://github.com/rotkonetworks/zcli?branch=staging#4e7b7c3447c3ede41182fde923f0c0429764ee7e"
 dependencies = [
  "rand_core 0.6.4",
  "sha2 0.10.9",
@@ -5480,7 +5480,7 @@ dependencies = [
 [[package]]
 name = "zync-core"
 version = "0.6.1"
-source = "git+https://github.com/rotkonetworks/zcli?branch=feat%2Fpczt-builder#2038eb6e1e91ba68c1bef9150596a978db9ec483"
+source = "git+https://github.com/rotkonetworks/zcli?branch=staging#4e7b7c3447c3ede41182fde923f0c0429764ee7e"
 dependencies = [
  "anyhow",
  "bincode",

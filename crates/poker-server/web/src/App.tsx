@@ -378,6 +378,16 @@ export default function App() {
         // cache-on-fire: reload mid-DKG must not spawn a second zafu popup conflicting with the first
         const dkgFiredKey = `poker_dkg_fired:${msg.code}`
         const dkgAlreadyFired = !!localStorage.getItem(dkgFiredKey)
+        console.log('[poker-dkg] RoomInfo received:', {
+          code: msg.code,
+          frost_relay_url: msg.frost_relay_url,
+          frost_room_code: msg.frost_room_code,
+          escrow: msg.escrow,
+          escrowEmpty: !msg.escrow || msg.escrow.length === 0,
+          dkgStartedFor,
+          dkgAlreadyFired,
+          willFire: !!(msg.frost_relay_url && msg.frost_room_code && (!msg.escrow || msg.escrow.length === 0) && dkgStartedFor !== msg.code && !dkgAlreadyFired),
+        })
         if (
           msg.frost_relay_url && msg.frost_room_code &&
           (!msg.escrow || msg.escrow.length === 0) &&
