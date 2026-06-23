@@ -35,7 +35,7 @@ pub async fn provision(
     rooms: Rooms,
     room_code: String,
     relay_url: String,
-    network: zcash_address::Network,
+    network: zcash_protocol::consensus::NetworkType,
     zidecar_url: String,
 ) -> Result<DkgProvision, String> {
     let nick = format!("escrow-{}", room_code);
@@ -69,7 +69,7 @@ async fn write_dkg_result(
     rooms: Rooms,
     code: &str,
     result: Result<frost_dkg::DkgOutput, frost_dkg::DkgError>,
-    network: zcash_address::Network,
+    network: zcash_protocol::consensus::NetworkType,
     zidecar_url: String,
 ) {
     let out = match result {
@@ -189,7 +189,7 @@ async fn run_deposit_poll(
 /// derive UAs + raw 43-byte addresses for seats 0/1 at diversifier_index 1/2
 fn derive_seat_addresses(
     out: &frost_dkg::DkgOutput,
-    network: zcash_address::Network,
+    network: zcash_protocol::consensus::NetworkType,
 ) -> Result<([String; 2], [[u8; 43]; 2]), String> {
     let sk_bytes = decode_sk_hex(&out.sk_hex)?;
     let mut uas = [String::new(), String::new()];

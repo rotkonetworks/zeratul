@@ -168,7 +168,7 @@ pub struct AppState {
     house_address: String,
     zidecar_url: String,
     verify_deposits: bool,
-    network: zcash_address::Network,
+    network: zcash_protocol::consensus::NetworkType,
     /// when true, /room runs DKG via the FROST relay instead of trusted-dealer keygen
     use_dkg: bool,
     /// FROST relay WebSocket URL (used in DKG mode)
@@ -197,7 +197,7 @@ struct CreateRoomResp {
 /// Derive a real Orchard Unified Address for an escrow room via frost-spend's
 /// trusted-dealer keygen. Returns the `u1...` string. Trusted-dealer is the
 /// pragmatic shortcut for Phase 2.1 — Phase 2.2 replaces this with DKG.
-fn derive_escrow_ua(network: zcash_address::Network) -> Result<String, String> {
+fn derive_escrow_ua(network: zcash_protocol::consensus::NetworkType) -> Result<String, String> {
     let dealer = frost_spend::orchestrate::dealer_keygen(2, 3)
         .map_err(|e| format!("dealer_keygen: {:?}", e))?;
     let raw = frost_spend::orchestrate::derive_address_raw(&dealer.public_key_package_hex, 0)
@@ -614,7 +614,7 @@ async fn initiate_payout(
         _ => return Json(serde_json::json!({"error": "stored FVK is not 96 bytes"})),
     };
 
-    let mainnet = matches!(state.network, zcash_address::Network::Main);
+    let mainnet = matches!(state.network, zcash_protocol::consensus::NetworkType::Main);
     let mut outputs = Vec::with_capacity(req.outputs.len());
     for (i, out) in req.outputs.iter().enumerate() {
         let addr = match tx_build::parse_orchard_ua(&out.address, mainnet) {

@@ -1,9 +1,7 @@
 //! Orchard UA + UFVK encoding for FROST-derived group keys.
 
-use zcash_address::{
-    unified::{Address as UnifiedAddress, Encoding, Fvk, Receiver, Ufvk},
-    Network,
-};
+use zcash_address::unified::{Address as UnifiedAddress, Encoding, Fvk, Receiver, Ufvk};
+use zcash_protocol::consensus::NetworkType as Network;
 
 pub fn encode_unified(raw: [u8; 43], network: Network) -> Result<String, String> {
     let receiver = Receiver::Orchard(raw);
