@@ -642,7 +642,7 @@ async fn initiate_payout(
         },
     };
 
-    let pczt_state = match tx_build::build_payout_pczt(
+    let pczt_result = match tx_build::build_payout_pczt(
         &zidecar, &fvk_bytes, &notes, &plan, anchor_height, mainnet,
     ).await {
         Ok(s) => s,
@@ -665,11 +665,8 @@ async fn initiate_payout(
             room.payout_status = PayoutStatus::Pending { relay_room: relay_room.clone() };
         }
     }
-    tracing::info!("payout initiated for {}: relay_room={} actions={}", code, relay_room, pczt_state.alphas.len());
+    tracing::info!("payout initiated for {}: relay_room={} actions={}", code, relay_room, pczt_result.alphas.len());
 
-    // display fields for the SIGN: payload — pick the first non-zero output as the headline
-    // recipient/amount; the OVK verifier in zafu would catch divergence if we published the
-    // unsigned tx hex too (not yet — PcztState doesn't expose pre-sign bytes).
     let (disp_recipient, disp_amount) = req.outputs.iter()
         .find(|o| o.amount_zat > 0)
         .map(|o| (o.address.clone(), o.amount_zat))
@@ -682,7 +679,7 @@ async fn initiate_payout(
     let bg_fee_zat = fee_zat;
     tokio::spawn(async move {
         run_payout_signing(bg_rooms, bg_code, bg_relay_room, bg_zidecar_url, relay,
-            pkg_hex, kp_hex, seed_hex, pczt_state,
+            pkg_hex, kp_hex, seed_hex, pczt_result,
             disp_recipient, disp_amount, bg_fee_zat).await;
     });
 
@@ -699,19 +696,21 @@ async fn run_payout_signing(
     pkg_hex: String,
     kp_hex: String,
     seed_hex: String,
-    pczt_state: zecli::pczt::PcztState,
+    pczt_result: crate::tx_build::PcztBuildResult,
     disp_recipient: String,
     disp_amount_zat: u64,
     fee_zat: u64,
 ) {
+    let pczt_hex = hex::encode(&pczt_result.pczt_bytes);
     let secrets = crate::payout_signing::PayoutSignSecrets {
         key_package_hex: kp_hex,
         ephemeral_seed_hex: seed_hex,
     };
     let sigs = match crate::payout_signing::host_sign_pczt(
         &mut relay, &pkg_hex, &secrets,
-        pczt_state.sighash, &pczt_state.alphas,
+        pczt_result.sighash, &pczt_result.alphas,
         &disp_recipient, disp_amount_zat, fee_zat,
+        &pczt_hex,
         std::time::Duration::from_secs(600),
     ).await {
         Ok(s) => s,
@@ -722,11 +721,13 @@ async fn run_payout_signing(
         }
     };
 
-    let tx_bytes = match zecli::pczt::complete_pczt_tx(pczt_state, &sigs) {
+    let tx_bytes = match crate::tx_build::complete_payout_pczt(
+        &pczt_result.pczt_bytes, &sigs, &pczt_result.spend_indices,
+    ) {
         Ok(b) => b,
         Err(e) => {
-            tracing::error!("complete_pczt_tx for {}: {}", code, e);
-            mark_payout_failed(rooms, code, format!("complete_pczt_tx: {}", e)).await;
+            tracing::error!("complete_payout_pczt for {}: {}", code, e);
+            mark_payout_failed(rooms, code, format!("complete_payout_pczt: {}", e)).await;
             return;
         }
     };

@@ -25,12 +25,16 @@ zcash_note_encryption = "0.4"
 zcash_protocol = { version = "0.9", default-features = false }
 blake2b_simd = "1"
 
+# PCZT standard pipeline — same versions as zcash-wasm / zafu / zigner (NU6.2 stack)
+zcash_primitives = { version = "0.28", default-features = false, features = ["non-standard-fees"] }
+pczt = { version = "0.7", default-features = false, features = ["orchard", "transparent", "sapling", "zcp-builder", "prover", "io-finalizer", "signer", "tx-extractor"] }
+
 # web server
 axum = { version = "0.8", features = ["ws", "macros"] }
 tokio = { version = "1", features = ["full"] }
 tower-http = { version = "0.6", features = ["cors"] }
 # WS client for the FROST relay (used in Phase 2.2 onward)
-tokio-tungstenite = { version = "0.24", features = ["connect"] }
+tokio-tungstenite = { version = "0.24", features = ["connect", "rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 
 # serialization
