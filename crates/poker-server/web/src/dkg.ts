@@ -15,23 +15,30 @@
  */
 let frostCapabilityGranted: boolean | null = null
 export async function ensureFrostCapability(): Promise<boolean> {
-  if (frostCapabilityGranted === true) return true
+  if (frostCapabilityGranted === true) { console.log('[poker-dkg] ensureFrostCapability: cached=true'); return true }
   const extId = findZafuExtensionId()
-  if (!extId) return false
-  if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) return false
+  console.log('[poker-dkg] ensureFrostCapability: extId=', extId)
+  if (!extId) { console.warn('[poker-dkg] ensureFrostCapability: no zafu extension id'); return false }
+  if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+    console.warn('[poker-dkg] ensureFrostCapability: chrome.runtime.sendMessage unavailable'); return false
+  }
+  console.log('[poker-dkg] ensureFrostCapability: sending zafu_request_capability { capability: frost }')
   const granted = await new Promise<boolean>(resolve => {
     chrome.runtime.sendMessage(
       extId,
       { type: 'zafu_request_capability', capability: 'frost' },
       (resp: any) => {
         if (chrome.runtime.lastError) {
+          console.error('[poker-dkg] ensureFrostCapability: lastError=', chrome.runtime.lastError.message)
           resolve(false)
           return
         }
+        console.log('[poker-dkg] ensureFrostCapability: resp=', resp)
         resolve(!!resp?.granted || !!resp?.success)
       },
     )
   })
+  console.log('[poker-dkg] ensureFrostCapability: granted=', granted)
   frostCapabilityGranted = granted
   return granted
 }
@@ -62,11 +69,14 @@ export interface PokerDkgError {
 /** same discovery as identity.ts: window[Symbol.for('penumbra')] */
 function findZafuExtensionId(): string | null {
   const providers = (window as any)[Symbol.for('penumbra')]
-  if (!providers) return null
+  if (!providers) { console.warn('[poker-dkg] findZafuExtensionId: window[Symbol.for("penumbra")] is missing — zafu not injected'); return null }
   const entries = Object.entries(providers)
-  if (!entries.length) return null
+  console.log('[poker-dkg] findZafuExtensionId: penumbra providers=', entries.map(e => e[0]))
+  if (!entries.length) { console.warn('[poker-dkg] findZafuExtensionId: no providers'); return null }
   const [origin] = entries[0] as [string, unknown]
-  return origin.replace('chrome-extension://', '').replace(/\/$/, '')
+  const id = origin.replace('chrome-extension://', '').replace(/\/$/, '')
+  console.log('[poker-dkg] findZafuExtensionId: id=', id)
+  return id
 }
 
 export interface PokerSignRequest {
@@ -79,30 +89,37 @@ export interface PokerSignRequest {
 }
 
 export async function requestPokerSign(req: PokerSignRequest): Promise<{ success: boolean; signed?: boolean; error?: string }> {
+  console.log('[poker-dkg] requestPokerSign: called req=', req)
   const extId = findZafuExtensionId()
-  if (!extId) return { success: false, error: 'zafu extension not detected' }
+  if (!extId) { console.error('[poker-dkg] requestPokerSign: zafu extension not detected'); return { success: false, error: 'zafu extension not detected' } }
   if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+    console.error('[poker-dkg] requestPokerSign: chrome.runtime.sendMessage unavailable')
     return { success: false, error: 'chrome.runtime.sendMessage unavailable' }
   }
   if (!(await ensureFrostCapability())) {
+    console.error('[poker-dkg] requestPokerSign: frost capability denied')
     return { success: false, error: 'frost capability denied' }
   }
+  const msg = {
+    type: 'zafu_frost_sign_orchard',
+    relayUrl: req.relayUrl,
+    roomCode: req.roomCode,
+    plan: req.plan,
+    feeZat: req.feeZat ?? 10_000,
+    multisigLabel: req.multisigLabel,
+  }
+  console.log('[poker-dkg] requestPokerSign: sending zafu_frost_sign_orchard', msg)
   return new Promise(resolve => {
     chrome.runtime.sendMessage(
       extId,
-      {
-        type: 'zafu_frost_sign_orchard',
-        relayUrl: req.relayUrl,
-        roomCode: req.roomCode,
-        plan: req.plan,
-        feeZat: req.feeZat ?? 10_000,
-        multisigLabel: req.multisigLabel,
-      },
+      msg,
       (resp: any) => {
         if (chrome.runtime.lastError) {
+          console.error('[poker-dkg] requestPokerSign: lastError=', chrome.runtime.lastError.message)
           resolve({ success: false, error: chrome.runtime.lastError.message ?? 'sendMessage failed' })
           return
         }
+        console.log('[poker-dkg] requestPokerSign: zafu_frost_sign_orchard resp=', resp)
         resolve({ success: !!resp?.success, signed: !!resp?.signed, error: resp?.error })
       },
     )
@@ -148,34 +165,42 @@ export async function requestDeletePokerMultisig(req: PokerDeleteRequest): Promi
 }
 
 export async function requestPokerDkg(req: PokerDkgRequest): Promise<PokerDkgResult | PokerDkgError> {
+  console.log('[poker-dkg] requestPokerDkg: called req=', req)
   const extId = findZafuExtensionId()
   if (!extId) {
+    console.error('[poker-dkg] requestPokerDkg: zafu extension not detected')
     return { success: false, error: 'zafu extension not detected' }
   }
   if (typeof chrome === 'undefined' || !chrome.runtime?.sendMessage) {
+    console.error('[poker-dkg] requestPokerDkg: chrome.runtime.sendMessage unavailable')
     return { success: false, error: 'chrome.runtime.sendMessage unavailable' }
   }
   if (!(await ensureFrostCapability())) {
+    console.error('[poker-dkg] requestPokerDkg: frost capability denied')
     return { success: false, error: 'frost capability denied' }
   }
 
+  const msg = {
+    type: 'zafu_dkg_join',
+    relayUrl: req.relayUrl,
+    roomCode: req.roomCode,
+    threshold: req.threshold ?? 2,
+    maxSigners: req.maxSigners ?? 3,
+    labelPrefix: req.labelPrefix ?? 'POKER',
+    hide: req.hide ?? true,
+  }
+  console.log('[poker-dkg] requestPokerDkg: sending zafu_dkg_join to', extId, msg)
   return new Promise(resolve => {
     chrome.runtime.sendMessage(
       extId,
-      {
-        type: 'zafu_dkg_join',
-        relayUrl: req.relayUrl,
-        roomCode: req.roomCode,
-        threshold: req.threshold ?? 2,
-        maxSigners: req.maxSigners ?? 3,
-        labelPrefix: req.labelPrefix ?? 'POKER',
-        hide: req.hide ?? true,
-      },
+      msg,
       (resp: any) => {
         if (chrome.runtime.lastError) {
+          console.error('[poker-dkg] requestPokerDkg: lastError=', chrome.runtime.lastError.message)
           resolve({ success: false, error: chrome.runtime.lastError.message ?? 'sendMessage failed' })
           return
         }
+        console.log('[poker-dkg] requestPokerDkg: zafu_dkg_join resp=', resp)
         if (resp?.success && resp.address && resp.orchardFvk) {
           resolve({
             success: true,

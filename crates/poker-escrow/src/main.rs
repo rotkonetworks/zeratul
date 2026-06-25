@@ -168,7 +168,7 @@ pub struct AppState {
     house_address: String,
     zidecar_url: String,
     verify_deposits: bool,
-    network: zcash_address::Network,
+    network: zcash_protocol::consensus::NetworkType,
     /// when true, /room runs DKG via the FROST relay instead of trusted-dealer keygen
     use_dkg: bool,
     /// FROST relay WebSocket URL (used in DKG mode)
@@ -197,7 +197,7 @@ struct CreateRoomResp {
 /// Derive a real Orchard Unified Address for an escrow room via frost-spend's
 /// trusted-dealer keygen. Returns the `u1...` string. Trusted-dealer is the
 /// pragmatic shortcut for Phase 2.1 — Phase 2.2 replaces this with DKG.
-fn derive_escrow_ua(network: zcash_address::Network) -> Result<String, String> {
+fn derive_escrow_ua(network: zcash_protocol::consensus::NetworkType) -> Result<String, String> {
     let dealer = frost_spend::orchestrate::dealer_keygen(2, 3)
         .map_err(|e| format!("dealer_keygen: {:?}", e))?;
     let raw = frost_spend::orchestrate::derive_address_raw(&dealer.public_key_package_hex, 0)
@@ -414,8 +414,7 @@ async fn report_deposit(
         _ => return Json(serde_json::json!({"error": "invalid seat"})),
     }
 
-    let both = room.player_a_deposit >= room.required_deposit
-        && room.player_b_deposit >= room.required_deposit;
+    let both = both_deposits_satisfied(room.player_a_deposit, room.player_b_deposit, room.required_deposit);
 
     tracing::info!("deposit: room={} seat={} amount={} txid={} both={}",
         code, req.seat, req.amount, &req.txid[..req.txid.len().min(16)], both);
@@ -614,7 +613,7 @@ async fn initiate_payout(
         _ => return Json(serde_json::json!({"error": "stored FVK is not 96 bytes"})),
     };
 
-    let mainnet = matches!(state.network, zcash_address::Network::Main);
+    let mainnet = matches!(state.network, zcash_protocol::consensus::NetworkType::Main);
     let mut outputs = Vec::with_capacity(req.outputs.len());
     for (i, out) in req.outputs.iter().enumerate() {
         let addr = match tx_build::parse_orchard_ua(&out.address, mainnet) {
@@ -642,7 +641,7 @@ async fn initiate_payout(
         },
     };
 
-    let pczt_state = match tx_build::build_payout_pczt(
+    let pczt_result = match tx_build::build_payout_pczt(
         &zidecar, &fvk_bytes, &notes, &plan, anchor_height, mainnet,
     ).await {
         Ok(s) => s,
@@ -665,11 +664,8 @@ async fn initiate_payout(
             room.payout_status = PayoutStatus::Pending { relay_room: relay_room.clone() };
         }
     }
-    tracing::info!("payout initiated for {}: relay_room={} actions={}", code, relay_room, pczt_state.alphas.len());
+    tracing::info!("payout initiated for {}: relay_room={} actions={}", code, relay_room, pczt_result.alphas.len());
 
-    // display fields for the SIGN: payload — pick the first non-zero output as the headline
-    // recipient/amount; the OVK verifier in zafu would catch divergence if we published the
-    // unsigned tx hex too (not yet — PcztState doesn't expose pre-sign bytes).
     let (disp_recipient, disp_amount) = req.outputs.iter()
         .find(|o| o.amount_zat > 0)
         .map(|o| (o.address.clone(), o.amount_zat))
@@ -682,7 +678,7 @@ async fn initiate_payout(
     let bg_fee_zat = fee_zat;
     tokio::spawn(async move {
         run_payout_signing(bg_rooms, bg_code, bg_relay_room, bg_zidecar_url, relay,
-            pkg_hex, kp_hex, seed_hex, pczt_state,
+            pkg_hex, kp_hex, seed_hex, pczt_result,
             disp_recipient, disp_amount, bg_fee_zat).await;
     });
 
@@ -699,19 +695,21 @@ async fn run_payout_signing(
     pkg_hex: String,
     kp_hex: String,
     seed_hex: String,
-    pczt_state: zecli::pczt::PcztState,
+    pczt_result: crate::tx_build::PcztBuildResult,
     disp_recipient: String,
     disp_amount_zat: u64,
     fee_zat: u64,
 ) {
+    let pczt_hex = hex::encode(&pczt_result.pczt_bytes);
     let secrets = crate::payout_signing::PayoutSignSecrets {
         key_package_hex: kp_hex,
         ephemeral_seed_hex: seed_hex,
     };
     let sigs = match crate::payout_signing::host_sign_pczt(
         &mut relay, &pkg_hex, &secrets,
-        pczt_state.sighash, &pczt_state.alphas,
+        pczt_result.sighash, &pczt_result.alphas,
         &disp_recipient, disp_amount_zat, fee_zat,
+        &pczt_hex,
         std::time::Duration::from_secs(600),
     ).await {
         Ok(s) => s,
@@ -722,11 +720,13 @@ async fn run_payout_signing(
         }
     };
 
-    let tx_bytes = match zecli::pczt::complete_pczt_tx(pczt_state, &sigs) {
+    let tx_bytes = match crate::tx_build::complete_payout_pczt(
+        &pczt_result.pczt_bytes, &sigs, &pczt_result.spend_indices,
+    ) {
         Ok(b) => b,
         Err(e) => {
-            tracing::error!("complete_pczt_tx for {}: {}", code, e);
-            mark_payout_failed(rooms, code, format!("complete_pczt_tx: {}", e)).await;
+            tracing::error!("complete_payout_pczt for {}: {}", code, e);
+            mark_payout_failed(rooms, code, format!("complete_payout_pczt: {}", e)).await;
             return;
         }
     };
@@ -936,8 +936,7 @@ async fn deposit_monitor(state: AppState) {
                 continue;
             }
 
-            let both = room.player_a_deposit >= room.required_deposit
-                && room.player_b_deposit >= room.required_deposit;
+            let both = both_deposits_satisfied(room.player_a_deposit, room.player_b_deposit, room.required_deposit);
 
             if both {
                 room.game_active = true;
@@ -960,6 +959,12 @@ async fn deposit_monitor(state: AppState) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The gate that flips an escrow room to `game_active`: both seats have funded at least the
+/// required deposit. Pure helper so the rule is unit-testable without a full `EscrowRoom`.
+fn both_deposits_satisfied(a_deposit: u64, b_deposit: u64, required: u64) -> bool {
+    a_deposit >= required && b_deposit >= required
+}
 
 fn share_to_bytes(share: &osst::SecretShare<PallasScalar>) -> [u8; 36] {
     let mut buf = [0u8; 36];
@@ -1062,4 +1067,25 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deposits_gate_requires_both_seats() {
+        let required = 15_000;
+        assert!(!both_deposits_satisfied(0, 0, required));
+        assert!(!both_deposits_satisfied(15_000, 0, required));
+        assert!(!both_deposits_satisfied(0, 15_000, required));
+        assert!(both_deposits_satisfied(15_000, 15_000, required));
+    }
+
+    #[test]
+    fn deposits_gate_allows_overpayment_blocks_underpayment() {
+        let required = 15_000;
+        assert!(!both_deposits_satisfied(14_999, 15_000, required));
+        assert!(both_deposits_satisfied(15_001, 20_000, required));
+    }
 }

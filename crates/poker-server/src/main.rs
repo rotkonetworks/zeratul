@@ -453,6 +453,27 @@ impl Room {
         self.players.iter().filter(|p| matches!(p, Some(p) if p.disconnected_at.is_none())).count()
     }
 
+    /// Find a disconnected seat this (re)joining player should resume. Name must match, the
+    /// seat must be in its reconnect window, and — if the seat registered a pubkey — the
+    /// pubkey must match (anon/name-only seats skip the pubkey check).
+    fn find_reconnect_seat(&self, name: &str, pubkey: Option<&str>) -> Option<usize> {
+        self.players.iter().position(|p| {
+            matches!(p, Some(p) if
+                p.name == name &&
+                p.disconnected_at.is_some() &&
+                (p.pubkey.is_none() || p.pubkey.as_deref() == pubkey)
+            )
+        })
+    }
+
+    /// True if `name` is already held by a seat that registered a *different* pubkey — a
+    /// same-name seat-hijack attempt, which the Join handler rejects.
+    fn is_seat_hijack(&self, name: &str, pubkey: Option<&str>) -> bool {
+        self.players.iter().any(|p| matches!(p, Some(p) if
+            p.name == name && p.pubkey.is_some() && p.pubkey.as_deref() != pubkey
+        ))
+    }
+
     fn broadcast(&self, msg: &ServerMsg) {
         for p in self.players.iter().flatten() {
             let _ = p.tx.send(msg.clone());
@@ -1390,9 +1411,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
     let send_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if let Ok(json) = serde_json::to_string(&msg) {
-                if ws_tx.send(WsMessage::Text(json.into())).await.is_err() { break; }
+        // keepalive: ping every 20s so half-dead sockets (e.g. idle through the deposit
+        // wait) and proxy idle-timeouts surface promptly instead of at the next game action.
+        let mut ping = tokio::time::interval(std::time::Duration::from_secs(20));
+        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                msg = rx.recv() => match msg {
+                    Some(msg) => {
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if ws_tx.send(WsMessage::Text(json.into())).await.is_err() { break; }
+                        }
+                    }
+                    None => break,
+                },
+                _ = ping.tick() => {
+                    if ws_tx.send(WsMessage::Ping(Vec::new().into())).await.is_err() { break; }
+                }
             }
         }
     });
@@ -1491,8 +1526,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
             for seat in &abandoners {
                 let seat_idx = *seat as usize;
                 if in_settlement {
-                    // silent drop; settlement UI is the user's surface now
-                    r.players[seat_idx] = None;
+                    // keep the seat (disconnected) so the player can still reconnect into the
+                    // settlement view to sign / see the payout txid; room cleanup tears the
+                    // whole room down post-payout anyway. Nulling it here locks a >60s-offline
+                    // player out via the "table closed" guard in the Join handler.
                     continue;
                 }
                 // remove abandoner first so winner_after_abandon sees the remaining alone
@@ -1570,21 +1607,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
 
                 // reconnect match: name + disconnected_at + pubkey (if originally set)
                 // pubkey check: anon joins (pubkey=None) keep name-only fallback; pubkey-set joins require the same pubkey
-                let reconnect_seat = r.players.iter().position(|p| {
-                    matches!(p, Some(p) if
-                        p.name == name &&
-                        p.disconnected_at.is_some() &&
-                        (p.pubkey.is_none() || p.pubkey.as_deref() == pubkey.as_deref())
-                    )
-                });
+                let reconnect_seat = r.find_reconnect_seat(&name, pubkey.as_deref());
                 // detect a hijack attempt: name matches a seated player but pubkey doesn't (and
                 // they registered with one). Reject with a clear error rather than silently
                 // sliding into the fresh-join path (which would hit "table full" anyway, but
                 // the message wouldn't tell them why).
                 if reconnect_seat.is_none() {
-                    let hijack = r.players.iter().any(|p| matches!(p, Some(p) if
-                        p.name == name && p.pubkey.is_some() && p.pubkey.as_deref() != pubkey.as_deref()
-                    ));
+                    let hijack = r.is_seat_hijack(&name, pubkey.as_deref());
                     if hijack {
                         let _ = tx.send(ServerMsg::Error {
                             message: "name in use by another player on this table".into(),
@@ -2098,4 +2127,73 @@ async fn main() {
     tracing::info!("poker server listening on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_player(name: &str, pubkey: Option<&str>, disconnected: bool) -> Player {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        Player {
+            name: name.into(),
+            seat: 0,
+            pubkey: pubkey.map(str::to_string),
+            zcash_address: None,
+            tx,
+            disconnected_at: disconnected.then(tokio::time::Instant::now),
+        }
+    }
+
+    #[test]
+    fn reconnect_matches_disconnected_seat_by_name() {
+        let mut room = Room::new("t".into());
+        room.players[0] = Some(test_player("anon", None, true));
+        assert_eq!(room.find_reconnect_seat("anon", None), Some(0));
+    }
+
+    #[test]
+    fn no_reconnect_for_connected_seat() {
+        let mut room = Room::new("t".into());
+        room.players[0] = Some(test_player("anon", None, false));
+        assert_eq!(room.find_reconnect_seat("anon", None), None);
+    }
+
+    #[test]
+    fn reconnect_requires_matching_pubkey() {
+        let mut room = Room::new("t".into());
+        room.players[0] = Some(test_player("b", Some("pk1"), true));
+        assert_eq!(room.find_reconnect_seat("b", Some("pk1")), Some(0));
+        assert_eq!(room.find_reconnect_seat("b", Some("pk2")), None);
+        assert_eq!(room.find_reconnect_seat("b", None), None);
+    }
+
+    #[test]
+    fn anon_seat_reconnects_by_name_only() {
+        // a seat that registered no pubkey accepts a name-only reconnect regardless of pubkey
+        let mut room = Room::new("t".into());
+        room.players[0] = Some(test_player("anon", None, true));
+        assert_eq!(room.find_reconnect_seat("anon", Some("whatever")), Some(0));
+    }
+
+    #[test]
+    fn hijack_detected_for_mismatched_pubkey() {
+        let mut room = Room::new("t".into());
+        room.players[0] = Some(test_player("b", Some("pk1"), false));
+        assert!(room.is_seat_hijack("b", Some("pk2")));
+        assert!(room.is_seat_hijack("b", None));
+        assert!(!room.is_seat_hijack("b", Some("pk1")));
+        assert!(!room.is_seat_hijack("other", Some("pk2")));
+    }
+
+    #[test]
+    fn disconnected_seat_retained_for_reconnect_but_not_counted() {
+        // mirrors the settlement fix: a disconnected seat stays present so it can reconnect,
+        // yet does not count as an active player.
+        let mut room = Room::new("t".into());
+        room.players[0] = Some(test_player("anon", None, true));
+        room.players[1] = Some(test_player("b", None, false));
+        assert_eq!(room.player_count(), 1);
+        assert_eq!(room.find_reconnect_seat("anon", None), Some(0));
+    }
 }
