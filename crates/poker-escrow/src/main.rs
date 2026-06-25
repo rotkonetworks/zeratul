@@ -414,8 +414,7 @@ async fn report_deposit(
         _ => return Json(serde_json::json!({"error": "invalid seat"})),
     }
 
-    let both = room.player_a_deposit >= room.required_deposit
-        && room.player_b_deposit >= room.required_deposit;
+    let both = both_deposits_satisfied(room.player_a_deposit, room.player_b_deposit, room.required_deposit);
 
     tracing::info!("deposit: room={} seat={} amount={} txid={} both={}",
         code, req.seat, req.amount, &req.txid[..req.txid.len().min(16)], both);
@@ -937,8 +936,7 @@ async fn deposit_monitor(state: AppState) {
                 continue;
             }
 
-            let both = room.player_a_deposit >= room.required_deposit
-                && room.player_b_deposit >= room.required_deposit;
+            let both = both_deposits_satisfied(room.player_a_deposit, room.player_b_deposit, room.required_deposit);
 
             if both {
                 room.game_active = true;
@@ -961,6 +959,12 @@ async fn deposit_monitor(state: AppState) {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// The gate that flips an escrow room to `game_active`: both seats have funded at least the
+/// required deposit. Pure helper so the rule is unit-testable without a full `EscrowRoom`.
+fn both_deposits_satisfied(a_deposit: u64, b_deposit: u64, required: u64) -> bool {
+    a_deposit >= required && b_deposit >= required
+}
 
 fn share_to_bytes(share: &osst::SecretShare<PallasScalar>) -> [u8; 36] {
     let mut buf = [0u8; 36];
@@ -1063,4 +1067,25 @@ async fn main() {
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn deposits_gate_requires_both_seats() {
+        let required = 15_000;
+        assert!(!both_deposits_satisfied(0, 0, required));
+        assert!(!both_deposits_satisfied(15_000, 0, required));
+        assert!(!both_deposits_satisfied(0, 15_000, required));
+        assert!(both_deposits_satisfied(15_000, 15_000, required));
+    }
+
+    #[test]
+    fn deposits_gate_allows_overpayment_blocks_underpayment() {
+        let required = 15_000;
+        assert!(!both_deposits_satisfied(14_999, 15_000, required));
+        assert!(both_deposits_satisfied(15_001, 20_000, required));
+    }
 }

@@ -37,32 +37,59 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
     if (!room) return
 
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const ws = new WebSocket(`${proto}//${location.host}/${room}/ws`)
+    let ws: WebSocket
+    let intentionalClose = false
+    let reconnectAttempts = 0
+    const maxRetries = 10
 
-    ws.onopen = () => {
-      setConnected(true)
-      // pubkey gates reconnect server-side: a later reload with a different pubkey is
-      // refused, defeating name-based seat hijack. Falls back to name-only if undefined.
-      const join: Record<string, unknown> = { type: 'Join', name }
-      if (pubkey) join.pubkey = pubkey
-      if (zcashAddress) join.zcash_address = zcashAddress
-      ws.send(JSON.stringify(join))
+    function open() {
+      ws = new WebSocket(`${proto}//${location.host}/${room}/ws`)
+
+      ws.onopen = () => {
+        setConnected(true)
+        reconnectAttempts = 0
+        // pubkey gates reconnect server-side: a later reload with a different pubkey is
+        // refused, defeating name-based seat hijack. Falls back to name-only if undefined.
+        // re-sent verbatim on every (re)connect — the server matches name+pubkey to the
+        // disconnected seat and replays game/deposit/settlement state.
+        const join: Record<string, unknown> = { type: 'Join', name }
+        if (pubkey) join.pubkey = pubkey
+        if (zcashAddress) join.zcash_address = zcashAddress
+        ws.send(JSON.stringify(join))
+      }
+
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data)
+          // terminal states: the room is being torn down server-side, so stop reconnecting
+          // (a reconnect after cleanup would spawn a fresh empty room).
+          if (msg.type === 'PayoutComplete' || msg.type === 'PayoutFailed') intentionalClose = true
+          onMsg(msg)
+        } catch {}
+      }
+
+      ws.onclose = () => {
+        setConnected(false)
+        if (intentionalClose) return
+        if (reconnectAttempts < maxRetries) {
+          reconnectAttempts++
+          const delay = Math.min(reconnectAttempts, 5) * 1000
+          console.log(`[ws] disconnected, reconnecting in ${delay}ms (attempt ${reconnectAttempts}/${maxRetries})`)
+          setTimeout(open, delay)
+        } else {
+          console.log('[ws] reconnect attempts exhausted')
+          onMsg({ type: 'Error', message: 'connection lost — reload to rejoin' })
+        }
+      }
     }
 
-    ws.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data)
-        onMsg(msg)
-      } catch {}
-    }
-
-    ws.onclose = () => setConnected(false)
+    open()
 
     return {
       send: (data: Record<string, unknown>) => {
         if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(data))
       },
-      close: () => ws.close(),
+      close: () => { intentionalClose = true; ws.close() },
     }
   }
 
