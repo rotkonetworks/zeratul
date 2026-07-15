@@ -126,6 +126,10 @@ struct EscrowRoom {
     /// on the first valid deposit. `None` means the depositor forgot the memo; deposits still
     /// accrue but the game won't start until we know where to refund/pay.
     seat_payout_address: Vec<Option<String>>,
+    /// per-seat Ed25519 identity pubkey, pinned on-chain from the deposit memo's `;id:<hex>`
+    /// segment. Settlement (`POST /settle`) requires a signature from exactly this key for each
+    /// seat, so the operator cannot decide payouts unilaterally. `None` = not yet pinned.
+    seat_identity_pubkey: Vec<Option<[u8; 32]>>,
     /// every scanned incoming note kept around so the payout tx builder can spend it later.
     /// Position (orchard merkle tree leaf index) lands here when the tx builder fetches a
     /// witness from zidecar via `GetCommitmentProofs` keyed on `cmx`.
@@ -158,6 +162,17 @@ struct EscrowRoom {
     // FROST signing state (ephemeral, consumed on round 2)
     pending_nonces: Option<osst::frost::Nonces<PallasScalar>>,
     created_at: u64,
+    /// Per-room capability secret minted at creation. Whoever created the room (the poker-server
+    /// acting for the seated players) receives it once in the create response. It authorizes the
+    /// money-moving endpoints (currently `payout/initiate`). Compared in constant time. This binds
+    /// a payout request to a party that knew the room's creation secret — an anonymous HTTP caller
+    /// who only knows the room code (which is public) cannot drain the escrow.
+    payout_token: [u8; 32],
+    /// Nullifiers/txids already credited to the deposit counters, so a deposit observed by both
+    /// the HTTP `/deposit` path and the background scanner is counted exactly once. Keyed by a
+    /// canonical dedup id (nullifier hex when known from the scanner, else `txid:seat` for the
+    /// self-reported HTTP path).
+    counted_deposits: std::collections::HashSet<String>,
 }
 
 type Rooms = Arc<Mutex<HashMap<String, EscrowRoom>>>;
@@ -271,6 +286,7 @@ async fn create_room_trusted_dealer(
         seat_addresses: vec![None, None],
         seat_addr_bytes: vec![None, None],
         seat_payout_address: vec![None, None],
+        seat_identity_pubkey: vec![None, None],
         notes: Vec::new(),
         last_scanned_height: 0,
         payout_status: PayoutStatus::None,
@@ -291,8 +307,11 @@ async fn create_room_trusted_dealer(
         payout_plan: None,
         pending_nonces: None,
         created_at: now_ms(),
+        payout_token: new_payout_token(),
+        counted_deposits: std::collections::HashSet::new(),
     };
 
+    let payout_token_hex = hex::encode(room.payout_token);
     state.rooms.lock().await.insert(req.code.clone(), room);
     tracing::info!("escrow created (trusted-dealer): {} -> {}", req.code, &escrow_ua);
 
@@ -302,6 +321,7 @@ async fn create_room_trusted_dealer(
         "player_b_share": b_share_hex,
         "public_key_package": pubkey_hex,
         "dkg_mode": false,
+        "payout_token": payout_token_hex,
     }))
 }
 
@@ -331,7 +351,9 @@ async fn create_room_dkg(
         state.frost_relay_url.clone(),
         prov.frost_room_code.clone(),
         shim,
+        new_payout_token(),
     );
+    let payout_token_hex = hex::encode(room.payout_token);
     state.rooms.lock().await.insert(req.code.clone(), room);
 
     tracing::info!(
@@ -347,6 +369,7 @@ async fn create_room_dkg(
         "dkg_mode": true,
         "frost_relay_url": state.frost_relay_url,
         "frost_room_code": prov.frost_room_code,
+        "payout_token": payout_token_hex,
     }))
 }
 
@@ -394,24 +417,62 @@ async fn report_deposit(
     Path(code): Path<String>,
     Json(req): Json<DepositReport>,
 ) -> impl IntoResponse {
+    if req.seat > 1 {
+        return Json(serde_json::json!({"error": "invalid seat"}));
+    }
+
+    // BUG 2 — fail closed under verification. When ESCROW_VERIFY_DEPOSITS=true the authoritative
+    // deposit signal is the background Orchard compact-block scanner (see dkg_room::run_deposit_poll),
+    // which trial-decrypts real on-chain notes and credits by nullifier. A self-reported 0-conf HTTP
+    // amount is NOT verified against the chain here, so we must NOT credit it on trust — doing so
+    // would let a caller inflate their balance with a fabricated txid/amount. Reject and let the
+    // scanner credit the real note when it lands.
+    if state.verify_deposits {
+        let rooms = state.rooms.lock().await;
+        if rooms.get(&code).is_none() {
+            return Json(serde_json::json!({"error": "room not found"}));
+        }
+        tracing::warn!(
+            "deposit: room={} seat={} REJECTED self-report under ESCROW_VERIFY_DEPOSITS — \
+             on-chain scanner is the authoritative signal",
+            code, req.seat,
+        );
+        return Json(serde_json::json!({
+            "ok": false,
+            "error": "self-reported deposits are not credited when verification is enabled; \
+                      the on-chain scanner credits confirmed notes automatically",
+            "verify_deposits": true,
+        }));
+    }
+
+    // Demo mode (verify_deposits=false): trust the self-report, but dedup so the same txid/seat
+    // is only ever counted once, even if reported repeatedly (BUG 3 — the HTTP path and the
+    // scanner both += the same counters; dedup keys keep a deposit counted exactly once).
     let mut rooms = state.rooms.lock().await;
     let room = match rooms.get_mut(&code) {
         Some(r) => r,
         None => return Json(serde_json::json!({"error": "room not found"})),
     };
 
-    // when verify_deposits is true, we would check the txid against zidecar here.
-    // for now (demo mode), trust the client report.
-    if state.verify_deposits {
-        tracing::warn!("ESCROW_VERIFY_DEPOSITS=true but chain verification not yet implemented -- accepting report on trust");
-        // TODO: call zidecar to confirm txid pays to escrow_address
-        // let confirmed = verify_deposit_on_chain(&state.zidecar_url, &room.escrow_address, &req.txid).await;
+    let dedup_key = format!("http:{}:{}", req.txid.trim().to_lowercase(), req.seat);
+    if !room.counted_deposits.insert(dedup_key) {
+        let both = room.player_a_deposit >= room.required_deposit
+            && room.player_b_deposit >= room.required_deposit;
+        tracing::info!("deposit: room={} seat={} txid already counted — ignoring duplicate", code, req.seat);
+        return Json(serde_json::json!({
+            "ok": true,
+            "duplicate": true,
+            "player_a_deposit": room.player_a_deposit,
+            "player_b_deposit": room.player_b_deposit,
+            "both_deposited": both,
+            "game_active": room.game_active,
+        }));
     }
 
     match req.seat {
         0 => room.player_a_deposit += req.amount,
         1 => room.player_b_deposit += req.amount,
-        _ => return Json(serde_json::json!({"error": "invalid seat"})),
+        _ => unreachable!("seat validated above"),
     }
 
     let both = both_deposits_satisfied(room.player_a_deposit, room.player_b_deposit, room.required_deposit);
@@ -442,6 +503,35 @@ struct SettleReq {
     /// Zcash address for player B's payout
     player_b_address: String,
     action_log_hash: String,
+    /// hex Ed25519 signature by seat 0's pinned identity key over `settlement_message(..)`
+    #[serde(default)]
+    player_a_sig: String,
+    /// hex Ed25519 signature by seat 1's pinned identity key over `settlement_message(..)`
+    #[serde(default)]
+    player_b_sig: String,
+}
+
+/// Canonical settlement bytes that BOTH players sign. Any change to who-gets-what
+/// (stacks or destination addresses) changes these bytes, so a valid pair of
+/// signatures proves both seats agreed to this exact outcome. Field order and
+/// separators are fixed — the client must build the identical string.
+fn settlement_message(
+    code: &str, a_stack: u64, b_stack: u64, a_addr: &str, b_addr: &str, log_hash: &str,
+) -> String {
+    format!(
+        "zk.poker/settle/v1:{}:{}:{}:{}:{}:{}",
+        code, a_stack, b_stack, a_addr, b_addr, log_hash,
+    )
+}
+
+/// Verify a hex Ed25519 signature (RFC8032, as produced by WebCrypto 'Ed25519')
+/// by `pubkey` over `msg`. Returns false on any decode/length/verify failure.
+fn verify_settlement_sig(pubkey: &[u8; 32], msg: &[u8], sig_hex: &str) -> bool {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let Ok(vk) = VerifyingKey::from_bytes(pubkey) else { return false };
+    let Ok(sig_bytes) = hex::decode(sig_hex.trim()) else { return false };
+    let Ok(sig_arr) = <[u8; 64]>::try_from(sig_bytes.as_slice()) else { return false };
+    vk.verify(msg, &Signature::from_bytes(&sig_arr)).is_ok()
 }
 
 async fn settle(
@@ -457,6 +547,58 @@ async fn settle(
 
     if !room.game_active {
         return Json(serde_json::json!({"error": "game not active"}));
+    }
+
+    // ── player co-signing gate ──────────────────────────────────────────────
+    // Settlement decides who gets the pot. Require BOTH seats to sign the exact
+    // outcome with the Ed25519 identity key each pinned on-chain in their deposit
+    // memo. The operator holds no signing key here, so it cannot forge a payout.
+    // Fail closed: no pinned identities (and no explicit demo override) ⇒ refuse.
+    let allow_unsigned = std::env::var("ESCROW_ALLOW_UNSIGNED_SETTLE")
+        .ok().as_deref() == Some("1");
+    let pk_a = room.seat_identity_pubkey.get(0).and_then(|p| *p);
+    let pk_b = room.seat_identity_pubkey.get(1).and_then(|p| *p);
+    match (pk_a, pk_b) {
+        (Some(pk_a), Some(pk_b)) => {
+            let msg = settlement_message(
+                &code, req.player_a_stack, req.player_b_stack,
+                &req.player_a_address, &req.player_b_address, &req.action_log_hash,
+            );
+            let a_ok = verify_settlement_sig(&pk_a, msg.as_bytes(), &req.player_a_sig);
+            let b_ok = verify_settlement_sig(&pk_b, msg.as_bytes(), &req.player_b_sig);
+            if !a_ok || !b_ok {
+                tracing::warn!("settle REJECTED room={} — bad player signatures (a_ok={} b_ok={})", code, a_ok, b_ok);
+                return Json(serde_json::json!({
+                    "error": "settlement requires a valid Ed25519 signature from BOTH seats' pinned identity keys",
+                    "player_a_sig_ok": a_ok,
+                    "player_b_sig_ok": b_ok,
+                }));
+            }
+            // defence in depth: if a payout address was pinned on-chain, the signed
+            // destination must match it — a signature can't redirect to a fresh addr.
+            for (i, (req_addr, pinned)) in [
+                (&req.player_a_address, room.seat_payout_address.get(0).and_then(|a| a.clone())),
+                (&req.player_b_address, room.seat_payout_address.get(1).and_then(|a| a.clone())),
+            ].into_iter().enumerate() {
+                if let Some(p) = pinned {
+                    if &p != req_addr {
+                        tracing::warn!("settle REJECTED room={} seat={} — payout addr != on-chain pinned addr", code, i);
+                        return Json(serde_json::json!({"error": "payout address does not match the on-chain pinned address"}));
+                    }
+                }
+            }
+            tracing::info!("settle room={} — both player signatures verified", code);
+        }
+        _ if allow_unsigned => {
+            tracing::warn!("settle room={} — UNSIGNED (ESCROW_ALLOW_UNSIGNED_SETTLE=1, demo only)", code);
+        }
+        _ => {
+            tracing::warn!("settle REJECTED room={} — seat identities not pinned on-chain; cannot verify co-signing", code);
+            return Json(serde_json::json!({
+                "error": "seat identities are not pinned on-chain (deposit memo must carry `;id:<pubkey>`); \
+                          settlement cannot be verified. set ESCROW_ALLOW_UNSIGNED_SETTLE=1 for demo only.",
+            }));
+        }
     }
 
     // store player addresses
@@ -557,6 +699,10 @@ struct InitiatePayoutReq {
     fee_zat: u64,
     #[serde(default)]
     anchor_height: Option<u32>,
+    /// Per-room capability token minted at room creation. Authorizes this payout. May also be
+    /// supplied via the `X-Payout-Token` request header; the header takes precedence.
+    #[serde(default)]
+    payout_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -568,20 +714,35 @@ struct PayoutOutputReq {
 async fn initiate_payout(
     State(state): State<AppState>,
     Path(code): Path<String>,
+    headers: axum::http::HeaderMap,
     Json(req): Json<InitiatePayoutReq>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    let header_token = headers
+        .get("x-payout-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
     // snapshot key material + notes; reject if DKG never completed or a payout is already underway
     let snap = {
         let rooms = state.rooms.lock().await;
         let Some(room) = rooms.get(&code) else {
-            return Json(serde_json::json!({"error": "room not found"}));
+            return json_response(serde_json::json!({"error": "room not found"}));
         };
+        // AUTH: bind this money-moving request to the room's creation secret. Fail closed.
+        if let Err((status, msg)) = check_payout_token(
+            &room.payout_token,
+            header_token.as_deref(),
+            req.payout_token.as_deref(),
+        ) {
+            tracing::warn!("payout/initiate REJECTED for {}: {}", code, msg);
+            return (status, Json(serde_json::json!({"error": msg}))).into_response();
+        }
         match &room.payout_status {
             PayoutStatus::Pending { relay_room } => {
-                return Json(serde_json::json!({"error": "payout already pending", "relay_room": relay_room}));
+                return json_response(serde_json::json!({"error": "payout already pending", "relay_room": relay_room}));
             }
             PayoutStatus::Broadcast { txid, .. } => {
-                return Json(serde_json::json!({"error": "payout already broadcast", "txid": txid}));
+                return json_response(serde_json::json!({"error": "payout already broadcast", "txid": txid}));
             }
             _ => {}
         }
@@ -594,13 +755,13 @@ async fn initiate_payout(
             (Some(fvk), Some(kp), Some(seed), Some(pkg)) => {
                 (fvk.clone(), kp.clone(), seed.clone(), pkg.clone(), room.notes.clone())
             }
-            _ => return Json(serde_json::json!({"error": "DKG not complete; no key material to sign with"})),
+            _ => return json_response(serde_json::json!({"error": "DKG not complete; no key material to sign with"})),
         }
     };
     let (fvk_hex, kp_hex, seed_hex, pkg_hex, notes) = snap;
 
     if notes.is_empty() {
-        return Json(serde_json::json!({"error": "no unspent notes — nothing to spend"}));
+        return json_response(serde_json::json!({"error": "no unspent notes — nothing to spend"}));
     }
 
     // 96-byte FVK
@@ -610,7 +771,7 @@ async fn initiate_payout(
             a.copy_from_slice(&b);
             a
         }
-        _ => return Json(serde_json::json!({"error": "stored FVK is not 96 bytes"})),
+        _ => return json_response(serde_json::json!({"error": "stored FVK is not 96 bytes"})),
     };
 
     let mainnet = matches!(state.network, zcash_protocol::consensus::NetworkType::Main);
@@ -618,7 +779,7 @@ async fn initiate_payout(
     for (i, out) in req.outputs.iter().enumerate() {
         let addr = match tx_build::parse_orchard_ua(&out.address, mainnet) {
             Ok(a) => a,
-            Err(e) => return Json(serde_json::json!({"error": format!("output {} address: {}", i, e)})),
+            Err(e) => return json_response(serde_json::json!({"error": format!("output {} address: {}", i, e)})),
         };
         outputs.push(tx_build::PayoutOutput {
             address: addr,
@@ -631,13 +792,13 @@ async fn initiate_payout(
 
     let zidecar = match zecli::client::ZidecarClient::connect(&state.zidecar_url).await {
         Ok(c) => c,
-        Err(e) => return Json(serde_json::json!({"error": format!("zidecar connect: {}", e)})),
+        Err(e) => return json_response(serde_json::json!({"error": format!("zidecar connect: {}", e)})),
     };
     let anchor_height = match req.anchor_height {
         Some(h) => h,
         None => match zidecar.get_tip().await {
             Ok((tip, _)) => tip,
-            Err(e) => return Json(serde_json::json!({"error": format!("get_tip: {}", e)})),
+            Err(e) => return json_response(serde_json::json!({"error": format!("get_tip: {}", e)})),
         },
     };
 
@@ -645,17 +806,17 @@ async fn initiate_payout(
         &zidecar, &fvk_bytes, &notes, &plan, anchor_height, mainnet,
     ).await {
         Ok(s) => s,
-        Err(e) => return Json(serde_json::json!({"error": format!("build_pczt: {}", e)})),
+        Err(e) => return json_response(serde_json::json!({"error": format!("build_pczt: {}", e)})),
     };
 
     let nick = format!("escrow-payout-{}", code);
     let mut relay = match crate::frost_relay::FrostRelayClient::connect(&state.frost_relay_url, nick).await {
         Ok(c) => c,
-        Err(e) => return Json(serde_json::json!({"error": format!("relay connect: {:?}", e)})),
+        Err(e) => return json_response(serde_json::json!({"error": format!("relay connect: {:?}", e)})),
     };
     let relay_room = match relay.create_room().await {
         Ok(r) => r,
-        Err(e) => return Json(serde_json::json!({"error": format!("relay create_room: {:?}", e)})),
+        Err(e) => return json_response(serde_json::json!({"error": format!("relay create_room: {:?}", e)})),
     };
 
     {
@@ -682,7 +843,7 @@ async fn initiate_payout(
             disp_recipient, disp_amount, bg_fee_zat).await;
     });
 
-    Json(serde_json::json!({"relay_room": relay_room}))
+    json_response(serde_json::json!({"relay_room": relay_room}))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -988,6 +1149,58 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
+/// Wrap a JSON value in a 200 OK response. Used by handlers that return `Response` so their
+/// error/success bodies stay uniform.
+fn json_response(v: serde_json::Value) -> axum::response::Response {
+    Json(v).into_response()
+}
+
+/// Mint a fresh 256-bit per-room capability token from the OS CSPRNG. Returned once to the room
+/// creator; required to authorize money-moving endpoints (payout initiation).
+fn new_payout_token() -> [u8; 32] {
+    use rand::RngCore;
+    let mut t = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut t);
+    t
+}
+
+/// Constant-time equality for the 32-byte payout token. Avoids leaking how many leading bytes
+/// of a guessed token were correct via response timing.
+fn ct_eq_token(a: &[u8; 32], b: &[u8; 32]) -> bool {
+    let mut diff = 0u8;
+    for i in 0..32 {
+        diff |= a[i] ^ b[i];
+    }
+    diff == 0
+}
+
+/// Extract the caller-supplied payout token from either the `X-Payout-Token` header or the
+/// request body's `payout_token` field, decode the hex, and constant-time compare against the
+/// room's minted token. Returns `Ok(())` on match; `Err(status, message)` otherwise. Fails
+/// closed: a missing, malformed, or mismatched token is rejected.
+fn check_payout_token(
+    expected: &[u8; 32],
+    header_token: Option<&str>,
+    body_token: Option<&str>,
+) -> Result<(), (axum::http::StatusCode, &'static str)> {
+    use axum::http::StatusCode;
+    let supplied = header_token.or(body_token).map(str::trim).filter(|s| !s.is_empty());
+    let Some(supplied) = supplied else {
+        return Err((StatusCode::UNAUTHORIZED, "missing payout token"));
+    };
+    let bytes = hex::decode(supplied).map_err(|_| (StatusCode::UNAUTHORIZED, "malformed payout token"))?;
+    if bytes.len() != 32 {
+        return Err((StatusCode::UNAUTHORIZED, "payout token wrong length"));
+    }
+    let mut got = [0u8; 32];
+    got.copy_from_slice(&bytes);
+    if ct_eq_token(expected, &got) {
+        Ok(())
+    } else {
+        Err((StatusCode::FORBIDDEN, "invalid payout token"))
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
@@ -1072,6 +1285,8 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::StatusCode;
+    use std::collections::HashSet;
 
     #[test]
     fn deposits_gate_requires_both_seats() {
@@ -1087,5 +1302,126 @@ mod tests {
         let required = 15_000;
         assert!(!both_deposits_satisfied(14_999, 15_000, required));
         assert!(both_deposits_satisfied(15_001, 20_000, required));
+    }
+
+    // ── BUG 1: payout auth ────────────────────────────────────────────────
+
+    #[test]
+    fn payout_token_missing_is_rejected() {
+        let expected = new_payout_token();
+        // no header, no body token — an anonymous caller who only knows the (public) room code
+        let res = check_payout_token(&expected, None, None);
+        assert_eq!(res.unwrap_err().0, StatusCode::UNAUTHORIZED);
+    }
+
+    // ── player co-signed settlement ──────────────────────────────────────────
+
+    #[test]
+    fn settlement_sig_roundtrip_and_tamper() {
+        use ed25519_dalek::{SigningKey, Signer};
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pk: [u8; 32] = sk.verifying_key().to_bytes();
+        let msg = settlement_message("ROOM1", 1500, 500, "u1alice", "u1bob", "deadbeef");
+        let sig = hex::encode(sk.sign(msg.as_bytes()).to_bytes());
+
+        // valid signature over the exact settlement verifies
+        assert!(verify_settlement_sig(&pk, msg.as_bytes(), &sig));
+
+        // any change to the outcome (stacks) invalidates the signature
+        let tampered = settlement_message("ROOM1", 2000, 0, "u1alice", "u1bob", "deadbeef");
+        assert!(!verify_settlement_sig(&pk, tampered.as_bytes(), &sig));
+
+        // a different key does not verify
+        let other: [u8; 32] = SigningKey::from_bytes(&[9u8; 32]).verifying_key().to_bytes();
+        assert!(!verify_settlement_sig(&other, msg.as_bytes(), &sig));
+
+        // garbage signature hex is rejected, not panicked
+        assert!(!verify_settlement_sig(&pk, msg.as_bytes(), "not-hex"));
+        assert!(!verify_settlement_sig(&pk, msg.as_bytes(), ""));
+    }
+
+    #[test]
+    fn payout_memo_pins_identity_pubkey() {
+        // the on-chain memo binds the seat to a settlement key the operator can't forge
+        let pk = [0xabu8; 32];
+        let memo = format!("zk.poker/v1/payout:u1exampleaddressxxxxxxxx;id:{}", hex::encode(pk));
+        let mut buf = [0u8; 512];
+        buf[..memo.len()].copy_from_slice(memo.as_bytes());
+        let (addr, parsed_pk) = super::scanner::parse_payout_memo(&buf).expect("parses");
+        assert_eq!(addr, "u1exampleaddressxxxxxxxx");
+        assert_eq!(parsed_pk, Some(pk));
+    }
+
+    #[test]
+    fn payout_token_empty_is_rejected() {
+        let expected = new_payout_token();
+        assert_eq!(check_payout_token(&expected, Some(""), None).unwrap_err().0, StatusCode::UNAUTHORIZED);
+        assert_eq!(check_payout_token(&expected, None, Some("   ")).unwrap_err().0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn payout_token_wrong_value_is_rejected() {
+        let expected = new_payout_token();
+        let mut wrong = expected;
+        wrong[0] ^= 0xff; // flip a byte — different token
+        let res = check_payout_token(&expected, Some(&hex::encode(wrong)), None);
+        assert_eq!(res.unwrap_err().0, StatusCode::FORBIDDEN);
+    }
+
+    #[test]
+    fn payout_token_malformed_hex_is_rejected() {
+        let expected = new_payout_token();
+        assert_eq!(check_payout_token(&expected, Some("not-hex-zz"), None).unwrap_err().0, StatusCode::UNAUTHORIZED);
+        // right hex, wrong length
+        assert_eq!(check_payout_token(&expected, Some("abcd"), None).unwrap_err().0, StatusCode::UNAUTHORIZED);
+    }
+
+    #[test]
+    fn payout_token_correct_is_accepted() {
+        let expected = new_payout_token();
+        // via header
+        assert!(check_payout_token(&expected, Some(&hex::encode(expected)), None).is_ok());
+        // via body
+        assert!(check_payout_token(&expected, None, Some(&hex::encode(expected))).is_ok());
+        // header takes precedence over a bad body token
+        assert!(check_payout_token(&expected, Some(&hex::encode(expected)), Some("garbage")).is_ok());
+    }
+
+    #[test]
+    fn tokens_are_unique_per_room() {
+        // two rooms must not share a token (CSPRNG); collision would let one room's creator
+        // authorize another room's payout.
+        let a = new_payout_token();
+        let b = new_payout_token();
+        assert_ne!(a, b);
+    }
+
+    // ── BUG 3: deposit dedup ──────────────────────────────────────────────
+
+    /// Models the exact dedup keys the two credit paths use: the HTTP path keys on
+    /// `http:<txid>:<seat>`, the scanner keys on `note:<nullifier hex>`. Crediting is gated on
+    /// `HashSet::insert` returning true, so re-observation is a no-op.
+    #[test]
+    fn deposit_counted_exactly_once_across_paths() {
+        let mut counted: HashSet<String> = HashSet::new();
+        let mut balance: u64 = 0;
+
+        // scanner observes note with nullifier N, value 1000
+        let nf_key = format!("note:{}", hex::encode([7u8; 32]));
+        if counted.insert(nf_key.clone()) { balance += 1000; }
+        assert_eq!(balance, 1000);
+
+        // same poll re-runs after a reorg and re-sees the same nullifier — must not double count
+        if counted.insert(nf_key.clone()) { balance += 1000; }
+        assert_eq!(balance, 1000, "re-observed nullifier must not credit twice");
+
+        // HTTP self-report for a *different* txid credits once (demo mode)
+        let http_key = "http:deadbeef:0".to_string();
+        if counted.insert(http_key.clone()) { balance += 500; }
+        assert_eq!(balance, 1500);
+
+        // same HTTP report replayed — no double count
+        if counted.insert(http_key.clone()) { balance += 500; }
+        assert_eq!(balance, 1500, "replayed HTTP report must not credit twice");
     }
 }
