@@ -573,6 +573,35 @@ impl Room {
         self.hole_cards = vec![None; self.max_seats];
         self.community_cards = Vec::new();
 
+        // PRIVACY GATE (finding #1: operator sees plaintext cards).
+        //
+        // The server-authoritative engine deals from a plaintext `Vec<Card>` it
+        // owns, so anything it deals is visible to the operator. That is only
+        // acceptable for chip-only bot demo tables (no real value, no privacy
+        // stake). For any table that can hold real value (`!bot_friendly`) we
+        // MUST NOT leak hole cards to the operator: refuse to deal via the
+        // custodial shuffler unless the operator has explicitly opted into
+        // insecure custodial mode. The trustless deal (client-side mental-poker
+        // ceremony over the /ws/zid blind relay) is the intended replacement;
+        // see the checklist in `custodial_deal_allowed()` below.
+        if !custodial_deal_allowed(self.bot_friendly) {
+            tracing::error!(
+                "room {}: refusing to deal — custodial plaintext shuffle would leak hole cards \
+                 to the operator on a real-value table. Trustless dealing not yet wired on this \
+                 code path; set POKER_ALLOW_PLAINTEXT_DEAL=1 only for trusted/test operators.",
+                self.code
+            );
+            self.broadcast(&ServerMsg::Error {
+                message: "dealing disabled: trustless (server-blind) shuffle is not yet available \
+                          on this table, and custodial plaintext dealing is refused to protect \
+                          your hole cards from the operator".into(),
+            });
+            // roll back the hand-number/button bump so a later retry (e.g. after
+            // the operator enables the override, or a trustless path lands) is clean.
+            self.hand_number -= 1;
+            return;
+        }
+
         let (deck, deck_commitment) = shuffled_deck_with_proof();
 
         // notify players of deck commitment before dealing
@@ -715,8 +744,45 @@ fn parse_action(action: &str, amount: Option<u64>) -> Option<ActionType> {
     }
 }
 
+/// Whether the custodial (operator-visible) plaintext deal is permitted.
+///
+/// SECURITY: the custodial shuffler below produces a plaintext deck that the
+/// operator can read in full — it is NOT mental poker, and the SHA256
+/// "commitment" hides nothing from the operator (the operator holds the
+/// preimage). It is only acceptable where there is no privacy or money at
+/// stake, i.e. chip-only bot demo tables.
+///
+/// For real-value tables it is refused unless the operator explicitly opts in
+/// with `POKER_ALLOW_PLAINTEXT_DEAL=1` (trusted/test operators only). The
+/// intended replacement is the trustless client-side mental-poker ceremony,
+/// whose primitives already exist:
+///   - `zk_shuffle::remasking::ElGamalCiphertext` (encrypt / remask / decrypt)
+///   - `zk_shuffle::{prove_shuffle, verify_shuffle}` (Chaum-Pedersen shuffle)
+///   - `zk_shuffle::reveal::{PossessionProof, RevealProof}` (DLEQ reveal)
+///   - client `poker-shuffle-wasm` (`ShuffleKeys`/`ShuffleState`/`RevealState`)
+///     already drives the full 2-player ceremony end to end
+///   - `web/src/shuffle-filter.ts` already speaks the shuffle_pk/init/done/reveal wire
+///   - the blind e2ee relay (`/ws/zid`, `handle_zid_socket`) can carry it without
+///     the operator ever seeing a card.
+/// What remains is to make the live `/{code}/ws` path route dealing through that
+/// ceremony instead of the server engine's plaintext `Vec<Card>` — see the
+/// checklist in the agent report / module docs.
+fn custodial_deal_allowed(bot_friendly: bool) -> bool {
+    if bot_friendly {
+        return true; // chip-only demo: no real value, no privacy stake
+    }
+    matches!(
+        std::env::var("POKER_ALLOW_PLAINTEXT_DEAL").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    )
+}
+
 /// shuffle deck with zk-shuffle proof. returns (shuffled_cards, deck_commitment).
 /// the commitment is SHA256 of the shuffled deck — included in HandTranscript.
+///
+/// SECURITY: this is the CUSTODIAL shuffler — the returned deck is plaintext and
+/// fully visible to the operator. Callers MUST gate it behind
+/// `custodial_deal_allowed()`. It is not mental poker; see that function's docs.
 fn shuffled_deck_with_proof() -> (Vec<Card>, [u8; 32]) {
     use sha2::{Sha256, Digest};
 
@@ -1043,6 +1109,45 @@ enum LobbyClientMsg {
 
 type LobbyUsers = Arc<Mutex<HashMap<String, LobbyUser>>>;
 
+/// a connected relay peer: its outgoing frame sink and, once paired, the
+/// pubkey of the peer it exchanges frames with.
+struct PeerConn {
+    tx: mpsc::UnboundedSender<WsMessage>,
+    peer: Option<String>,
+}
+
+/// blind e2ee relay state (Path B mental poker). the relay pairs two peers by
+/// pubkey and forwards opaque frames between them; it never inspects payloads
+/// — see zafu packages/zid/src/noise-channel.ts. it only brokers a pubkey
+/// *introduction* so a host (who doesn't know the guest's key up front) learns
+/// who is connecting; the pubkeys are public and the game payloads stay e2ee.
+/// `pending` buffers frames that arrive before the destination peer connects,
+/// so the Noise handshake can't race.
+#[derive(Default)]
+struct ZidRelay {
+    /// session-pubkey (hex) -> connection
+    peers: HashMap<String, PeerConn>,
+    /// dest-pubkey (hex) -> frames waiting for that peer to connect
+    pending: HashMap<String, Vec<Vec<u8>>>,
+}
+type ZidPeers = Arc<Mutex<ZidRelay>>;
+
+/// a peer connected to a room-keyed blind relay: its nick (for join/leave
+/// notices) and its outgoing frame sink. game payloads are already e2ee
+/// (x25519 → AES-GCM, see web/src/transport.ts) — the relay only forwards the
+/// opaque `_enc` envelopes and never inspects them.
+struct RelayPeer {
+    nick: String,
+    tx: mpsc::UnboundedSender<WsMessage>,
+}
+
+/// room-keyed blind relay registry: room code -> connected peers. Seats are
+/// assigned by join order (first = 0). This is the transport for Path B: both
+/// clients run the game engine + mental-poker ceremony locally and exchange
+/// only ciphertext through here, so the operator sees no cards and the two
+/// players never open a direct socket to each other (no peer IP leak).
+type RelayRooms = Arc<Mutex<HashMap<String, Vec<RelayPeer>>>>;
+
 #[derive(Clone)]
 struct AppState {
     rooms: Rooms,
@@ -1050,11 +1155,224 @@ struct AppState {
     static_dir: String,
     /// base url of the poker-escrow service, e.g. http://127.0.0.1:3034; None disables remote escrow
     escrow_url: Option<String>,
+    /// blind e2ee relay peer registry (Path B mental poker, pubkey-paired Noise)
+    zid_peers: ZidPeers,
+    /// room-keyed blind relay registry (Path B, room-code addressed)
+    relay_rooms: RelayRooms,
 }
 
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+/// blind e2ee relay websocket (Path B mental poker).
+///
+/// the relay is a dumb pubkey-pair router: it forwards opaque frames between
+/// two peers and never sees plaintext. peers run the zafu wallet's Noise IK
+/// channel (packages/zid/src/noise-channel.ts) end-to-end over this socket, so
+/// the operator cannot read cards or alter the game. wire:
+///   - first text frame: {"type":"announce","from":<hex pk>,"to":<hex pk>}
+///   - thereafter: binary Noise frames, forwarded verbatim to peer `to`.
+async fn zid_relay_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_zid_socket(socket, state))
+}
+
+async fn handle_zid_socket(socket: WebSocket, state: AppState) {
+    use futures::{SinkExt, StreamExt};
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (tx, mut rx) = mpsc::unbounded_channel::<WsMessage>();
+
+    // send task: deliver relay frames (peer-intro text + forwarded binary)
+    let send_task = tokio::spawn(async move {
+        while let Some(frame) = rx.recv().await {
+            if ws_tx.send(frame).await.is_err() { break; }
+        }
+    });
+
+    // notify a peer which pubkey is connecting to them (public info; lets a
+    // host that has no prior knowledge of the guest address its replies)
+    fn intro(pk: &str) -> WsMessage {
+        WsMessage::Text(format!(r#"{{"type":"peer","pubkey":"{}"}}"#, pk).into())
+    }
+
+    let mut me: Option<String> = None; // our pubkey, once announced
+
+    while let Some(Ok(msg)) = ws_rx.next().await {
+        match msg {
+            WsMessage::Text(t) => {
+                // only the announce frame is inspected — it carries no secrets
+                let v: serde_json::Value = match serde_json::from_str(&t) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("type").and_then(|x| x.as_str()) != Some("announce") { continue; }
+                // `to` is optional: a host may not know the guest's key yet
+                let from = match v.get("from").and_then(|x| x.as_str()) {
+                    Some(f) => f.to_string(),
+                    None => continue,
+                };
+                let to = v.get("to").and_then(|x| x.as_str()).map(|s| s.to_string());
+
+                let mut relay = state.zid_peers.lock().await;
+                relay.peers.insert(from.clone(), PeerConn { tx: tx.clone(), peer: to.clone() });
+                // flush frames that arrived before we connected
+                if let Some(buffered) = relay.pending.remove(&from) {
+                    for frame in buffered { let _ = tx.send(WsMessage::Binary(frame.into())); }
+                }
+                // if we named a peer that is already here, pair both ways and
+                // introduce ourselves so they can address us back
+                if let Some(dest) = to {
+                    if let Some(other) = relay.peers.get_mut(&dest) {
+                        if other.peer.is_none() { other.peer = Some(from.clone()); }
+                        let _ = other.tx.send(intro(&from));
+                    }
+                }
+                me = Some(from);
+            }
+            WsMessage::Binary(data) => {
+                let Some(my_pk) = me.as_ref() else { continue }; // must announce first
+                let data = data.to_vec();
+                let mut relay = state.zid_peers.lock().await;
+                let dest = relay.peers.get(my_pk).and_then(|c| c.peer.clone());
+                match dest {
+                    Some(d) => match relay.peers.get(&d) {
+                        Some(other) => { let _ = other.tx.send(WsMessage::Binary(data.into())); }
+                        None => relay.pending.entry(d).or_default().push(data),
+                    },
+                    None => { /* not paired yet — drop until introduced */ }
+                }
+            }
+            WsMessage::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    // deregister on disconnect
+    if let Some(pk) = me {
+        let mut relay = state.zid_peers.lock().await;
+        if relay.peers.get(&pk).map_or(false, |c| c.tx.same_channel(&tx)) {
+            relay.peers.remove(&pk);
+        }
+    }
+    send_task.abort();
+}
+
+/// room-keyed blind relay websocket (Path B mental poker).
+///
+/// wire protocol (matches web/src/transport.ts `createRelayTransport`):
+///   client -> `{"t":"create","nick":..}`  -> server `{"t":"created","room":<code>}`
+///   client -> `{"t":"join","room":..,"nick":..}` -> server
+///             `{"t":"joined","room":..,"count":N,"seat":S}` to the joiner and
+///             `{"t":"system","text":"<nick> joined"}` to peers already present
+///   client -> `{"t":"msg","text":<opaque>}` -> forwarded verbatim to the other
+///             peers as `{"t":"msg","text":..,"nick":..,"ts":<ms>}`
+///   client -> `{"t":"part"}` -> leave
+/// The `text` payload is an already-encrypted envelope; the relay never parses
+/// it. Seats are assigned by join order so host/guest doesn't depend on the URL.
+async fn relay_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_relay_socket(socket, state))
+}
+
+async fn handle_relay_socket(socket: WebSocket, state: AppState) {
+    use futures::{SinkExt, StreamExt};
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (tx, mut rx) = mpsc::unbounded_channel::<WsMessage>();
+
+    let send_task = tokio::spawn(async move {
+        while let Some(m) = rx.recv().await {
+            if ws_tx.send(m).await.is_err() { break; }
+        }
+    });
+
+    fn frame(v: serde_json::Value) -> WsMessage { WsMessage::Text(v.to_string().into()) }
+    fn now_ms() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    }
+
+    let mut my_room: Option<String> = None;
+    let mut my_nick = String::from("anon");
+
+    while let Some(Ok(msg)) = ws_rx.next().await {
+        let t = match msg {
+            WsMessage::Text(t) => t,
+            WsMessage::Close(_) => break,
+            _ => continue,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&t) { Ok(v) => v, Err(_) => continue };
+        match v.get("t").and_then(|x| x.as_str()) {
+            Some("create") => {
+                if my_room.is_some() { continue; }
+                if let Some(n) = v.get("nick").and_then(|x| x.as_str()) { my_nick = n.to_string(); }
+                let code = generate_room_code();
+                state.relay_rooms.lock().await.entry(code.clone()).or_default();
+                let _ = tx.send(frame(serde_json::json!({ "t": "created", "room": code })));
+                // client follows up with a `join` for the freshly minted code
+            }
+            Some("join") => {
+                let room = match v.get("room").and_then(|x| x.as_str()) {
+                    Some(r) if !r.is_empty() => r.to_string(),
+                    _ => { let _ = tx.send(frame(serde_json::json!({ "t": "error", "msg": "missing room" }))); continue; }
+                };
+                if let Some(n) = v.get("nick").and_then(|x| x.as_str()) { my_nick = n.to_string(); }
+                let mut rooms = state.relay_rooms.lock().await;
+                let peers = rooms.entry(room.clone()).or_default();
+                // heads-up: cap at 2 players (spectators are a later, separate path)
+                if peers.iter().all(|p| !p.tx.same_channel(&tx)) && peers.len() >= 2 {
+                    drop(rooms);
+                    let _ = tx.send(frame(serde_json::json!({ "t": "error", "msg": "room full" })));
+                    continue;
+                }
+                let seat = peers.len();
+                peers.push(RelayPeer { nick: my_nick.clone(), tx: tx.clone() });
+                let count = peers.len();
+                my_room = Some(room.clone());
+                let _ = tx.send(frame(serde_json::json!({ "t": "joined", "room": room, "count": count, "seat": seat })));
+                // let peers already present know someone joined (transport.ts maps
+                // a "joined"/"reconnected" system notice to opponent presence)
+                for p in peers.iter() {
+                    if !p.tx.same_channel(&tx) {
+                        let _ = p.tx.send(frame(serde_json::json!({ "t": "system", "text": format!("{} joined", my_nick) })));
+                    }
+                }
+            }
+            Some("msg") => {
+                let Some(room) = my_room.clone() else { continue };
+                let Some(text) = v.get("text").and_then(|x| x.as_str()) else { continue };
+                let ts = now_ms();
+                let rooms = state.relay_rooms.lock().await;
+                if let Some(peers) = rooms.get(&room) {
+                    for p in peers.iter() {
+                        if !p.tx.same_channel(&tx) {
+                            let _ = p.tx.send(frame(serde_json::json!({ "t": "msg", "text": text, "nick": my_nick, "ts": ts })));
+                        }
+                    }
+                }
+            }
+            Some("part") => break,
+            _ => {}
+        }
+    }
+
+    // deregister and notify remaining peers
+    if let Some(room) = my_room {
+        let mut rooms = state.relay_rooms.lock().await;
+        if let Some(peers) = rooms.get_mut(&room) {
+            peers.retain(|p| !p.tx.same_channel(&tx));
+            for p in peers.iter() {
+                let _ = p.tx.send(frame(serde_json::json!({ "t": "system", "text": format!("{} left", my_nick) })));
+            }
+            if peers.is_empty() { rooms.remove(&room); }
+        }
+    }
+    send_task.abort();
+}
 
 /// lobby websocket — global chat, whispers, player list
 async fn lobby_ws_handler(
@@ -1215,6 +1533,14 @@ async fn list_tables(State(state): State<AppState>) -> impl IntoResponse {
     Json(get_table_list(&state.rooms).await)
 }
 
+/// client capability probe — drives which options the lobby offers.
+/// `escrow_enabled` gates real-money tables; when false the UI shows practice only.
+async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "escrow_enabled": state.escrow_url.is_some(),
+    }))
+}
+
 /// create new room and redirect to it
 /// query params for table creation
 #[derive(Deserialize, Default)]
@@ -1296,6 +1622,15 @@ async fn create_room(
     };
 
     let bot_friendly = params.bot.unwrap_or(false) && matches!(access, TableAccess::Public);
+    // don't offer what we can't honor: real-money tables need the escrow service wired.
+    // without it, refuse to create — the UI also hides the option, this is the backstop.
+    if !bot_friendly && state.escrow_url.is_none() {
+        tracing::warn!("refused real-money table create — escrow service not configured");
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "real-money tables are unavailable right now (escrow offline)",
+        ).into_response();
+    }
     let rake_bps = params.rake_bps.unwrap_or(0);
     // bot tables are chip-only demos — no FROST escrow, no DKG, no on-chain anything
     let external_escrow = if bot_friendly {
@@ -1309,7 +1644,7 @@ async fn create_room(
         spawn_deposit_poller(state.rooms.clone(), state.escrow_url.clone(), code.clone());
     }
     notify_lobby_tables(&state.rooms, &state.lobby_users).await;
-    axum::response::Redirect::to(&format!("/{}", code))
+    axum::response::Redirect::to(&format!("/{}", code)).into_response()
 }
 
 /// serve room page (same SPA, code in URL)
@@ -1731,6 +2066,26 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                 }
 
                 // fresh join
+                // integrity: on real-money tables a single wallet may not occupy two seats
+                // (playing yourself defeats the escrow). Keyed on session pubkey; anon joins
+                // (pubkey=None) are only allowed on bot/demo tables anyway.
+                if !r.bot_friendly {
+                    match pubkey.as_deref() {
+                        Some(pk) if r.players.iter().flatten().any(|p| p.pubkey.as_deref() == Some(pk)) => {
+                            let _ = tx.send(ServerMsg::Error {
+                                message: "this wallet is already seated at this table — you can't play yourself".into(),
+                            });
+                            continue;
+                        }
+                        None => {
+                            let _ = tx.send(ServerMsg::Error {
+                                message: "real-money tables require a zafu wallet".into(),
+                            });
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
                 let seat = r.players.iter().position(|p| p.is_none());
                 if let Some(seat_idx) = seat {
                     let seat = seat_idx as u8;
@@ -1926,6 +2281,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
             ClientMsg::ReportDeposit { txid, amount } => {
                 if let Some(seat) = my_seat {
                     let mut r = room.lock().await;
+                    // integrity: never trust a client-reported deposit on a real table — those are
+                    // credited only by spawn_deposit_poller reading confirmed on-chain escrow state.
+                    // This path exists for bot/demo chip play only.
+                    if !r.bot_friendly {
+                        tracing::warn!("room {} seat {}: rejected client ReportDeposit on real table", r.code, seat);
+                        r.send_to(seat, ServerMsg::Error {
+                            message: "deposits are verified on-chain, not self-reported".into(),
+                        });
+                        continue;
+                    }
                     if (seat as usize) < r.deposits.len() {
                         r.deposits[seat as usize] += amount;
                         tracing::info!("deposit: room={} seat={} amount={} txid={}",
@@ -2104,6 +2469,8 @@ async fn main() {
         lobby_users: Arc::new(Mutex::new(HashMap::new())),
         static_dir: static_dir.clone(),
         escrow_url: escrow_url.clone(),
+        zid_peers: Arc::new(Mutex::new(ZidRelay::default())),
+        relay_rooms: Arc::new(Mutex::new(HashMap::new())),
     };
 
     tracing::info!("serving static files from {}", static_dir);
@@ -2114,8 +2481,15 @@ async fn main() {
     }
 
     let app = Router::new()
+        // blind room relay. NOTE: prod HAProxy routes any `/ws*` path to a
+        // separate relay (:50053), so the client dials `/p2p` (routes to us by
+        // default). `/ws` kept as an alias for local/dev without HAProxy.
+        .route("/p2p", axum::routing::get(relay_handler))
+        .route("/ws", axum::routing::get(relay_handler))
         .route("/ws/lobby", axum::routing::get(lobby_ws_handler))
+        .route("/ws/zid", axum::routing::get(zid_relay_handler))
         .route("/api/tables", axum::routing::get(list_tables))
+        .route("/api/config", axum::routing::get(get_config))
         .route("/new", axum::routing::get(create_room))
         .route("/{code}/ws", axum::routing::get(ws_handler))
         .route("/{code}/spectate", axum::routing::get(spectate_handler))

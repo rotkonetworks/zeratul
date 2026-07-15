@@ -38,7 +38,7 @@ export interface TransportProvider {
 export type OnPeerMessage = (msg: WireMessage) => void
 
 /** callback for room events */
-export type OnRoomEvent = (event: 'joined' | 'opponent_joined' | 'opponent_left' | 'opponent_disconnected' | 'opponent_reconnected' | 'error' | 'encrypted', data?: string) => void
+export type OnRoomEvent = (event: 'joined' | 'opponent_joined' | 'opponent_left' | 'opponent_disconnected' | 'opponent_reconnected' | 'error' | 'encrypted', data?: string, seat?: number) => void
 
 // ============================================================================
 // Ephemeral encryption (x25519 ECDH → AES-256-GCM)
@@ -99,7 +99,7 @@ function fromB64(s: string): Uint8Array {
 }
 
 // ============================================================================
-// WebSocket relay transport (relay.zk.bot)
+// WebSocket relay transport (same-origin /ws)
 // ============================================================================
 
 /** configurable reconnection settings */
@@ -151,7 +151,9 @@ export function createRelayTransport(
   }
 
   function doConnect(room: string) {
-    const relayUrl = 'wss://relay.zk.bot/ws'
+    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
+    // `/p2p`, not `/ws`: prod HAProxy routes `/ws*` to a different relay service.
+    const relayUrl = `${proto}//${location.host}/p2p`
     ws = new WebSocket(relayUrl)
 
     ws.onopen = async () => {
@@ -212,9 +214,10 @@ export function createRelayTransport(
       case 'joined': {
         currentRoom = msg['room'] as string
         const count = msg['count'] as number
+        const seat = msg['seat'] as number | undefined
         if (!hasJoined) {
           hasJoined = true
-          onRoom('joined', currentRoom)
+          onRoom('joined', currentRoom, seat)
           // send our ephemeral public key + session identity signature
           if (ephemeral) {
             if (sessionIdentity) {

@@ -96,44 +96,17 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
   let directWs: { send: (data: Record<string, unknown>) => void; close: () => void } | null = null
 
   async function connect(name: string, customRules?: { smallBlind: number; bigBlind: number; buyin: number }) {
-    // try direct server mode first (centralized WebSocket)
-    const directRoom = getRoomFromUrl()
-    if (directRoom) {
-      onMsg({ type: 'Status', phase: 'connecting', message: 'connecting to table...' })
-      // resolve zid identity BEFORE the WS so we can pass pubkey on Join. Pubkey gates
-      // server-side reconnect so the seat can't be hijacked by a same-name attacker.
-      // identity() also exposes the pubkey to App.tsx for the UI badge.
-      let pubkey: string | undefined
-      try {
-        const zidIdentity = await zid.connect({ appName: 'poker.zk.bot', tradingMode: true })
-        if (name) zid.setName(name)
-        const sess: SessionIdentity = {
-          ...zidIdentity,
-          sessionPubKey: zidIdentity.pubkey,
-          nick: zidIdentity.name,
-        }
-        setIdentity(sess)
-        // walletPubkey is the persistent zafu identity; session pubkey is regenerated every connect()
-        pubkey = zidIdentity.walletPubkey || zidIdentity.pubkey
-      } catch (e) {
-        console.warn('[ws] zid.connect failed, joining anon:', e)
-      }
-      const ws = await connectDirect(name, pubkey)
-      if (ws) {
-        directWs = ws
-        return
-      }
-    }
-
-    // fallback: P2P relay mode
+    // P2P over the blind relay: both clients run the engine + mental-poker
+    // ceremony locally and exchange only ciphertext through the server relay.
+    // the operator never sees cards, and the two players never open a socket to
+    // each other (no peer IP leak). the server engine at /{code}/ws is unused.
     onMsg({ type: 'Status', phase: 'connecting', message: 'loading game engine...' })
     const wasmOk = await loadWasmEngine()
     if (!wasmOk) onMsg({ type: 'Error', message: 'game engine failed to load — using fallback' })
 
     const room = getRoomFromUrl()
-    const isHost = !room
 
-    // create session identity via zid SDK (tries zafu, falls back to ephemeral)
+    // session identity via zid SDK (zafu wallet, or ephemeral ed25519)
     const zidIdentity = await zid.connect({ appName: 'poker.zk.bot', tradingMode: true })
     if (name) zid.setName(name)
     const sess: SessionIdentity = {
@@ -144,13 +117,34 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
     setIdentity(sess)
     if (zidIdentity.mode === 'zafu') name = zidIdentity.name
 
+    // host/guest is decided by the relay-assigned seat (join order), NOT the URL:
+    // whoever joins the relay room first is seat 0 (host). the game is built once,
+    // as soon as we learn our seat. (falls back to URL if the relay omits a seat.)
+    let mySeat = -1
+
+    function buildGame(isHost: boolean) {
+      if (game) return
+      // media: WebRTC voice/video (opt-in, direct P2P, signaling over the relay)
+      media = createMedia((msg) => transport!.send(msg))
+      game = createGame(transport!, isHost, name, {
+        onMsg,
+        onLog: (t) => console.log('[game]', t),
+        onRulesProposed: (rules, fromSelf) => {
+          onMsg({ type: 'RulesProposed', buyin: rules.buyin, smallBlind: rules.smallBlind, bigBlind: rules.bigBlind, fromSelf })
+          // guest auto-accepts host's rules (they chose to join this table)
+          if (!fromSelf && !isHost) setTimeout(() => game?.acceptRules(), 500)
+        },
+        onRulesAccepted: () => onMsg({ type: 'RulesAccepted' }),
+        onEscrowReady: (addr) => onMsg({ type: 'RoomInfo', code: room ?? '', jury_nodes: 5, jury_threshold: 3, escrow: addr }),
+        onDepositConfirmed: () => {},
+        onTimerTick: (s) => { if (s >= 0) onMsg({ type: 'TimerTick', secondsLeft: s }) },
+      }, sess, customRules)
+    }
+
     transport = createRelayTransport(
       (msg: WireMessage) => {
         // media signaling filter
-        if (msg.t === '_sdp' || msg.t === '_ice') {
-          media?.handleSignal(msg)
-          return
-        }
+        if (msg.t === '_sdp' || msg.t === '_ice') { media?.handleSignal(msg); return }
         // chat filter
         if (msg.t === 'chat') {
           const text = (msg.d as any)?.text
@@ -159,39 +153,43 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
         }
         game?.onPeerMessage(msg)
       },
-      (event, data) => {
+      (event, data, seat) => {
         switch (event) {
           case 'joined':
             setConnected(true)
-            console.log('[ws] joined room:', data, 'isHost:', isHost)
+            if (mySeat < 0) {
+              mySeat = typeof seat === 'number' ? seat : (room ? 1 : 0)
+              console.log('[ws] joined room:', data, 'seat:', mySeat)
+              buildGame(mySeat === 0)
+              onMsg({ type: 'Seated', seat: mySeat, name })
+              // guest (joined second) announces immediately; host announces when
+              // the opponent arrives (opponent_joined below).
+              if (mySeat === 1) game?.announce()
+            }
             if (data) {
               setRoomInUrl(data)
               onMsg({ type: 'RoomInfo', code: data, jury_nodes: 5, jury_threshold: 3, escrow: '' })
               onMsg({ type: 'InviteLink', url: '/' + data })
             }
-            if (!isHost) {
-              console.log('[ws] guest announcing')
-              game?.announce()
-            }
             break
           case 'opponent_joined':
-            console.log('[ws] opponent_joined, isHost:', isHost, 'announced:', announced)
-            onMsg({ type: 'OpponentJoined', seat: isHost ? 1 : 0, name: 'opponent' })
-            if (isHost && !announced) {
+            console.log('[ws] opponent_joined, mySeat:', mySeat, 'announced:', announced)
+            onMsg({ type: 'OpponentJoined', seat: mySeat === 0 ? 1 : 0, name: 'opponent' })
+            if (mySeat === 0 && !announced) {
               announced = true
               console.log('[ws] host announcing (once)')
               game?.announce()
             }
             break
           case 'opponent_left':
-            onMsg({ type: 'OpponentLeft', seat: isHost ? 1 : 0 })
+            onMsg({ type: 'OpponentLeft', seat: mySeat === 0 ? 1 : 0 })
             break
           case 'opponent_disconnected':
-            onMsg({ type: 'OpponentDisconnected', seat: isHost ? 1 : 0, reconnect_secs: parseInt(data ?? '60') })
+            onMsg({ type: 'OpponentDisconnected', seat: mySeat === 0 ? 1 : 0, reconnect_secs: parseInt(data ?? '60') })
             game?.pauseTimer()
             break
           case 'opponent_reconnected':
-            onMsg({ type: 'OpponentReconnected', seat: isHost ? 1 : 0 })
+            onMsg({ type: 'OpponentReconnected', seat: mySeat === 0 ? 1 : 0 })
             game?.resumeTimer()
             break
           case 'encrypted':
@@ -206,28 +204,6 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
       sess, // pass identity for authenticated key exchange
     )
 
-    // media: WebRTC voice/video (opt-in, signaling through encrypted relay)
-    media = createMedia((msg) => transport!.send(msg))
-
-    game = createGame(transport, isHost, name, {
-      onMsg,
-      onLog: (t) => console.log('[game]', t),
-      onRulesProposed: (rules, fromSelf) => {
-        onMsg({ type: 'RulesProposed', buyin: rules.buyin, smallBlind: rules.smallBlind, bigBlind: rules.bigBlind, fromSelf })
-        // guest auto-accepts host's rules (they chose to join this table)
-        if (!fromSelf && !isHost) {
-          setTimeout(() => game?.acceptRules(), 500)
-        }
-      },
-      onRulesAccepted: () => {
-        onMsg({ type: 'RulesAccepted' })
-      },
-      onEscrowReady: (addr) => onMsg({ type: 'RoomInfo', code: room ?? '', jury_nodes: 5, jury_threshold: 3, escrow: addr }),
-      onDepositConfirmed: () => {},
-      onTimerTick: (s) => { if (s >= 0) onMsg({ type: 'TimerTick', secondsLeft: s }) },
-    }, sess, customRules)
-
-    onMsg({ type: 'Seated', seat: isHost ? 0 : 1, name })
     transport.connect(room, name)
   }
 
@@ -248,6 +224,9 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
       game?.acceptRules()
     } else if (data['type'] === 'Chat') {
       transport?.send({ t: 'chat', d: { text: data['text'] } })
+    } else if (data['type'] === 'Leave') {
+      // explicit leave: drop the relay socket so the opponent is notified
+      transport?.disconnect()
     }
   }
 
