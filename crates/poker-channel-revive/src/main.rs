@@ -95,6 +95,87 @@ fn keccak256(data: &[u8]) -> [u8; 32] {
     out
 }
 
+/// Load the deployment domain: (chain_id, contract_address).
+///
+/// Signed-state / settlement messages MUST be bound to this domain so that a
+/// signature produced for one deployment cannot be replayed against another
+/// deployment (different chain-id) or a different contract instance (different
+/// address) that happens to share the same game_id / nonce / state_hash.
+fn deployment_domain() -> ([u8; 32], [u8; 20]) {
+    let mut chain_id = [0u8; 32];
+    api::chain_id(&mut chain_id);
+    let mut contract_addr = [0u8; 20];
+    api::address(&mut contract_addr);
+    (chain_id, contract_addr)
+}
+
+/// Build the domain-separated message hash that channel participants sign for a
+/// state update / dispute.
+///
+/// message = domain_tag(11) || chain_id(32) || contract_addr(20)
+///           || game_id(32) || nonce(8) || state_hash(32)
+///
+/// The domain tag distinguishes state-update signatures from settlement
+/// signatures so the two can never be confused / cross-replayed.
+fn state_message_hash(
+    chain_id: &[u8; 32],
+    contract_addr: &[u8; 20],
+    game_id: &[u8; 32],
+    nonce: u64,
+    state_hash: &[u8; 32],
+) -> [u8; 32] {
+    const TAG: &[u8; 11] = b"POKER_STATE";
+    let mut msg = [0u8; 11 + 32 + 20 + 32 + 8 + 32];
+    let mut p = 0;
+    msg[p..p + 11].copy_from_slice(TAG);
+    p += 11;
+    msg[p..p + 32].copy_from_slice(chain_id);
+    p += 32;
+    msg[p..p + 20].copy_from_slice(contract_addr);
+    p += 20;
+    msg[p..p + 32].copy_from_slice(game_id);
+    p += 32;
+    msg[p..p + 8].copy_from_slice(&nonce.to_be_bytes());
+    p += 8;
+    msg[p..p + 32].copy_from_slice(state_hash);
+    keccak256(&msg)
+}
+
+/// Build the domain-separated message hash that channel participants sign to
+/// authorize a cooperative settlement (final payout distribution).
+///
+/// message = domain_tag(12) || chain_id(32) || contract_addr(20)
+///           || game_id(32) || nonce(8) || state_hash(32) || payouts_hash(32)
+///
+/// Binding to (nonce, state_hash) ties the settlement to the exact agreed
+/// channel state; binding to payouts_hash ties it to the exact distribution.
+fn settle_message_hash(
+    chain_id: &[u8; 32],
+    contract_addr: &[u8; 20],
+    game_id: &[u8; 32],
+    nonce: u64,
+    state_hash: &[u8; 32],
+    payouts_hash: &[u8; 32],
+) -> [u8; 32] {
+    const TAG: &[u8; 12] = b"POKER_SETTLE";
+    let mut msg = [0u8; 12 + 32 + 20 + 32 + 8 + 32 + 32];
+    let mut p = 0;
+    msg[p..p + 12].copy_from_slice(TAG);
+    p += 12;
+    msg[p..p + 32].copy_from_slice(chain_id);
+    p += 32;
+    msg[p..p + 20].copy_from_slice(contract_addr);
+    p += 20;
+    msg[p..p + 32].copy_from_slice(game_id);
+    p += 32;
+    msg[p..p + 8].copy_from_slice(&nonce.to_be_bytes());
+    p += 8;
+    msg[p..p + 32].copy_from_slice(state_hash);
+    p += 32;
+    msg[p..p + 32].copy_from_slice(payouts_hash);
+    keccak256(&msg)
+}
+
 /// recover signer from signature via ecrecover precompile (address 0x01)
 /// input: hash(32) || v(32) || r(32) || s(32) = 128 bytes
 /// output: address (32 bytes, left-padded)
@@ -145,6 +226,9 @@ fn ecrecover(msg_hash: &[u8; 32], signature: &[u8; 65]) -> Option<[u8; 20]> {
 /// verify signatures for a state update or dispute
 /// expects ABI-encoded bytes[] array starting at sigs_offset
 /// returns true if all active players have signed
+///
+/// The signed message is domain-separated by chain-id and contract address (see
+/// `state_message_hash`) so signatures cannot be replayed across deployments.
 fn verify_state_signatures(
     game_id: &[u8; 32],
     nonce: u64,
@@ -152,13 +236,25 @@ fn verify_state_signatures(
     game_data: &[u8; GAME_DATA_SIZE],
     sigs_offset: usize,
 ) -> bool {
-    // build message hash: keccak256(gameId || nonce || stateHash)
-    let mut msg = [0u8; 72];
-    msg[0..32].copy_from_slice(game_id);
-    msg[32..40].copy_from_slice(&nonce.to_be_bytes());
-    msg[40..72].copy_from_slice(state_hash);
-    let msg_hash = keccak256(&msg);
+    // build domain-separated message hash
+    let (chain_id, contract_addr) = deployment_domain();
+    let msg_hash = state_message_hash(&chain_id, &contract_addr, game_id, nonce, state_hash);
 
+    verify_all_players_signed(game_id, game_data, &msg_hash, sigs_offset)
+}
+
+/// Verify that EVERY active player (seat present in storage) has produced a valid
+/// 65-byte ECDSA signature over `msg_hash`, given an ABI-encoded `bytes[]`
+/// signatures array whose head word lives at `sigs_offset` in the calldata.
+///
+/// Returns true only if all active players signed and no malformed signature was
+/// encountered. Fails closed on any parsing/recovery error.
+fn verify_all_players_signed(
+    game_id: &[u8; 32],
+    game_data: &[u8; GAME_DATA_SIZE],
+    msg_hash: &[u8; 32],
+    sigs_offset: usize,
+) -> bool {
     let max_players = game_data[38];
 
     // read array offset from fixed params (relative to start of params at offset 4)
@@ -200,7 +296,7 @@ fn verify_state_signatures(
         signature[64] = last_chunk[0];
 
         // recover signer address
-        let signer = match ecrecover(&msg_hash, &signature) {
+        let signer = match ecrecover(msg_hash, &signature) {
             Some(addr) => addr,
             None => return false,
         };
@@ -431,8 +527,8 @@ pub extern "C" fn call() {
     else if selector == sel("dispute(bytes32,uint64,bytes32,bytes[])") {
         handle_dispute(input_len);
     }
-    // settle(bytes32 gameId, uint128[] payouts)
-    else if selector == sel("settle(bytes32,uint128[])") {
+    // settle(bytes32 gameId, uint128[] payouts, bytes[] signatures)
+    else if selector == sel("settle(bytes32,uint128[],bytes[])") {
         handle_settle(input_len);
     }
     // getGame(bytes32 gameId)
@@ -733,21 +829,50 @@ fn handle_dispute(input_len: usize) {
 }
 
 fn handle_settle(input_len: usize) {
-    // gameId(32) + payouts offset(32) + payouts length(32) + payouts...
+    // settle(bytes32 gameId, uint128[] payouts, bytes[] signatures)
+    // head: gameId(32) + payoutsOffset(32) + signaturesOffset(32)
     if input_len < 4 + 96 {
         api::return_value(ReturnFlags::REVERT, &[0x02]);
     }
 
-    let mut fixed = [0u8; 64];
-    api::call_data_copy(&mut fixed, 4);
+    // read the three head words (relative to params start at calldata offset 4)
+    let mut head = [0u8; 96];
+    api::call_data_copy(&mut head, 4);
 
     let mut game_id = [0u8; 32];
-    game_id.copy_from_slice(&fixed[0..32]);
+    game_id.copy_from_slice(&head[0..32]);
+
+    // dynamic array offsets are relative to the params start (offset 4)
+    let payouts_head =
+        4 + u32::from_be_bytes(head[60..64].try_into().unwrap()) as usize;
+    // the signatures[] head word lives at params offset 64; verify_all_players_signed
+    // will read it and follow the (also params-relative) offset.
+    let sigs_offset = 4 + 64;
 
     let key = game_key(&game_id);
     let mut game_data = [0u8; GAME_DATA_SIZE];
     if !sget(&key, &mut game_data) {
         api::return_value(ReturnFlags::REVERT, &[0x03]);
+    }
+
+    // AUTHENTICATION: only a channel participant may submit a settlement.
+    // (Matches the caller-auth pattern used by startGame/dispute.) This alone is
+    // not sufficient — the settlement is additionally bound to the agreed state
+    // and to all participants' signatures below.
+    let mut caller = [0u8; 20];
+    api::caller(&mut caller);
+    let max_players_u8 = game_data[38];
+    let mut caller_is_participant = false;
+    for seat in 0..max_players_u8 {
+        let player_k = player_key(&game_id, seat);
+        let mut player_data = [0u8; PLAYER_DATA_SIZE];
+        if sget(&player_k, &mut player_data) && player_data[0..20] == caller[..] {
+            caller_is_participant = true;
+            break;
+        }
+    }
+    if !caller_is_participant {
+        api::return_value(ReturnFlags::REVERT, &[0x20]); // caller not a participant
     }
 
     // can settle from ACTIVE (cooperative) or DISPUTED (after timeout)
@@ -765,16 +890,25 @@ fn handle_settle(input_len: usize) {
         api::return_value(ReturnFlags::REVERT, &[0x04]);
     }
 
-    // parse payouts
-    let payouts_len_offset = 4 + 64;
+    // parse payouts (dynamic array, params-relative offset)
+    let payouts_len_offset = payouts_head;
     let mut payouts_len_bytes = [0u8; 32];
     api::call_data_copy(&mut payouts_len_bytes, payouts_len_offset as u32);
     let payouts_len = u32::from_be_bytes(payouts_len_bytes[28..32].try_into().unwrap()) as usize;
 
     let max_players = game_data[38] as usize;
-    if payouts_len > max_players {
+    // hard cap at 10 seats: payout_list / player_signed / payouts_preimage are all
+    // sized for 10. Guards against OOB writes if max_players was created > 10.
+    if payouts_len > max_players || payouts_len > 10 {
         api::return_value(ReturnFlags::REVERT, &[0x17]); // too many payouts
     }
+
+    // STATE BINDING: hash the exact payouts distribution so participants' signatures
+    // commit to it. payouts_hash = keccak256(len(32) || payout_0(32) || ...).
+    // Bound to 10 seats max (payouts_len <= max_players <= 10).
+    let mut payouts_preimage = [0u8; 32 + 10 * 32];
+    payouts_preimage[0..32].copy_from_slice(&payouts_len_bytes);
+    let payouts_preimage_len = 32 + payouts_len * 32;
 
     // parse and validate payouts BEFORE any transfers
     let mut total_payout: u128 = 0;
@@ -785,6 +919,8 @@ fn handle_settle(input_len: usize) {
         let payout_offset = payouts_len_offset + 32 + i * 32;
         let mut payout_bytes = [0u8; 32];
         api::call_data_copy(&mut payout_bytes, payout_offset as u32);
+        // fold the raw word into the payouts commitment
+        payouts_preimage[32 + i * 32..64 + i * 32].copy_from_slice(&payout_bytes);
         let payout = u128::from_be_bytes(payout_bytes[16..32].try_into().unwrap());
 
         if payout > 0 {
@@ -818,6 +954,29 @@ fn handle_settle(input_len: usize) {
     }
     if total_payout > total_deposits {
         api::return_value(ReturnFlags::REVERT, &[0x1B]); // payouts exceed deposits
+    }
+
+    // STATE BINDING + AUTHORIZATION: require ALL active players to have signed the
+    // settlement, bound to the agreed on-chain state (stored nonce + state_hash)
+    // and to the exact payouts distribution, and domain-separated by chain-id +
+    // contract address. This makes cooperative close require every participant's
+    // signature and prevents an arbitrary caller from draining the pot with
+    // fabricated payouts. Fails closed on any missing/invalid signature.
+    let payouts_hash = keccak256(&payouts_preimage[0..payouts_preimage_len]);
+    let stored_nonce = u64::from_le_bytes(game_data[72..80].try_into().unwrap());
+    let mut stored_state_hash = [0u8; 32];
+    stored_state_hash.copy_from_slice(&game_data[40..72]);
+    let (chain_id, contract_addr) = deployment_domain();
+    let settle_hash = settle_message_hash(
+        &chain_id,
+        &contract_addr,
+        &game_id,
+        stored_nonce,
+        &stored_state_hash,
+        &payouts_hash,
+    );
+    if !verify_all_players_signed(&game_id, &game_data, &settle_hash, sigs_offset) {
+        api::return_value(ReturnFlags::REVERT, &[0x18]); // invalid/insufficient signatures
     }
 
     // EFFECTS: update state BEFORE transfers (CEI pattern)

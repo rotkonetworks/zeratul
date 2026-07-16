@@ -358,7 +358,7 @@ impl Arena {
 
             let mut state = GameState {
                 stacks: { let mut s = [0u32; 10]; s[0] = chips; s[1] = chips; s },
-                bets: [0; MAX_SEATS], pot: 0,
+                bets: [0; MAX_SEATS], contributed: [0; MAX_SEATS], pot: 0,
                 community: [0; MAX_COMMUNITY], community_count: 0,
                 phase: Phase::Preflop, acting_seat: button,
                 num_players: 2, hand_number: hand_num as u32, button,
@@ -544,6 +544,7 @@ impl Arena {
                     s
                 },
                 bets: [0; MAX_SEATS],
+                contributed: [0; MAX_SEATS],
                 pot: 0,
                 community: [0; MAX_COMMUNITY],
                 community_count: 0,

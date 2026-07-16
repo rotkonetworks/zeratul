@@ -9,6 +9,9 @@ polkadot-omni-node
 # node
 node_modules/
 
+# claude code worktrees / local agent state
+.claude/
+
 # large generated files
 *.explore.html
 

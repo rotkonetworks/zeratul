@@ -50,7 +50,7 @@ pub async fn run_dkg(
     total: u16,
     initial_count: u32,
     is_host: bool,
-    network: zcash_address::Network,
+    network: zcash_protocol::consensus::NetworkType,
     timeout: Duration,
 ) -> Result<DkgOutput, DkgError> {
     let deadline = Instant::now() + timeout;
@@ -290,13 +290,13 @@ mod tests {
         let carol_count = carol.join_room(&room).await.unwrap();
 
         let alice_handle = tokio::spawn(async move {
-            run_dkg(&mut alice, 3, 3, 1, true, zcash_address::Network::Test, Duration::from_secs(15)).await
+            run_dkg(&mut alice, 3, 3, 1, true, zcash_protocol::consensus::NetworkType::Test, Duration::from_secs(15)).await
         });
         let bob_handle = tokio::spawn(async move {
-            run_dkg(&mut bob, 3, 3, bob_count, false, zcash_address::Network::Test, Duration::from_secs(15)).await
+            run_dkg(&mut bob, 3, 3, bob_count, false, zcash_protocol::consensus::NetworkType::Test, Duration::from_secs(15)).await
         });
         let carol_handle = tokio::spawn(async move {
-            run_dkg(&mut carol, 3, 3, carol_count, false, zcash_address::Network::Test, Duration::from_secs(15)).await
+            run_dkg(&mut carol, 3, 3, carol_count, false, zcash_protocol::consensus::NetworkType::Test, Duration::from_secs(15)).await
         });
 
         let a = alice_handle.await.unwrap().expect("alice dkg");

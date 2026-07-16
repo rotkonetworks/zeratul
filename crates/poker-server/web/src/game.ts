@@ -18,6 +18,7 @@
 
 import type { ServerMsg, CardJson } from './types'
 import type { WireMsg, TransportProvider } from './transport'
+import { getRoomFromUrl } from './transport'
 import type { SessionIdentity } from './identity'
 import { signAction } from './identity'
 import { createNegotiation } from './negotiate'
@@ -86,6 +87,12 @@ function cardToJson(idx: number): CardJson {
   return { rank: RANKS[idx % 13]!, suit: SUITS[Math.floor(idx / 13)]! }
 }
 
+/** hex SHA-256 of a UTF-8 string (WebCrypto). Used for the canonical settlement log hash. */
+async function sha256Hex(s: string): Promise<string> {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(s))
+  return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
+}
+
 // ============================================================================
 // Game orchestrator: composes services + filters
 // ============================================================================
@@ -97,10 +104,20 @@ export function createGame(
   cb: GameCallbacks,
   identity?: SessionIdentity,
   initialRules?: Partial<GameRules>,
+  staked?: boolean,
 ) {
   const mySeat = isHost ? 0 : 1
   const oppSeat = isHost ? 1 : 0
   const send = (msg: WireMsg) => transport.send(msg)
+
+  // ── staked-settlement state ─────────────────────────────
+  // Per-seat on-chain payout addresses, pinned in each player's deposit memo and
+  // surfaced to BOTH clients by the server (DepositStatus.seat_payout_addresses).
+  // Both peers must see the SAME [seat0, seat1] ordering so they build byte-for-byte
+  // identical settlement messages. Set via setPayoutAddresses().
+  let seatPayoutAddresses: (string | null)[] = []
+  // guard: fire the co-signed settlement exactly once at match end.
+  let settlementSent = false
 
   // ── mutable hand state (reset each hand) ────────────────
   let handNum = 0
@@ -144,7 +161,7 @@ export function createGame(
     onRulesAccepted: cb.onRulesAccepted,
     onEscrowReady: cb.onEscrowReady,
     onReady: () => { if (isHost) beginDeal() },
-  }, ensureEngine, initialRules)
+  }, ensureEngine, initialRules, !!staked)
 
   // 2. shuffle
   const shuffle: ShuffleApi = createShuffle(send, isHost, ShuffleKeysClass, ShuffleStateClass, {
@@ -229,12 +246,64 @@ export function createGame(
       const winner = s0 > 0 ? 0 : 1
       cb.onLog(`game over — ${winner === mySeat ? 'you win!' : 'opponent wins'}`)
       cb.onMsg({ type: 'Error', message: winner === mySeat ? 'You win the match!' : 'Opponent wins the match.' })
+      // staked table: co-sign the agreed final outcome so the escrow can pay the
+      // real winner (server-side refund is the abandonment fallback only).
+      void sendSettlement(s0, s1)
       return // no more hands
     }
     cb.onLog(isHost ? 'next hand in 2s...' : 'waiting for next hand...')
     if (isHost) {
       setTimeout(() => beginDeal(), 2000)
     }
+  }
+
+  /** Per-seat payout addresses arrived from the server (DepositStatus). Both peers
+   *  get the SAME [seat0, seat1] list, so both build the identical settlement message. */
+  function setPayoutAddresses(addrs: (string | null)[]) {
+    if (Array.isArray(addrs) && addrs.length) seatPayoutAddresses = addrs
+  }
+
+  /** Build + sign + send this seat's half of the co-signed settlement (staked tables only).
+   *
+   *  The signed string MUST match poker-escrow's `settlement_message(..)` byte-for-byte:
+   *      zk.poker/settle/v1:{code}:{a_stack}:{b_stack}:{a_addr}:{b_addr}:{log_hash}
+   *  where seat 0 == player A (host) and seat 1 == player B (guest), regardless of "me".
+   *
+   *  Each client signs with its SESSION Ed25519 key — the same key pinned on-chain via the
+   *  deposit memo `;id:<sessionPubKey>` — so the escrow verifies each sig against the pinned
+   *  identity. Both peers submit independently; the server collects both sigs and calls /settle.
+   */
+  async function sendSettlement(s0: number, s1: number) {
+    if (!staked || !identity || settlementSent) return
+    const code = getRoomFromUrl()
+    const aAddr = seatPayoutAddresses[0]
+    const bAddr = seatPayoutAddresses[1]
+    if (!code || !aAddr || !bAddr) {
+      cb.onLog('[settle] skipped — missing room code or seat payout addresses')
+      return
+    }
+    // Seat-indexed final chip stacks (NOT reordered to "me/opp"): seat 0 = A, seat 1 = B.
+    // The escrow distributes the pot proportionally to these, so only the ratio matters and
+    // both peers hold the identical [s0, s1] from the shared engine outcome.
+    const aStack = Math.max(0, Math.floor(s0))
+    const bStack = Math.max(0, Math.floor(s1))
+    // Canonical action-log hash both peers can derive identically. The per-hand transcript
+    // diverges between peers (each fills its own sessionPub / relayTs), so it is NOT usable
+    // here; instead we hash the agreed, public match-end facts that both sides share exactly.
+    const logHash = await sha256Hex(`zk.poker/log/v1:${code}:${aStack}:${bStack}:${aAddr}:${bAddr}`)
+    const msg = `zk.poker/settle/v1:${code}:${aStack}:${bStack}:${aAddr}:${bAddr}:${logHash}`
+    const sig = await identity.sign(new TextEncoder().encode(msg))
+    settlementSent = true
+    cb.onLog(`[settle] co-signing outcome a_stack=${aStack} b_stack=${bStack}`)
+    transport.sendServer({
+      type: 'Settlement',
+      a_stack: aStack,
+      b_stack: bStack,
+      a_addr: aAddr,
+      b_addr: bAddr,
+      log_hash: logHash,
+      sig,
+    })
   }
 
   // ── engine event dispatch ───────────────────────────────
@@ -596,6 +665,7 @@ export function createGame(
     skipDeposit: () => {},
     pauseTimer: () => { pauseTurnTimer(); clearOppTimer() },
     resumeTimer: () => { resumeTurnTimer(); /* opp timer restarts when they act or we prompt */ },
+    setPayoutAddresses,
     transcript,
   }
 }

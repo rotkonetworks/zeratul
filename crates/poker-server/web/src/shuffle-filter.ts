@@ -9,8 +9,14 @@
  * isolated from the game engine. The engine is pure; the shuffle
  * filter handles the cryptographic card dealing.
  *
- * Wire messages handled: shuffle_pk, shuffle_init, shuffle_done, reveal
- * Wire messages emitted: shuffle_pk, shuffle_init, shuffle_done, reveal, phase
+ * Trustless properties (enforced by the wasm layer):
+ *  - each player proves possession of their shuffle key (rogue-key defence)
+ *  - the initial deck is canonical and verified equal on both sides
+ *  - every shuffle carries a Chaum-Pedersen proof that is verified
+ *  - every decryption share carries a DLEQ proof that is verified at reveal
+ *
+ * Wire messages handled: shuffle_pk, shuffle_init, shuffle_done, reveal, phase
+ * Wire messages emitted:  shuffle_pk, shuffle_init, shuffle_done, reveal, phase
  */
 
 import type { WireMsg } from './service'
@@ -20,6 +26,22 @@ const RANKS = ['2','3','4','5','6','7','8','9','T','J','Q','K','A']
 const SUITS = ['s','h','d','c']
 function cardToJson(idx: number): CardJson {
   return { rank: RANKS[idx % 13]!, suit: SUITS[Math.floor(idx / 13)]! }
+}
+
+/** a decryption share together with its DLEQ proof (hex) */
+interface Share {
+  share: string
+  proof: string
+}
+
+/** parse the JSON returned by wasm decrypt_share, or null if it failed */
+function parseShare(json: string | undefined | null): Share | null {
+  if (!json) return null
+  try {
+    const o = JSON.parse(json)
+    if (typeof o?.share === 'string' && typeof o?.proof === 'string') return o as Share
+  } catch { /* fall through */ }
+  return null
 }
 
 export interface ShuffleCallbacks {
@@ -57,9 +79,11 @@ export function createShuffle(
   let shuffleKeys: any = null
   let shuffleState: any = null
   let myPkHex = ''
+  let myPopHex = ''
   let oppPkHex = ''
-  let myShares = new Map<number, string>()
-  let oppShares = new Map<number, string>()
+  let oppPopHex = ''
+  let myShares = new Map<number, Share>()
+  let oppShares = new Map<number, Share>()
   let shuffleReady = false
   let communityRevealed = 0
   let communityCards = [0, 0, 0, 0, 0]
@@ -69,12 +93,26 @@ export function createShuffle(
     shuffleKeys = null
     shuffleState = null
     myPkHex = ''
+    myPopHex = ''
     oppPkHex = ''
+    oppPopHex = ''
     myShares = new Map()
     oppShares = new Map()
     shuffleReady = false
     communityRevealed = 0
     communityCards = [0, 0, 0, 0, 0]
+  }
+
+  /** create a fresh per-hand keypair + proof of possession */
+  function freshKeys() {
+    shuffleKeys = new ShuffleKeysClass()
+    myPkHex = shuffleKeys.public_key_hex()
+    myPopHex = shuffleKeys.prove_possession()
+  }
+
+  function abort(reason: string) {
+    cb.onLog(`shuffle: ${reason}`)
+    cb.onMsg({ type: 'Error', message: reason })
   }
 
   // ── shuffle ceremony ──────────────────────────────────────
@@ -83,49 +121,59 @@ export function createShuffle(
     if (!available) return
     handId++
     reset()
-    shuffleKeys = new ShuffleKeysClass()
-    myPkHex = shuffleKeys.public_key_hex()
+    freshKeys()
     cb.onLog('shuffling deck...')
     cb.onMsg({ type: 'Status', phase: 'shuffling', message: 'exchanging keys...' })
-    send({ t: 'shuffle_pk', d: { pk: myPkHex, hand: handId } })
+    send({ t: 'shuffle_pk', d: { pk: myPkHex, pop: myPopHex, hand: handId } })
     maybeContinue()
   }
 
   function maybeContinue() {
-    if (!shuffleKeys || !oppPkHex) return
+    if (!shuffleKeys || !oppPkHex || !oppPopHex) return
     if (isHost) hostShuffle()
   }
 
   function hostShuffle() {
-    shuffleState = new ShuffleStateClass(myPkHex, oppPkHex)
+    // constructor verifies both proofs of possession — a rogue key throws here
+    try {
+      shuffleState = new ShuffleStateClass(myPkHex, oppPkHex, myPopHex, oppPopHex)
+    } catch (e: any) {
+      abort(`key verification failed — opponent may be cheating: ${e}`)
+      return
+    }
     const preDeck = shuffleState.deck_hex()
     cb.onMsg({ type: 'Status', phase: 'shuffling', message: 'shuffling deck...' })
     const result = JSON.parse(shuffleState.shuffle_and_prove(0))
     cb.onMsg({ type: 'Status', phase: 'shuffling', message: 'proving shuffle...' })
-    send({ t: 'shuffle_init', d: { pk_a: myPkHex, pk_b: oppPkHex, pre_deck: preDeck, deck: result.deck, proof: result.proof } })
+    send({ t: 'shuffle_init', d: {
+      pk_a: myPkHex, pk_b: oppPkHex, pop_a: myPopHex, pop_b: oppPopHex,
+      pre_deck: preDeck, deck: result.deck, proof: result.proof,
+    } })
   }
 
   function onShuffleInit(d: any) {
-    // guest creates state from the INITIAL (pre-shuffle) deck
-    // so the transcript matches the host's state before proving
-    shuffleState = ShuffleStateClass.from_initial_deck(d.pk_a, d.pk_b, d.pre_deck)
+    // guest creates state from the INITIAL (pre-shuffle) deck so the
+    // transcript matches the host's before proving. the constructor also
+    // verifies both proofs of possession and that the initial deck is canonical.
+    try {
+      shuffleState = ShuffleStateClass.from_initial_deck(d.pk_a, d.pk_b, d.pop_a, d.pop_b, d.pre_deck)
+    } catch (e: any) {
+      abort(`deck/key verification failed — opponent may be cheating: ${e}`)
+      return
+    }
 
     // verify host's shuffle proof (Chaum-Pedersen)
     try {
       const valid = shuffleState.verify_and_apply(d.deck, d.proof)
-      if (valid) {
-        cb.onMsg({ type: 'Status', phase: 'shuffling', message: 'host shuffle verified' })
-        cb.onLog('shuffle: host proof VERIFIED ✓')
-      } else {
-        cb.onMsg({ type: 'Error', message: 'deck verification failed — opponent may be cheating' })
-        cb.onLog('shuffle: host proof FAILED — deck rejected')
-        return // abort hand
+      if (!valid) {
+        abort('host shuffle proof FAILED — deck rejected')
+        return
       }
+      cb.onMsg({ type: 'Status', phase: 'shuffling', message: 'host shuffle verified' })
+      cb.onLog('shuffle: host proof VERIFIED ✓')
     } catch (e: any) {
-      // verification threw — log the actual error for debugging
-      cb.onLog(`shuffle: verify error: ${e}`)
-      cb.onMsg({ type: 'Error', message: `shuffle verification error: ${e}` })
-      return // abort hand
+      abort(`shuffle verification error: ${e}`)
+      return
     }
 
     cb.onLog('shuffle: guest shuffling...')
@@ -137,21 +185,19 @@ export function createShuffle(
   }
 
   function onShuffleDone(d: any) {
+    if (!shuffleState) return
     // host verifies guest's shuffle proof (Chaum-Pedersen)
     try {
       const valid = shuffleState.verify_and_apply(d.deck, d.proof)
-      if (valid) {
-        cb.onMsg({ type: 'Status', phase: 'shuffling', message: 'guest shuffle verified' })
-        cb.onLog('shuffle: guest proof VERIFIED ✓')
-      } else {
-        cb.onMsg({ type: 'Error', message: 'deck verification failed — opponent may be cheating' })
-        cb.onLog('shuffle: guest proof FAILED — deck rejected')
-        return // abort hand
+      if (!valid) {
+        abort('guest shuffle proof FAILED — deck rejected')
+        return
       }
+      cb.onMsg({ type: 'Status', phase: 'shuffling', message: 'guest shuffle verified' })
+      cb.onLog('shuffle: guest proof VERIFIED ✓')
     } catch (e: any) {
-      cb.onLog(`shuffle: verify error: ${e}`)
-      cb.onMsg({ type: 'Error', message: `shuffle verification error: ${e}` })
-      return // abort hand
+      abort(`shuffle verification error: ${e}`)
+      return
     }
 
     sendShares([0, 1, 2, 3])
@@ -161,19 +207,19 @@ export function createShuffle(
   // ── share exchange ────────────────────────────────────────
 
   function sendShares(positions: number[]) {
-    // C5 FIX: for hole cards (positions 0-3), only send shares for
-    // the OPPONENT's cards. Never send your own hole card shares.
-    // Each player keeps their own shares private.
+    // C5: for hole cards (positions 0-3), only send shares for the
+    // OPPONENT's cards. Never send your own hole-card shares, or the
+    // opponent could reconstruct your hand.
     const mySeatPositions = isHost ? [0, 1] : [2, 3]
 
-    const shares: Record<number, string> = {}
+    const shares: Record<number, Share> = {}
     for (const pos of positions) {
-      const share = shuffleKeys.decrypt_share(shuffleState, pos)
-      if (share) {
-        myShares.set(pos, share) // always store locally
-        // only SEND if it's not our own hole card position
+      const parsed = parseShare(shuffleKeys.decrypt_share(shuffleState, pos))
+      if (parsed) {
+        myShares.set(pos, parsed) // always store locally
+        // only SEND if it's not our own hole-card position
         if (!mySeatPositions.includes(pos)) {
-          shares[pos] = share
+          shares[pos] = parsed
         }
       }
     }
@@ -183,9 +229,11 @@ export function createShuffle(
   }
 
   function onRevealShares(d: any) {
-    const shares = d.shares as Record<string, string>
+    const shares = d.shares as Record<string, Share>
     for (const [pos, share] of Object.entries(shares)) {
-      oppShares.set(Number(pos), share)
+      if (share && typeof share.share === 'string' && typeof share.proof === 'string') {
+        oppShares.set(Number(pos), share)
+      }
     }
     tryRevealHoleCards()
     tryRevealCommunity()
@@ -197,10 +245,13 @@ export function createShuffle(
     }
     const revealed: number[] = []
     for (const i of positions) {
-      const hostShare = isHost ? myShares.get(i)! : oppShares.get(i)!
-      const guestShare = isHost ? oppShares.get(i)! : myShares.get(i)!
-      const cardIdx = shuffleState.reveal_card(i, hostShare, guestShare)
-      if (cardIdx < 0) return null
+      // host is player A (pk_a), guest is player B (pk_b): the wasm verifies
+      // each share's DLEQ proof against the matching public key, so the a/b
+      // assignment must match how the deck was constructed.
+      const host = isHost ? myShares.get(i)! : oppShares.get(i)!
+      const guest = isHost ? oppShares.get(i)! : myShares.get(i)!
+      const cardIdx = shuffleState.reveal_card(i, host.share, host.proof, guest.share, guest.proof)
+      if (cardIdx < 0) return null // bad share or invalid DLEQ proof
       revealed.push(cardIdx)
     }
     return revealed
@@ -209,22 +260,24 @@ export function createShuffle(
   function tryRevealHoleCards() {
     if (shuffleReady) return
 
-    // C5 FIX: only reveal OUR hole cards, not opponent's
-    // we have both shares for our positions (our own + opponent sent theirs)
-    // we do NOT have both shares for opponent's positions (we only have our own)
+    // C5: only reveal OUR hole cards. we hold both shares for our positions
+    // (our own + the opponent's, which they sent); we never hold both shares
+    // for the opponent's positions, so we can't see their hand.
     const myPositions: [number, number] = isHost ? [0, 1] : [2, 3]
 
-    // check if we have both shares for our positions
     for (const p of myPositions) {
       if (!myShares.has(p) || !oppShares.has(p)) return
     }
 
     const myRevealed = revealPositions(myPositions)
-    if (!myRevealed) return
+    if (!myRevealed) {
+      abort('hole-card reveal failed — invalid decryption proof')
+      return
+    }
     shuffleReady = true
 
     const myCards: [number, number] = [myRevealed[0]!, myRevealed[1]!]
-    // opponent's cards are UNKNOWN until showdown — as it should be
+    // opponent's cards stay UNKNOWN until showdown — as it should be
     const oppCards: [number, number] = [255, 255] // sentinel: unknown
 
     cb.onLog('shuffle: hole cards revealed (zk)')
@@ -291,15 +344,16 @@ export function createShuffle(
           handId = incomingHand
           reset()
           oppPkHex = d.pk
+          oppPopHex = d.pop ?? ''
           if (available) {
-            shuffleKeys = new ShuffleKeysClass()
-            myPkHex = shuffleKeys.public_key_hex()
+            freshKeys()
             cb.onLog('shuffle: responding with key (hand ' + handId + ')')
-            send({ t: 'shuffle_pk', d: { pk: myPkHex, hand: handId } })
+            send({ t: 'shuffle_pk', d: { pk: myPkHex, pop: myPopHex, hand: handId } })
           }
         } else {
-          // reply to our own shuffle_pk (same hand) — just store their key
+          // reply to our own shuffle_pk (same hand) — just store their key + pop
           oppPkHex = d.pk
+          oppPopHex = d.pop ?? ''
           cb.onLog('shuffle: got opponent key')
         }
         maybeContinue()

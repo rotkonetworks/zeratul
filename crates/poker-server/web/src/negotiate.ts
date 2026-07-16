@@ -42,6 +42,7 @@ export function createNegotiation(
   cb: NegotiateCallbacks,
   initEngine: () => void,
   initialRules?: Partial<GameRules>,
+  staked?: boolean,
 ): NegotiateApi {
   let rules: GameRules = { ...DEFAULT_RULES, ...initialRules }
   let agreed = false
@@ -62,7 +63,16 @@ export function createNegotiation(
   }
 
   function setupEscrow() {
-    // TODO: frostito DKG via poker-sdk WASM
+    // STAKED tables: the real escrow address arrives from the SERVER (RoomInfo with a
+    // real `escrow` UA + `frost_relay_url` + `frost_room_code`), which App.tsx handles to
+    // trigger the FROST DKG. We must NOT fabricate an address here and must NOT auto-proceed
+    // as if deposits are done — the first hand is gated on the server's DepositStatus (both
+    // seats funded on-chain). So for staked tables setupEscrow is a no-op.
+    if (staked) {
+      cb.onLog('waiting for escrow + deposits…')
+      return
+    }
+    // FREE-PLAY / demo: no escrow, no wallet. Mock an address and start immediately.
     const addr = 'u1mock' + Math.random().toString(36).slice(2, 20)
     cb.onEscrowReady(addr)
     send({ t: 'escrow_ready', d: { address: addr } })
@@ -85,6 +95,9 @@ export function createNegotiation(
         initEngine()
         return true
       case 'escrow_ready':
+        // staked tables never take the mock escrow path; ignore any stray peer signal so
+        // the hand can't start before the server confirms on-chain deposits.
+        if (staked) return true
         cb.onEscrowReady((msg.d as any).address)
         cb.onLog('deposits skipped (demo)')
         cb.onReady()

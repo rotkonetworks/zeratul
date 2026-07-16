@@ -8,6 +8,12 @@ description = "poker state channel contract for revive/polkavm"
 uapi = { package = "pallet-revive-uapi", version = "0.9", default-features = false }
 polkavm-derive = "0.30.0"
 
+# dev-only: pure-Rust keccak256 (zero transitive deps, host-independent) used to
+# assert the signed-message domain-separation layout in tests/. Does NOT affect
+# the contract binary — dev-dependencies are excluded from the built artifact.
+[dev-dependencies]
+keccak-const = "0.2"
+
 [[bin]]
 name = "poker-channel"
 path = "src/main.rs"

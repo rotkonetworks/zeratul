@@ -50,9 +50,9 @@ pub struct SignOutput {
 // PCZT-driven multi-action signing (unified wire with zafu mnemonic-sign / multisig/sign)
 // ────────────────────────────────────────────────────────────────────────────
 // Wire (matches zafu/apps/extension/src/routes/popup/send/frost-multisig/relay-protocol.ts):
-//   SIGN:<sighash hex>:<alpha1,alpha2,...>:<recipient>:<amount_zat>:<fee_zat>   (host, once)
-//   C:<commit1>|<commit2>|...                                                   (both, once — N commits each, pipe-separated)
-//   S:<action_idx>:<share>                                                      (both, N times, one per action)
+//   SIGN:<sighash hex>:<alpha1,alpha2,...>:<recipient>:<amount_zat>:<fee_zat>[:<pcztHex>]  (host, once)
+//   C:<commit1>|<commit2>|...                                                               (both, once — N commits each, pipe-separated)
+//   S:<action_idx>:<share>                                                                  (both, N times, one per action)
 
 #[derive(Debug, Clone)]
 pub struct PayoutSignSecrets {
@@ -60,16 +60,14 @@ pub struct PayoutSignSecrets {
     pub ephemeral_seed_hex: String,
 }
 
-/// 64-byte SpendAuth signatures, parallel to the bundle's actions; pass directly to
-/// `zecli::pczt::complete_pczt_tx`.
+/// 64-byte SpendAuth signatures, parallel to the bundle's real spends; pass to
+/// `tx_build::complete_payout_pczt` together with `spend_indices`.
 pub type ActionSigs = Vec<[u8; 64]>;
 
 /// Host the multi-action signing for a PCZT we built. `sighash` + `alphas` come from
-/// `zecli::pczt::PcztState` after `tx_build::build_payout_pczt`. `display_*` fields are
-/// what zafu's approval popup shows to the user (recipient = first non-zero output's UA,
-/// amount = first non-zero output's zat). The on-chain bundle can have additional outputs;
-/// the OVK-decrypt verifier in zafu would catch divergence (skipped here until we publish
-/// the unsigned tx hex with the SIGN message).
+/// `tx_build::build_payout_pczt`. `pczt_hex` is the serialized standard PCZT (hex) that
+/// the joiner uses for independent OVK-verification of the recipient/amount before signing
+/// (gh #17 migration, matches zafu relay-protocol.ts SIGN wire format).
 #[allow(clippy::too_many_arguments)]
 pub async fn host_sign_pczt(
     client: &mut FrostRelayClient,
@@ -80,18 +78,20 @@ pub async fn host_sign_pczt(
     display_recipient: &str,
     display_amount_zat: u64,
     fee_zat: u64,
+    pczt_hex: &str,
     timeout: Duration,
 ) -> Result<ActionSigs, SignError> {
     let deadline = Instant::now() + timeout;
     wait_for_peer(client, &deadline).await?;
 
     let sign_msg = format!(
-        "SIGN:{}:{}:{}:{}:{}",
+        "SIGN:{}:{}:{}:{}:{}:{}",
         hex::encode(sighash),
         alphas.iter().map(hex::encode).collect::<Vec<_>>().join(","),
         display_recipient,
         display_amount_zat,
         fee_zat,
+        pczt_hex,
     );
     client.send_message(sign_msg.as_bytes()).await?;
     run_multi_rounds(client, public_key_package_hex, secrets, sighash, alphas, &deadline).await
@@ -513,7 +513,7 @@ mod tests {
         let alphas_for_host = alphas.clone();
         let host = tokio::spawn(async move {
             host_sign_pczt(&mut alice, &pkg_for_host, &secrets_a, sighash, &alphas_for_host,
-                "u1test", 1234, 10_000, Duration::from_secs(30)).await
+                "u1test", 1234, 10_000, "", Duration::from_secs(30)).await
         });
         let join = tokio::spawn(async move {
             join_sign_pczt(&mut bob, &pkg_for_join, &secrets_b, Duration::from_secs(30)).await

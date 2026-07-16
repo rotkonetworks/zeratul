@@ -36,6 +36,10 @@ pub struct DepositNote {
     /// refunds / payouts go for this seat. `None` means the depositor forgot the memo and the
     /// game cannot start until a memo-bearing top-up arrives.
     pub payout_address: Option<String>,
+    /// `Some(32-byte)` when the memo pinned a `;id:<hex>` Ed25519 identity pubkey. This is the
+    /// key escrow requires a settlement signature from for this seat (set on-chain by the
+    /// depositor, so the operator cannot forge it). `None` = no identity pinned.
+    pub identity_pubkey: Option<[u8; 32]>,
     /// 32-byte note nullifier; used to mark the note spent when we sign a payout tx.
     pub nullifier: [u8; 32],
     /// 32-byte note commitment (`cmx`). zidecar's `GetCommitmentProofs` keys on this.
@@ -104,15 +108,29 @@ fn extract_enc_ciphertext(
     None
 }
 
-fn parse_payout_memo(memo_bytes: &[u8]) -> Option<String> {
+/// Parse the deposit memo `zk.poker/v1/payout:<u1addr>[;id:<64-hex>]`.
+/// Returns the payout address and, when present, the depositor's 32-byte Ed25519
+/// identity pubkey. The pubkey is pinned ON-CHAIN by the depositor here — only the
+/// party who owns the deposit can set it — so at settlement escrow can require a
+/// signature from exactly this key. The operator cannot substitute its own key.
+pub(crate) fn parse_payout_memo(memo_bytes: &[u8]) -> Option<(String, Option<[u8; 32]>)> {
     let end = memo_bytes.iter().rposition(|&b| b != 0).map(|i| i + 1).unwrap_or(0);
     let text = std::str::from_utf8(&memo_bytes[..end]).ok()?;
     let suffix = text.strip_prefix(PAYOUT_MEMO_PREFIX)?.trim();
-    if !(suffix.starts_with("u1") || suffix.starts_with("utest1") || suffix.starts_with("uregtest1")) {
+    // split off an optional `;id:<hex>` identity-pin segment
+    let (addr_part, id_part) = match suffix.split_once(";id:") {
+        Some((a, id)) => (a.trim(), Some(id.trim())),
+        None => (suffix, None),
+    };
+    if !(addr_part.starts_with("u1") || addr_part.starts_with("utest1") || addr_part.starts_with("uregtest1")) {
         return None;
     }
-    if suffix.len() < 20 || suffix.len() > 256 { return None; }
-    Some(suffix.to_string())
+    if addr_part.len() < 20 || addr_part.len() > 256 { return None; }
+    let pubkey = id_part.and_then(|h| {
+        let bytes = hex::decode(h).ok()?;
+        <[u8; 32]>::try_from(bytes.as_slice()).ok()
+    });
+    Some((addr_part.to_string(), pubkey))
 }
 
 /// Scan from `last_height + 1` to tip and return every note that landed at one of
@@ -193,7 +211,7 @@ pub async fn scan(
                 // re-decrypt the full ciphertext to recover the 512-byte memo. extra round-trip
                 // per matched action only; the vast majority of blocks have no hits, so cost
                 // stays bounded in practice.
-                let payout_address = match client.get_transaction(&action.txid).await {
+                let parsed_memo = match client.get_transaction(&action.txid).await {
                     Ok(raw_tx) => extract_enc_ciphertext(&raw_tx, &action.cmx, &action.ephemeral_key)
                         .and_then(|enc| {
                             let full = FullOutput { epk: action.ephemeral_key, cmx: action.cmx, enc };
@@ -205,6 +223,8 @@ pub async fn scan(
                         None
                     }
                 };
+                let payout_address = parsed_memo.as_ref().map(|(a, _)| a.clone());
+                let identity_pubkey = parsed_memo.and_then(|(_, pk)| pk);
 
                 found.push(DepositNote {
                     seat: seat as u8,
@@ -212,6 +232,7 @@ pub async fn scan(
                     txid: action.txid.clone(),
                     block_height: block.height,
                     payout_address,
+                    identity_pubkey,
                     nullifier: action.nullifier,
                     cmx: action.cmx,
                     recipient: addr_bytes,

@@ -17,6 +17,7 @@ pub mod audit;
 pub mod poker;
 pub mod proof;
 pub mod remasking;
+pub mod reveal;
 pub mod shuffle_argument;
 pub mod transcript;
 pub mod verify;
@@ -33,6 +34,7 @@ use alloc::string::String;
 
 pub use proof::{ShuffleProof, prove_shuffle};
 pub use remasking::ElGamalCiphertext;
+pub use reveal::{PossessionProof, RevealProof};
 pub use transcript::ShuffleTranscript;
 pub use verify::verify_shuffle;
 pub use shuffle_argument::{

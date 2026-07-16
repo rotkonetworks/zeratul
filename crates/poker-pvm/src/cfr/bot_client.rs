@@ -290,7 +290,7 @@ fn build_game_state(
         gs_bets[i] = b as u32;
     }
     poker_pvm::GameState {
-        stacks: gs_stacks, bets: gs_bets, pot: pot as u32,
+        stacks: gs_stacks, bets: gs_bets, contributed: [0; poker_pvm::MAX_SEATS], pot: pot as u32,
         community: *community, community_count: cc, phase,
         acting_seat: acting, num_players, hand_number, button, seat_state,
         cards: [[0; 2]; poker_pvm::MAX_SEATS],

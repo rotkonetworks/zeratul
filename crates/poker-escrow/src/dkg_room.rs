@@ -35,7 +35,7 @@ pub async fn provision(
     rooms: Rooms,
     room_code: String,
     relay_url: String,
-    network: zcash_address::Network,
+    network: zcash_protocol::consensus::NetworkType,
     zidecar_url: String,
 ) -> Result<DkgProvision, String> {
     let nick = format!("escrow-{}", room_code);
@@ -69,7 +69,7 @@ async fn write_dkg_result(
     rooms: Rooms,
     code: &str,
     result: Result<frost_dkg::DkgOutput, frost_dkg::DkgError>,
-    network: zcash_address::Network,
+    network: zcash_protocol::consensus::NetworkType,
     zidecar_url: String,
 ) {
     let out = match result {
@@ -153,10 +153,20 @@ async fn run_deposit_poll(
                 room.last_scanned_height = new_tip;
                 for n in notes {
                     let txid_short = hex::encode(&n.txid[..n.txid.len().min(8)]);
-                    match n.seat {
-                        0 => room.player_a_deposit = room.player_a_deposit.saturating_add(n.value_zat),
-                        1 => room.player_b_deposit = room.player_b_deposit.saturating_add(n.value_zat),
-                        _ => {}
+                    // BUG 3 — dedup by nullifier so a deposit credits the counters exactly once,
+                    // even if the same note is observed on a subsequent poll (e.g. after a reorg
+                    // rescans an overlapping height range) or was already counted. The nullifier
+                    // is globally unique per note, so it's the canonical dedup key.
+                    let dedup_key = format!("note:{}", hex::encode(n.nullifier));
+                    let newly_counted = room.counted_deposits.insert(dedup_key);
+                    if newly_counted {
+                        match n.seat {
+                            0 => room.player_a_deposit = room.player_a_deposit.saturating_add(n.value_zat),
+                            1 => room.player_b_deposit = room.player_b_deposit.saturating_add(n.value_zat),
+                            _ => {}
+                        }
+                    } else {
+                        tracing::debug!("deposit room={} seat={} nullifier already counted — skipping credit", code, n.seat);
                     }
                     if let (Some(addr), Some(slot)) = (
                         n.payout_address.as_ref(),
@@ -171,6 +181,17 @@ async fn run_deposit_poll(
                             "deposit room={} seat={} val={} MISSING payout memo — game cannot start until top-up with `zk.poker/v1/payout:<addr>`",
                             code, n.seat, n.value_zat,
                         );
+                    }
+                    // pin the depositor's settlement identity key from the on-chain memo.
+                    // first pin wins (a later top-up can't rebind the seat to a different key).
+                    if let (Some(pk), Some(slot)) = (
+                        n.identity_pubkey,
+                        room.seat_identity_pubkey.get_mut(n.seat as usize),
+                    ) {
+                        if slot.is_none() {
+                            *slot = Some(pk);
+                            tracing::info!("deposit room={} seat={} identity pinned={}", code, n.seat, hex::encode(pk));
+                        }
                     }
                     tracing::info!(
                         "deposit room={} seat={} val={} tx={} h={}",
@@ -189,7 +210,7 @@ async fn run_deposit_poll(
 /// derive UAs + raw 43-byte addresses for seats 0/1 at diversifier_index 1/2
 fn derive_seat_addresses(
     out: &frost_dkg::DkgOutput,
-    network: zcash_address::Network,
+    network: zcash_protocol::consensus::NetworkType,
 ) -> Result<([String; 2], [[u8; 43]; 2]), String> {
     let sk_bytes = decode_sk_hex(&out.sk_hex)?;
     let mut uas = [String::new(), String::new()];
@@ -223,6 +244,7 @@ pub fn empty_room(
     frost_relay_url: String,
     frost_room_code: String,
     legacy_osst: LegacyOsstShim,
+    payout_token: [u8; 32],
 ) -> EscrowRoom {
     EscrowRoom {
         code,
@@ -237,6 +259,7 @@ pub fn empty_room(
         seat_addresses: vec![None, None],
         seat_addr_bytes: vec![None, None],
         seat_payout_address: vec![None, None],
+        seat_identity_pubkey: vec![None, None],
         notes: Vec::new(),
         last_scanned_height: 0,
         payout_status: crate::PayoutStatus::None,
@@ -257,6 +280,8 @@ pub fn empty_room(
         payout_plan: None,
         pending_nonces: None,
         created_at: now_ms(),
+        payout_token,
+        counted_deposits: std::collections::HashSet::new(),
     }
 }
 

@@ -126,6 +126,11 @@ pub struct GameState {
     pub stacks: [u32; MAX_SEATS],
     pub pot: u32,
     pub bets: [u32; MAX_SEATS],
+    /// total chips each seat has committed to the pot over the whole hand.
+    /// used to build side pots at showdown (per-seat eligibility). uncalled
+    /// bets returned by `equalize_bets` are subtracted back out, so this only
+    /// ever reflects chips that are actually live in `pot`.
+    pub contributed: [u32; MAX_SEATS],
     pub seat_state: [SeatState; MAX_SEATS],
     pub cards: [[u8; 2]; MAX_SEATS],
     pub community: [u8; MAX_COMMUNITY],
@@ -450,6 +455,7 @@ impl GameState {
             stacks,
             pot: 0,
             bets: [0; MAX_SEATS],
+            contributed: [0; MAX_SEATS],
             seat_state,
             cards: [[0; 2]; MAX_SEATS],
             community: [0; MAX_COMMUNITY],
@@ -533,6 +539,7 @@ impl GameState {
         self.community_count = 0;
         self.pot = 0;
         self.bets = [0; MAX_SEATS];
+        self.contributed = [0; MAX_SEATS];
         self.round_actions = 0;
         self.last_aggressor = 255;
         self.action_count = 0;
@@ -561,7 +568,12 @@ impl GameState {
         self.stacks[bb] -= bb_amount;
         self.bets[sb] = sb_amount;
         self.bets[bb] = bb_amount;
+        self.contributed[sb] += sb_amount;
+        self.contributed[bb] += bb_amount;
         self.pot = sb_amount + bb_amount;
+        // a blind that empties a short stack is an all-in
+        if self.stacks[sb] == 0 { self.seat_state[sb] = SeatState::AllIn; }
+        if self.stacks[bb] == 0 { self.seat_state[bb] = SeatState::AllIn; }
 
         self.acting_seat = self.first_preflop();
     }
@@ -603,6 +615,7 @@ impl GameState {
                     let payout = self.collect_rake();
                     self.stacks[winner] += payout;
                     self.pot = 0;
+                    self.contributed = [0; MAX_SEATS];
                     self.phase = Phase::Settled;
                     self.button = self.next_active(self.button);
                     return Ok(ActionResult {
@@ -629,6 +642,7 @@ impl GameState {
                 let actual = to_call.min(self.stacks[seat]);
                 self.stacks[seat] -= actual;
                 self.bets[seat] += actual;
+                self.contributed[seat] += actual;
                 self.pot += actual;
                 // if calling puts us all-in, mark it
                 if self.stacks[seat] == 0 {
@@ -644,6 +658,7 @@ impl GameState {
                 }
                 self.stacks[seat] -= amount;
                 self.bets[seat] += amount;
+                self.contributed[seat] += amount;
                 self.pot += amount;
                 // H6: if stack hits 0 from a bet/raise, mark as all-in
                 if self.stacks[seat] == 0 {
@@ -655,6 +670,7 @@ impl GameState {
                 let amount = self.stacks[seat];
                 self.stacks[seat] = 0;
                 self.bets[seat] += amount;
+                self.contributed[seat] += amount;
                 self.pot += amount;
                 self.seat_state[seat] = SeatState::AllIn;
             }
@@ -775,12 +791,16 @@ impl GameState {
             levels[0] // only one level — everyone matched
         };
 
-        // return excess to players who bet above max contested
+        // return excess to players who bet above max contested. this is an
+        // *uncalled* bet, so it was never truly committed — remove it from the
+        // per-seat contribution tally as well, or it would inflate that seat's
+        // side-pot eligibility at showdown.
         for i in 0..n {
             if self.bets[i] > max_contested {
                 let excess = self.bets[i] - max_contested;
                 self.stacks[i] += excess;
                 self.pot -= excess;
+                self.contributed[i] = self.contributed[i].saturating_sub(excess);
             }
         }
         self.bets = [0; MAX_SEATS];
@@ -840,50 +860,145 @@ impl GameState {
             debug_assert!(self.community[i] < 52, "invalid community card: {}", self.community[i]);
         }
 
-        let mut best_score = 0u32;
-        let mut winners: [bool; MAX_SEATS] = [false; MAX_SEATS];
-        let mut winner_count = 0u8;
+        let n = self.num_players as usize;
 
-        for i in 0..self.num_players as usize {
-            if !matches!(self.seat_state[i], SeatState::Active | SeatState::AllIn) { continue; }
-            let score = self.best_hand(i);
-            if score > best_score {
-                best_score = score;
-                winners = [false; MAX_SEATS];
-                winners[i] = true;
-                winner_count = 1;
-            } else if score == best_score {
-                winners[i] = true;
-                winner_count += 1;
+        // pre-score every seat still in the hand (Active or AllIn). folded seats
+        // score 0 and are never eligible, but their `contributed` chips remain
+        // dead money inside whatever pot layer they reached.
+        let mut score = [0u32; MAX_SEATS];
+        let mut can_win = [false; MAX_SEATS];
+        for i in 0..n {
+            if matches!(self.seat_state[i], SeatState::Active | SeatState::AllIn) {
+                score[i] = self.best_hand(i);
+                can_win[i] = true;
             }
         }
 
-        let payout = self.collect_rake();
+        // working copy of contributions we peel into side pots.
+        let mut remaining = self.contributed;
 
-        if winner_count > 1 {
-            // split pot
-            let share = payout / winner_count as u32;
-            let remainder = payout % winner_count as u32;
-            let mut first = true;
-            for i in 0..self.num_players as usize {
-                if winners[i] {
-                    self.stacks[i] += share + if first { remainder } else { 0 };
-                    first = false;
+        // rake is charged once, off the top of the whole pot (matches the
+        // previous single-pot behaviour). we track how much rake is still owed
+        // and skim it from each pot layer as it is awarded, so the sum paid out
+        // equals `total_pot - rake` and chips are conserved.
+        let total_pot: u32 = (0..n).map(|i| remaining[i]).sum();
+        debug_assert!(total_pot == self.pot, "contributions must equal pot at showdown");
+        let mut rake_owed = {
+            if self.rules.rake_bps == 0 {
+                0
+            } else {
+                let mut r = (total_pot as u64 * self.rules.rake_bps as u64 / 10000) as u32;
+                if self.rules.rake_cap > 0 { r = r.min(self.rules.rake_cap); }
+                r
+            }
+        };
+        self.rake += rake_owed;
+
+        // track the winner of the *main* pot to return as the headline seat.
+        let mut headline_winner: Option<u8> = None;
+
+        // peel side pots: repeatedly take the smallest positive remaining
+        // contribution level, form a layer at that level across every seat that
+        // still has chips in, and award it to the best eligible (non-folded)
+        // hand. eligibility for a layer = seats that reached that contribution
+        // level. dead money from folded seats is included in the layer amount
+        // but folded seats cannot win.
+        loop {
+            // smallest positive remaining contribution across ALL seats
+            // (folded included — their dead money still forms pot layers).
+            let mut level = u32::MAX;
+            for i in 0..n {
+                if remaining[i] > 0 && remaining[i] < level {
+                    level = remaining[i];
                 }
             }
-        } else {
-            for i in 0..self.num_players as usize {
-                if winners[i] { self.stacks[i] += payout; }
+            if level == u32::MAX { break; } // nothing left to distribute
+
+            // membership snapshot: any seat with chips still in *before* this
+            // peel put money into this layer and is therefore eligible for it
+            // (unless folded). folded members contribute dead money but can't win.
+            let mut in_layer = [false; MAX_SEATS];
+            let mut pot_amount: u32 = 0;
+            for i in 0..n {
+                if remaining[i] > 0 {
+                    in_layer[i] = true;
+                    remaining[i] -= level;
+                    pot_amount += level;
+                }
+            }
+            if pot_amount == 0 { continue; }
+
+            // skim any outstanding rake off this layer first (rake off the top).
+            if rake_owed > 0 {
+                let skim = rake_owed.min(pot_amount);
+                pot_amount -= skim;
+                rake_owed -= skim;
+            }
+            if pot_amount == 0 { continue; }
+
+            // best eligible hand for this layer: eligible = not folded AND a
+            // member of this layer.
+            let mut best = 0u32;
+            let mut have_winner = false;
+            let mut winners = [false; MAX_SEATS];
+            let mut winner_count = 0u32;
+            for i in 0..n {
+                if !can_win[i] || !in_layer[i] { continue; }
+                let s = score[i];
+                if !have_winner || s > best {
+                    best = s;
+                    have_winner = true;
+                    winners = [false; MAX_SEATS];
+                    winners[i] = true;
+                    winner_count = 1;
+                } else if s == best {
+                    winners[i] = true;
+                    winner_count += 1;
+                }
+            }
+
+            if !have_winner {
+                // no eligible live hand for this layer (only possible if every
+                // contributor to it folded). award to the overall best live hand
+                // so chips are never burned.
+                let mut fallback = 0u32;
+                let mut fb_seat: Option<usize> = None;
+                for i in 0..n {
+                    if can_win[i] && (fb_seat.is_none() || score[i] > fallback) {
+                        fallback = score[i];
+                        fb_seat = Some(i);
+                    }
+                }
+                if let Some(i) = fb_seat {
+                    self.stacks[i] += pot_amount;
+                    if headline_winner.is_none() { headline_winner = Some(i as u8); }
+                }
+                continue;
+            }
+
+            // split evenly; odd chips go to the first winner in seat order
+            // (seats 0..n). this matches the convention the previous single-pot
+            // split code used.
+            let share = pot_amount / winner_count;
+            let remainder = pot_amount % winner_count;
+            let mut first = true;
+            for i in 0..n {
+                if winners[i] {
+                    self.stacks[i] += share + if first { remainder } else { 0 };
+                    if headline_winner.is_none() { headline_winner = Some(i as u8); }
+                    first = false;
+                }
             }
         }
 
         self.pot = 0;
+        self.contributed = [0; MAX_SEATS];
         self.phase = Phase::Settled;
         // rotate button to next active player
         self.button = self.next_active(self.button);
 
-        // return first winner seat
-        (0..self.num_players as usize).find(|&i| winners[i]).unwrap_or(0) as u8
+        // return the headline (main-pot) winner seat.
+        headline_winner.unwrap_or(0)
     }
 
     fn best_hand(&self, seat: usize) -> u32 {
@@ -1366,6 +1481,162 @@ mod tests {
         state.pot = 100;
         let winner = state.showdown();
         assert_eq!(winner, 0); // flush beats straight
+    }
+
+    // ------------------------------------------------------------------
+    // Side-pot correctness (the money-critical fix).
+    //
+    // Card encoding: rank = card % 13 (0=2 .. 11=K, 12=A), suit = card / 13.
+    // Rainbow board with no pairs/straights/flush so each seat's hand strength
+    // is decided purely by their pocket pair:
+    //   board = { Q(10), 8(19), 5(29), 3(40), 2(0) }  suits {0,1,2,3,0}
+    //   seat0 pocket AA -> A♠(12) A♥(25)   best hand
+    //   seat1 pocket KK -> K♠(11) K♥(24)   2nd
+    //   seat2 pocket 44 -> 4♠(2)  4♥(15)   3rd
+    // ------------------------------------------------------------------
+
+    const BOARD_RAINBOW: [u8; 5] = [10, 19, 29, 40, 0];
+
+    /// build a 3-handed state parked at showdown with explicit contributions,
+    /// so we test pot distribution in isolation with exact chip counts.
+    fn showdown_fixture(contributed: [u32; 3]) -> GameState {
+        let mut state = GameState::new(Rules::default(), 3);
+        state.cards[0] = [12, 25]; // AA
+        state.cards[1] = [11, 24]; // KK
+        state.cards[2] = [2, 15];  // 44
+        state.community = BOARD_RAINBOW;
+        state.community_count = 5;
+        state.phase = Phase::Showdown;
+        state.stacks = [0; MAX_SEATS];
+        state.contributed = [0; MAX_SEATS];
+        for i in 0..3 {
+            state.contributed[i] = contributed[i];
+            state.seat_state[i] = SeatState::AllIn;
+        }
+        state.pot = contributed.iter().sum();
+        state
+    }
+
+    #[test]
+    fn test_short_allin_best_hand_wins_only_main_pot() {
+        // (a) Short all-in with the BEST hand only scoops the main pot it
+        // covered; the remainder goes to the next-best eligible player.
+        //
+        // seat0 (AA, best) is all-in for 100; seat1 (KK) and seat2 (44) each
+        // put in 500.
+        //   main pot  = 3*100 = 300, eligible {0,1,2} -> seat0 (AA)
+        //   side pot  = 2*400 = 800, eligible {1,2}   -> seat1 (KK)
+        let mut state = showdown_fixture([100, 500, 500]);
+        let total: u32 = 100 + 500 + 500;
+
+        let winner = state.showdown();
+
+        assert_eq!(winner, 0, "main-pot winner is the best hand");
+        assert_eq!(state.stacks[0], 300, "AA covered only 100 -> wins 300 main pot only");
+        assert_eq!(state.stacks[1], 800, "KK takes the 800 side pot AA could not contest");
+        assert_eq!(state.stacks[2], 0, "44 wins nothing");
+        assert_eq!(state.stacks[0] + state.stacks[1] + state.stacks[2], total,
+            "chip conservation");
+        assert_eq!(state.pot, 0);
+    }
+
+    #[test]
+    fn test_three_way_allin_three_stacks_side_pots() {
+        // (b) Three-way all-in at three different sizes -> main + 2 side pots.
+        //
+        // Contributions already equalized (uncalled top layer returned upstream
+        // by equalize_bets): seat0=100, seat1=500, seat2=500 would be the
+        // equalized case, but here we exercise the raw distributor with an
+        // uncontested top layer left in to prove the lone-eligible seat gets it
+        // back: seat0=100, seat1=500, seat2=1000.
+        //   main pot   = 3*100 = 300, eligible {0,1,2} -> seat0 (AA)
+        //   side pot 1 = 2*400 = 800, eligible {1,2}   -> seat1 (KK)
+        //   side pot 2 = 1*500 = 500, eligible {2}     -> seat2 (only member)
+        let mut state = showdown_fixture([100, 500, 1000]);
+        let total: u32 = 100 + 500 + 1000;
+
+        let winner = state.showdown();
+
+        assert_eq!(winner, 0, "main-pot winner is the best hand");
+        assert_eq!(state.stacks[0], 300, "AA -> 300 main pot");
+        assert_eq!(state.stacks[1], 800, "KK -> 800 side pot 1");
+        assert_eq!(state.stacks[2], 500, "44 is sole member of side pot 2 -> 500 back");
+        assert_eq!(state.stacks[0] + state.stacks[1] + state.stacks[2], total,
+            "chip conservation");
+        assert_eq!(state.pot, 0);
+    }
+
+    #[test]
+    fn test_side_pots_full_action_flow_conservation() {
+        // (c) End-to-end through real actions: three unequal all-ins.
+        // Chip conservation must hold, and the short best hand must not scoop
+        // more than the main pot.
+        let rules = Rules { buyin: 1000, small_blind: 5, big_blind: 10,
+            turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0 };
+        let mut state = GameState::new(rules, 3);
+        state.stacks[0] = 100;
+        state.stacks[1] = 500;
+        state.stacks[2] = 1000;
+        let initial: u32 = state.stacks.iter().take(3).sum();
+
+        // deal with our rainbow board + pocket pairs (seat0 AA best but shortest)
+        state.deal(&[[12, 25], [11, 24], [2, 15]], BOARD_RAINBOW);
+
+        // everyone shoves until we reach showdown
+        while state.phase != Phase::Showdown && state.phase != Phase::Settled {
+            let seat = state.acting_seat;
+            if state.apply(&make_action(seat, Action::AllIn, 0, 0)).is_err() {
+                let _ = state.apply(&make_action(seat, Action::Call, 0, 0));
+            }
+        }
+        assert_eq!(state.phase, Phase::Showdown);
+
+        // pre-showdown conservation
+        let pre: u32 = state.stacks.iter().take(3).sum::<u32>() + state.pot;
+        assert_eq!(pre, initial, "chips leaked before showdown");
+
+        state.showdown();
+
+        // post-showdown conservation (no rake configured)
+        let post: u32 = state.stacks.iter().take(3).sum::<u32>() + state.pot + state.rake;
+        assert_eq!(post, initial,
+            "chips leaked in showdown: stacks={:?} pot={} rake={}",
+            &state.stacks[..3], state.pot, state.rake);
+
+        // seat0 (AA) is all-in for at most 100 into a 3-way pot, so it can win
+        // at most the main pot (3*100 = 300). It must NOT scoop the whole pot.
+        assert!(state.stacks[0] <= 300,
+            "short all-in AA over-scooped: got {}", state.stacks[0]);
+    }
+
+    #[test]
+    fn test_side_pot_rake_conserved() {
+        // rake is charged once off the top; side pots still sum correctly.
+        let rules = Rules { rake_bps: 500, rake_cap: 0, ..Rules::default() }; // 5%
+        let mut state = GameState::new(rules, 3);
+        state.cards[0] = [12, 25]; // AA
+        state.cards[1] = [11, 24]; // KK
+        state.cards[2] = [2, 15];  // 44
+        state.community = BOARD_RAINBOW;
+        state.community_count = 5;
+        state.phase = Phase::Showdown;
+        state.stacks = [0; MAX_SEATS];
+        state.contributed = [0; MAX_SEATS];
+        state.contributed[0] = 100;
+        state.contributed[1] = 500;
+        state.contributed[2] = 500;
+        state.seat_state[0] = SeatState::AllIn;
+        state.seat_state[1] = SeatState::AllIn;
+        state.seat_state[2] = SeatState::AllIn;
+        state.pot = 1100;
+
+        state.showdown();
+
+        // 5% of 1100 = 55 rake. 1100 - 55 = 1045 distributed.
+        assert_eq!(state.rake, 55);
+        let paid: u32 = state.stacks.iter().take(3).sum();
+        assert_eq!(paid, 1045, "distributed pot + rake must equal total");
+        assert_eq!(paid + state.rake, 1100, "chip conservation with rake");
     }
 }
 

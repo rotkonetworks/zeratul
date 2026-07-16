@@ -107,13 +107,31 @@ interface IPokerChannel {
     ) external;
 
     /// @notice Settle the game and distribute payouts
-    /// @dev From ACTIVE: cooperative close (caller should be host or have consent).
-    ///      From DISPUTED: can only settle after disputeTimeout blocks have passed.
+    /// @dev Caller MUST be a channel participant. All active players MUST sign the
+    ///      settlement. The signed message is domain-separated and bound to the
+    ///      agreed on-chain state and the exact payouts:
+    ///
+    ///        keccak256(
+    ///          "POKER_SETTLE" || chainId || address(this) ||
+    ///          gameId || storedNonce || storedStateHash || payoutsHash
+    ///        )
+    ///
+    ///      where payoutsHash = keccak256(abi.encodePacked(payouts_len_word, payout_words...))
+    ///      i.e. keccak256 over the raw ABI payouts array body (length word followed
+    ///      by each 32-byte payout word). storedNonce / storedStateHash are the
+    ///      values currently persisted on-chain (set by the last updateState/dispute).
+    ///
+    ///      From ACTIVE: cooperative close, requires every participant's signature.
+    ///      From DISPUTED: can only settle after disputeTimeout blocks have passed,
+    ///      and payouts must still be bound to the agreed state via signatures.
     /// @param gameId Game identifier
     /// @param payouts Array of amounts to pay each seat (index = seat number)
+    /// @param signatures 65-byte ECDSA signatures from all active players over the
+    ///        settlement message described above
     function settle(
         bytes32 gameId,
-        uint128[] calldata payouts
+        uint128[] calldata payouts,
+        bytes[] calldata signatures
     ) external;
 
     // ========================================================================

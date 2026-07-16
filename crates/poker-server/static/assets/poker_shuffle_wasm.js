@@ -1,6 +1,74 @@
 /* @ts-self-types="./poker_shuffle_wasm.d.ts" */
 
 /**
+ * reveal-only state for after the ceremony: reconstructs the final
+ * deck to produce/verify decryption shares. has no shuffle or proof
+ * methods, so it cannot be misused to skip shuffle verification
+ */
+export class RevealState {
+    __destroy_into_raw() {
+        const ptr = this.__wbg_ptr;
+        this.__wbg_ptr = 0;
+        RevealStateFinalization.unregister(this);
+        return ptr;
+    }
+    free() {
+        const ptr = this.__destroy_into_raw();
+        wasm.__wbg_revealstate_free(ptr, 0);
+    }
+    /**
+     * @returns {number}
+     */
+    deck_size() {
+        const ret = wasm.revealstate_deck_size(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * @param {string} pk_a_hex
+     * @param {string} pk_b_hex
+     * @param {string} deck_hex
+     */
+    constructor(pk_a_hex, pk_b_hex, deck_hex) {
+        const ptr0 = passStringToWasm0(pk_a_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(pk_b_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(deck_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.revealstate_new(ptr0, len0, ptr1, len1, ptr2, len2);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        this.__wbg_ptr = ret[0] >>> 0;
+        RevealStateFinalization.register(this, this.__wbg_ptr, this);
+        return this;
+    }
+    /**
+     * reveal a card from both players' decryption shares + dleq proofs.
+     * returns card index (0..51) or -1 if any share or proof is invalid
+     * @param {number} idx
+     * @param {string} share_a_hex
+     * @param {string} proof_a_hex
+     * @param {string} share_b_hex
+     * @param {string} proof_b_hex
+     * @returns {number}
+     */
+    reveal_card(idx, share_a_hex, proof_a_hex, share_b_hex, proof_b_hex) {
+        const ptr0 = passStringToWasm0(share_a_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(proof_a_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(share_b_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(proof_b_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.revealstate_reveal_card(this.__wbg_ptr, idx, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
+        return ret;
+    }
+}
+if (Symbol.dispose) RevealState.prototype[Symbol.dispose] = RevealState.prototype.free;
+
+/**
  * a player's shuffle keys (ristretto255 ElGamal)
  */
 export class ShuffleKeys {
@@ -15,7 +83,8 @@ export class ShuffleKeys {
         wasm.__wbg_shufflekeys_free(ptr, 0);
     }
     /**
-     * compute decryption share for a ciphertext at position `idx`
+     * decryption share + dleq proof for the ciphertext at `idx`.
+     * returns JSON {"share": hex, "proof": hex}
      * @param {ShuffleState} state
      * @param {number} idx
      * @returns {string | undefined}
@@ -30,11 +99,44 @@ export class ShuffleKeys {
         }
         return v1;
     }
+    /**
+     * same as decrypt_share, for a reveal-only state
+     * @param {RevealState} state
+     * @param {number} idx
+     * @returns {string | undefined}
+     */
+    decrypt_share_reveal(state, idx) {
+        _assertClass(state, RevealState);
+        const ret = wasm.shufflekeys_decrypt_share_reveal(this.__wbg_ptr, state.__wbg_ptr, idx);
+        let v1;
+        if (ret[0] !== 0) {
+            v1 = getStringFromWasm0(ret[0], ret[1]).slice();
+            wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
+        }
+        return v1;
+    }
     constructor() {
         const ret = wasm.shufflekeys_new();
         this.__wbg_ptr = ret >>> 0;
         ShuffleKeysFinalization.register(this, this.__wbg_ptr, this);
         return this;
+    }
+    /**
+     * schnorr proof of possession of the secret key (64-byte hex).
+     * required by the ShuffleState constructors
+     * @returns {string}
+     */
+    prove_possession() {
+        let deferred1_0;
+        let deferred1_1;
+        try {
+            const ret = wasm.shufflekeys_prove_possession(this.__wbg_ptr);
+            deferred1_0 = ret[0];
+            deferred1_1 = ret[1];
+            return getStringFromWasm0(ret[0], ret[1]);
+        } finally {
+            wasm.__wbindgen_free(deferred1_0, deferred1_1, 1);
+        }
     }
     /**
      * public key as 32-byte hex
@@ -56,7 +158,7 @@ export class ShuffleKeys {
 if (Symbol.dispose) ShuffleKeys.prototype[Symbol.dispose] = ShuffleKeys.prototype.free;
 
 /**
- * the shuffle state — holds the encrypted deck and transcript
+ * the shuffle ceremony state — holds the encrypted deck and transcript
  */
 export class ShuffleState {
     static __wrap(ptr) {
@@ -100,63 +202,51 @@ export class ShuffleState {
         return ret >>> 0;
     }
     /**
-     * UNVERIFIED: create state from an already-shuffled deck.
-     * WARNING: transcript is NOT bound. verify_and_apply() will produce
-     * WRONG results on this state. Only use for card reveal after both
-     * shuffles are complete and verified via from_initial_deck path.
+     * like the constructor, but verifies a received initial deck (hex)
+     * equals the canonical deck. rejects duplicated/omitted cards
      * @param {string} pk_a_hex
      * @param {string} pk_b_hex
-     * @param {string} deck_hex
-     * @returns {ShuffleState}
-     */
-    static from_deck_unverified(pk_a_hex, pk_b_hex, deck_hex) {
-        const ptr0 = passStringToWasm0(pk_a_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(pk_b_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(deck_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
-        const len2 = WASM_VECTOR_LEN;
-        const ret = wasm.shufflestate_from_deck_unverified(ptr0, len0, ptr1, len1, ptr2, len2);
-        if (ret[2]) {
-            throw takeFromExternrefTable0(ret[1]);
-        }
-        return ShuffleState.__wrap(ret[0]);
-    }
-    /**
-     * create state from the initial (pre-shuffle) deck sent by host.
-     * the guest calls this with the INITIAL deck (before host's shuffle)
-     * so both transcripts are in the same state before verification.
-     * @param {string} pk_a_hex
-     * @param {string} pk_b_hex
+     * @param {string} pop_a_hex
+     * @param {string} pop_b_hex
      * @param {string} initial_deck_hex
      * @returns {ShuffleState}
      */
-    static from_initial_deck(pk_a_hex, pk_b_hex, initial_deck_hex) {
+    static from_initial_deck(pk_a_hex, pk_b_hex, pop_a_hex, pop_b_hex, initial_deck_hex) {
         const ptr0 = passStringToWasm0(pk_a_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(pk_b_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
-        const ptr2 = passStringToWasm0(initial_deck_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const ptr2 = passStringToWasm0(pop_a_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len2 = WASM_VECTOR_LEN;
-        const ret = wasm.shufflestate_from_initial_deck(ptr0, len0, ptr1, len1, ptr2, len2);
+        const ptr3 = passStringToWasm0(pop_b_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ptr4 = passStringToWasm0(initial_deck_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len4 = WASM_VECTOR_LEN;
+        const ret = wasm.shufflestate_from_initial_deck(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3, ptr4, len4);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
         return ShuffleState.__wrap(ret[0]);
     }
     /**
-     * create initial encrypted deck from two public keys (hex).
-     * called by player A (host). binds the initial deck to the transcript
-     * so that the verifier's transcript matches the prover's.
+     * create ceremony state from both players' public keys and proofs
+     * of possession (hex). the deck starts as the canonical initial
+     * deck, constructed locally — identical on both sides
      * @param {string} pk_a_hex
      * @param {string} pk_b_hex
+     * @param {string} pop_a_hex
+     * @param {string} pop_b_hex
      */
-    constructor(pk_a_hex, pk_b_hex) {
+    constructor(pk_a_hex, pk_b_hex, pop_a_hex, pop_b_hex) {
         const ptr0 = passStringToWasm0(pk_a_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
         const ptr1 = passStringToWasm0(pk_b_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.shufflestate_new(ptr0, len0, ptr1, len1);
+        const ptr2 = passStringToWasm0(pop_a_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(pop_b_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.shufflestate_new(ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
         if (ret[2]) {
             throw takeFromExternrefTable0(ret[1]);
         }
@@ -165,19 +255,26 @@ export class ShuffleState {
         return this;
     }
     /**
-     * reveal a card given two decryption shares (hex).
-     * returns card index (0..51) or -1 if failed.
+     * reveal a card from both players' decryption shares + dleq proofs
+     * (hex, as produced by decrypt_share). returns card index (0..51)
+     * or -1 if any share or proof is invalid
      * @param {number} idx
      * @param {string} share_a_hex
+     * @param {string} proof_a_hex
      * @param {string} share_b_hex
+     * @param {string} proof_b_hex
      * @returns {number}
      */
-    reveal_card(idx, share_a_hex, share_b_hex) {
+    reveal_card(idx, share_a_hex, proof_a_hex, share_b_hex, proof_b_hex) {
         const ptr0 = passStringToWasm0(share_a_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len0 = WASM_VECTOR_LEN;
-        const ptr1 = passStringToWasm0(share_b_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const ptr1 = passStringToWasm0(proof_a_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         const len1 = WASM_VECTOR_LEN;
-        const ret = wasm.shufflestate_reveal_card(this.__wbg_ptr, idx, ptr0, len0, ptr1, len1);
+        const ptr2 = passStringToWasm0(share_b_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ptr3 = passStringToWasm0(proof_b_hex, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len3 = WASM_VECTOR_LEN;
+        const ret = wasm.shufflestate_reveal_card(this.__wbg_ptr, idx, ptr0, len0, ptr1, len1, ptr2, len2, ptr3, len3);
         return ret;
     }
     /**
@@ -337,6 +434,9 @@ function __wbg_get_imports() {
     };
 }
 
+const RevealStateFinalization = (typeof FinalizationRegistry === 'undefined')
+    ? { register: () => {}, unregister: () => {} }
+    : new FinalizationRegistry(ptr => wasm.__wbg_revealstate_free(ptr >>> 0, 1));
 const ShuffleKeysFinalization = (typeof FinalizationRegistry === 'undefined')
     ? { register: () => {}, unregister: () => {} }
     : new FinalizationRegistry(ptr => wasm.__wbg_shufflekeys_free(ptr >>> 0, 1));

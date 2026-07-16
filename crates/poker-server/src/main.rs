@@ -50,6 +50,23 @@ enum ClientMsg {
     ReportDeposit { txid: String, amount: u64 },
     /// player leaves — triggers settlement and payout
     Leave,
+    /// co-signed game-over: this seat's signature over the agreed final outcome.
+    /// Both seats submit independently; when both agree the server calls escrow /settle
+    /// (winner payout) then triggers the on-chain payout. Staked tables only.
+    Settlement {
+        /// seat 0 (player A) final chip stack
+        a_stack: u64,
+        /// seat 1 (player B) final chip stack
+        b_stack: u64,
+        /// seat 0 payout Zcash address
+        a_addr: String,
+        /// seat 1 payout Zcash address
+        b_addr: String,
+        /// hex SHA-256 action-log hash (both peers derive identically)
+        log_hash: String,
+        /// hex Ed25519 signature by THIS seat's session key over the escrow settlement_message
+        sig: String,
+    },
     /// player broadcasts filtered game state to spectators
     Broadcast { data: String },
     Dispute,
@@ -134,6 +151,11 @@ enum ServerMsg {
         /// per-seat diversified deposit UAs (None if escrow hasn't surfaced them yet)
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         seat_addresses: Vec<Option<String>>,
+        /// per-seat on-chain-pinned payout addresses (recovered from the deposit memo).
+        /// Surfaced to BOTH clients so each can build the identical co-signed settlement
+        /// message at game over. None until the depositor's memo has been scanned.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        seat_payout_addresses: Vec<Option<String>>,
         player_a_deposit: u64,
         player_b_deposit: u64,
         required: u64,
@@ -319,6 +341,8 @@ struct Room {
     /// FROST relay coords — `Some` only when escrow runs in DKG mode; forwarded to clients via RoomInfo
     frost_relay_url: Option<String>,
     frost_room_code: Option<String>,
+    /// per-room capability token from the escrow; echoed on `/payout/initiate` (fail-closed there)
+    payout_token: Option<String>,
     /// per-seat DKG UA report — must agree across seats before we trust it as escrow_address
     dkg_reported_ua: Vec<Option<String>>,
     /// per-seat deposit UAs synced from poker-escrow's /room/{code}
@@ -346,6 +370,31 @@ struct Room {
     payout_complete_txid: Option<String>,
     /// Set after `PayoutFailed{reason}` is broadcast.
     payout_failed_reason: Option<String>,
+    /// per-seat co-signed settlement submissions. Each seat POSTs its own signature over the
+    /// agreed outcome via ClientMsg::Settlement. When both seats have submitted AND their
+    /// claimed (stacks, addrs, log_hash) tuples MATCH, the server calls escrow /settle with
+    /// both sigs. Disagreement ⇒ no settle (safe default; Leave→refund remains the fallback).
+    settlement_submissions: Vec<Option<SettlementSubmission>>,
+}
+
+/// One seat's co-signed settlement claim + signature (from ClientMsg::Settlement).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SettlementSubmission {
+    a_stack: u64,
+    b_stack: u64,
+    a_addr: String,
+    b_addr: String,
+    log_hash: String,
+    /// hex Ed25519 sig by this seat's session key. Excluded from tuple-equality checks
+    /// (each seat's sig differs); only the CLAIM must match across seats.
+    sig: String,
+}
+
+impl SettlementSubmission {
+    /// The agreed-outcome tuple both seats must match on (sig excluded).
+    fn claim(&self) -> (u64, u64, &str, &str, &str) {
+        (self.a_stack, self.b_stack, &self.a_addr, &self.b_addr, &self.log_hash)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -383,6 +432,7 @@ impl Room {
         let local_addr_hex = hex::encode(redpallas::derive_address_bytes(&group_pubkey));
         let frost_relay_url = external_escrow.frost_relay_url;
         let frost_room_code = external_escrow.frost_room_code;
+        let payout_token = external_escrow.payout_token;
         // DKG mode: escrow_address stays empty until players' DkgComplete agrees on a UA
         let dkg_mode = frost_relay_url.is_some() && frost_room_code.is_some();
         let escrow_address = external_escrow.address.unwrap_or_else(
@@ -434,6 +484,7 @@ impl Room {
             escrow_address,
             frost_relay_url,
             frost_room_code,
+            payout_token,
             dkg_reported_ua: vec![None; seats],
             seat_deposit_addresses: vec![None; seats],
             seat_payout_addresses: vec![None; seats],
@@ -446,11 +497,33 @@ impl Room {
             payout_signing_state: None,
             payout_complete_txid: None,
             payout_failed_reason: None,
+            settlement_submissions: vec![None; seats],
         }
     }
 
     fn player_count(&self) -> usize {
         self.players.iter().filter(|p| matches!(p, Some(p) if p.disconnected_at.is_none())).count()
+    }
+
+    /// Find a disconnected seat this (re)joining player should resume. Name must match, the
+    /// seat must be in its reconnect window, and — if the seat registered a pubkey — the
+    /// pubkey must match (anon/name-only seats skip the pubkey check).
+    fn find_reconnect_seat(&self, name: &str, pubkey: Option<&str>) -> Option<usize> {
+        self.players.iter().position(|p| {
+            matches!(p, Some(p) if
+                p.name == name &&
+                p.disconnected_at.is_some() &&
+                (p.pubkey.is_none() || p.pubkey.as_deref() == pubkey)
+            )
+        })
+    }
+
+    /// True if `name` is already held by a seat that registered a *different* pubkey — a
+    /// same-name seat-hijack attempt, which the Join handler rejects.
+    fn is_seat_hijack(&self, name: &str, pubkey: Option<&str>) -> bool {
+        self.players.iter().any(|p| matches!(p, Some(p) if
+            p.name == name && p.pubkey.is_some() && p.pubkey.as_deref() != pubkey
+        ))
     }
 
     fn broadcast(&self, msg: &ServerMsg) {
@@ -462,6 +535,24 @@ impl Room {
     fn send_to(&self, seat: u8, msg: ServerMsg) {
         if let Some(Some(p)) = self.players.get(seat as usize) {
             let _ = p.tx.send(msg);
+        }
+    }
+
+    /// Build the `RoomInfo` control frame describing this room's escrow/DKG coords.
+    /// Used both on the old `/ws` path and by the `/p2p` relay bridge so a freshly
+    /// joined staked peer immediately learns the FROST relay + deposit addresses.
+    fn room_info(&self) -> ServerMsg {
+        ServerMsg::RoomInfo {
+            code: self.code.clone(),
+            jury_nodes: JURY_N as u8,
+            jury_threshold: JURY_T as u8,
+            escrow: self.escrow_address.clone(),
+            buyin_zat: self.buyin_zat,
+            fee_per_seat: self.fee_per_seat,
+            frost_relay_url: self.frost_relay_url.clone(),
+            frost_room_code: self.frost_room_code.clone(),
+            seat_addresses: self.seat_deposit_addresses.clone(),
+            required_deposit: self.required_deposit,
         }
     }
 
@@ -551,6 +642,35 @@ impl Room {
         }
         self.hole_cards = vec![None; self.max_seats];
         self.community_cards = Vec::new();
+
+        // PRIVACY GATE (finding #1: operator sees plaintext cards).
+        //
+        // The server-authoritative engine deals from a plaintext `Vec<Card>` it
+        // owns, so anything it deals is visible to the operator. That is only
+        // acceptable for chip-only bot demo tables (no real value, no privacy
+        // stake). For any table that can hold real value (`!bot_friendly`) we
+        // MUST NOT leak hole cards to the operator: refuse to deal via the
+        // custodial shuffler unless the operator has explicitly opted into
+        // insecure custodial mode. The trustless deal (client-side mental-poker
+        // ceremony over the /ws/zid blind relay) is the intended replacement;
+        // see the checklist in `custodial_deal_allowed()` below.
+        if !custodial_deal_allowed(self.bot_friendly) {
+            tracing::error!(
+                "room {}: refusing to deal — custodial plaintext shuffle would leak hole cards \
+                 to the operator on a real-value table. Trustless dealing not yet wired on this \
+                 code path; set POKER_ALLOW_PLAINTEXT_DEAL=1 only for trusted/test operators.",
+                self.code
+            );
+            self.broadcast(&ServerMsg::Error {
+                message: "dealing disabled: trustless (server-blind) shuffle is not yet available \
+                          on this table, and custodial plaintext dealing is refused to protect \
+                          your hole cards from the operator".into(),
+            });
+            // roll back the hand-number/button bump so a later retry (e.g. after
+            // the operator enables the override, or a trustless path lands) is clean.
+            self.hand_number -= 1;
+            return;
+        }
 
         let (deck, deck_commitment) = shuffled_deck_with_proof();
 
@@ -694,8 +814,45 @@ fn parse_action(action: &str, amount: Option<u64>) -> Option<ActionType> {
     }
 }
 
+/// Whether the custodial (operator-visible) plaintext deal is permitted.
+///
+/// SECURITY: the custodial shuffler below produces a plaintext deck that the
+/// operator can read in full — it is NOT mental poker, and the SHA256
+/// "commitment" hides nothing from the operator (the operator holds the
+/// preimage). It is only acceptable where there is no privacy or money at
+/// stake, i.e. chip-only bot demo tables.
+///
+/// For real-value tables it is refused unless the operator explicitly opts in
+/// with `POKER_ALLOW_PLAINTEXT_DEAL=1` (trusted/test operators only). The
+/// intended replacement is the trustless client-side mental-poker ceremony,
+/// whose primitives already exist:
+///   - `zk_shuffle::remasking::ElGamalCiphertext` (encrypt / remask / decrypt)
+///   - `zk_shuffle::{prove_shuffle, verify_shuffle}` (Chaum-Pedersen shuffle)
+///   - `zk_shuffle::reveal::{PossessionProof, RevealProof}` (DLEQ reveal)
+///   - client `poker-shuffle-wasm` (`ShuffleKeys`/`ShuffleState`/`RevealState`)
+///     already drives the full 2-player ceremony end to end
+///   - `web/src/shuffle-filter.ts` already speaks the shuffle_pk/init/done/reveal wire
+///   - the blind e2ee relay (`/ws/zid`, `handle_zid_socket`) can carry it without
+///     the operator ever seeing a card.
+/// What remains is to make the live `/{code}/ws` path route dealing through that
+/// ceremony instead of the server engine's plaintext `Vec<Card>` — see the
+/// checklist in the agent report / module docs.
+fn custodial_deal_allowed(bot_friendly: bool) -> bool {
+    if bot_friendly {
+        return true; // chip-only demo: no real value, no privacy stake
+    }
+    matches!(
+        std::env::var("POKER_ALLOW_PLAINTEXT_DEAL").ok().as_deref(),
+        Some("1") | Some("true") | Some("TRUE")
+    )
+}
+
 /// shuffle deck with zk-shuffle proof. returns (shuffled_cards, deck_commitment).
 /// the commitment is SHA256 of the shuffled deck — included in HandTranscript.
+///
+/// SECURITY: this is the CUSTODIAL shuffler — the returned deck is plaintext and
+/// fully visible to the operator. Callers MUST gate it behind
+/// `custodial_deal_allowed()`. It is not mental poker; see that function's docs.
 fn shuffled_deck_with_proof() -> (Vec<Card>, [u8; 32]) {
     use sha2::{Sha256, Digest};
 
@@ -804,10 +961,14 @@ async fn trigger_payout(
     let outputs: Vec<escrow_client::PayoutOutputReq> = plan.iter()
         .map(|p| escrow_client::PayoutOutputReq { address: p.address.clone(), amount_zat: p.amount_zat })
         .collect();
+    // capability token minted by the escrow at room creation — /payout/initiate is
+    // gated on it (fail-closed), so forward it or the payout is rejected.
+    let payout_token = room.lock().await.payout_token.clone();
     let req = escrow_client::InitiatePayoutReq {
         outputs,
         fee_zat: Some(TX_PAYOUT_FEE_ZAT),
         anchor_height: None,
+        payout_token,
     };
 
     let relay_room = match escrow_client::initiate_payout(&escrow_url, &code, &req).await {
@@ -954,6 +1115,7 @@ fn spawn_deposit_poller(rooms: Rooms, escrow_url: Option<String>, code: String) 
                 r.broadcast(&ServerMsg::DepositStatus {
                     escrow_address: r.escrow_address.clone(),
                     seat_addresses: r.seat_deposit_addresses.clone(),
+                    seat_payout_addresses: r.seat_payout_addresses.clone(),
                     player_a_deposit: state.player_a_deposit,
                     player_b_deposit: state.player_b_deposit,
                     required: r.required_deposit,
@@ -1022,6 +1184,45 @@ enum LobbyClientMsg {
 
 type LobbyUsers = Arc<Mutex<HashMap<String, LobbyUser>>>;
 
+/// a connected relay peer: its outgoing frame sink and, once paired, the
+/// pubkey of the peer it exchanges frames with.
+struct PeerConn {
+    tx: mpsc::UnboundedSender<WsMessage>,
+    peer: Option<String>,
+}
+
+/// blind e2ee relay state (Path B mental poker). the relay pairs two peers by
+/// pubkey and forwards opaque frames between them; it never inspects payloads
+/// — see zafu packages/zid/src/noise-channel.ts. it only brokers a pubkey
+/// *introduction* so a host (who doesn't know the guest's key up front) learns
+/// who is connecting; the pubkeys are public and the game payloads stay e2ee.
+/// `pending` buffers frames that arrive before the destination peer connects,
+/// so the Noise handshake can't race.
+#[derive(Default)]
+struct ZidRelay {
+    /// session-pubkey (hex) -> connection
+    peers: HashMap<String, PeerConn>,
+    /// dest-pubkey (hex) -> frames waiting for that peer to connect
+    pending: HashMap<String, Vec<Vec<u8>>>,
+}
+type ZidPeers = Arc<Mutex<ZidRelay>>;
+
+/// a peer connected to a room-keyed blind relay: its nick (for join/leave
+/// notices) and its outgoing frame sink. game payloads are already e2ee
+/// (x25519 → AES-GCM, see web/src/transport.ts) — the relay only forwards the
+/// opaque `_enc` envelopes and never inspects them.
+struct RelayPeer {
+    nick: String,
+    tx: mpsc::UnboundedSender<WsMessage>,
+}
+
+/// room-keyed blind relay registry: room code -> connected peers. Seats are
+/// assigned by join order (first = 0). This is the transport for Path B: both
+/// clients run the game engine + mental-poker ceremony locally and exchange
+/// only ciphertext through here, so the operator sees no cards and the two
+/// players never open a direct socket to each other (no peer IP leak).
+type RelayRooms = Arc<Mutex<HashMap<String, Vec<RelayPeer>>>>;
+
 #[derive(Clone)]
 struct AppState {
     rooms: Rooms,
@@ -1029,11 +1230,549 @@ struct AppState {
     static_dir: String,
     /// base url of the poker-escrow service, e.g. http://127.0.0.1:3034; None disables remote escrow
     escrow_url: Option<String>,
+    /// blind e2ee relay peer registry (Path B mental poker, pubkey-paired Noise)
+    zid_peers: ZidPeers,
+    /// room-keyed blind relay registry (Path B, room-code addressed)
+    relay_rooms: RelayRooms,
 }
 
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
+
+/// blind e2ee relay websocket (Path B mental poker).
+///
+/// the relay is a dumb pubkey-pair router: it forwards opaque frames between
+/// two peers and never sees plaintext. peers run the zafu wallet's Noise IK
+/// channel (packages/zid/src/noise-channel.ts) end-to-end over this socket, so
+/// the operator cannot read cards or alter the game. wire:
+///   - first text frame: {"type":"announce","from":<hex pk>,"to":<hex pk>}
+///   - thereafter: binary Noise frames, forwarded verbatim to peer `to`.
+async fn zid_relay_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_zid_socket(socket, state))
+}
+
+async fn handle_zid_socket(socket: WebSocket, state: AppState) {
+    use futures::{SinkExt, StreamExt};
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (tx, mut rx) = mpsc::unbounded_channel::<WsMessage>();
+
+    // send task: deliver relay frames (peer-intro text + forwarded binary)
+    let send_task = tokio::spawn(async move {
+        while let Some(frame) = rx.recv().await {
+            if ws_tx.send(frame).await.is_err() { break; }
+        }
+    });
+
+    // notify a peer which pubkey is connecting to them (public info; lets a
+    // host that has no prior knowledge of the guest address its replies)
+    fn intro(pk: &str) -> WsMessage {
+        WsMessage::Text(format!(r#"{{"type":"peer","pubkey":"{}"}}"#, pk).into())
+    }
+
+    let mut me: Option<String> = None; // our pubkey, once announced
+
+    while let Some(Ok(msg)) = ws_rx.next().await {
+        match msg {
+            WsMessage::Text(t) => {
+                // only the announce frame is inspected — it carries no secrets
+                let v: serde_json::Value = match serde_json::from_str(&t) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                if v.get("type").and_then(|x| x.as_str()) != Some("announce") { continue; }
+                // `to` is optional: a host may not know the guest's key yet
+                let from = match v.get("from").and_then(|x| x.as_str()) {
+                    Some(f) => f.to_string(),
+                    None => continue,
+                };
+                let to = v.get("to").and_then(|x| x.as_str()).map(|s| s.to_string());
+
+                let mut relay = state.zid_peers.lock().await;
+                relay.peers.insert(from.clone(), PeerConn { tx: tx.clone(), peer: to.clone() });
+                // flush frames that arrived before we connected
+                if let Some(buffered) = relay.pending.remove(&from) {
+                    for frame in buffered { let _ = tx.send(WsMessage::Binary(frame.into())); }
+                }
+                // if we named a peer that is already here, pair both ways and
+                // introduce ourselves so they can address us back
+                if let Some(dest) = to {
+                    if let Some(other) = relay.peers.get_mut(&dest) {
+                        if other.peer.is_none() { other.peer = Some(from.clone()); }
+                        let _ = other.tx.send(intro(&from));
+                    }
+                }
+                me = Some(from);
+            }
+            WsMessage::Binary(data) => {
+                let Some(my_pk) = me.as_ref() else { continue }; // must announce first
+                let data = data.to_vec();
+                let mut relay = state.zid_peers.lock().await;
+                let dest = relay.peers.get(my_pk).and_then(|c| c.peer.clone());
+                match dest {
+                    Some(d) => match relay.peers.get(&d) {
+                        Some(other) => { let _ = other.tx.send(WsMessage::Binary(data.into())); }
+                        None => relay.pending.entry(d).or_default().push(data),
+                    },
+                    None => { /* not paired yet — drop until introduced */ }
+                }
+            }
+            WsMessage::Close(_) => break,
+            _ => {}
+        }
+    }
+
+    // deregister on disconnect
+    if let Some(pk) = me {
+        let mut relay = state.zid_peers.lock().await;
+        if relay.peers.get(&pk).map_or(false, |c| c.tx.same_channel(&tx)) {
+            relay.peers.remove(&pk);
+        }
+    }
+    send_task.abort();
+}
+
+/// room-keyed blind relay websocket (Path B mental poker).
+///
+/// wire protocol (matches web/src/transport.ts `createRelayTransport`):
+///   client -> `{"t":"create","nick":..}`  -> server `{"t":"created","room":<code>}`
+///   client -> `{"t":"join","room":..,"nick":..}` -> server
+///             `{"t":"joined","room":..,"count":N,"seat":S}` to the joiner and
+///             `{"t":"system","text":"<nick> joined"}` to peers already present
+///   client -> `{"t":"msg","text":<opaque>}` -> forwarded verbatim to the other
+///             peers as `{"t":"msg","text":..,"nick":..,"ts":<ms>}`
+///   client -> `{"t":"part"}` -> leave
+/// The `text` payload is an already-encrypted envelope; the relay never parses
+/// it. Seats are assigned by join order so host/guest doesn't depend on the URL.
+async fn relay_handler(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_relay_socket(socket, state))
+}
+
+async fn handle_relay_socket(socket: WebSocket, state: AppState) {
+    use futures::{SinkExt, StreamExt};
+    let (mut ws_tx, mut ws_rx) = socket.split();
+    let (tx, mut rx) = mpsc::unbounded_channel::<WsMessage>();
+
+    let send_task = tokio::spawn(async move {
+        while let Some(m) = rx.recv().await {
+            if ws_tx.send(m).await.is_err() { break; }
+        }
+    });
+
+    fn frame(v: serde_json::Value) -> WsMessage { WsMessage::Text(v.to_string().into()) }
+    fn now_ms() -> u64 {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+    }
+    /// Wrap a `ServerMsg` control frame for the relay wire, distinct from the opaque
+    /// `_enc` peer frames the relay forwards blind. The client demuxes on `t == "srv"`.
+    fn srv_frame(msg: &ServerMsg) -> WsMessage {
+        WsMessage::Text(
+            serde_json::json!({ "t": "srv", "msg": msg }).to_string().into(),
+        )
+    }
+
+    let mut my_room: Option<String> = None;
+    let mut my_nick = String::from("anon");
+
+    // --- staked-table (escrow) bridge state -------------------------------
+    // Non-None only when this /p2p peer joined a room that has an escrow-aware
+    // `Room` in state.rooms (frost_room_code set => ESCROW_URL was wired at
+    // create time). For free-play / pure-relay tables these stay None and the
+    // handler behaves byte-for-byte as before.
+    let mut escrow_room: Option<Arc<Mutex<Room>>> = None;
+    let mut escrow_seat: Option<u8> = None;
+    // ServerMsg sink registered into Room.players[seat].tx; a forwarder task
+    // serializes what the Room broadcasts here into `srv` frames on our socket.
+    let mut srv_forward_task: Option<tokio::task::JoinHandle<()>> = None;
+
+    while let Some(Ok(msg)) = ws_rx.next().await {
+        let t = match msg {
+            WsMessage::Text(t) => t,
+            WsMessage::Close(_) => break,
+            _ => continue,
+        };
+        let v: serde_json::Value = match serde_json::from_str(&t) { Ok(v) => v, Err(_) => continue };
+        match v.get("t").and_then(|x| x.as_str()) {
+            Some("create") => {
+                if my_room.is_some() { continue; }
+                if let Some(n) = v.get("nick").and_then(|x| x.as_str()) { my_nick = n.to_string(); }
+                let code = generate_room_code();
+                state.relay_rooms.lock().await.entry(code.clone()).or_default();
+                let _ = tx.send(frame(serde_json::json!({ "t": "created", "room": code })));
+                // client follows up with a `join` for the freshly minted code
+            }
+            Some("join") => {
+                let room = match v.get("room").and_then(|x| x.as_str()) {
+                    Some(r) if !r.is_empty() => r.to_string(),
+                    _ => { let _ = tx.send(frame(serde_json::json!({ "t": "error", "msg": "missing room" }))); continue; }
+                };
+                if let Some(n) = v.get("nick").and_then(|x| x.as_str()) { my_nick = n.to_string(); }
+                let mut rooms = state.relay_rooms.lock().await;
+                let peers = rooms.entry(room.clone()).or_default();
+                // heads-up: cap at 2 players (spectators are a later, separate path)
+                if peers.iter().all(|p| !p.tx.same_channel(&tx)) && peers.len() >= 2 {
+                    drop(rooms);
+                    let _ = tx.send(frame(serde_json::json!({ "t": "error", "msg": "room full" })));
+                    continue;
+                }
+                let seat = peers.len();
+                peers.push(RelayPeer { nick: my_nick.clone(), tx: tx.clone() });
+                let count = peers.len();
+                my_room = Some(room.clone());
+                let _ = tx.send(frame(serde_json::json!({ "t": "joined", "room": room, "count": count, "seat": seat })));
+                // let peers already present know someone joined (transport.ts maps
+                // a "joined"/"reconnected" system notice to opponent presence)
+                for p in peers.iter() {
+                    if !p.tx.same_channel(&tx) {
+                        let _ = p.tx.send(frame(serde_json::json!({ "t": "system", "text": format!("{} joined", my_nick) })));
+                    }
+                }
+                drop(rooms);
+
+                // --- staked-table bridge --------------------------------------
+                // If this room code has an escrow-aware Room in state.rooms AND that
+                // room is in DKG/escrow mode (frost_room_code set — only possible
+                // when ESCROW_URL was wired at create time), subscribe this relay
+                // socket to the Room's ServerMsg control stream and take a seat in
+                // Room.players so broadcast()/send_to() reach us. This is what makes
+                // the deposit poller + payout signing broadcasts actually land on a
+                // P2P client. Guarded so free-play / bot / pure-relay tables (no such
+                // Room, or frost_room_code == None) take the byte-for-byte-old path.
+                if escrow_room.is_none() {
+                    let room_arc = state.rooms.lock().await.get(&room).cloned();
+                    if let Some(room_arc) = room_arc {
+                        let mut r = room_arc.lock().await;
+                        // staked only: DKG-mode escrow => frost coords present.
+                        if !r.bot_friendly && r.frost_room_code.is_some() {
+                            // per-connection ServerMsg channel; the Room writes control
+                            // frames here via broadcast()/send_to() and we forward them
+                            // to the socket as `srv` frames.
+                            let (srv_tx, mut srv_rx) = mpsc::unbounded_channel::<ServerMsg>();
+                            let ws_sink = tx.clone();
+                            let fwd = tokio::spawn(async move {
+                                while let Some(m) = srv_rx.recv().await {
+                                    if ws_sink.send(srv_frame(&m)).is_err() { break; }
+                                }
+                            });
+                            srv_forward_task = Some(fwd);
+
+                            // Seat/reseat this peer in the Room WITHOUT running the
+                            // server-side poker engine. Reconnect: reuse the seat by
+                            // relay join order (heads-up) and refresh its tx sink.
+                            let seat_u8 = seat as u8;
+                            let seat_idx = seat_u8 as usize;
+                            if seat_idx < r.players.len() {
+                                if let Some(Some(p)) = r.players.get_mut(seat_idx) {
+                                    // reconnect: swap the sink, clear disconnect timer
+                                    p.tx = srv_tx.clone();
+                                    p.disconnected_at = None;
+                                } else {
+                                    r.players[seat_idx] = Some(Player {
+                                        name: my_nick.clone(),
+                                        seat: seat_u8,
+                                        pubkey: None,
+                                        zcash_address: None,
+                                        tx: srv_tx.clone(),
+                                        disconnected_at: None,
+                                    });
+                                }
+                                escrow_room = Some(room_arc.clone());
+                                escrow_seat = Some(seat_u8);
+                                // push current room escrow coords immediately so the
+                                // client can join the FROST DKG room + show deposit UI.
+                                let _ = srv_tx.send(r.room_info());
+                                if r.escrow_address.is_empty() || !r.deposits_satisfied() {
+                                    let ready = r.deposits_satisfied() && r.player_count() >= 2;
+                                    let _ = srv_tx.send(ServerMsg::DepositStatus {
+                                        escrow_address: r.escrow_address.clone(),
+                                        seat_addresses: r.seat_deposit_addresses.clone(),
+                                        seat_payout_addresses: r.seat_payout_addresses.clone(),
+                                        player_a_deposit: r.deposits.get(0).copied().unwrap_or(0),
+                                        player_b_deposit: r.deposits.get(1).copied().unwrap_or(0),
+                                        required: r.required_deposit,
+                                        ready,
+                                    });
+                                }
+                                // replay in-flight settlement so a mid-payout reconnect
+                                // lands in the signing view.
+                                if r.payout_triggered {
+                                    if let Some(s) = r.payout_signing_state.clone() {
+                                        let elapsed = s.broadcast_at.elapsed().as_secs();
+                                        let remaining = PRIORITY_SIGNER_FALLBACK_SECS.saturating_sub(elapsed);
+                                        let _ = srv_tx.send(ServerMsg::PayoutSigningRequest {
+                                            relay_room: s.relay_room,
+                                            plan: s.plan,
+                                            priority_seat: s.priority_seat,
+                                            fallback_secs_remaining: remaining,
+                                        });
+                                    }
+                                    if let Some(txid) = r.payout_complete_txid.clone() {
+                                        let _ = srv_tx.send(ServerMsg::PayoutComplete { txid });
+                                    }
+                                    if let Some(reason) = r.payout_failed_reason.clone() {
+                                        let _ = srv_tx.send(ServerMsg::PayoutFailed { reason });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Some("msg") => {
+                let Some(room) = my_room.clone() else { continue };
+                let Some(text) = v.get("text").and_then(|x| x.as_str()) else { continue };
+                let ts = now_ms();
+                let rooms = state.relay_rooms.lock().await;
+                if let Some(peers) = rooms.get(&room) {
+                    for p in peers.iter() {
+                        if !p.tx.same_channel(&tx) {
+                            let _ = p.tx.send(frame(serde_json::json!({ "t": "msg", "text": text, "nick": my_nick, "ts": ts })));
+                        }
+                    }
+                }
+            }
+            // Server-facing CONTROL frame (staked tables only). Carries a ClientMsg
+            // under "msg". This is DISTINCT from the opaque `_enc` peer payloads
+            // (which arrive as `{"t":"msg","text":..}` and are forwarded blind above):
+            // the server NEVER parses card/action content. We only handle the escrow-
+            // relevant variants — DkgComplete (drives escrow-address agreement) and
+            // Leave (co-signed game-over => settlement/payout). Action / StartHand /
+            // any card content is intentionally NOT handled here: no server-side engine
+            // runs for a staked P2P table, so those stay peer-to-peer and blind.
+            Some("srv") => {
+                let Some(room_arc) = escrow_room.clone() else { continue };
+                let Some(seat) = escrow_seat else { continue };
+                let inner = match v.get("msg") {
+                    Some(m) => m.clone(),
+                    None => continue,
+                };
+                let cmsg: ClientMsg = match serde_json::from_value(inner) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                match cmsg {
+                    ClientMsg::DkgComplete { escrow_ua, orchard_fvk } => {
+                        let mut r = room_arc.lock().await;
+                        if r.frost_room_code.is_none() || (seat as usize) >= r.dkg_reported_ua.len() {
+                            continue;
+                        }
+                        tracing::info!(
+                            "relay room {} seat {}: dkg complete ua={} fvk_tail=…{}",
+                            r.code, seat, &escrow_ua[..escrow_ua.len().min(24)],
+                            &orchard_fvk[orchard_fvk.len().saturating_sub(8)..],
+                        );
+                        r.dkg_reported_ua[seat as usize] = Some(escrow_ua.clone());
+                        let seated: Vec<usize> = r.players.iter().enumerate()
+                            .filter_map(|(i, p)| p.as_ref().map(|_| i))
+                            .collect();
+                        let all_match = seated.len() >= 2 && seated.iter().all(|&i| {
+                            r.dkg_reported_ua.get(i).and_then(|u| u.as_deref()) == Some(escrow_ua.as_str())
+                        });
+                        if all_match && r.escrow_address != escrow_ua {
+                            tracing::info!("relay room {}: escrow UA agreed by all players: {}", r.code, escrow_ua);
+                            r.escrow_address = escrow_ua.clone();
+                            let info = r.room_info();
+                            r.broadcast(&info);
+                        }
+                    }
+                    ClientMsg::Settlement { a_stack, b_stack, a_addr, b_addr, log_hash, sig } => {
+                        // Co-signed WINNER payout. Each seat independently signs the agreed
+                        // final outcome (seat 0 = player A, seat 1 = player B) with its session
+                        // Ed25519 key — the same key pinned on-chain in the deposit memo. We
+                        // collect both submissions; only when BOTH seats submit AND their claims
+                        // (stacks, addrs, log_hash) MATCH do we call escrow /settle with both
+                        // sigs and then trigger the on-chain payout to the actual winner.
+                        //
+                        // ESCROW_URL unset (free-play / bot tables) ⇒ no-op: nothing to settle.
+                        let Some(escrow_url) = state.escrow_url.clone() else {
+                            tracing::debug!("settlement ignored — no ESCROW_URL (free-play)");
+                            continue;
+                        };
+                        let (settle_req, code) = {
+                            let mut r = room_arc.lock().await;
+                            if r.bot_friendly {
+                                continue; // chip-only tables never settle on-chain
+                            }
+                            if r.payout_triggered {
+                                tracing::info!("relay room {}: seat {} settlement ignored — payout already in flight", r.code, seat);
+                                continue;
+                            }
+                            let idx = seat as usize;
+                            if idx >= r.settlement_submissions.len() {
+                                continue;
+                            }
+                            let sub = SettlementSubmission {
+                                a_stack, b_stack,
+                                a_addr: a_addr.clone(), b_addr: b_addr.clone(),
+                                log_hash: log_hash.clone(), sig: sig.clone(),
+                            };
+                            tracing::info!(
+                                "relay room {}: seat {} settlement claim a_stack={} b_stack={}",
+                                r.code, seat, a_stack, b_stack,
+                            );
+                            r.settlement_submissions[idx] = Some(sub);
+                            // both seats submitted?
+                            let a = r.settlement_submissions.get(0).and_then(|s| s.clone());
+                            let b = r.settlement_submissions.get(1).and_then(|s| s.clone());
+                            let (Some(a), Some(b)) = (a, b) else {
+                                continue; // still waiting for the other seat
+                            };
+                            // claims must agree exactly (sig excluded) or we refuse to settle.
+                            if a.claim() != b.claim() {
+                                tracing::warn!(
+                                    "relay room {}: SETTLEMENT DISPUTE — seat claims disagree; NOT settling. \
+                                     a=({},{},{},{},{}) b=({},{},{},{},{})",
+                                    r.code,
+                                    a.a_stack, a.b_stack, a.a_addr, a.b_addr, a.log_hash,
+                                    b.a_stack, b.b_stack, b.a_addr, b.b_addr, b.log_hash,
+                                );
+                                continue; // safe default: leave unsettled; Leave→refund remains the fallback
+                            }
+                            // agreed. build the escrow SettleReq carrying BOTH seats' sigs.
+                            // seat 0 signature = player_a_sig, seat 1 = player_b_sig.
+                            r.payout_triggered = true;
+                            let req = escrow_client::SettleReq {
+                                player_a_stack: a.a_stack,
+                                player_b_stack: a.b_stack,
+                                player_a_address: a.a_addr.clone(),
+                                player_b_address: a.b_addr.clone(),
+                                action_log_hash: a.log_hash.clone(),
+                                player_a_sig: a.sig.clone(),
+                                player_b_sig: b.sig.clone(),
+                            };
+                            (req, r.code.clone())
+                        };
+
+                        // /settle (verify co-sign + record plan) then drive the on-chain payout.
+                        let room_clone = room_arc.clone();
+                        let rooms_clone = state.rooms.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = escrow_client::settle(&escrow_url, &code, &settle_req).await {
+                                tracing::error!("settle {}: escrow rejected co-signed outcome: {}", code, e);
+                                let mut r = room_clone.lock().await;
+                                r.payout_triggered = false; // allow retry / Leave fallback
+                                r.broadcast(&ServerMsg::PayoutFailed { reason: format!("settle: {}", e) });
+                                return;
+                            }
+                            tracing::info!("settle {}: escrow accepted co-signed outcome; initiating winner payout", code);
+                            // Build the payout plan from the SETTLED outcome (winner-weighted),
+                            // one output per seat with a positive payout. Amounts here mirror the
+                            // proportional split the escrow computed at /settle.
+                            let total = settle_req.player_a_stack + settle_req.player_b_stack;
+                            let (payouts, addrs) = (
+                                [settle_req.player_a_stack, settle_req.player_b_stack],
+                                [settle_req.player_a_address.clone(), settle_req.player_b_address.clone()],
+                            );
+                            let mut plan: Vec<PayoutLineJson> = Vec::new();
+                            {
+                                let r = room_clone.lock().await;
+                                let deposits_total = r.deposits.iter().sum::<u64>();
+                                let fee = TX_PAYOUT_FEE_ZAT.min(deposits_total);
+                                let distributable = deposits_total.saturating_sub(fee);
+                                for seat in 0u8..2 {
+                                    let amt = if total > 0 {
+                                        (distributable as u128 * payouts[seat as usize] as u128 / total as u128) as u64
+                                    } else {
+                                        distributable / 2
+                                    };
+                                    if amt > 0 {
+                                        plan.push(PayoutLineJson { seat, address: addrs[seat as usize].clone(), amount_zat: amt });
+                                    }
+                                }
+                            }
+                            if plan.is_empty() {
+                                tracing::warn!("settle {}: empty payout plan — nothing to pay", code);
+                                return;
+                            }
+                            // priority signer = seat 0 (arbitrary; trigger_payout swaps on timeout).
+                            trigger_payout(rooms_clone, room_clone, escrow_url, code, plan, 0).await;
+                        });
+                        notify_lobby_tables(&state.rooms, &state.lobby_users).await;
+                    }
+                    ClientMsg::Leave => {
+                        // Game-over co-signed settlement, P2P edition. The players agreed
+                        // on the outcome peer-to-peer (cards never touched the server); a
+                        // Leave frame is the trigger to settle the pre-funded deposits per
+                        // the deposit-derived settlement_plan and start on-chain payout.
+                        let mut r = room_arc.lock().await;
+                        if r.payout_triggered {
+                            tracing::info!("relay room {}: seat {} leave ignored — payout already in flight", r.code, seat);
+                            continue;
+                        }
+                        tracing::info!("relay room {}: seat {} leaving — settling", r.code, seat);
+                        r.payout_triggered = true;
+                        let payouts = r.settlement_plan();
+                        r.broadcast(&ServerMsg::GameOver {
+                            reason: format!("seat {} left the table", seat),
+                            payouts: payouts.clone(),
+                        });
+                        let pczt_plan: Vec<PayoutLineJson> = payouts.iter().filter_map(|(s, amt)| {
+                            r.seat_payout_addresses.get(*s as usize)
+                                .and_then(|opt| opt.as_ref())
+                                .map(|addr| PayoutLineJson { seat: *s, address: addr.clone(), amount_zat: *amt })
+                        }).collect();
+                        let code = r.code.clone();
+                        r.action_deadline = None;
+                        drop(r);
+                        if !pczt_plan.is_empty() {
+                            if let Some(escrow_url) = state.escrow_url.clone() {
+                                let room_clone = room_arc.clone();
+                                let rooms_clone = state.rooms.clone();
+                                tokio::spawn(async move {
+                                    trigger_payout(rooms_clone, room_clone, escrow_url, code, pczt_plan, seat).await;
+                                });
+                            } else {
+                                tracing::warn!("no ESCROW_URL configured — skipping on-chain payout");
+                            }
+                        }
+                        notify_lobby_tables(&state.rooms, &state.lobby_users).await;
+                    }
+                    // Every other ClientMsg (Action, StartHand, ReportDeposit, Chat, …)
+                    // is NOT a server-facing control message on a staked P2P table —
+                    // ignore. Card/action content is exchanged peer-to-peer via `_enc`.
+                    _ => {}
+                }
+            }
+            Some("part") => break,
+            _ => {}
+        }
+    }
+
+    // deregister and notify remaining peers
+    if let Some(room) = my_room {
+        let mut rooms = state.relay_rooms.lock().await;
+        if let Some(peers) = rooms.get_mut(&room) {
+            peers.retain(|p| !p.tx.same_channel(&tx));
+            for p in peers.iter() {
+                let _ = p.tx.send(frame(serde_json::json!({ "t": "system", "text": format!("{} left", my_nick) })));
+            }
+            if peers.is_empty() { rooms.remove(&room); }
+        }
+    }
+
+    // staked bridge: mark our Room seat disconnected (keep it for the reconnect
+    // window / settlement replay) and stop the ServerMsg forwarder.
+    if let (Some(room_arc), Some(seat)) = (escrow_room, escrow_seat) {
+        let mut r = room_arc.lock().await;
+        if let Some(Some(p)) = r.players.get_mut(seat as usize) {
+            p.disconnected_at = Some(tokio::time::Instant::now());
+        }
+        r.broadcast(&ServerMsg::OpponentDisconnected {
+            seat,
+            reconnect_secs: RECONNECT_WINDOW.as_secs(),
+        });
+    }
+    if let Some(fwd) = srv_forward_task { fwd.abort(); }
+
+    send_task.abort();
+}
 
 /// lobby websocket — global chat, whispers, player list
 async fn lobby_ws_handler(
@@ -1194,6 +1933,14 @@ async fn list_tables(State(state): State<AppState>) -> impl IntoResponse {
     Json(get_table_list(&state.rooms).await)
 }
 
+/// client capability probe — drives which options the lobby offers.
+/// `escrow_enabled` gates real-money tables; when false the UI shows practice only.
+async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
+    Json(serde_json::json!({
+        "escrow_enabled": state.escrow_url.is_some(),
+    }))
+}
+
 /// create new room and redirect to it
 /// query params for table creation
 #[derive(Deserialize, Default)]
@@ -1220,6 +1967,7 @@ struct RemoteEscrow {
     address: Option<String>,
     frost_relay_url: Option<String>,
     frost_room_code: Option<String>,
+    payout_token: Option<String>,
 }
 
 /// fetch escrow setup from poker-escrow if configured; logs and returns default on failure.
@@ -1245,6 +1993,7 @@ async fn remote_escrow_for(
                 address: setup.escrow_address,
                 frost_relay_url: setup.frost_relay_url,
                 frost_room_code: setup.frost_room_code,
+                payout_token: setup.payout_token,
             }
         }
         Err(e) => {
@@ -1275,6 +2024,15 @@ async fn create_room(
     };
 
     let bot_friendly = params.bot.unwrap_or(false) && matches!(access, TableAccess::Public);
+    // don't offer what we can't honor: real-money tables need the escrow service wired.
+    // without it, refuse to create — the UI also hides the option, this is the backstop.
+    if !bot_friendly && state.escrow_url.is_none() {
+        tracing::warn!("refused real-money table create — escrow service not configured");
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "real-money tables are unavailable right now (escrow offline)",
+        ).into_response();
+    }
     let rake_bps = params.rake_bps.unwrap_or(0);
     // bot tables are chip-only demos — no FROST escrow, no DKG, no on-chain anything
     let external_escrow = if bot_friendly {
@@ -1288,7 +2046,7 @@ async fn create_room(
         spawn_deposit_poller(state.rooms.clone(), state.escrow_url.clone(), code.clone());
     }
     notify_lobby_tables(&state.rooms, &state.lobby_users).await;
-    axum::response::Redirect::to(&format!("/{}", code))
+    axum::response::Redirect::to(&format!("/{}", code)).into_response()
 }
 
 /// serve room page (same SPA, code in URL)
@@ -1390,9 +2148,23 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
     let send_task = tokio::spawn(async move {
-        while let Some(msg) = rx.recv().await {
-            if let Ok(json) = serde_json::to_string(&msg) {
-                if ws_tx.send(WsMessage::Text(json.into())).await.is_err() { break; }
+        // keepalive: ping every 20s so half-dead sockets (e.g. idle through the deposit
+        // wait) and proxy idle-timeouts surface promptly instead of at the next game action.
+        let mut ping = tokio::time::interval(std::time::Duration::from_secs(20));
+        ping.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                msg = rx.recv() => match msg {
+                    Some(msg) => {
+                        if let Ok(json) = serde_json::to_string(&msg) {
+                            if ws_tx.send(WsMessage::Text(json.into())).await.is_err() { break; }
+                        }
+                    }
+                    None => break,
+                },
+                _ = ping.tick() => {
+                    if ws_tx.send(WsMessage::Ping(Vec::new().into())).await.is_err() { break; }
+                }
             }
         }
     });
@@ -1491,8 +2263,10 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
             for seat in &abandoners {
                 let seat_idx = *seat as usize;
                 if in_settlement {
-                    // silent drop; settlement UI is the user's surface now
-                    r.players[seat_idx] = None;
+                    // keep the seat (disconnected) so the player can still reconnect into the
+                    // settlement view to sign / see the payout txid; room cleanup tears the
+                    // whole room down post-payout anyway. Nulling it here locks a >60s-offline
+                    // player out via the "table closed" guard in the Join handler.
                     continue;
                 }
                 // remove abandoner first so winner_after_abandon sees the remaining alone
@@ -1570,21 +2344,13 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
 
                 // reconnect match: name + disconnected_at + pubkey (if originally set)
                 // pubkey check: anon joins (pubkey=None) keep name-only fallback; pubkey-set joins require the same pubkey
-                let reconnect_seat = r.players.iter().position(|p| {
-                    matches!(p, Some(p) if
-                        p.name == name &&
-                        p.disconnected_at.is_some() &&
-                        (p.pubkey.is_none() || p.pubkey.as_deref() == pubkey.as_deref())
-                    )
-                });
+                let reconnect_seat = r.find_reconnect_seat(&name, pubkey.as_deref());
                 // detect a hijack attempt: name matches a seated player but pubkey doesn't (and
                 // they registered with one). Reject with a clear error rather than silently
                 // sliding into the fresh-join path (which would hit "table full" anyway, but
                 // the message wouldn't tell them why).
                 if reconnect_seat.is_none() {
-                    let hijack = r.players.iter().any(|p| matches!(p, Some(p) if
-                        p.name == name && p.pubkey.is_some() && p.pubkey.as_deref() != pubkey.as_deref()
-                    ));
+                    let hijack = r.is_seat_hijack(&name, pubkey.as_deref());
                     if hijack {
                         let _ = tx.send(ServerMsg::Error {
                             message: "name in use by another player on this table".into(),
@@ -1672,6 +2438,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                         let _ = tx.send(ServerMsg::DepositStatus {
                             escrow_address: r.escrow_address.clone(),
                             seat_addresses: r.seat_deposit_addresses.clone(),
+                            seat_payout_addresses: r.seat_payout_addresses.clone(),
                             player_a_deposit: r.deposits.get(0).copied().unwrap_or(0),
                             player_b_deposit: r.deposits.get(1).copied().unwrap_or(0),
                             required: r.required_deposit,
@@ -1702,6 +2469,26 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                 }
 
                 // fresh join
+                // integrity: on real-money tables a single wallet may not occupy two seats
+                // (playing yourself defeats the escrow). Keyed on session pubkey; anon joins
+                // (pubkey=None) are only allowed on bot/demo tables anyway.
+                if !r.bot_friendly {
+                    match pubkey.as_deref() {
+                        Some(pk) if r.players.iter().flatten().any(|p| p.pubkey.as_deref() == Some(pk)) => {
+                            let _ = tx.send(ServerMsg::Error {
+                                message: "this wallet is already seated at this table — you can't play yourself".into(),
+                            });
+                            continue;
+                        }
+                        None => {
+                            let _ = tx.send(ServerMsg::Error {
+                                message: "real-money tables require a zafu wallet".into(),
+                            });
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
                 let seat = r.players.iter().position(|p| p.is_none());
                 if let Some(seat_idx) = seat {
                     let seat = seat_idx as u8;
@@ -1897,6 +2684,16 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
             ClientMsg::ReportDeposit { txid, amount } => {
                 if let Some(seat) = my_seat {
                     let mut r = room.lock().await;
+                    // integrity: never trust a client-reported deposit on a real table — those are
+                    // credited only by spawn_deposit_poller reading confirmed on-chain escrow state.
+                    // This path exists for bot/demo chip play only.
+                    if !r.bot_friendly {
+                        tracing::warn!("room {} seat {}: rejected client ReportDeposit on real table", r.code, seat);
+                        r.send_to(seat, ServerMsg::Error {
+                            message: "deposits are verified on-chain, not self-reported".into(),
+                        });
+                        continue;
+                    }
                     if (seat as usize) < r.deposits.len() {
                         r.deposits[seat as usize] += amount;
                         tracing::info!("deposit: room={} seat={} amount={} txid={}",
@@ -1911,6 +2708,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                         r.broadcast(&ServerMsg::DepositStatus {
                             escrow_address: r.escrow_address.clone(),
                             seat_addresses: r.seat_deposit_addresses.clone(),
+                            seat_payout_addresses: r.seat_payout_addresses.clone(),
                             player_a_deposit: r.deposits.get(0).copied().unwrap_or(0),
                             player_b_deposit: r.deposits.get(1).copied().unwrap_or(0),
                             required: r.required_deposit,
@@ -2007,6 +2805,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     for tx in &txs { let _ = tx.send(msg.clone()); }
                 });
             }
+            // Co-signed settlement only flows over the P2P `srv` relay (staked tables);
+            // the centralized/free-play server engine has no such outcome to settle.
+            ClientMsg::Settlement { .. } => {}
         }
     }
 
@@ -2075,6 +2876,8 @@ async fn main() {
         lobby_users: Arc::new(Mutex::new(HashMap::new())),
         static_dir: static_dir.clone(),
         escrow_url: escrow_url.clone(),
+        zid_peers: Arc::new(Mutex::new(ZidRelay::default())),
+        relay_rooms: Arc::new(Mutex::new(HashMap::new())),
     };
 
     tracing::info!("serving static files from {}", static_dir);
@@ -2085,8 +2888,20 @@ async fn main() {
     }
 
     let app = Router::new()
+        // blind room relay. NOTE: prod HAProxy routes any `/ws*` path to a
+        // separate relay (:50053), so the client dials `/p2p` (routes to us by
+        // default). `/ws` kept as an alias for local/dev without HAProxy.
+        .route("/p2p", axum::routing::get(relay_handler))
+        .route("/ws", axum::routing::get(relay_handler))
+        // HAProxy routes ALL `/ws*` to the separate FROST relay (:50053), which
+        // shadowed lobby chat + the zid e2ee relay. Serve them off non-`/ws`
+        // paths so they reach us; `/ws/*` kept as aliases for local/dev.
+        .route("/lobby", axum::routing::get(lobby_ws_handler))
+        .route("/zid", axum::routing::get(zid_relay_handler))
         .route("/ws/lobby", axum::routing::get(lobby_ws_handler))
+        .route("/ws/zid", axum::routing::get(zid_relay_handler))
         .route("/api/tables", axum::routing::get(list_tables))
+        .route("/api/config", axum::routing::get(get_config))
         .route("/new", axum::routing::get(create_room))
         .route("/{code}/ws", axum::routing::get(ws_handler))
         .route("/{code}/spectate", axum::routing::get(spectate_handler))
@@ -2098,4 +2913,73 @@ async fn main() {
     tracing::info!("poker server listening on http://{}", addr);
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_player(name: &str, pubkey: Option<&str>, disconnected: bool) -> Player {
+        let (tx, _rx) = mpsc::unbounded_channel();
+        Player {
+            name: name.into(),
+            seat: 0,
+            pubkey: pubkey.map(str::to_string),
+            zcash_address: None,
+            tx,
+            disconnected_at: disconnected.then(tokio::time::Instant::now),
+        }
+    }
+
+    #[test]
+    fn reconnect_matches_disconnected_seat_by_name() {
+        let mut room = Room::new("t".into());
+        room.players[0] = Some(test_player("anon", None, true));
+        assert_eq!(room.find_reconnect_seat("anon", None), Some(0));
+    }
+
+    #[test]
+    fn no_reconnect_for_connected_seat() {
+        let mut room = Room::new("t".into());
+        room.players[0] = Some(test_player("anon", None, false));
+        assert_eq!(room.find_reconnect_seat("anon", None), None);
+    }
+
+    #[test]
+    fn reconnect_requires_matching_pubkey() {
+        let mut room = Room::new("t".into());
+        room.players[0] = Some(test_player("b", Some("pk1"), true));
+        assert_eq!(room.find_reconnect_seat("b", Some("pk1")), Some(0));
+        assert_eq!(room.find_reconnect_seat("b", Some("pk2")), None);
+        assert_eq!(room.find_reconnect_seat("b", None), None);
+    }
+
+    #[test]
+    fn anon_seat_reconnects_by_name_only() {
+        // a seat that registered no pubkey accepts a name-only reconnect regardless of pubkey
+        let mut room = Room::new("t".into());
+        room.players[0] = Some(test_player("anon", None, true));
+        assert_eq!(room.find_reconnect_seat("anon", Some("whatever")), Some(0));
+    }
+
+    #[test]
+    fn hijack_detected_for_mismatched_pubkey() {
+        let mut room = Room::new("t".into());
+        room.players[0] = Some(test_player("b", Some("pk1"), false));
+        assert!(room.is_seat_hijack("b", Some("pk2")));
+        assert!(room.is_seat_hijack("b", None));
+        assert!(!room.is_seat_hijack("b", Some("pk1")));
+        assert!(!room.is_seat_hijack("other", Some("pk2")));
+    }
+
+    #[test]
+    fn disconnected_seat_retained_for_reconnect_but_not_counted() {
+        // mirrors the settlement fix: a disconnected seat stays present so it can reconnect,
+        // yet does not count as an active player.
+        let mut room = Room::new("t".into());
+        room.players[0] = Some(test_player("anon", None, true));
+        room.players[1] = Some(test_player("b", None, false));
+        assert_eq!(room.player_count(), 1);
+        assert_eq!(room.find_reconnect_seat("anon", None), Some(0));
+    }
 }

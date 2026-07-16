@@ -56,7 +56,7 @@ impl StateCache {
         }
     }
 
-    /// get channel state from cache
+    /// get channel state (app_data) from cache
     pub fn get_channel(&self, channel_id: &[u8; 32]) -> Option<Vec<u8>> {
         self.channels
             .iter()
@@ -64,41 +64,51 @@ impl StateCache {
             .map(|c| c.state_data.clone())
     }
 
-    /// apply state update
+    /// seat index of account in channel participants
+    pub fn participant_seat(&self, channel_id: &[u8; 32], account: &[u8; 32]) -> Option<u8> {
+        self.channels
+            .iter()
+            .find(|c| &c.channel_id == channel_id)
+            .and_then(|c| c.participants.iter().position(|p| p == account))
+            .map(|i| i as u8)
+    }
+
+    /// apply state update; stale nonces (<= cached) are ignored
     pub fn apply_update(&mut self, update: &StateUpdate) {
         let now = crate::now();
 
-        // find or create channel entry
         let idx = self.channels.iter().position(|c| c.channel_id == update.channel_id);
 
         match idx {
             Some(i) => {
-                // collect balance updates first
-                let balance_updates: Vec<_> = {
-                    let channel = &self.channels[i];
-                    if update.nonce > channel.nonce {
+                if update.nonce > self.channels[i].nonce {
+                    // map (participant_idx, balance) to pubkeys, preferring
+                    // the fresh participant list from the update
+                    let balance_updates: Vec<_> = {
+                        let participants = if update.participants.is_empty() {
+                            &self.channels[i].participants
+                        } else {
+                            &update.participants
+                        };
                         update.balances.iter()
                             .filter_map(|(idx, balance)| {
-                                channel.participants.get(*idx as usize)
-                                    .map(|pk| (*pk, *balance))
+                                participants.get(*idx as usize).map(|pk| (*pk, *balance))
                             })
                             .collect()
-                    } else {
-                        Vec::new()
-                    }
-                };
+                    };
 
-                // update channel
-                let channel = &mut self.channels[i];
-                if update.nonce > channel.nonce {
+                    let channel = &mut self.channels[i];
                     channel.nonce = update.nonce;
                     channel.state_hash = update.state_hash;
+                    channel.state_data = update.app_data.clone();
+                    if !update.participants.is_empty() {
+                        channel.participants = update.participants.clone();
+                    }
                     channel.updated_at = now;
-                }
 
-                // apply balance updates
-                for (pk, balance) in balance_updates {
-                    self.set_balance(pk, balance);
+                    for (pk, balance) in balance_updates {
+                        self.set_balance(pk, balance);
+                    }
                 }
             }
             None => {
@@ -118,14 +128,23 @@ impl StateCache {
                     channel_id: update.channel_id,
                     nonce: update.nonce,
                     state_hash: update.state_hash,
-                    state_data: Vec::new(),
-                    participants: Vec::new(),
+                    state_data: update.app_data.clone(),
+                    participants: update.participants.clone(),
                     updated_at: now,
                 });
+
+                for (idx, balance) in &update.balances {
+                    if let Some(pk) = update.participants.get(*idx as usize) {
+                        self.set_balance(*pk, *balance);
+                    }
+                }
             }
         }
 
-        self.confirmed_nonce = update.nonce;
+        // only advance the global confirmed nonce
+        if update.nonce > self.confirmed_nonce {
+            self.confirmed_nonce = update.nonce;
+        }
         self.last_update = now;
     }
 
@@ -147,9 +166,9 @@ impl StateCache {
         let state = ConfirmedState {
             nonce: self.confirmed_nonce,
             channels: self.channels.iter().map(|c| ChannelSummary {
-                id: hex_encode(&c.channel_id),
+                id: crate::hex_encode(&c.channel_id),
                 nonce: c.nonce,
-                state_hash: hex_encode(&c.state_hash),
+                state_hash: crate::hex_encode(&c.state_hash),
             }).collect(),
         };
 
@@ -192,13 +211,22 @@ struct CachedBalance {
     updated_at: f64,
 }
 
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn update(channel: u8, nonce: u64) -> StateUpdate {
+        StateUpdate {
+            channel_id: [channel; 32],
+            nonce,
+            state_hash: [nonce as u8; 32],
+            balances: Vec::new(),
+            app_data_hash: [0u8; 32],
+            participants: Vec::new(),
+            app_data: Vec::new(),
+            game: None,
+        }
+    }
 
     #[test]
     fn test_cache_balance() {
@@ -209,5 +237,60 @@ mod tests {
 
         cache.set_balance(account, 1000);
         assert_eq!(cache.get_balance(&account), Some(1000));
+    }
+
+    #[test]
+    fn test_balance_eviction() {
+        let mut cache = StateCache::new();
+        for i in 0..(MAX_BALANCES + 4) {
+            cache.set_balance([i as u8; 32], i as u64);
+        }
+        assert!(cache.balances.len() <= MAX_BALANCES);
+    }
+
+    #[test]
+    fn test_channel_eviction() {
+        let mut cache = StateCache::new();
+        for i in 0..(MAX_CHANNELS + 2) {
+            cache.apply_update(&update(i as u8, 1));
+        }
+        assert_eq!(cache.channels.len(), MAX_CHANNELS);
+    }
+
+    #[test]
+    fn test_stale_update_ignored() {
+        let mut cache = StateCache::new();
+        cache.apply_update(&update(1, 5));
+        cache.apply_update(&update(1, 3));
+
+        assert_eq!(cache.confirmed_nonce, 5);
+        let channel = &cache.channels[0];
+        assert_eq!(channel.nonce, 5);
+        assert_eq!(channel.state_hash, [5u8; 32]);
+    }
+
+    #[test]
+    fn test_participants_and_balances_from_update() {
+        let mut cache = StateCache::new();
+        let alice = [7u8; 32];
+        let bob = [8u8; 32];
+
+        let mut upd = update(1, 1);
+        upd.participants = vec![alice, bob];
+        upd.balances = vec![(0, 500), (1, 600)];
+        upd.app_data = vec![1, 2, 3];
+        cache.apply_update(&upd);
+
+        assert_eq!(cache.get_balance(&alice), Some(500));
+        assert_eq!(cache.get_balance(&bob), Some(600));
+        assert_eq!(cache.get_channel(&[1u8; 32]), Some(vec![1, 2, 3]));
+        assert_eq!(cache.participant_seat(&[1u8; 32], &bob), Some(1));
+
+        // newer update without participants keeps the cached list
+        let mut upd2 = update(1, 2);
+        upd2.balances = vec![(0, 450)];
+        cache.apply_update(&upd2);
+        assert_eq!(cache.get_balance(&alice), Some(450));
+        assert_eq!(cache.participant_seat(&[1u8; 32], &bob), Some(1));
     }
 }

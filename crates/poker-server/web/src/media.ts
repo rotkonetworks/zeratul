@@ -4,8 +4,32 @@
  * Uses the existing relay for signaling (SDP offer/answer + ICE candidates).
  * Media streams are P2P (not through relay) once ICE connects.
  *
- * Opt-in: player must click mic/camera to enable.
- * The relay never sees audio/video data — only signaling messages.
+ * PRIVACY / OPT-IN:
+ * The poker game itself runs P2P over the ENCRYPTED BLIND RELAY (transport.ts):
+ * the two players never open a socket to each other, so no peer IP is leaked.
+ * WebRTC media is the exception — it connects the two clients DIRECTLY so that
+ * audio/video never touches the operator's servers. That direct connection
+ * necessarily reveals each player's IP address to the other.
+ *
+ * Because of that, media is HARD opt-in: nothing here calls getUserMedia and no
+ * RTCPeerConnection is created until the user has explicitly acknowledged the
+ * IP-exposure tradeoff (`acknowledge()`). `revoke()` tears everything down and
+ * re-arms the gate. Incoming SDP/ICE signaling is ignored until acknowledged, so
+ * a remote peer cannot force a connection (or a candidate-gathering IP probe)
+ * on us before we consent.
+ *
+ * ICE / NAT traversal decision (team standing decision — DIRECT P2P, opt-in):
+ *   - NO TURN relay. TURN would route media through a server and HIDE IPs, which
+ *     is the opposite of the intended tradeoff (and would defeat the "media is
+ *     direct" property). If relayed/anonymous media is ever wanted it is a
+ *     separate feature with its own consent.
+ *   - NO third-party STUN. Public STUN servers (e.g. Google's) would hand a
+ *     third party the client's reflexive IP, deanonymizing beyond the peer.
+ *     We therefore use an EMPTY iceServers list: host candidates only. Media
+ *     connects directly on reachable networks (same LAN / non-symmetric NAT via
+ *     peer-reflexive candidates); if both peers are behind restrictive NATs it
+ *     may fail to connect — that is the accepted privacy-first default. A
+ *     self-hosted STUN could be added later without leaking to a third party.
  */
 
 import { createSignal } from 'solid-js'
@@ -17,16 +41,30 @@ export interface MediaState {
   micEnabled: () => boolean
   camEnabled: () => boolean
   connected: () => boolean
+  /** true once the user has consented to direct-P2P media + IP exposure */
+  acknowledged: () => boolean
+  /** record explicit consent; media stays inert until this is called */
+  acknowledge: () => void
+  /** withdraw consent: stops tracks, closes the peer connection, re-arms the gate */
+  revoke: () => void
+  /**
+   * true when the opponent has started media (an SDP offer arrived) but the
+   * local user has NOT yet opted in. Drives the "opponent enabled video —
+   * enable yours to connect" prompt. Cleared once we acknowledge or on cleanup.
+   */
+  incomingPending: () => boolean
+  /** dismiss the incoming-media prompt without opting in (stays disconnected) */
+  dismissIncoming: () => void
   toggleMic: () => Promise<void>
   toggleCam: () => Promise<void>
   handleSignal: (msg: WireMessage) => void
   cleanup: () => void
 }
 
-const ICE_SERVERS = [
-  { urls: 'stun:stun.l.google.com:19302' },
-  { urls: 'stun:stun1.l.google.com:19302' },
-]
+// Direct P2P, no TURN, no third-party STUN. See file header for rationale.
+// Host candidates only → the reflexive IP is never disclosed to any third party;
+// the only party that learns your IP is the opponent you chose to connect to.
+const ICE_SERVERS: RTCIceServer[] = []
 
 export function createMedia(
   send: (msg: WireMessage) => void,
@@ -36,6 +74,13 @@ export function createMedia(
   const [micEnabled, setMicEnabled] = createSignal(false)
   const [camEnabled, setCamEnabled] = createSignal(false)
   const [connected, setConnected] = createSignal(false)
+  // Consent gate. Nothing that could leak the local IP (getUserMedia →
+  // addTrack → ICE gathering, or accepting a remote offer) runs until true.
+  const [acknowledged, setAcknowledged] = createSignal(false)
+  // Set when a remote SDP offer arrives while we have NOT opted in. We do not
+  // touch it (no PC, no ICE, no IP leak) — we only raise this flag so the UI can
+  // surface a consent prompt. The peer's repeated offers just re-arm the flag.
+  const [incomingPending, setIncomingPending] = createSignal(false)
 
   let pc: RTCPeerConnection | null = null
   let makingOffer = false
@@ -118,6 +163,13 @@ export function createMedia(
   }
 
   async function toggleMic() {
+    // Consent gate: refuse to touch the mic / create a peer connection until the
+    // user has acknowledged the IP-exposure tradeoff. The UI must call
+    // acknowledge() first; this is a defensive backstop.
+    if (!acknowledged()) {
+      console.warn('[media] mic toggle blocked: media not acknowledged')
+      return
+    }
     if (micEnabled()) {
       // disable mic
       const stream = localStream()
@@ -137,6 +189,10 @@ export function createMedia(
   }
 
   async function toggleCam() {
+    if (!acknowledged()) {
+      console.warn('[media] cam toggle blocked: media not acknowledged')
+      return
+    }
     if (camEnabled()) {
       // disable camera
       const stream = localStream()
@@ -155,8 +211,23 @@ export function createMedia(
     }
   }
 
-  // handle incoming WebRTC signaling messages
+  // handle incoming WebRTC signaling messages.
+  // Ignored entirely until the user has opted in: otherwise a remote offer would
+  // create an RTCPeerConnection and start ICE gathering — leaking our IP to the
+  // peer before we ever consented. We only ever connect after our own opt-in.
   async function handleSignal(msg: WireMessage) {
+    if (!acknowledged()) {
+      // Not opted in: do NOT create a peer connection or add the candidate —
+      // that would start ICE and leak our IP to the peer before we consented.
+      // Instead, surface an incoming-media prompt when the peer sends an OFFER
+      // (their attempt to start media). ICE candidates arriving before consent
+      // are just dropped; they're meaningless without a peer connection.
+      if (msg.t === '_sdp' && (msg.d as { sdp?: RTCSessionDescriptionInit })?.sdp?.type === 'offer') {
+        setIncomingPending(true)
+      }
+      console.warn('[media] ignoring signaling before opt-in:', msg.t)
+      return
+    }
     if (msg.t === '_sdp') {
       const d = msg.d as { sdp: RTCSessionDescriptionInit }
       const conn = ensurePeerConnection()
@@ -187,15 +258,45 @@ export function createMedia(
     }
   }
 
-  function cleanup() {
+  // Fully stop media and close the peer connection, without touching the
+  // consent flag. Shared by revoke() and cleanup().
+  function teardown() {
     localStream()?.getTracks().forEach(t => t.stop())
     setLocalStream(null)
     setRemoteStream(null)
     pc?.close()
     pc = null
+    makingOffer = false
     setMicEnabled(false)
     setCamEnabled(false)
     setConnected(false)
+  }
+
+  function acknowledge() {
+    setAcknowledged(true)
+    // We're consenting now; the prompt is no longer relevant. If the peer had
+    // already offered, our own toggle will (re)negotiate a fresh connection.
+    setIncomingPending(false)
+  }
+
+  // User withdrew consent: stop everything AND re-arm the gate, so any later
+  // mic/cam use requires acknowledging again.
+  function revoke() {
+    teardown()
+    setAcknowledged(false)
+    setIncomingPending(false)
+  }
+
+  // Dismiss the "opponent enabled video" prompt without opting in. We stay
+  // disconnected — no PC, no ICE, no IP leak.
+  function dismissIncoming() {
+    setIncomingPending(false)
+  }
+
+  function cleanup() {
+    teardown()
+    setAcknowledged(false)
+    setIncomingPending(false)
   }
 
   return {
@@ -204,6 +305,11 @@ export function createMedia(
     micEnabled,
     camEnabled,
     connected,
+    acknowledged,
+    acknowledge,
+    revoke,
+    incomingPending,
+    dismissIncoming,
     toggleMic,
     toggleCam,
     handleSignal,

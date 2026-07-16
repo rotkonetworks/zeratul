@@ -14,9 +14,10 @@ wasm = ["std", "dep:wasm-bindgen", "dep:serde", "dep:serde_json", "getrandom/js"
 
 [dependencies]
 zk-shuffle = { path = "../zk-shuffle", default-features = false, features = ["std"] }
-curve25519-dalek = { version = "4.1", default-features = false, features = ["digest", "rand_core", "group"] }
+curve25519-dalek = { version = "4.1", default-features = false, features = ["digest", "rand_core", "group", "zeroize"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 getrandom = { version = "0.2" }
+zeroize = { version = "1", default-features = false }
 
 # wasm bindings
 wasm-bindgen = { version = "0.2", optional = true }
