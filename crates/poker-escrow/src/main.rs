@@ -680,6 +680,32 @@ async fn settle(
         return Json(serde_json::json!({"error": "game not active"}));
     }
 
+    // ── 0-conf theft guard (fail-closed) ────────────────────────────────────
+    // The hand may have been DEALT the instant both buy-ins were seen in the mempool
+    // (deal_ready = confirmed+pending), but the payout must NEVER move more than the
+    // value that actually CONFIRMED into the vault. If either seat's on-chain-confirmed
+    // deposit is still short — its mempool tx never mined (dropped / RBF'd / double-spent) —
+    // refuse to settle. Otherwise a player could enter on an unconfirmed deposit, win, and be
+    // paid out of the honest seat's real deposit (free-roll theft). This is transient for a
+    // legit fast hand: retry after the block lands (~75s), or /cancel to refund confirmed
+    // deposits. Money paths stay confirmed-only; see run_mempool_watch + deal_ready.
+    if !both_deposits_satisfied(room.player_a_deposit, room.player_b_deposit, room.required_deposit) {
+        tracing::warn!(
+            "settle BLOCKED room={} — unconfirmed deposit shortfall (a={} b={} required={}); \
+             refusing 0-conf payout, funds remain in vault",
+            code, room.player_a_deposit, room.player_b_deposit, room.required_deposit,
+        );
+        return Json(serde_json::json!({
+            "error": "settlement blocked: a deposit is not yet confirmed on-chain — a payout \
+                      cannot exceed confirmed funds. wait for confirmation and retry, or cancel \
+                      to refund confirmed deposits.",
+            "deposit_pending_confirmation": true,
+            "player_a_deposit": room.player_a_deposit,
+            "player_b_deposit": room.player_b_deposit,
+            "required_deposit": room.required_deposit,
+        }));
+    }
+
     // ── player co-signing gate ──────────────────────────────────────────────
     // Settlement decides who gets the pot. Require BOTH seats to sign the exact
     // outcome with the Ed25519 identity key each pinned on-chain in their deposit
@@ -1371,6 +1397,20 @@ async fn arbitrate(
             "refund" => (room.player_a_deposit, room.player_b_deposit, true, true),
             other => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("unknown ruling '{}'", other)}))).into_response(),
         };
+        // 0-conf safety (defense-in-depth): pay_a/pay_b award the winner the whole confirmed
+        // pot. If a deposit never confirmed, that pot is the OTHER seat's real money — paying it
+        // to the winner is theft. Only 'refund' (each seat gets its own confirmed deposit back)
+        // is safe under a shortfall. The automatic /settle path enforces the same invariant.
+        if (req.ruling == "pay_a" || req.ruling == "pay_b")
+            && !both_deposits_satisfied(room.player_a_deposit, room.player_b_deposit, room.required_deposit) {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                "error": "a deposit is unconfirmed on-chain — pay_a/pay_b could pay the winner from \
+                          the other seat's deposit. use 'refund' to return each seat's confirmed deposit.",
+                "player_a_deposit": room.player_a_deposit,
+                "player_b_deposit": room.player_b_deposit,
+                "required_deposit": room.required_deposit,
+            }))).into_response();
+        }
         if need_a && addr_a.is_none() {
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "player A payout address not pinned on-chain — cannot pay"}))).into_response();
         }
@@ -1851,6 +1891,22 @@ mod tests {
         let required = 15_000;
         assert!(!both_deposits_satisfied(14_999, 15_000, required));
         assert!(both_deposits_satisfied(15_001, 20_000, required));
+    }
+
+    #[test]
+    fn settle_guard_blocks_0conf_theft() {
+        // The 0-conf attack the /settle + arbitrate guards defend against: attacker A's deposit
+        // is only ever SEEN in the mempool (enough for deal_ready to deal the hand) but never
+        // confirms — a double-spend/RBF. B's deposit confirms for real. A wins the hand.
+        // At settlement the CONFIRMED counters are a=0, b=required: the vault holds only B's
+        // money. The guard (both_deposits_satisfied over CONFIRMED) must be false so /settle
+        // refuses — otherwise A would be paid out of B's deposit (free-roll theft).
+        let required = 15_000;
+        // attacker unconfirmed, honest confirmed -> guard shut (settle refused, funds safe)
+        assert!(!both_deposits_satisfied(0, required, required), "A never confirmed → must block");
+        assert!(!both_deposits_satisfied(required, 0, required), "B never confirmed → must block");
+        // both actually confirmed (the normal case: a block lands mid-hand) -> guard opens
+        assert!(both_deposits_satisfied(required, required, required), "both confirmed → allow payout");
     }
 
     // ── MEMPOOL (0-conf) pending-deposit lifecycle ────────────────────────────
