@@ -178,6 +178,13 @@ export function createGame(
       const p = engineApi?.phase() ?? 0
       if (p >= 2 && p <= 5) promptAction()
     },
+    onShowdownReveal: (opp) => {
+      // opponent's cards are now cryptographically bound to the committed deck.
+      // this is the ONLY source of oppCards on a ZK table — never the wire claim.
+      oppCards = opp
+      cb.onMsg({ type: 'Showdown', hands: [[oppSeat, [cardToJson(opp[0]), cardToJson(opp[1])]]] })
+      evalShowdown()
+    },
   })
 
   // 3. transcript
@@ -208,6 +215,44 @@ export function createGame(
       send({ t: 'deal', d: { cards: oppCards, community, stacks: engineApi!.stacks() } })
     }
     startHand()
+  }
+
+  /** Evaluate the showdown through the engine and award the pot. oppCards must
+   *  already be set — either from the verified ZK reveal (onShowdownReveal) or,
+   *  on a non-ZK table, from the asserted wire message. Waits for community
+   *  cards if the ZK community reveal is still in flight (all-in async path). */
+  function evalShowdown() {
+    let showdownRetries = 0
+    const doShowdown = () => {
+      const sc = shuffle.community()
+      if (sc.some(c => c > 0)) community = [...sc]
+
+      if (!community.some(c => c > 0)) {
+        // community not revealed yet — retry
+        if (showdownRetries++ < 100) {
+          setTimeout(doShowdown, 100)
+          return
+        }
+        cb.onLog('showdown timeout — community cards unavailable')
+      }
+
+      // update engine with final state
+      engineApi!.updateCommunity(community)
+      engineApi!.updateOppCards(oppCards)
+
+      const pot = engineApi!.pot()
+      const winner = engineApi!.showdown()
+      const stacks = engineApi!.stacks()
+      lastStacks = [...stacks] as [number, number]
+
+      console.log('[showdown] community=', JSON.stringify(community),
+        'winner=', winner, 'pot=', pot, 'stacks=', JSON.stringify(stacks))
+
+      cb.onMsg({ type: 'PotAwarded', seat: winner, amount: pot })
+      cb.onMsg({ type: 'HandComplete', stacks: [...stacks] })
+      handComplete()
+    }
+    doShowdown()
   }
 
   function startHand() {
@@ -344,9 +389,14 @@ export function createGame(
             shuffle.revealCommunity('flop')
             shuffle.revealCommunity('turn')
             shuffle.revealCommunity('river')
+            // release our own hole-card shares; the opponent verifies them
+            // against the committed deck (and we verify theirs). No plaintext
+            // card claim crosses the wire on a ZK table.
+            shuffle.revealShowdown()
+          } else {
+            send({ t: 'showdown', d: { cards: myCards } })
           }
-          send({ t: 'showdown', d: { cards: myCards } })
-          return // stop processing — showdown handled by peer message
+          return // stop processing — showdown handled by verified reveal / peer message
 
         case 'rejected':
           cb.onLog(`rejected: ${ev.action} (${ev.reason})`)
@@ -541,11 +591,51 @@ export function createGame(
         const oppMode = typeof d === 'object' ? d.mode : 'anon'
         cb.onMsg({ type: 'OpponentJoined', seat: oppSeat, name: `${oppName} (${oppMode})` })
         if (isHost) negotiation.proposeRules(negotiation.rules())
+        // Bidirectional reconnect resync (free play). A peer that (re)announces `seated` AFTER
+        // we've already dealt a hand (handNum > 0) has rebuilt a FRESH game — a page reload
+        // wipes its in-memory state — and would otherwise be stuck on "getting ready", because
+        // our negotiation's `gameStarted` guard swallows the re-handshake. Whoever stayed
+        // connected owns the authoritative hand counter + rules, so we hand them to the
+        // reconnecting peer via `resync`; the HOST (seat 0 — the STABLE shuffle initiator, kept
+        // stable across reloads by the seat pin in ws.ts) then deals a fresh hand at a handId
+        // above the established one. Reset our engine so both sides agree on stacks. Staked
+        // tables are excluded — a mid-hand reconnect there must be resolved against the escrow/
+        // server hand-state authority, not silently re-dealt with real money committed.
+        if (handNum > 0 && !staked) {
+          cb.onLog('opponent rejoined — resyncing for a fresh hand')
+          clearTurnTimer()
+          clearOppTimer()
+          send({ t: 'resync', d: { handId: shuffle.currentHandId(), rules: negotiation.rules() } })
+          engineApi = null
+          ensureEngine()
+          if (isHost) setTimeout(() => beginDeal(), 500)
+        }
+        break
+      }
+
+      case 'resync': {
+        // Counterpart to 'seated' above: a still-connected peer is resyncing us after OUR
+        // reload. Adopt their hand counter (so our next deal's handId lands above theirs and
+        // their `isNewHand` check accepts it) + rules, reset our engine to match their stacks,
+        // and — if we're the host (the stable shuffle initiator) — drive the fresh deal.
+        if (staked) break
+        const rd = msg.d as any
+        clearTurnTimer()
+        clearOppTimer()
+        if (typeof rd?.handId === 'number') shuffle.setHandIdBaseline(rd.handId)
+        if (rd?.rules && isHost) negotiation.proposeRules(rd.rules)
+        engineApi = null
+        ensureEngine()
+        if (isHost) setTimeout(() => beginDeal(), 300)
         break
       }
 
       case 'deal': {
-        // plaintext fallback: guest receives cards from host
+        // plaintext fallback: guest receives cards from host.
+        // On a ZK table cards come ONLY from the shuffle ceremony (onDeal) — a
+        // peer must not be able to inject hole/board values out of band, so we
+        // ignore an unsolicited `deal` when the shuffle ceremony is active.
+        if (shuffle.available) break
         const d = msg.d as any
         myCards = d.cards; community = d.community
         ensureEngine()
@@ -586,42 +676,17 @@ export function createGame(
         // P2P: BOTH sides evaluate showdown through the engine.
         // no "host evaluates and tells guest" — both are equal peers.
         if (!engineApi) break
+        // On a ZK table the opponent's hole cards are trusted ONLY after their
+        // decryption shares verify against the committed deck (onShowdownReveal).
+        // The plaintext `cards` in this message are unauthenticated — a losing
+        // player could assert any winning hand — so we ignore them entirely and
+        // let the verified reveal drive the pot. Plaintext/bot tables (no ZK
+        // ceremony) still fall back to the asserted cards.
+        if (shuffle.available) break
         const d = msg.d as { cards: [number, number] }
         oppCards = d.cards
         cb.onMsg({ type: 'Showdown', hands: [[oppSeat, [cardToJson(d.cards[0]), cardToJson(d.cards[1])]]] })
-
-        // wait for community cards if not yet revealed (all-in async path)
-        const doShowdown = () => {
-          const sc = shuffle.community()
-          if (sc.some(c => c > 0)) community = [...sc]
-
-          if (!community.some(c => c > 0)) {
-            // community not revealed yet — retry
-            if (showdownRetries++ < 100) {
-              setTimeout(doShowdown, 100)
-              return
-            }
-            cb.onLog('showdown timeout — community cards unavailable')
-          }
-
-          // update engine with final state
-          engineApi!.updateCommunity(community)
-          engineApi!.updateOppCards(oppCards)
-
-          const pot = engineApi!.pot()
-          const winner = engineApi!.showdown()
-          const stacks = engineApi!.stacks()
-          lastStacks = [...stacks] as [number, number]
-
-          console.log('[showdown] community=', JSON.stringify(community),
-            'winner=', winner, 'pot=', pot, 'stacks=', JSON.stringify(stacks))
-
-          cb.onMsg({ type: 'PotAwarded', seat: winner, amount: pot })
-          cb.onMsg({ type: 'HandComplete', stacks: [...stacks] })
-          handComplete()
-        }
-        let showdownRetries = 0
-        doShowdown()
+        evalShowdown()
         break
       }
 

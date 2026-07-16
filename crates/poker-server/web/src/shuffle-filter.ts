@@ -51,6 +51,10 @@ export interface ShuffleCallbacks {
   onDeal: (myCards: [number, number], oppCards: [number, number], community: number[]) => void
   /** called when community cards for a phase are revealed */
   onCommunityRevealed: (phase: string, cards: CardJson[]) => void
+  /** called at showdown once the opponent's hole cards are revealed AND their
+   *  DLEQ proofs verify against the committed deck. NOT the asserted plaintext —
+   *  a forged share never reaches this callback (reveal returns -1 → abort). */
+  onShowdownReveal: (oppCards: [number, number]) => void
 }
 
 export interface ShuffleApi {
@@ -60,10 +64,20 @@ export interface ShuffleApi {
   beginDeal: () => void
   /** reveal community cards for a phase advance */
   revealCommunity: (phase: string) => void
+  /** at showdown: release our own hole-card shares so the opponent can verify
+   *  our hand against the committed deck. Their cards arrive (verified) via the
+   *  onShowdownReveal callback once they do the same. */
+  revealShowdown: () => void
   /** true if shuffle WASM is available */
   available: boolean
   /** the shuffleState (for engine deal with community placeholders) */
   community: () => number[]
+  /** current monotonic hand counter — sent to a reconnecting peer so it re-syncs */
+  currentHandId: () => number
+  /** raise the local hand counter to at least `n` (reconnect resync: the reconnecting
+   *  host must deal at a handId ABOVE the still-connected peer's, or the peer's
+   *  `isNewHand` check rejects the fresh deal). No-op if `n` is not higher. */
+  setHandIdBaseline: (n: number) => void
 }
 
 export function createShuffle(
@@ -85,6 +99,7 @@ export function createShuffle(
   let myShares = new Map<number, Share>()
   let oppShares = new Map<number, Share>()
   let shuffleReady = false
+  let oppHoleRevealed = false
   let communityRevealed = 0
   let communityCards = [0, 0, 0, 0, 0]
   let handId = 0 // increments each deal to distinguish new hands
@@ -99,9 +114,14 @@ export function createShuffle(
     myShares = new Map()
     oppShares = new Map()
     shuffleReady = false
+    oppHoleRevealed = false
     communityRevealed = 0
     communityCards = [0, 0, 0, 0, 0]
   }
+
+  // own vs opponent hole-card deck positions (heads-up: host=A holds 0,1)
+  const myHolePositions: [number, number] = isHost ? [0, 1] : [2, 3]
+  const oppHolePositions: [number, number] = isHost ? [2, 3] : [0, 1]
 
   /** create a fresh per-hand keypair + proof of possession */
   function freshKeys() {
@@ -237,6 +257,7 @@ export function createShuffle(
     }
     tryRevealHoleCards()
     tryRevealCommunity()
+    tryRevealOppHoleCards()
   }
 
   function revealPositions(positions: number[]): number[] | null {
@@ -283,6 +304,46 @@ export function createShuffle(
     cb.onLog('shuffle: hole cards revealed (zk)')
     cb.onMsg({ type: 'Status', phase: 'dealing', message: 'deck verified — dealing...' })
     setTimeout(() => cb.onDeal(myCards, oppCards, communityCards), 1500)
+  }
+
+  // ── showdown: reveal our own hole cards to the opponent ───
+
+  function revealShowdown() {
+    if (!shuffleState || !shuffleKeys) return
+    // release the shares we withheld during the hand (C5) for OUR hole
+    // positions, so the opponent can bind our claimed cards to the deck.
+    const shares: Record<number, Share> = {}
+    for (const pos of myHolePositions) {
+      const parsed = parseShare(shuffleKeys.decrypt_share(shuffleState, pos))
+      if (parsed) {
+        myShares.set(pos, parsed)
+        shares[pos] = parsed
+      }
+    }
+    if (Object.keys(shares).length > 0) {
+      send({ t: 'reveal', d: { shares } })
+    }
+    // the opponent's shares may already be here (they revealed first)
+    tryRevealOppHoleCards()
+  }
+
+  function tryRevealOppHoleCards() {
+    if (oppHoleRevealed) return
+    // need BOTH shares for the opponent's hole positions: ours (computed at
+    // deal) plus theirs (sent only now, at showdown).
+    for (const p of oppHolePositions) {
+      if (!myShares.has(p) || !oppShares.has(p)) return
+    }
+    const revealed = revealPositions(oppHolePositions)
+    if (!revealed) {
+      // a share whose DLEQ proof does not verify against the committed deck:
+      // the opponent tried to claim cards they were not dealt. Refuse.
+      abort('showdown reveal failed — opponent decryption proof invalid')
+      return
+    }
+    oppHoleRevealed = true
+    cb.onLog('shuffle: opponent hole cards revealed + verified (zk)')
+    cb.onShowdownReveal([revealed[0]!, revealed[1]!])
   }
 
   // ── community card reveals (per phase) ────────────────────
@@ -391,7 +452,10 @@ export function createShuffle(
     handle,
     beginDeal,
     revealCommunity,
+    revealShowdown,
     available,
     community: () => communityCards,
+    currentHandId: () => handId,
+    setHandIdBaseline: (n: number) => { if (n > handId) handId = n },
   }
 }
