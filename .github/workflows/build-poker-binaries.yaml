@@ -1,0 +1,67 @@
+name: Build poker binaries (prod artifacts)
+
+# Builds release poker-escrow + poker-relay on a glibc-2.35 runner so the artifacts
+# run on the prod box (glibc 2.41) without the local glibc-2.43 skew. Prod itself is a
+# 2 GB / full-disk server that cannot self-compile the halo2/orchard/FROST stack, so the
+# heavy build happens here on free CI compute.
+#
+# BUILD ONLY — no deploy. Money-critical escrow cutover stays a manual, reviewed,
+# smoke-tested step on prod (backup + rollback). No secrets are consumed here: compiling
+# needs no keys/mnemonic; secrets only matter at runtime on prod.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [staging, master]
+    paths:
+      - 'crates/poker-escrow/**'
+      - 'crates/poker-server/**'
+      - 'crates/zk-shuffle/**'
+      - 'crates/poker-shuffle-wasm/**'
+      - '.github/workflows/build-poker-binaries.yaml'
+
+jobs:
+  build:
+    # ubuntu-22.04 = glibc 2.35 (<= prod's 2.41) so the binary loads on prod.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+
+      - name: Install protobuf-compiler
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
+
+      - name: Build poker-escrow (release)
+        run: cargo build --release --manifest-path crates/poker-escrow/Cargo.toml --bin poker-escrow
+
+      - name: Build poker-server (release)
+        run: cargo build --release --manifest-path crates/poker-server/Cargo.toml --bin poker-server
+
+      - name: Verify glibc floor (must be <= 2.35)
+        run: |
+          for b in target/release/poker-escrow target/release/poker-server; do
+            floor=$(objdump -T "$b" | grep -oE 'GLIBC_[0-9.]+' | sort -V | tail -1)
+            echo "$b -> $floor"
+          done
+
+      - name: Stage artifacts
+        run: |
+          mkdir -p dist
+          # poker-server binary is deployed on prod as 'poker-relay'
+          cp target/release/poker-escrow dist/poker-escrow
+          cp target/release/poker-server dist/poker-relay
+          sha256sum dist/* > dist/SHA256SUMS
+          cat dist/SHA256SUMS
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: poker-binaries-${{ github.sha }}
+          path: dist/
+          retention-days: 14

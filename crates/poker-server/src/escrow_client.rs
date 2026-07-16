@@ -106,6 +106,12 @@ pub struct EscrowState {
     pub player_a_deposit: u64,
     #[serde(default)]
     pub player_b_deposit: u64,
+    /// MEMPOOL-seen (0-conf) per-seat totals. UX signal only — never spendable. Absent on older
+    /// escrow builds, so `#[serde(default)]` → 0.
+    #[serde(default)]
+    pub player_a_deposit_pending: u64,
+    #[serde(default)]
+    pub player_b_deposit_pending: u64,
     #[serde(default)]
     pub required_deposit: u64,
     #[serde(default)]
@@ -167,6 +173,24 @@ pub async fn settle(base_url: &str, code: &str, req: &SettleReq) -> Result<(), S
     if v.get("settled").and_then(|s| s.as_bool()) != Some(true) {
         return Err(format!("escrow settle did not confirm: {}", v));
     }
+    Ok(())
+}
+
+/// POST /room/{code}/fault — forward a client-detected escrow fault to the escrow's
+/// durable journal. Fire-and-forget from the caller's perspective; the escrow always
+/// 200s and just records it. `seat` is the reporting seat (0/1), `phase` is coarse
+/// ("dkg"/"deposit"/"settle"/"payout"/"connect"), `detail` is free-text.
+pub async fn report_fault(base_url: &str, code: &str, seat: u8, phase: &str, detail: &str)
+    -> Result<(), String>
+{
+    let url = format!("{}/room/{}/fault", base_url.trim_end_matches('/'), code);
+    let body = serde_json::json!({ "seat": seat, "phase": phase, "detail": detail });
+    reqwest::Client::new()
+        .post(&url)
+        .json(&body)
+        .timeout(Duration::from_secs(5))
+        .send().await
+        .map_err(|e| format!("escrow fault POST: {}", e))?;
     Ok(())
 }
 

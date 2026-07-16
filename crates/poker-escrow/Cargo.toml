@@ -44,6 +44,11 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "1"
 
+# ntfy dispute alerts (outbound HTTP POST; rustls to stay openssl-free)
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+# operator-PIN hashing for the dispute dashboard (never store raw PIN)
+argon2 = "0.5"
+
 # zidecar gRPC client (deposit watching)
 # tonic = "0.12"
 

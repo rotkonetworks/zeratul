@@ -9,11 +9,20 @@ use zecli::client::ZidecarClient;
 use crate::frost_dkg;
 use crate::frost_relay::FrostRelayClient;
 use crate::scanner;
-use crate::{EscrowRoom, Rooms};
+use crate::{EscrowRoom, PendingDeposit, Rooms};
 
 /// Poll cadence for the deposit scanner. 20s gives near-immediate UX once a block lands
 /// without hammering zidecar between Zcash's ~75s block times.
 const DEPOSIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// Poll cadence for the mempool (0-conf) watcher. Faster than the confirmed poll so the deal gate
+/// opens promptly once both deposits are broadcast, without waiting for a block.
+const MEMPOOL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How long a pending (mempool-seen) note is retained after it stops appearing in the mempool
+/// before we evict it and reverse its pending credit. The grace window tolerates a single missed
+/// poll (e.g. a transient zidecar hiccup) so a still-valid tx isn't flapped out prematurely.
+const EVICTION_GRACE_MS: u64 = 30_000;
 
 /// Total expected participants in the FROST multisig (escrow + 2 players).
 const DKG_TOTAL: u16 = 3;
@@ -37,6 +46,7 @@ pub async fn provision(
     relay_url: String,
     network: zcash_protocol::consensus::NetworkType,
     zidecar_url: String,
+    store: Option<crate::persist::Store>,
 ) -> Result<DkgProvision, String> {
     let nick = format!("escrow-{}", room_code);
     let mut client = FrostRelayClient::connect(&relay_url, nick).await
@@ -53,13 +63,14 @@ pub async fn provision(
     let bg_code = room_code.clone();
     let bg_network = network;
     let bg_zidecar = zidecar_url;
+    let bg_store = store;
     tokio::spawn(async move {
         let result = frost_dkg::run_dkg(
             &mut client, DKG_THRESHOLD, DKG_TOTAL,
             1, // we're the only one in the room when we just created it
             true, bg_network, DKG_TIMEOUT,
         ).await;
-        write_dkg_result(bg_rooms, &bg_code, result, bg_network, bg_zidecar).await;
+        write_dkg_result(bg_rooms, &bg_code, result, bg_network, bg_zidecar, bg_store).await;
     });
 
     Ok(DkgProvision { frost_room_code })
@@ -71,6 +82,7 @@ async fn write_dkg_result(
     result: Result<frost_dkg::DkgOutput, frost_dkg::DkgError>,
     network: zcash_protocol::consensus::NetworkType,
     zidecar_url: String,
+    store: Option<crate::persist::Store>,
 ) {
     let out = match result {
         Ok(o) => o,
@@ -95,6 +107,11 @@ async fn write_dkg_result(
             "dkg completed for {}: ua={} seat0={} seat1={}",
             code, &out.orchard_ua, &seat_uas[0], &seat_uas[1],
         );
+        crate::journal::record(code, "dkg_completed", serde_json::json!({
+            "escrow_ua": &out.orchard_ua,
+            "seat0_address": &seat_uas[0],
+            "seat1_address": &seat_uas[1],
+        }));
         room.escrow_ua = Some(out.orchard_ua);
         room.dkg_key_package_hex = Some(out.key_package_hex);
         room.dkg_public_key_package_hex = Some(out.public_key_package_hex);
@@ -103,26 +120,77 @@ async fn write_dkg_result(
         room.dkg_ephemeral_seed_hex = Some(out.ephemeral_seed_hex);
         room.seat_addresses = vec![Some(seat_uas[0].clone()), Some(seat_uas[1].clone())];
         room.seat_addr_bytes = vec![Some(seat_bytes[0]), Some(seat_bytes[1])];
+        // CRITICAL: DKG key material just landed — persist immediately so a restart can
+        // still co-sign this vault's payout.
+        if let Some(s) = store.as_ref() {
+            s.save_room(room);
+        }
     }
 
     tokio::spawn(run_deposit_poll(
         rooms.clone(),
         code.to_string(),
+        zidecar_url.clone(),
+        fvk_hex.clone(),
+        vec![Some(seat_bytes[0]), Some(seat_bytes[1])],
+        store.clone(),
+        false, // fresh room: anchor the scan cursor at the current tip
+    ));
+    // 0-conf watcher: lets the deal gate open on mempool-seen deposits (never touches money paths).
+    tokio::spawn(run_mempool_watch(
+        rooms.clone(),
+        code.to_string(),
         zidecar_url,
         fvk_hex,
         vec![Some(seat_bytes[0]), Some(seat_bytes[1])],
+        store,
     ));
 }
 
-/// Per-room poll loop. Connects to zidecar, initializes scan cursor at current tip,
-/// then every `DEPOSIT_POLL_INTERVAL` scans new blocks and adds matched notes' values
-/// to `player_{a,b}_deposit`. Exits when the room disappears from `rooms`.
+/// Resume the deposit scanner for a room restored from disk after a restart. Unlike a fresh
+/// room, a resumed room keeps its persisted `last_scanned_height` so deposits that landed
+/// while the service was down are still detected — NOT re-anchored to the current tip.
+///
+/// Caller must ensure the room is DKG-complete (`dkg_orchard_fvk_hex` set, `seat_addr_bytes`
+/// populated) and still needs deposits (payout not yet settled).
+pub fn resume_deposit_poll(
+    rooms: Rooms,
+    code: String,
+    zidecar_url: String,
+    fvk_hex: String,
+    seat_addr_bytes: Vec<Option<[u8; 43]>>,
+    store: Option<crate::persist::Store>,
+) {
+    tokio::spawn(run_deposit_poll(
+        rooms.clone(),
+        code.clone(),
+        zidecar_url.clone(),
+        fvk_hex.clone(),
+        seat_addr_bytes.clone(),
+        store.clone(),
+        true,
+    ));
+    // 0-conf watcher rebuilds the ephemeral pending ledger from the live mempool after restart.
+    tokio::spawn(run_mempool_watch(rooms, code, zidecar_url, fvk_hex, seat_addr_bytes, store));
+}
+
+/// Per-room poll loop. Connects to zidecar, initializes scan cursor at current tip (fresh
+/// rooms only), then every `DEPOSIT_POLL_INTERVAL` scans new blocks and adds matched notes'
+/// values to `player_{a,b}_deposit`. Exits when the room disappears from `rooms`.
+///
+/// `resume`: when true this is a room restored from disk — keep the persisted
+/// `last_scanned_height` rather than re-anchoring to the tip, so downtime deposits aren't
+/// skipped. The one exception is a persisted cursor of 0 (the process crashed in the narrow
+/// window between DKG completion and the first tip-init, before any deposit was possible —
+/// the escrow UA had only just been derived): re-anchor to tip to avoid a full genesis rescan.
 async fn run_deposit_poll(
     rooms: Rooms,
     code: String,
     zidecar_url: String,
     fvk_hex: String,
     seat_addr_bytes: Vec<Option<[u8; 43]>>,
+    store: Option<crate::persist::Store>,
+    resume: bool,
 ) {
     let client = match ZidecarClient::connect(&zidecar_url).await {
         Ok(c) => c,
@@ -133,11 +201,21 @@ async fn run_deposit_poll(
         Err(e) => { tracing::error!("deposit poll {}: parse fvk: {}", code, e); return; }
     };
 
-    if let Ok((tip, _)) = client.get_tip().await {
-        if let Some(room) = rooms.lock().await.get_mut(&code) {
-            room.last_scanned_height = tip;
+    // A resumed room with a real persisted cursor keeps it (don't skip downtime deposits).
+    // A fresh room — or a resumed room that never established a baseline (cursor 0) — anchors
+    // at the current tip.
+    let anchor_at_tip = !resume
+        || rooms.lock().await.get(&code).map(|r| r.last_scanned_height == 0).unwrap_or(true);
+    if anchor_at_tip {
+        if let Ok((tip, _)) = client.get_tip().await {
+            if let Some(room) = rooms.lock().await.get_mut(&code) {
+                room.last_scanned_height = tip;
+            }
+            tracing::info!("deposit poll {}: starting from tip={}", code, tip);
         }
-        tracing::info!("deposit poll {}: starting from tip={}", code, tip);
+    } else {
+        let from = rooms.lock().await.get(&code).map(|r| r.last_scanned_height).unwrap_or(0);
+        tracing::info!("deposit poll {}: resuming from persisted height={}", code, from);
     }
 
     loop {
@@ -157,7 +235,11 @@ async fn run_deposit_poll(
                     // even if the same note is observed on a subsequent poll (e.g. after a reorg
                     // rescans an overlapping height range) or was already counted. The nullifier
                     // is globally unique per note, so it's the canonical dedup key.
-                    let dedup_key = format!("note:{}", hex::encode(n.nullifier));
+                    // dedup key is the bare nullifier hex; the mempool watcher keys its
+                    // `pending_deposits` / this room's `counted_deposits` on the SAME string, so a
+                    // note observed first in the mempool and then in a block maps to one key.
+                    let null_key = hex::encode(n.nullifier);
+                    let dedup_key = format!("note:{}", null_key);
                     let newly_counted = room.counted_deposits.insert(dedup_key);
                     if newly_counted {
                         match n.seat {
@@ -165,6 +247,23 @@ async fn run_deposit_poll(
                             1 => room.player_b_deposit = room.player_b_deposit.saturating_add(n.value_zat),
                             _ => {}
                         }
+                        // PROMOTION: this note just confirmed. If the mempool watcher was already
+                        // counting it as pending, remove it and subtract its value from the seat's
+                        // PENDING counter — so confirmed += value and pending -= value keeps the
+                        // deal-gate total (confirmed + pending) stable across the transition.
+                        if let Some(pd) = room.pending_deposits.remove(&null_key) {
+                            match pd.seat {
+                                0 => room.player_a_deposit_pending = room.player_a_deposit_pending.saturating_sub(pd.value_zat),
+                                1 => room.player_b_deposit_pending = room.player_b_deposit_pending.saturating_sub(pd.value_zat),
+                                _ => {}
+                            }
+                        }
+                        crate::journal::record(&code, "deposit_detected", serde_json::json!({
+                            "seat": n.seat,
+                            "value_zat": n.value_zat,
+                            "txid": hex::encode(&n.txid),
+                            "block_height": n.block_height,
+                        }));
                     } else {
                         tracing::debug!("deposit room={} seat={} nullifier already counted — skipping credit", code, n.seat);
                     }
@@ -201,8 +300,126 @@ async fn run_deposit_poll(
                         room.notes.push(n);
                     }
                 }
+                // persist after crediting deposits / pinning payout+identity / adding notes /
+                // advancing the scan cursor, so a restart resumes with the same spendable notes.
+                if let Some(s) = store.as_ref() {
+                    s.save_room(room);
+                }
             }
             Err(e) => tracing::warn!("deposit poll {}: scan: {}", code, e),
+        }
+    }
+}
+
+/// Per-room MEMPOOL (0-conf) watcher. Polls zidecar's mempool stream every
+/// `MEMPOOL_POLL_INTERVAL` and maintains the room's EPHEMERAL pending ledger
+/// (`player_{a,b}_deposit_pending` + `pending_deposits`). This ledger feeds the DEAL gate only —
+/// it lets the game start before a block confirms — and NEVER affects settlement / rake / payout,
+/// which read the confirmed counters. A mempool note is NEVER pushed to `room.notes` (it has no
+/// commitment-tree position, so it isn't spendable).
+///
+/// Each tick:
+///   - scan the mempool; build this tick's set of nullifier-hex keys.
+///   - CREDIT: for each note whose key is neither already confirmed (`counted_deposits`) nor
+///     already pending (`pending_deposits`), insert a `PendingDeposit` and add its value to the
+///     seat's pending counter.
+///   - EVICT: for each existing pending entry whose key is NOT in this tick's mempool AND NOT in
+///     `counted_deposits` AND older than `EVICTION_GRACE_MS`, remove it and subtract its value.
+///
+/// Exits when the room disappears from `rooms` (mirrors `run_deposit_poll`). Does NOT persist —
+/// the pending ledger is ephemeral by design.
+async fn run_mempool_watch(
+    rooms: Rooms,
+    code: String,
+    zidecar_url: String,
+    fvk_hex: String,
+    seat_addr_bytes: Vec<Option<[u8; 43]>>,
+    _store: Option<crate::persist::Store>,
+) {
+    let client = match ZidecarClient::connect(&zidecar_url).await {
+        Ok(c) => c,
+        Err(e) => { tracing::error!("mempool watch {}: zidecar connect: {}", code, e); return; }
+    };
+    let fvk = match scanner::parse_fvk(&fvk_hex) {
+        Ok(f) => f,
+        Err(e) => { tracing::error!("mempool watch {}: parse fvk: {}", code, e); return; }
+    };
+
+    loop {
+        tokio::time::sleep(MEMPOOL_POLL_INTERVAL).await;
+        // exit if the room is gone (mirror run_deposit_poll)
+        if rooms.lock().await.get(&code).is_none() {
+            tracing::info!("mempool watch {}: room gone, exiting", code);
+            return;
+        }
+
+        let notes = match scanner::scan_mempool(&client, &fvk, &seat_addr_bytes).await {
+            Ok(n) => n,
+            Err(e) => { tracing::warn!("mempool watch {}: scan_mempool: {}", code, e); continue; }
+        };
+
+        // nullifier-hex keys seen THIS tick — used to decide evictions.
+        let seen_this_tick: std::collections::HashSet<String> =
+            notes.iter().map(|n| hex::encode(n.nullifier)).collect();
+
+        let mut rooms_lock = rooms.lock().await;
+        let Some(room) = rooms_lock.get_mut(&code) else { return; };
+
+        // ── CREDIT new mempool notes ──────────────────────────────────────────
+        for n in &notes {
+            let key = hex::encode(n.nullifier);
+            // already confirmed (dedup key is `note:<hex>`): the confirmed path owns it — skip.
+            if room.counted_deposits.contains(&format!("note:{}", key)) {
+                continue;
+            }
+            // already pending: skip (don't double-credit on a repeat poll).
+            if room.pending_deposits.contains_key(&key) {
+                continue;
+            }
+            room.pending_deposits.insert(key, PendingDeposit {
+                seat: n.seat,
+                value_zat: n.value_zat,
+                first_seen_ms: now_ms(),
+            });
+            match n.seat {
+                0 => room.player_a_deposit_pending = room.player_a_deposit_pending.saturating_add(n.value_zat),
+                1 => room.player_b_deposit_pending = room.player_b_deposit_pending.saturating_add(n.value_zat),
+                _ => {}
+            }
+            // journal the 0-conf sighting — never log secret values (memo/key material).
+            crate::journal::record(&code, "deposit_pending", serde_json::json!({
+                "seat": n.seat,
+                "value_zat": n.value_zat,
+                "txid": hex::encode(&n.txid),
+            }));
+            tracing::info!("mempool watch {}: seat={} val={} pending (0-conf)", code, n.seat, n.value_zat);
+        }
+
+        // ── EVICT pending notes that left the mempool without confirming ──────
+        let now = now_ms();
+        let to_evict: Vec<String> = room
+            .pending_deposits
+            .iter()
+            .filter(|(key, pd)| {
+                !seen_this_tick.contains(*key)
+                    && !room.counted_deposits.contains(&format!("note:{}", key))
+                    && now.saturating_sub(pd.first_seen_ms) > EVICTION_GRACE_MS
+            })
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in to_evict {
+            if let Some(pd) = room.pending_deposits.remove(&key) {
+                match pd.seat {
+                    0 => room.player_a_deposit_pending = room.player_a_deposit_pending.saturating_sub(pd.value_zat),
+                    1 => room.player_b_deposit_pending = room.player_b_deposit_pending.saturating_sub(pd.value_zat),
+                    _ => {}
+                }
+                crate::journal::record(&code, "deposit_evicted", serde_json::json!({
+                    "seat": pd.seat,
+                    "value_zat": pd.value_zat,
+                }));
+                tracing::info!("mempool watch {}: seat={} val={} evicted (left mempool unconfirmed)", code, pd.seat, pd.value_zat);
+            }
         }
     }
 }
@@ -282,6 +499,9 @@ pub fn empty_room(
         created_at: now_ms(),
         payout_token,
         counted_deposits: std::collections::HashSet::new(),
+        player_a_deposit_pending: 0,
+        player_b_deposit_pending: 0,
+        pending_deposits: std::collections::HashMap::new(),
     }
 }
 
