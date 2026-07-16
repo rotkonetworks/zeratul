@@ -17,6 +17,10 @@ pub struct InitiatePayoutReq {
     pub fee_zat: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub anchor_height: Option<u32>,
+    /// Per-room capability token minted by the escrow at room creation. The escrow's
+    /// `/payout/initiate` is gated on it (fail-closed), so it MUST be forwarded here.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub payout_token: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +87,9 @@ pub struct EscrowSetup {
     pub frost_room_code: Option<String>,
     #[serde(default)]
     pub dkg_mode: bool,
+    /// Per-room capability token; must be echoed back on `/payout/initiate`.
+    #[serde(default)]
+    pub payout_token: Option<String>,
 }
 
 /// Subset of `GET /room/{code}` we care about for deposit gating.
@@ -124,6 +131,43 @@ pub async fn get_room_state(base_url: &str, code: &str) -> Result<EscrowState, S
         return Err(format!("escrow service error: {}", err));
     }
     serde_json::from_value(v).map_err(|e| format!("escrow state shape mismatch: {}", e))
+}
+
+/// Body for `POST /room/{code}/settle` — the co-signed final outcome. Field names/order
+/// mirror poker-escrow's `SettleReq`; both `player_*_sig` are hex Ed25519 signatures over
+/// the escrow `settlement_message(..)`, one per seat's on-chain-pinned identity key.
+#[derive(Debug, Clone, Serialize)]
+pub struct SettleReq {
+    pub player_a_stack: u64,
+    pub player_b_stack: u64,
+    pub player_a_address: String,
+    pub player_b_address: String,
+    pub action_log_hash: String,
+    pub player_a_sig: String,
+    pub player_b_sig: String,
+}
+
+/// POST /room/{code}/settle — submit both seats' signatures over the agreed outcome. The
+/// escrow verifies each sig against the seat's on-chain-pinned identity key, checks the
+/// signed payout addresses match the pinned ones, and records the payout plan. On success
+/// the room is settled; the actual on-chain payout is then driven via `initiate_payout`.
+pub async fn settle(base_url: &str, code: &str, req: &SettleReq) -> Result<(), String> {
+    let url = format!("{}/room/{}/settle", base_url.trim_end_matches('/'), code);
+    let resp = reqwest::Client::new()
+        .post(&url)
+        .json(req)
+        .timeout(Duration::from_secs(10))
+        .send().await
+        .map_err(|e| format!("escrow settle POST: {}", e))?;
+    let v: serde_json::Value = resp.json().await
+        .map_err(|e| format!("escrow settle response not JSON: {}", e))?;
+    if let Some(err) = v.get("error") {
+        return Err(format!("escrow settle rejected: {}", err));
+    }
+    if v.get("settled").and_then(|s| s.as_bool()) != Some(true) {
+        return Err(format!("escrow settle did not confirm: {}", v));
+    }
+    Ok(())
 }
 
 /// POST /room — ask poker-escrow to generate a fresh FROST escrow for a room.

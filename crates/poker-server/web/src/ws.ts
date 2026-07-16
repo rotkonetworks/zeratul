@@ -30,6 +30,9 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
   let transport: ReturnType<typeof createRelayTransport> | null = null
   let announced = false
   let media: MediaState | null = null
+  // staked (real-money) table: escrow control frames flow over the /p2p `srv`
+  // channel to the server coordinator. false for free-play (no escrow at all).
+  let isStaked = false
 
   /** direct WebSocket to server (centralized mode, not P2P) */
   async function connectDirect(name: string, pubkey?: string, zcashAddress?: string) {
@@ -95,7 +98,8 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
 
   let directWs: { send: (data: Record<string, unknown>) => void; close: () => void } | null = null
 
-  async function connect(name: string, customRules?: { smallBlind: number; bigBlind: number; buyin: number }) {
+  async function connect(name: string, customRules?: { smallBlind: number; bigBlind: number; buyin: number }, staked?: boolean) {
+    isStaked = !!staked
     // P2P over the blind relay: both clients run the engine + mental-poker
     // ceremony locally and exchange only ciphertext through the server relay.
     // the operator never sees cards, and the two players never open a socket to
@@ -138,7 +142,7 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
         onEscrowReady: (addr) => onMsg({ type: 'RoomInfo', code: room ?? '', jury_nodes: 5, jury_threshold: 3, escrow: addr }),
         onDepositConfirmed: () => {},
         onTimerTick: (s) => { if (s >= 0) onMsg({ type: 'TimerTick', secondsLeft: s }) },
-      }, sess, customRules)
+      }, sess, customRules, !!staked)
     }
 
     transport = createRelayTransport(
@@ -202,6 +206,20 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
         }
       },
       sess, // pass identity for authenticated key exchange
+      undefined, // default reconnect config
+      (sm) => {
+        // inbound server escrow control frame (staked tables): RoomInfo (with
+        // frost coords → triggers DKG), DepositStatus, PayoutSigningRequest,
+        // PayoutComplete/Failed. Dispatch straight into the App message handler.
+        const m = sm as ServerMsg & { type?: string }
+        if (m?.type === 'RoomInfo') isStaked = true
+        // feed per-seat payout addresses (pinned on-chain, surfaced by the server) to the
+        // game so both peers can build the identical co-signed settlement message at game over.
+        if (m?.type === 'DepositStatus' && Array.isArray((m as any).seat_payout_addresses)) {
+          game?.setPayoutAddresses((m as any).seat_payout_addresses)
+        }
+        onMsg(m as ServerMsg)
+      },
     )
 
     transport.connect(room, name)
@@ -222,11 +240,23 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
       game?.proposeRules(data as any)
     } else if (data['type'] === 'AcceptRules') {
       game?.acceptRules()
+    } else if (data['type'] === 'DkgComplete') {
+      // escrow control frame → SERVER coordinator over the /p2p `srv` channel
+      // (NOT the peer). the server records this seat's agreed escrow UA and,
+      // once both seats match, pins escrow_address + re-broadcasts RoomInfo.
+      transport?.sendServer(data)
     } else if (data['type'] === 'Chat') {
       transport?.send({ t: 'chat', d: { text: data['text'] } })
     } else if (data['type'] === 'Leave') {
-      // explicit leave: drop the relay socket so the opponent is notified
-      transport?.disconnect()
+      // staked table: tell the server coordinator to settle (co-signed game-over
+      // → deposit refund / payout) over the `srv` channel, then stay connected to
+      // receive PayoutSigningRequest/PayoutComplete. free-play: just drop the
+      // relay socket so the opponent is notified.
+      if (isStaked) {
+        transport?.sendServer({ type: 'Leave' })
+      } else {
+        transport?.disconnect()
+      }
     }
   }
 

@@ -313,8 +313,15 @@ pub fn evaluate_hand(cards: &[Card]) -> EvaluatedHand {
 
     // two pair
     if pairs.len() >= 2 {
-        let kicker = pairs.get(2).copied()
-            .or_else(|| singles.first().copied())
+        // top two pairs play; the kicker is the highest remaining card, which
+        // may be the rank of a third (lower) pair or the highest single —
+        // whichever is greater. pairs/singles are sorted descending.
+        let third_pair = pairs.get(2).copied();
+        let top_single = singles.first().copied();
+        let kicker = third_pair
+            .into_iter()
+            .chain(top_single)
+            .max()
             .unwrap_or(0);
         return EvaluatedHand {
             rank: HandRank::TwoPair,
@@ -508,6 +515,29 @@ mod tests {
         assert_eq!(eval.rank, HandRank::TwoPair);
         assert_eq!(eval.primary, 12); // aces
         assert_eq!(eval.secondary, 11); // kings
+    }
+
+    #[test]
+    fn test_two_pair_three_pairs_kicker() {
+        // Three pairs (K, Q, 3) plus a lone Ace. Top two pairs are K and Q;
+        // the kicker is the highest remaining card, which is the Ace single
+        // (12) — NOT the rank of the third, lowest pair (3 = rank 1).
+        let hand = cards("Kc Kd Qh Qs 3c 3d Ah");
+        let eval = evaluate_hand(&hand);
+        assert_eq!(eval.rank, HandRank::TwoPair);
+        assert_eq!(eval.primary, 11); // kings
+        assert_eq!(eval.secondary, 10); // queens
+        assert_eq!(eval.kickers[0], 12); // ace kicker, not the third pair (3)
+
+        // Three pairs (A, K, 5) with only low singles. Top two pairs are A and
+        // K; the highest remaining card is the third pair's rank (5), which
+        // beats the low singles.
+        let hand2 = cards("Ac Ad Kh Ks 5c 5d 2h");
+        let eval2 = evaluate_hand(&hand2);
+        assert_eq!(eval2.rank, HandRank::TwoPair);
+        assert_eq!(eval2.primary, 12); // aces
+        assert_eq!(eval2.secondary, 11); // kings
+        assert_eq!(eval2.kickers[0], 3); // 5 (rank 3), the third pair's card
     }
 
     #[test]

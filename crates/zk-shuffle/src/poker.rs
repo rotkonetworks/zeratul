@@ -281,7 +281,9 @@ pub fn evaluate_hand(cards: &[Card; 5]) -> HandRank {
     }
 
     // determine hand category
-    if is_flush && is_straight {
+    // note: the wheel (A-2-3-4-5) sets `is_wheel` but not `is_straight`, so it
+    // must be included explicitly or a suited wheel is misclassified as a flush.
+    if is_flush && (is_straight || is_wheel) {
         if ranks[0] == 14 && ranks[1] == 13 {
             // royal flush: A-K-Q-J-T of same suit
             return HandRank::new(HandCategory::RoyalFlush, [14, 13, 12, 11, 10]);
@@ -699,6 +701,34 @@ mod tests {
         let rank = evaluate_hand(&hand);
         assert_eq!(rank.category, HandCategory::StraightFlush);
         assert_eq!(rank.ranks[0], 10);
+    }
+
+    #[test]
+    fn test_wheel_straight_flush() {
+        // suited A-2-3-4-5 is a straight flush (five-high), not a plain flush
+        let hand = [
+            card(14, 2), // A♥
+            card(5, 2),  // 5♥
+            card(4, 2),  // 4♥
+            card(3, 2),  // 3♥
+            card(2, 2),  // 2♥
+        ];
+        let rank = evaluate_hand(&hand);
+        assert_eq!(rank.category, HandCategory::StraightFlush);
+        assert_eq!(rank.ranks[0], 5); // ranked at the five-high (wheel) level
+
+        // a six-high straight flush must beat the wheel straight flush
+        let six_high = [
+            card(6, 3), // 6♠
+            card(5, 3), // 5♠
+            card(4, 3), // 4♠
+            card(3, 3), // 3♠
+            card(2, 3), // 2♠
+        ];
+        let six_rank = evaluate_hand(&six_high);
+        assert_eq!(six_rank.category, HandCategory::StraightFlush);
+        assert_eq!(compare_hands(&six_rank, &rank), CompareResult::Win);
+        assert_eq!(compare_hands(&rank, &six_rank), CompareResult::Lose);
     }
 
     #[test]

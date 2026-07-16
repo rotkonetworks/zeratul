@@ -587,6 +587,17 @@ pub extern "C" fn call() {
             api::return_value(ReturnFlags::REVERT, &[0x04]);
         }
 
+        // Only a party to the escrow (buyer or seller) may resolve the dispute
+        // and thereby cause share_C to be revealed. Without this check ANY
+        // caller could trigger the reveal.
+        let mut caller = [0u8; 20];
+        api::caller(&mut caller);
+        let is_buyer = caller == escrow_data[85..105];
+        let is_seller = caller == escrow_data[65..85];
+        if !is_buyer && !is_seller {
+            api::return_value(ReturnFlags::REVERT, &[0x07]); // Not party
+        }
+
         let mut share_c = [0u8; 32];
         sget(&share_key(&escrow_id), &mut share_c);
 

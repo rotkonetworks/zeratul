@@ -6,15 +6,31 @@
 //! - delta-based sync
 //! - zero-copy where possible
 //! - non-blocking async
+//!
+//! wire protocol (the server must implement this):
+//!
+//! server -> client:
+//! - [0x01][scale(StateUpdate)]  channel state update (see StateUpdate;
+//!   participants, app_data and the GameSnapshot drive the game ui —
+//!   pot, phase, current_bet, acting_seat, action_deadline_ms)
+//! - [0x02][tx_hash: 32]         tx confirmation
+//! - [0x21][balance: 8 le]       balance query response
+//!
+//! client -> server:
+//! - [0x10][channel_id: 32]      subscribe to channel updates
+//! - [0x20][account: 32]         balance query
+//! - [0x30][len: 4 le][tx]       submit tx (tx is an action, see src/action.rs)
 
 use wasm_bindgen::prelude::*;
 use parity_scale_codec::{Decode, Encode};
 use std::collections::VecDeque;
 
+mod action;
 mod state;
 mod websocket;
 mod prediction;
 
+pub use action::*;
 pub use state::*;
 pub use prediction::*;
 
@@ -199,14 +215,13 @@ impl PokerChainClient {
         let tx_hash = blake3::hash(tx_bytes);
         let hash_bytes = tx_hash.as_bytes().to_vec();
 
-        // apply optimistic update
+        // apply optimistic update (single optimistic-apply path)
         self.predictor.apply_optimistic_tx(tx_bytes);
 
         // queue pending tx
         self.pending_txs.push_back(PendingTx {
             hash: *tx_hash.as_bytes(),
             submitted_at: now(),
-            confirmed: false,
         });
 
         // submit async (non-blocking)
@@ -247,7 +262,7 @@ impl PokerChainClient {
             changed |= self.process_message(&msg);
         }
 
-        // prune old pending txs
+        // prune timed-out pending txs (confirmed ones are removed on receipt)
         self.pending_txs.retain(|tx| {
             now - tx.submitted_at < 60_000.0 // 60s timeout
         });
@@ -295,19 +310,16 @@ impl PokerChainClient {
                     let mut hash = [0u8; 32];
                     hash.copy_from_slice(&msg[1..33]);
 
-                    // mark tx confirmed
-                    for tx in &mut self.pending_txs {
-                        if tx.hash == hash {
-                            tx.confirmed = true;
+                    // remove confirmed tx; unknown hashes are not a state change
+                    if let Some(i) = self.pending_txs.iter().position(|tx| tx.hash == hash) {
+                        self.pending_txs.remove(i);
 
-                            // fire callback
-                            if let Some(cb) = &self.on_tx_confirmed {
-                                let _ = cb.call1(&JsValue::NULL, &JsValue::from(hex_encode(&hash)));
-                            }
-                            break;
+                        // fire callback
+                        if let Some(cb) = &self.on_tx_confirmed {
+                            let _ = cb.call1(&JsValue::NULL, &JsValue::from(hex_encode(&hash)));
                         }
+                        return true;
                     }
-                    return true;
                 }
             }
             _ => {}
@@ -327,10 +339,12 @@ impl Default for PokerChainClient {
 struct PendingTx {
     hash: [u8; 32],
     submitted_at: f64,
-    confirmed: bool,
 }
 
-/// state update from chain
+/// acting_seat value in GameSnapshot when no seat is to act
+pub const NO_ACTING_SEAT: u8 = 0xff;
+
+/// state update from chain, scale-encoded after the 0x01 opcode
 #[derive(Clone, Debug, Encode, Decode)]
 pub struct StateUpdate {
     pub channel_id: [u8; 32],
@@ -338,18 +352,48 @@ pub struct StateUpdate {
     pub state_hash: [u8; 32],
     pub balances: Vec<(u32, u64)>, // (participant_idx, balance)
     pub app_data_hash: [u8; 32],
+    /// participant public keys, indexed by seat
+    pub participants: Vec<[u8; 32]>,
+    /// opaque application state blob (must hash to app_data_hash)
+    pub app_data: Vec<u8>,
+    /// game view for the ui, none if the channel runs no game
+    pub game: Option<GameSnapshot>,
 }
 
-/// get current time in ms
-fn now() -> f64 {
+/// per-update game view sent by the server
+#[derive(Clone, Debug, Encode, Decode)]
+pub struct GameSnapshot {
+    pub phase: u8,
+    pub pot: u64,
+    pub current_bet: u64,
+    /// seat currently to act, NO_ACTING_SEAT if none
+    pub acting_seat: u8,
+    /// remaining time to act in ms at send time, 0 if none
+    pub action_deadline_ms: u64,
+}
+
+/// get current time in ms (worker-safe: falls back to Date.now when
+/// there is no window, e.g. in a web worker)
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn now() -> f64 {
     web_sys::window()
         .and_then(|w| w.performance())
         .map(|p| p.now())
+        .unwrap_or_else(js_sys::Date::now)
+}
+
+/// get current time in ms (native, for tests)
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn now() -> f64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64() * 1000.0)
         .unwrap_or(0.0)
 }
 
 /// hex encode
-fn hex_encode(bytes: &[u8]) -> String {
+pub(crate) fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{:02x}", b)).collect()
 }
 
@@ -358,6 +402,10 @@ fn hex_encode(bytes: &[u8]) -> String {
 // ============================================================================
 
 /// poker game client - high-level api for game ui
+///
+/// all game state (pot, phase, turn, deadline) is derived from the
+/// predictor: confirmed chain updates rebased with our optimistic
+/// actions. there is exactly one apply path.
 #[wasm_bindgen]
 pub struct PokerGameClient {
     chain: PokerChainClient,
@@ -365,7 +413,7 @@ pub struct PokerGameClient {
     account: [u8; 32],
     /// current channel
     channel_id: Option<[u8; 32]>,
-    /// local game state
+    /// local game state (derived view, refreshed on poll/submit)
     game_state: Option<LocalGameState>,
 }
 
@@ -411,22 +459,23 @@ impl PokerGameClient {
         Ok(())
     }
 
-    /// submit poker action (bet, fold, etc)
+    /// submit poker action encoded with the canonical codec (src/action.rs)
+    /// the predictor applies it optimistically exactly once
     #[wasm_bindgen]
     pub async fn submit_action(&mut self, action_bytes: &[u8]) -> Result<Vec<u8>, JsError> {
-        // apply local prediction immediately
-        if let Some(state) = &mut self.game_state {
-            state.apply_action_local(action_bytes);
-        }
-
-        // submit to chain
-        self.chain.submit_tx(action_bytes).await
+        let hash = self.chain.submit_tx(action_bytes).await?;
+        self.sync_game_state();
+        Ok(hash)
     }
 
     /// poll for updates - call every frame
     #[wasm_bindgen]
     pub fn poll(&mut self) -> bool {
-        self.chain.poll()
+        let changed = self.chain.poll();
+        if changed {
+            self.sync_game_state();
+        }
+        changed
     }
 
     /// get our balance
@@ -461,17 +510,37 @@ impl PokerGameClient {
             .map(|deadline| (deadline - now()).max(0.0))
             .unwrap_or(0.0)
     }
+
+    /// refresh the derived game view from predictor + cache
+    fn sync_game_state(&mut self) {
+        let Some(channel_id) = self.channel_id else { return };
+        let Some(state) = &mut self.game_state else { return };
+
+        let predicted = self.chain.predictor.predicted();
+        state.pot = predicted.pot;
+        state.phase = predicted.phase;
+        state.current_bet = predicted.current_bet;
+
+        let our_seat = self.chain.cache.participant_seat(&channel_id, &self.account);
+        state.is_our_turn = match (predicted.acting_seat, our_seat) {
+            (Some(acting), Some(ours)) => acting == ours,
+            _ => false,
+        };
+        state.action_deadline = if state.is_our_turn {
+            predicted.action_deadline
+        } else {
+            None
+        };
+    }
 }
 
-/// local game state for prediction
+/// derived game view for the ui, updated from the predictor
 pub struct LocalGameState {
     pub phase: u8,
     pub pot: u64,
     pub current_bet: u64,
-    pub our_bet: u64,
     pub is_our_turn: bool,
     pub action_deadline: Option<f64>,
-    pub players: Vec<PlayerState>,
 }
 
 impl LocalGameState {
@@ -480,46 +549,8 @@ impl LocalGameState {
             phase: 0,
             pot: 0,
             current_bet: 0,
-            our_bet: 0,
             is_our_turn: false,
             action_deadline: None,
-            players: Vec::new(),
-        }
-    }
-
-    pub fn apply_action_local(&mut self, action: &[u8]) {
-        // optimistically apply action
-        // this will be confirmed/reverted when chain update arrives
-        if action.is_empty() {
-            return;
-        }
-
-        match action[0] {
-            // fold
-            0x00 => {
-                self.is_our_turn = false;
-            }
-            // check
-            0x01 => {
-                self.is_our_turn = false;
-            }
-            // call
-            0x02 => {
-                let call_amount = self.current_bet.saturating_sub(self.our_bet);
-                self.pot += call_amount;
-                self.our_bet = self.current_bet;
-                self.is_our_turn = false;
-            }
-            // raise (amount in bytes 1..9)
-            0x03 if action.len() >= 9 => {
-                let amount = u64::from_le_bytes(action[1..9].try_into().unwrap_or([0; 8]));
-                self.current_bet += amount;
-                let raise_cost = self.current_bet.saturating_sub(self.our_bet);
-                self.pot += raise_cost;
-                self.our_bet = self.current_bet;
-                self.is_our_turn = false;
-            }
-            _ => {}
         }
     }
 }
@@ -530,32 +561,83 @@ impl Default for LocalGameState {
     }
 }
 
-/// player state
-pub struct PlayerState {
-    pub seat: u8,
-    pub balance: u64,
-    pub current_bet: u64,
-    pub folded: bool,
-    pub all_in: bool,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wasm_bindgen_test::*;
 
-    #[wasm_bindgen_test]
+    #[test]
     fn test_client_creation() {
         let client = PokerChainClient::new();
         assert_eq!(client.connection_state(), ConnectionState::Disconnected);
     }
 
-    #[wasm_bindgen_test]
+    #[test]
     fn test_frame_budget() {
         let mut client = PokerChainClient::new();
         assert!((client.frame_budget_ms - 4.16).abs() < 0.01);
 
         client.set_target_fps(60);
         assert!((client.frame_budget_ms - 16.67).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_tx_confirm_removes_pending() {
+        let mut client = PokerChainClient::new();
+        client.pending_txs.push_back(PendingTx {
+            hash: [7u8; 32],
+            submitted_at: 0.0,
+        });
+
+        // unknown hash: not a state change, pending untouched
+        let mut msg = vec![0x02];
+        msg.extend_from_slice(&[9u8; 32]);
+        assert!(!client.process_message(&msg));
+        assert_eq!(client.pending_txs.len(), 1);
+
+        // matching hash: confirmed and removed
+        let mut msg = vec![0x02];
+        msg.extend_from_slice(&[7u8; 32]);
+        assert!(client.process_message(&msg));
+        assert!(client.pending_txs.is_empty());
+    }
+
+    #[test]
+    fn test_state_update_drives_game_view() {
+        let account = [3u8; 32];
+        let mut game = PokerGameClient::new(&account).unwrap();
+        game.channel_id = Some([1u8; 32]);
+        game.game_state = Some(LocalGameState::new());
+
+        let update = StateUpdate {
+            channel_id: [1u8; 32],
+            nonce: 1,
+            state_hash: [0u8; 32],
+            balances: vec![(0, 1000), (1, 900)],
+            app_data_hash: [0u8; 32],
+            participants: vec![[2u8; 32], account],
+            app_data: vec![0xaa],
+            game: Some(GameSnapshot {
+                phase: 2,
+                pot: 100,
+                current_bet: 50,
+                acting_seat: 1,
+                action_deadline_ms: 30_000,
+            }),
+        };
+        let mut msg = vec![0x01];
+        msg.extend_from_slice(&update.encode());
+
+        assert!(game.chain.process_message(&msg));
+        game.sync_game_state();
+
+        assert!(game.is_our_turn());
+        assert_eq!(game.get_pot(), 100);
+        assert_eq!(game.get_phase(), 2);
+        assert!(game.action_timeout_ms() > 0.0);
+        assert_eq!(game.get_balance(), 900);
+        assert_eq!(
+            game.chain.get_channel_cached(&[1u8; 32]),
+            Some(vec![0xaa])
+        );
     }
 }

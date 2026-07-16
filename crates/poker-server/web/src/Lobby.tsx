@@ -121,6 +121,18 @@ export default function Lobby(props: {
   const [inviteCode, setInviteCode] = createSignal('')
   const [liveTables, setLiveTables] = createSignal<LiveTable[]>([])
   const [tab, setTab] = createSignal<'play' | 'public' | 'invite'>('play')
+  // cash = real-ZEC private table (deposit + escrow); practice = play-chip table vs bot
+  const [playMode, setPlayMode] = createSignal<'cash' | 'practice'>('practice')
+  // real-money availability — server reports whether the escrow service is wired.
+  // when false the lobby offers practice only (don't advertise what we can't settle).
+  const [escrowEnabled, setEscrowEnabled] = createSignal(false)
+  onMount(async () => {
+    try {
+      const cfg = await (await fetch('/api/config')).json()
+      setEscrowEnabled(!!cfg.escrow_enabled)
+      setPlayMode(cfg.escrow_enabled ? 'cash' : 'practice')
+    } catch { /* leave practice-only */ }
+  })
   const isMobile = window.innerWidth <= 640
   const [chatMessages, setChatMessages] = createSignal<{text: string, cls: string}[]>([])
   const [players, setPlayers] = createSignal<string[]>([])
@@ -135,7 +147,8 @@ export default function Lobby(props: {
   onMount(() => {
     // connect lobby WebSocket
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    lobbyWs = new WebSocket(`${proto}//${location.host}/ws/lobby`)
+    // `/lobby`, not `/ws/lobby`: HAProxy routes `/ws*` to the FROST relay.
+    lobbyWs = new WebSocket(`${proto}//${location.host}/lobby`)
     lobbyWs.onmessage = (ev) => {
       try {
         const msg = JSON.parse(ev.data)
@@ -208,26 +221,48 @@ export default function Lobby(props: {
   const liveStreams = () => liveTables().filter(t => t.live)
 
   return (
-    <div class="min-h-screen min-h-[100dvh] flex flex-col items-center justify-center p-2 bg-zec-dark font-sans text-white">
-      <div class="w-full max-w-md">
+    <div class="w-full m-auto flex flex-col items-center justify-center p-3">
+      <div class="w-full max-w-md lg:max-w-xl">
         {/* header */}
-        <div class="text-center mb-3">
-          <div class="text-zec-yellow text-14px font-bold tracking-wider font-mono">poker.zk.bot</div>
-          <div class="text-neutral-600 text-8px uppercase tracking-widest mt-0.5">
+        <div class="text-center mb-5">
+          <div class="text-zec-yellow text-24px lg:text-30px font-bold tracking-wider font-mono">zk.poker</div>
+          <div class="text-white/38 text-11px uppercase tracking-widest mt-1">
             zk-shuffle · co-signed · encrypted
           </div>
         </div>
 
-        {/* wallet gate */}
+        {/* wallet gate — the Chrome Web Store build is behind on poker features,
+            so we point players at the latest GitHub beta (crx/zip) for now. */}
         <Show when={!props.hasWallet}>
-          <div class="text-center p-6 border border-red-900/50 rounded-lg bg-red-900/10 mb-4">
-            <div class="text-red-400 text-11px uppercase tracking-wider mb-2">wallet required</div>
-            <div class="text-neutral-400 text-10px mb-3">
-              install the <span class="text-zec-yellow">zafu</span> browser extension to play.
-              every action is signed with your key.
+          <div class="p-5 border border-white/10 rounded-xl bg-zec-surface mb-4">
+            <div class="text-center mb-4">
+              <div class="text-zec-text text-13px font-semibold uppercase tracking-wider mb-1.5">zafu wallet required</div>
+              <div class="text-white/60 text-12px leading-relaxed">
+                every action is signed with your key. the store build is
+                <span class="text-zec-text"> outdated for poker</span> — grab the latest beta from github while the store update lands.
+              </div>
             </div>
-            <a href="https://github.com/niconicobar/zafu" target="_blank"
-              class="text-9px text-zec-yellow underline">get zafu extension</a>
+
+            <a href="https://github.com/rotkonetworks/zafu/releases/latest" target="_blank"
+              class="btn btn-primary w-full flex items-center justify-center text-12px py-2.5 no-underline mb-4">
+              download latest beta (.crx / .zip)
+            </a>
+
+            {/* install steps */}
+            <ol class="text-white/50 text-11px leading-relaxed list-decimal pl-4 space-y-1 mb-4">
+              <li>download <span class="text-white/70 font-mono">zafu-beta-*.zip</span> from the release and unzip it</li>
+              <li>open <span class="text-white/70 font-mono">chrome://extensions</span> and enable <span class="text-white/70">Developer mode</span></li>
+              <li>click <span class="text-white/70">Load unpacked</span> and pick the unzipped folder</li>
+              <li>reload this page</li>
+            </ol>
+
+            <div class="flex items-center justify-center gap-3 text-11px">
+              <a href="https://github.com/rotkonetworks/zafu" target="_blank"
+                class="text-white/40 underline hover:text-zec-text">source</a>
+              <span class="text-white/20">·</span>
+              <a href="https://chromewebstore.google.com/detail/zafu-wallet-beta/bhlogefpcebekhjpomlodifcelldoimn" target="_blank"
+                class="text-white/40 underline hover:text-zec-text">web store (outdated)</a>
+            </div>
           </div>
         </Show>
 
@@ -236,7 +271,7 @@ export default function Lobby(props: {
           <div class="flex items-center justify-center gap-2 mb-3">
             <span class="text-11px text-zec-yellow font-mono">{name() || props.pubkey?.slice(0, 8) || 'anon'}</span>
             <Show when={props.pubkey}>
-              <span class="text-7px text-neutral-700 font-mono" title={props.pubkey}>
+              <span class="text-10px text-neutral-700 font-mono" title={props.pubkey}>
                 {props.pubkey!.slice(0, 6)}..
               </span>
             </Show>
@@ -244,10 +279,10 @@ export default function Lobby(props: {
         </Show>
 
         {/* tabs */}
-        <div class="flex gap-0 mb-3 border-b border-neutral-800">
+        <div class="flex gap-0 mb-3 border-b border-white/10">
           {(['play', 'public', 'invite'] as const).map(t =>
             <button
-              class={`flex-1 text-center py-2 text-9px uppercase tracking-wider transition-colors ${
+              class={`flex-1 text-center py-2 text-11px uppercase tracking-wider transition-colors ${
                 tab() === t
                   ? 'text-zec-yellow border-b-2 border-zec-yellow'
                   : 'text-neutral-600 hover:text-neutral-400'
@@ -261,30 +296,50 @@ export default function Lobby(props: {
 
         {/* ===== CREATE / JOIN TABLE ===== */}
         <Show when={tab() === 'play' && props.hasWallet}>
+          {/* mode toggle — real money vs practice-vs-bot, one clear choice.
+              real money only appears when the escrow service is live. */}
+          <div class="grid grid-cols-2 gap-1 p-1 mb-3 rounded-xl bg-black/30 border border-white/8">
+            <button
+              class={`py-2 rounded-lg text-12px font-semibold transition-all duration-150 disabled:opacity-40 disabled:cursor-not-allowed ${playMode() === 'cash' ? 'bg-zec-yellow text-black shadow-[0_2px_12px_rgba(244,183,40,0.25)]' : 'text-white/50 hover:text-white/80'}`}
+              disabled={!escrowEnabled()}
+              title={escrowEnabled() ? '' : 'real-money tables are offline right now'}
+              onClick={() => escrowEnabled() && setPlayMode('cash')}
+            >real money{!escrowEnabled() && ' · soon'}</button>
+            <button
+              class={`py-2 rounded-lg text-12px font-semibold transition-all duration-150 ${playMode() === 'practice' ? 'bg-white/12 text-white/87 border border-white/15' : 'text-white/50 hover:text-white/80'}`}
+              onClick={() => setPlayMode('practice')}
+            >free play</button>
+          </div>
+
+          <div class="text-11px text-white/38 mb-2.5 px-1">
+            <Show when={playMode() === 'cash'} fallback={
+              'chip-only table — create it, then invite a friend with the link. no deposit, nothing at stake.'
+            }>
+              creates a private ZEC table — you deposit your buy-in, then share the invite link with an opponent.
+            </Show>
+          </div>
+
           <div class="flex flex-col gap-2">
               <For each={TABLES}>
                 {(table, i) => (
-                  <div class="flex items-stretch gap-2">
-                    <button
-                      class="flex-1 flex items-center justify-between p-3 bg-zec-surface border border-neutral-800 rounded-lg active:border-zec-yellow transition-colors"
-                      onClick={() => joinTable(i(), false)}
-                      title="private table — share invite link"
-                    >
-                      <div>
-                        <div class="text-12px font-semibold">{table.name}</div>
-                        <div class="text-9px text-neutral-500">{table.blinds} ZEC blinds</div>
-                      </div>
-                      <div class="text-right">
-                        <div class="text-10px font-mono text-zec-yellow">{fmtZec(table.buyin)}</div>
-                        <div class="text-7px text-neutral-600">buy-in · {table.rakeBps/100}% fee</div>
-                      </div>
-                    </button>
-                    <button
-                      class="px-3 bg-zec-surface border border-neutral-800 rounded-lg active:border-zec-yellow transition-colors text-9px text-zec-yellow uppercase tracking-wider whitespace-nowrap"
-                      onClick={() => joinTable(i(), true)}
-                      title="public table — a bot will autojoin"
-                    >[bot]</button>
-                  </div>
+                  <button
+                    class="w-full flex items-center justify-between p-4 bg-zec-surface border border-white/10 rounded-xl transition-all duration-150 hover:border-zec-yellow/50 hover:bg-zec-elevated active:scale-99 group text-left"
+                    onClick={() => joinTable(i(), playMode() === 'practice')}
+                    title={playMode() === 'cash' ? 'create a real-money private table' : 'chip-only — invite a friend'}
+                  >
+                    <div>
+                      <div class="text-15px font-semibold text-white/87 group-hover:text-zec-text transition-colors">{table.name}</div>
+                      <div class="text-12px text-white/50 mt-0.5">{table.blinds} ZEC blinds</div>
+                    </div>
+                    <div class="text-right">
+                      <Show when={playMode() === 'cash'} fallback={
+                        <div class="text-12px font-medium text-white/50 uppercase tracking-wider">free play</div>
+                      }>
+                        <div class="text-14px font-mono tabular-nums text-zec-text">{fmtZec(table.buyin)}</div>
+                        <div class="text-11px text-white/38 mt-0.5">buy-in · {table.rakeBps/100}% fee</div>
+                      </Show>
+                    </div>
+                  </button>
                 )}
               </For>
             </div>
@@ -295,28 +350,28 @@ export default function Lobby(props: {
           <Show when={waitingTables().length > 0} fallback={
             <div class="text-center py-8">
               <div class="text-neutral-600 text-11px mb-2">no public tables waiting</div>
-              <div class="text-neutral-700 text-9px">create one from the "create table" tab<br/>or invite a friend</div>
+              <div class="text-neutral-700 text-11px">create one from the "create table" tab<br/>or invite a friend</div>
             </div>
           }>
-            <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">waiting for opponent</div>
+            <div class="text-neutral-500 text-11px uppercase tracking-wider mb-2">waiting for opponent</div>
             <div class="flex flex-col gap-2">
               <For each={waitingTables()}>
                 {table => (
                   <button
-                    class="flex items-center justify-between p-3 bg-zec-surface border border-neutral-800 rounded-lg active:border-zec-yellow transition-colors"
+                    class="flex items-center justify-between p-3 bg-zec-surface border border-white/10 rounded-lg active:border-zec-yellow transition-colors"
                     onClick={() => joinLive(table)}
                   >
                     <div>
                       <div class="flex items-center gap-2">
                         <span class="text-11px font-mono text-white">{table.code}</span>
                         <Show when={table.bot_friendly}>
-                          <span class="text-7px text-zec-yellow border border-zec-yellow rounded px-1 uppercase tracking-wider">bot</span>
+                          <span class="text-10px text-zec-yellow border border-zec-yellow rounded px-1 uppercase tracking-wider">bot</span>
                         </Show>
                       </div>
-                      <div class="text-9px text-neutral-500">{table.blinds} blinds</div>
+                      <div class="text-11px text-neutral-500">{table.blinds} blinds</div>
                     </div>
                     <div class="flex items-center gap-2">
-                      <span class="text-9px text-neutral-500">{table.players}/{table.max_players}</span>
+                      <span class="text-11px text-neutral-500">{table.players}/{table.max_players}</span>
                       <span class="w-2 h-2 rounded-full bg-zec-yellow animate-pulse" />
                     </div>
                   </button>
@@ -326,7 +381,7 @@ export default function Lobby(props: {
           </Show>
 
           <Show when={liveStreams().length > 0}>
-            <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2 mt-4 flex items-center gap-2">
+            <div class="text-neutral-500 text-11px uppercase tracking-wider mb-2 mt-4 flex items-center gap-2">
               <span class="w-2 h-2 rounded-full bg-red-500 animate-pulse" />
               live games
             </div>
@@ -339,11 +394,11 @@ export default function Lobby(props: {
                   >
                     <div>
                       <div class="text-11px font-mono text-white">{table.code}</div>
-                      <div class="text-8px text-neutral-500">{table.blinds} · hand #{table.hand_number}</div>
+                      <div class="text-10px text-neutral-500">{table.blinds} · hand #{table.hand_number}</div>
                     </div>
                     <div class="flex items-center gap-2">
-                      <span class="text-8px text-neutral-500">{table.spectators} watching</span>
-                      <span class="text-8px px-1.5 py-0.5 rounded bg-red-900/30 text-red-400">LIVE</span>
+                      <span class="text-10px text-neutral-500">{table.spectators} watching</span>
+                      <span class="text-10px px-1.5 py-0.5 rounded bg-red-900/30 text-red-400">LIVE</span>
                     </div>
                   </button>
                 )}
@@ -352,13 +407,13 @@ export default function Lobby(props: {
           </Show>
 
           <Show when={activeTables().length > 0}>
-            <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2 mt-4">in progress</div>
+            <div class="text-neutral-500 text-11px uppercase tracking-wider mb-2 mt-4">in progress</div>
             <div class="flex flex-col gap-1">
               <For each={activeTables()}>
                 {table => (
-                  <div class="flex items-center justify-between p-2 bg-zec-surface/50 border border-neutral-800/50 rounded text-neutral-600">
+                  <div class="flex items-center justify-between p-2 bg-zec-surface/50 border border-white/10/50 rounded text-neutral-600">
                     <span class="text-10px font-mono">{table.code}</span>
-                    <span class="text-8px">{table.blinds} · hand #{table.hand_number}</span>
+                    <span class="text-10px">{table.blinds} · hand #{table.hand_number}</span>
                     <span class="w-2 h-2 rounded-full bg-green-500" />
                   </div>
                 )}
@@ -373,9 +428,9 @@ export default function Lobby(props: {
             {/* invite from contacts */}
             <Show when={props.identity?.pickContacts}>
               <div class="mb-4">
-                <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">invite from contacts</div>
+                <div class="text-neutral-500 text-11px uppercase tracking-wider mb-2">invite from contacts</div>
                 <button
-                  class="w-full p-3 bg-zec-surface border border-neutral-800 rounded-lg active:border-zec-yellow transition-colors flex items-center gap-3"
+                  class="w-full p-3 bg-zec-surface border border-white/10 rounded-lg active:border-zec-yellow transition-colors flex items-center gap-3"
                   onClick={async () => {
                     const contacts = await props.identity?.pickContacts?.({ purpose: 'Invite to poker table', max: 3 })
                     if (contacts?.length) {
@@ -399,7 +454,7 @@ export default function Lobby(props: {
                   <div class="w-8 h-8 rounded-full bg-zec-yellow/10 flex items-center justify-center text-zec-yellow text-14px">+</div>
                   <div>
                     <div class="text-11px text-white">pick from address book</div>
-                    <div class="text-8px text-neutral-500">opens zafu contact picker</div>
+                    <div class="text-10px text-neutral-500">opens zafu contact picker</div>
                   </div>
                 </button>
               </div>
@@ -411,28 +466,28 @@ export default function Lobby(props: {
 
             {/* create private game */}
             <div class="mb-4">
-              <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">create private table</div>
+              <div class="text-neutral-500 text-11px uppercase tracking-wider mb-2">create private table</div>
               <div class="flex gap-2">
                 <For each={TABLES}>
                   {(table, i) => (
                     <button
-                      class="flex-1 p-2 bg-zec-surface border border-neutral-800 rounded text-center active:border-zec-yellow"
+                      class="flex-1 p-2 bg-zec-surface border border-white/10 rounded text-center active:border-zec-yellow"
                       onClick={() => joinTable(i())}
                     >
                       <div class="text-10px font-semibold">{table.name}</div>
-                      <div class="text-7px text-neutral-600">{table.blinds}</div>
+                      <div class="text-10px text-neutral-600">{table.blinds}</div>
                     </button>
                   )}
                 </For>
               </div>
-              <div class="text-neutral-700 text-8px mt-1 text-center">
+              <div class="text-neutral-700 text-10px mt-1 text-center">
                 creates a private table · share the code with your friend
               </div>
             </div>
 
             {/* join by code */}
             <div>
-              <div class="text-neutral-500 text-9px uppercase tracking-wider mb-2">join by code</div>
+              <div class="text-neutral-500 text-11px uppercase tracking-wider mb-2">join by code</div>
               <div class="flex gap-2">
                 <input
                   class="input-field flex-1 text-11px"
@@ -453,37 +508,37 @@ export default function Lobby(props: {
 
         {/* ===== LOBBY CHAT + PLAYERS ===== */}
         <Show when={props.hasWallet}>
-          <div class="mt-3 border border-neutral-800 rounded-lg overflow-hidden">
+          <div class="mt-3 border border-white/10 rounded-lg overflow-hidden">
             {/* player count */}
-            <div class="flex items-center justify-between px-2 py-1 bg-neutral-900/50 border-b border-neutral-800">
-              <span class="text-8px text-neutral-500 uppercase tracking-wider">lobby chat</span>
-              <span class="text-8px text-neutral-600">{players().length} online</span>
+            <div class="flex items-center justify-between px-2 py-1 bg-neutral-900/50 border-b border-white/10">
+              <span class="text-10px text-neutral-500 uppercase tracking-wider">lobby chat</span>
+              <span class="text-10px text-neutral-600">{players().length} online</span>
             </div>
 
             {/* messages */}
-            <div ref={chatEl!} class="h-28 overflow-y-auto px-2 py-1 font-mono text-9px bg-zec-surface/50">
+            <div ref={chatEl!} class="h-28 lg:h-44 overflow-y-auto px-2 py-1 font-mono text-11px bg-zec-surface/50">
               <For each={chatMessages()}>
                 {m => <div class={`text-neutral-500 leading-relaxed ${m.cls}`}>{m.text}</div>}
               </For>
               <Show when={chatMessages().length === 0}>
-                <div class="text-neutral-700 text-8px py-4 text-center">
+                <div class="text-neutral-700 text-10px py-4 text-center">
                   type to chat · /w name msg · /challenge name
                 </div>
               </Show>
             </div>
 
             {/* input */}
-            <form class="flex border-t border-neutral-800" onSubmit={e => {
+            <form class="flex border-t border-white/10" onSubmit={e => {
               e.preventDefault()
               sendChat(chatInput())
             }}>
               <input
-                class="flex-1 bg-transparent text-9px px-2 py-1.5 text-white outline-none placeholder-neutral-700"
+                class="flex-1 bg-transparent text-11px px-2 py-1.5 text-white outline-none placeholder-neutral-700"
                 placeholder="/w player hi · /challenge player · or just chat..."
                 value={chatInput()}
                 onInput={e => setChatInput(e.currentTarget.value)}
               />
-              <button type="submit" class="text-8px px-2 text-neutral-600 hover:text-neutral-400">↵</button>
+              <button type="submit" class="text-10px px-2 text-neutral-600 hover:text-neutral-400">↵</button>
             </form>
           </div>
 
@@ -492,7 +547,7 @@ export default function Lobby(props: {
             <div class="flex flex-wrap gap-1 mt-2 px-1">
               <For each={players()}>
                 {p => (
-                  <span class="text-7px px-1.5 py-0.5 rounded bg-neutral-900 border border-neutral-800 text-neutral-500 cursor-pointer hover:text-zec-yellow hover:border-zec-yellow/30"
+                  <span class="text-10px px-1.5 py-0.5 rounded bg-neutral-900 border border-white/10 text-neutral-500 cursor-pointer hover:text-zec-yellow hover:border-zec-yellow/30"
                     onClick={() => setChatInput(`/w ${p} `)}
                     title={`whisper ${p}`}
                   >{p}</span>
@@ -502,7 +557,7 @@ export default function Lobby(props: {
           </Show>
         </Show>
 
-        <div class="text-center text-7px text-neutral-700 mt-3 uppercase tracking-widest">
+        <div class="text-center text-10px text-neutral-700 mt-3 uppercase tracking-widest">
           heads-up nlhe · nested frost escrow · pallas
         </div>
       </div>

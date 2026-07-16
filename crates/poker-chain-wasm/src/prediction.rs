@@ -1,14 +1,14 @@
 //! optimistic state prediction for 240hz ui
 //!
-//! provides immediate state updates before chain confirmation
-//! - apply txs optimistically
-//! - revert on conflict
-//! - interpolate between states
+//! single optimistic-apply path: txs are decoded via the canonical
+//! action codec (src/action.rs), applied as deltas on top of the last
+//! confirmed chain state, and rebased when confirmations arrive.
 
 use wasm_bindgen::prelude::*;
 use std::collections::VecDeque;
 
-use crate::StateUpdate;
+use crate::action::{Action, ActionKind};
+use crate::{StateUpdate, NO_ACTING_SEAT};
 
 /// maximum pending predictions
 const MAX_PENDING: usize = 16;
@@ -17,8 +17,8 @@ const MAX_PENDING: usize = 16;
 pub struct StatePrediction {
     /// base confirmed state
     confirmed: Option<PredictedState>,
-    /// pending optimistic updates
-    pending: VecDeque<PendingUpdate>,
+    /// pending optimistic deltas, oldest first
+    pending: VecDeque<StateDelta>,
     /// current predicted state (confirmed + pending)
     predicted: PredictedState,
     /// prediction accuracy stats
@@ -37,21 +37,16 @@ impl StatePrediction {
         }
     }
 
+    /// current predicted state
+    pub fn predicted(&self) -> &PredictedState {
+        &self.predicted
+    }
+
     /// apply optimistic transaction
     pub fn apply_optimistic_tx(&mut self, tx_bytes: &[u8]) {
-        let tx_hash = blake3::hash(tx_bytes);
-
-        // parse and apply optimistically
-        if let Some(update) = self.parse_tx(tx_bytes) {
-            // store pending
-            self.pending.push_back(PendingUpdate {
-                tx_hash: *tx_hash.as_bytes(),
-                applied_at: crate::now(),
-                delta: update.clone(),
-            });
-
-            // apply to predicted state
-            self.apply_delta(&update);
+        if let Some(delta) = Self::parse_tx(tx_bytes) {
+            self.apply_delta(&delta);
+            self.pending.push_back(delta);
 
             // prune old pending
             while self.pending.len() > MAX_PENDING {
@@ -60,40 +55,67 @@ impl StatePrediction {
         }
     }
 
-    /// confirm state from chain
+    /// confirm state from chain, rebasing remaining pending deltas
     pub fn confirm_state(&mut self, update: &StateUpdate) {
-        let new_confirmed = PredictedState {
+        let mut new_confirmed = PredictedState {
             nonce: update.nonce,
             channel_id: update.channel_id,
-            balances: update.balances.iter()
-                .map(|(i, b)| (*i as u8, *b))
-                .collect(),
-            pot: 0, // would be in app_data
+            balances: update.balances.iter().map(|(i, b)| (*i as u8, *b)).collect(),
+            pot: 0,
             phase: 0,
             current_bet: 0,
+            acting_seat: None,
+            action_deadline: None,
         };
-
-        // check predictions
-        let old_pending_len = self.pending.len();
-
-        // remove confirmed pending txs
-        self.pending.retain(|p| {
-            // keep if nonce is still ahead
-            p.delta.nonce > update.nonce
-        });
-
-        if self.pending.len() < old_pending_len {
-            self.hits += (old_pending_len - self.pending.len()) as u64;
+        if let Some(game) = &update.game {
+            new_confirmed.pot = game.pot;
+            new_confirmed.phase = game.phase;
+            new_confirmed.current_bet = game.current_bet;
+            if game.acting_seat != NO_ACTING_SEAT {
+                new_confirmed.acting_seat = Some(game.acting_seat);
+                if game.action_deadline_ms > 0 {
+                    new_confirmed.action_deadline =
+                        Some(crate::now() + game.action_deadline_ms as f64);
+                }
+            }
         }
 
-        // update confirmed
+        // split pending into consumed (covered by this update) and remaining
+        let mut consumed = Vec::new();
+        let mut remaining = VecDeque::with_capacity(self.pending.len());
+        for delta in self.pending.drain(..) {
+            if delta.nonce > update.nonce {
+                remaining.push_back(delta);
+            } else {
+                consumed.push(delta);
+            }
+        }
+        self.pending = remaining;
+
+        // score consumed predictions: replay them on the previous confirmed
+        // base and compare against the confirmed game state; without a
+        // baseline or game snapshot there is nothing to contradict, count hit
+        if !consumed.is_empty() {
+            match (&self.confirmed, &update.game) {
+                (Some(base), Some(game)) => {
+                    let mut sim = base.clone();
+                    for delta in &consumed {
+                        Self::apply_delta_to(&mut sim, delta);
+                    }
+                    if sim.pot == game.pot && sim.current_bet == game.current_bet {
+                        self.hits += consumed.len() as u64;
+                    } else {
+                        self.misses += consumed.len() as u64;
+                    }
+                }
+                _ => self.hits += consumed.len() as u64,
+            }
+        }
+
+        // rebase: confirmed + remaining pending
         self.confirmed = Some(new_confirmed.clone());
-
-        // rebuild predicted from confirmed + remaining pending
         self.predicted = new_confirmed;
-
-        // collect deltas first to avoid borrow conflict
-        let deltas: Vec<_> = self.pending.iter().map(|p| p.delta.clone()).collect();
+        let deltas: Vec<_> = self.pending.iter().cloned().collect();
         for delta in &deltas {
             self.apply_delta(delta);
         }
@@ -109,6 +131,7 @@ impl StatePrediction {
             pot: u64,
             phase: u8,
             current_bet: u64,
+            acting_seat: Option<u8>,
             pending_count: usize,
             prediction_accuracy: f64,
         }
@@ -121,11 +144,12 @@ impl StatePrediction {
 
         let state = State {
             nonce: self.predicted.nonce,
-            channel_id: hex_encode(&self.predicted.channel_id),
+            channel_id: crate::hex_encode(&self.predicted.channel_id),
             balances: self.predicted.balances.clone(),
             pot: self.predicted.pot,
             phase: self.predicted.phase,
             current_bet: self.predicted.current_bet,
+            acting_seat: self.predicted.acting_seat,
             pending_count: self.pending.len(),
             prediction_accuracy: accuracy,
         };
@@ -133,97 +157,44 @@ impl StatePrediction {
         serde_wasm_bindgen::to_value(&state).unwrap_or(JsValue::NULL)
     }
 
-    /// parse tx into state delta
-    fn parse_tx(&self, tx_bytes: &[u8]) -> Option<StateDelta> {
-        if tx_bytes.is_empty() {
-            return None;
-        }
-
-        // simple tx format for poker actions
-        // [action_type: 1][channel_id: 32][nonce: 8][data...]
-        if tx_bytes.len() < 41 {
-            return None;
-        }
-
-        let action_type = tx_bytes[0];
-        let mut channel_id = [0u8; 32];
-        channel_id.copy_from_slice(&tx_bytes[1..33]);
-        let nonce = u64::from_le_bytes(tx_bytes[33..41].try_into().ok()?);
-
-        match action_type {
-            // bet action
-            0x01 => {
-                if tx_bytes.len() >= 50 {
-                    let seat = tx_bytes[41];
-                    let amount = u64::from_le_bytes(tx_bytes[42..50].try_into().ok()?);
-                    return Some(StateDelta {
-                        channel_id,
-                        nonce,
-                        balance_changes: vec![(seat, -(amount as i64))],
-                        pot_change: amount as i64,
-                        phase_change: None,
-                        current_bet_change: None,
-                    });
-                }
+    /// parse tx into state delta via the canonical action codec
+    fn parse_tx(tx_bytes: &[u8]) -> Option<StateDelta> {
+        let action = Action::decode(tx_bytes)?;
+        let (balance_changes, pot_change, current_bet_change) = match action.kind {
+            ActionKind::Bet { amount } | ActionKind::Call { amount } => {
+                (vec![(action.seat, -(amount as i64))], amount as i64, None)
             }
-            // fold action
-            0x02 => {
-                return Some(StateDelta {
-                    channel_id,
-                    nonce,
-                    balance_changes: Vec::new(),
-                    pot_change: 0,
-                    phase_change: None,
-                    current_bet_change: None,
-                });
-            }
-            // call action
-            0x03 => {
-                if tx_bytes.len() >= 50 {
-                    let seat = tx_bytes[41];
-                    let amount = u64::from_le_bytes(tx_bytes[42..50].try_into().ok()?);
-                    return Some(StateDelta {
-                        channel_id,
-                        nonce,
-                        balance_changes: vec![(seat, -(amount as i64))],
-                        pot_change: amount as i64,
-                        phase_change: None,
-                        current_bet_change: None,
-                    });
-                }
-            }
-            // raise action
-            0x04 => {
-                if tx_bytes.len() >= 58 {
-                    let seat = tx_bytes[41];
-                    let amount = u64::from_le_bytes(tx_bytes[42..50].try_into().ok()?);
-                    let new_bet = u64::from_le_bytes(tx_bytes[50..58].try_into().ok()?);
-                    return Some(StateDelta {
-                        channel_id,
-                        nonce,
-                        balance_changes: vec![(seat, -(amount as i64))],
-                        pot_change: amount as i64,
-                        phase_change: None,
-                        current_bet_change: Some(new_bet),
-                    });
-                }
-            }
-            _ => {}
-        }
-
-        None
+            ActionKind::Raise { amount, new_bet } => (
+                vec![(action.seat, -(amount as i64))],
+                amount as i64,
+                Some(new_bet),
+            ),
+            ActionKind::Fold | ActionKind::Check => (Vec::new(), 0, None),
+        };
+        Some(StateDelta {
+            channel_id: action.channel_id,
+            nonce: action.nonce,
+            balance_changes,
+            pot_change,
+            phase_change: None,
+            current_bet_change,
+            // after our action it is no longer our turn until the chain says so
+            clears_turn: true,
+        })
     }
 
     /// apply delta to predicted state
     fn apply_delta(&mut self, delta: &StateDelta) {
-        self.predicted.nonce = delta.nonce;
-        self.predicted.channel_id = delta.channel_id;
+        Self::apply_delta_to(&mut self.predicted, delta);
+    }
+
+    fn apply_delta_to(state: &mut PredictedState, delta: &StateDelta) {
+        state.nonce = delta.nonce;
+        state.channel_id = delta.channel_id;
 
         // apply balance changes
         for (seat, change) in &delta.balance_changes {
-            if let Some((_, balance)) = self.predicted.balances.iter_mut()
-                .find(|(s, _)| *s == *seat)
-            {
+            if let Some((_, balance)) = state.balances.iter_mut().find(|(s, _)| *s == *seat) {
                 if *change < 0 {
                     *balance = balance.saturating_sub((-*change) as u64);
                 } else {
@@ -234,19 +205,24 @@ impl StatePrediction {
 
         // apply pot change
         if delta.pot_change < 0 {
-            self.predicted.pot = self.predicted.pot.saturating_sub((-delta.pot_change) as u64);
+            state.pot = state.pot.saturating_sub((-delta.pot_change) as u64);
         } else {
-            self.predicted.pot = self.predicted.pot.saturating_add(delta.pot_change as u64);
+            state.pot = state.pot.saturating_add(delta.pot_change as u64);
         }
 
         // apply phase change
         if let Some(phase) = delta.phase_change {
-            self.predicted.phase = phase;
+            state.phase = phase;
         }
 
         // apply current bet change
         if let Some(bet) = delta.current_bet_change {
-            self.predicted.current_bet = bet;
+            state.current_bet = bet;
+        }
+
+        if delta.clears_turn {
+            state.acting_seat = None;
+            state.action_deadline = None;
         }
     }
 }
@@ -266,13 +242,10 @@ pub struct PredictedState {
     pub pot: u64,
     pub phase: u8,
     pub current_bet: u64,
-}
-
-/// pending optimistic update
-struct PendingUpdate {
-    tx_hash: [u8; 32],
-    applied_at: f64,
-    delta: StateDelta,
+    /// seat currently to act (confirmed info)
+    pub acting_seat: Option<u8>,
+    /// local absolute deadline (ms, crate::now() clock)
+    pub action_deadline: Option<f64>,
 }
 
 /// state change delta
@@ -284,20 +257,110 @@ struct StateDelta {
     pot_change: i64,
     phase_change: Option<u8>,
     current_bet_change: Option<u64>,
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{:02x}", b)).collect()
+    clears_turn: bool,
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::GameSnapshot;
+
+    fn call_tx(amount: u64, nonce: u64) -> Vec<u8> {
+        Action {
+            channel_id: [1u8; 32],
+            nonce,
+            seat: 0,
+            kind: ActionKind::Call { amount },
+        }
+        .encode()
+    }
+
+    fn update(nonce: u64, pot: u64, current_bet: u64) -> StateUpdate {
+        StateUpdate {
+            channel_id: [1u8; 32],
+            nonce,
+            state_hash: [0u8; 32],
+            balances: vec![(0, 1000)],
+            app_data_hash: [0u8; 32],
+            participants: vec![[9u8; 32]],
+            app_data: Vec::new(),
+            game: Some(GameSnapshot {
+                phase: 1,
+                pot,
+                current_bet,
+                acting_seat: NO_ACTING_SEAT,
+                action_deadline_ms: 0,
+            }),
+        }
+    }
 
     #[test]
     fn test_prediction_new() {
         let pred = StatePrediction::new();
         assert!(pred.confirmed.is_none());
         assert!(pred.pending.is_empty());
+    }
+
+    #[test]
+    fn test_call_applied_exactly_once() {
+        let mut pred = StatePrediction::new();
+        pred.confirm_state(&update(1, 100, 50));
+        pred.apply_optimistic_tx(&call_tx(50, 2));
+        assert_eq!(pred.predicted().pot, 150);
+        assert_eq!(pred.pending.len(), 1);
+        // balance debited once
+        assert_eq!(pred.predicted().balances[0], (0, 950));
+    }
+
+    #[test]
+    fn test_confirm_rebase_no_double_count() {
+        let mut pred = StatePrediction::new();
+        pred.confirm_state(&update(1, 100, 50));
+        pred.apply_optimistic_tx(&call_tx(50, 2));
+        pred.apply_optimistic_tx(&call_tx(50, 3));
+        assert_eq!(pred.predicted().pot, 200);
+
+        // confirm covers nonce 2 and matches the prediction
+        pred.confirm_state(&update(2, 150, 50));
+        assert_eq!(pred.hits, 1);
+        assert_eq!(pred.misses, 0);
+        assert_eq!(pred.pending.len(), 1);
+        // confirmed 150 + remaining pending call = 200, not 250
+        assert_eq!(pred.predicted().pot, 200);
+    }
+
+    #[test]
+    fn test_contradicted_prediction_counts_miss() {
+        let mut pred = StatePrediction::new();
+        pred.confirm_state(&update(1, 100, 50));
+        pred.apply_optimistic_tx(&call_tx(50, 2));
+
+        // chain says the pot went somewhere else
+        pred.confirm_state(&update(2, 999, 50));
+        assert_eq!(pred.misses, 1);
+        assert_eq!(pred.hits, 0);
+        // predicted snaps to confirmed
+        assert_eq!(pred.predicted().pot, 999);
+    }
+
+    #[test]
+    fn test_turn_and_deadline_from_confirmed() {
+        let mut pred = StatePrediction::new();
+        let mut upd = update(1, 100, 50);
+        upd.game = Some(GameSnapshot {
+            phase: 1,
+            pot: 100,
+            current_bet: 50,
+            acting_seat: 2,
+            action_deadline_ms: 30_000,
+        });
+        pred.confirm_state(&upd);
+        assert_eq!(pred.predicted().acting_seat, Some(2));
+        assert!(pred.predicted().action_deadline.is_some());
+
+        // our optimistic action clears the turn
+        pred.apply_optimistic_tx(&call_tx(50, 2));
+        assert_eq!(pred.predicted().acting_seat, None);
+        assert!(pred.predicted().action_deadline.is_none());
     }
 }

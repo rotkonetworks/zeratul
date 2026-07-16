@@ -50,6 +50,23 @@ enum ClientMsg {
     ReportDeposit { txid: String, amount: u64 },
     /// player leaves — triggers settlement and payout
     Leave,
+    /// co-signed game-over: this seat's signature over the agreed final outcome.
+    /// Both seats submit independently; when both agree the server calls escrow /settle
+    /// (winner payout) then triggers the on-chain payout. Staked tables only.
+    Settlement {
+        /// seat 0 (player A) final chip stack
+        a_stack: u64,
+        /// seat 1 (player B) final chip stack
+        b_stack: u64,
+        /// seat 0 payout Zcash address
+        a_addr: String,
+        /// seat 1 payout Zcash address
+        b_addr: String,
+        /// hex SHA-256 action-log hash (both peers derive identically)
+        log_hash: String,
+        /// hex Ed25519 signature by THIS seat's session key over the escrow settlement_message
+        sig: String,
+    },
     /// player broadcasts filtered game state to spectators
     Broadcast { data: String },
     Dispute,
@@ -134,6 +151,11 @@ enum ServerMsg {
         /// per-seat diversified deposit UAs (None if escrow hasn't surfaced them yet)
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         seat_addresses: Vec<Option<String>>,
+        /// per-seat on-chain-pinned payout addresses (recovered from the deposit memo).
+        /// Surfaced to BOTH clients so each can build the identical co-signed settlement
+        /// message at game over. None until the depositor's memo has been scanned.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        seat_payout_addresses: Vec<Option<String>>,
         player_a_deposit: u64,
         player_b_deposit: u64,
         required: u64,
@@ -319,6 +341,8 @@ struct Room {
     /// FROST relay coords — `Some` only when escrow runs in DKG mode; forwarded to clients via RoomInfo
     frost_relay_url: Option<String>,
     frost_room_code: Option<String>,
+    /// per-room capability token from the escrow; echoed on `/payout/initiate` (fail-closed there)
+    payout_token: Option<String>,
     /// per-seat DKG UA report — must agree across seats before we trust it as escrow_address
     dkg_reported_ua: Vec<Option<String>>,
     /// per-seat deposit UAs synced from poker-escrow's /room/{code}
@@ -346,6 +370,31 @@ struct Room {
     payout_complete_txid: Option<String>,
     /// Set after `PayoutFailed{reason}` is broadcast.
     payout_failed_reason: Option<String>,
+    /// per-seat co-signed settlement submissions. Each seat POSTs its own signature over the
+    /// agreed outcome via ClientMsg::Settlement. When both seats have submitted AND their
+    /// claimed (stacks, addrs, log_hash) tuples MATCH, the server calls escrow /settle with
+    /// both sigs. Disagreement ⇒ no settle (safe default; Leave→refund remains the fallback).
+    settlement_submissions: Vec<Option<SettlementSubmission>>,
+}
+
+/// One seat's co-signed settlement claim + signature (from ClientMsg::Settlement).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SettlementSubmission {
+    a_stack: u64,
+    b_stack: u64,
+    a_addr: String,
+    b_addr: String,
+    log_hash: String,
+    /// hex Ed25519 sig by this seat's session key. Excluded from tuple-equality checks
+    /// (each seat's sig differs); only the CLAIM must match across seats.
+    sig: String,
+}
+
+impl SettlementSubmission {
+    /// The agreed-outcome tuple both seats must match on (sig excluded).
+    fn claim(&self) -> (u64, u64, &str, &str, &str) {
+        (self.a_stack, self.b_stack, &self.a_addr, &self.b_addr, &self.log_hash)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -383,6 +432,7 @@ impl Room {
         let local_addr_hex = hex::encode(redpallas::derive_address_bytes(&group_pubkey));
         let frost_relay_url = external_escrow.frost_relay_url;
         let frost_room_code = external_escrow.frost_room_code;
+        let payout_token = external_escrow.payout_token;
         // DKG mode: escrow_address stays empty until players' DkgComplete agrees on a UA
         let dkg_mode = frost_relay_url.is_some() && frost_room_code.is_some();
         let escrow_address = external_escrow.address.unwrap_or_else(
@@ -434,6 +484,7 @@ impl Room {
             escrow_address,
             frost_relay_url,
             frost_room_code,
+            payout_token,
             dkg_reported_ua: vec![None; seats],
             seat_deposit_addresses: vec![None; seats],
             seat_payout_addresses: vec![None; seats],
@@ -446,6 +497,7 @@ impl Room {
             payout_signing_state: None,
             payout_complete_txid: None,
             payout_failed_reason: None,
+            settlement_submissions: vec![None; seats],
         }
     }
 
@@ -483,6 +535,24 @@ impl Room {
     fn send_to(&self, seat: u8, msg: ServerMsg) {
         if let Some(Some(p)) = self.players.get(seat as usize) {
             let _ = p.tx.send(msg);
+        }
+    }
+
+    /// Build the `RoomInfo` control frame describing this room's escrow/DKG coords.
+    /// Used both on the old `/ws` path and by the `/p2p` relay bridge so a freshly
+    /// joined staked peer immediately learns the FROST relay + deposit addresses.
+    fn room_info(&self) -> ServerMsg {
+        ServerMsg::RoomInfo {
+            code: self.code.clone(),
+            jury_nodes: JURY_N as u8,
+            jury_threshold: JURY_T as u8,
+            escrow: self.escrow_address.clone(),
+            buyin_zat: self.buyin_zat,
+            fee_per_seat: self.fee_per_seat,
+            frost_relay_url: self.frost_relay_url.clone(),
+            frost_room_code: self.frost_room_code.clone(),
+            seat_addresses: self.seat_deposit_addresses.clone(),
+            required_deposit: self.required_deposit,
         }
     }
 
@@ -891,10 +961,14 @@ async fn trigger_payout(
     let outputs: Vec<escrow_client::PayoutOutputReq> = plan.iter()
         .map(|p| escrow_client::PayoutOutputReq { address: p.address.clone(), amount_zat: p.amount_zat })
         .collect();
+    // capability token minted by the escrow at room creation — /payout/initiate is
+    // gated on it (fail-closed), so forward it or the payout is rejected.
+    let payout_token = room.lock().await.payout_token.clone();
     let req = escrow_client::InitiatePayoutReq {
         outputs,
         fee_zat: Some(TX_PAYOUT_FEE_ZAT),
         anchor_height: None,
+        payout_token,
     };
 
     let relay_room = match escrow_client::initiate_payout(&escrow_url, &code, &req).await {
@@ -1041,6 +1115,7 @@ fn spawn_deposit_poller(rooms: Rooms, escrow_url: Option<String>, code: String) 
                 r.broadcast(&ServerMsg::DepositStatus {
                     escrow_address: r.escrow_address.clone(),
                     seat_addresses: r.seat_deposit_addresses.clone(),
+                    seat_payout_addresses: r.seat_payout_addresses.clone(),
                     player_a_deposit: state.player_a_deposit,
                     player_b_deposit: state.player_b_deposit,
                     required: r.required_deposit,
@@ -1295,9 +1370,27 @@ async fn handle_relay_socket(socket: WebSocket, state: AppState) {
         use std::time::{SystemTime, UNIX_EPOCH};
         SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
     }
+    /// Wrap a `ServerMsg` control frame for the relay wire, distinct from the opaque
+    /// `_enc` peer frames the relay forwards blind. The client demuxes on `t == "srv"`.
+    fn srv_frame(msg: &ServerMsg) -> WsMessage {
+        WsMessage::Text(
+            serde_json::json!({ "t": "srv", "msg": msg }).to_string().into(),
+        )
+    }
 
     let mut my_room: Option<String> = None;
     let mut my_nick = String::from("anon");
+
+    // --- staked-table (escrow) bridge state -------------------------------
+    // Non-None only when this /p2p peer joined a room that has an escrow-aware
+    // `Room` in state.rooms (frost_room_code set => ESCROW_URL was wired at
+    // create time). For free-play / pure-relay tables these stay None and the
+    // handler behaves byte-for-byte as before.
+    let mut escrow_room: Option<Arc<Mutex<Room>>> = None;
+    let mut escrow_seat: Option<u8> = None;
+    // ServerMsg sink registered into Room.players[seat].tx; a forwarder task
+    // serializes what the Room broadcasts here into `srv` frames on our socket.
+    let mut srv_forward_task: Option<tokio::task::JoinHandle<()>> = None;
 
     while let Some(Ok(msg)) = ws_rx.next().await {
         let t = match msg {
@@ -1341,6 +1434,96 @@ async fn handle_relay_socket(socket: WebSocket, state: AppState) {
                         let _ = p.tx.send(frame(serde_json::json!({ "t": "system", "text": format!("{} joined", my_nick) })));
                     }
                 }
+                drop(rooms);
+
+                // --- staked-table bridge --------------------------------------
+                // If this room code has an escrow-aware Room in state.rooms AND that
+                // room is in DKG/escrow mode (frost_room_code set — only possible
+                // when ESCROW_URL was wired at create time), subscribe this relay
+                // socket to the Room's ServerMsg control stream and take a seat in
+                // Room.players so broadcast()/send_to() reach us. This is what makes
+                // the deposit poller + payout signing broadcasts actually land on a
+                // P2P client. Guarded so free-play / bot / pure-relay tables (no such
+                // Room, or frost_room_code == None) take the byte-for-byte-old path.
+                if escrow_room.is_none() {
+                    let room_arc = state.rooms.lock().await.get(&room).cloned();
+                    if let Some(room_arc) = room_arc {
+                        let mut r = room_arc.lock().await;
+                        // staked only: DKG-mode escrow => frost coords present.
+                        if !r.bot_friendly && r.frost_room_code.is_some() {
+                            // per-connection ServerMsg channel; the Room writes control
+                            // frames here via broadcast()/send_to() and we forward them
+                            // to the socket as `srv` frames.
+                            let (srv_tx, mut srv_rx) = mpsc::unbounded_channel::<ServerMsg>();
+                            let ws_sink = tx.clone();
+                            let fwd = tokio::spawn(async move {
+                                while let Some(m) = srv_rx.recv().await {
+                                    if ws_sink.send(srv_frame(&m)).is_err() { break; }
+                                }
+                            });
+                            srv_forward_task = Some(fwd);
+
+                            // Seat/reseat this peer in the Room WITHOUT running the
+                            // server-side poker engine. Reconnect: reuse the seat by
+                            // relay join order (heads-up) and refresh its tx sink.
+                            let seat_u8 = seat as u8;
+                            let seat_idx = seat_u8 as usize;
+                            if seat_idx < r.players.len() {
+                                if let Some(Some(p)) = r.players.get_mut(seat_idx) {
+                                    // reconnect: swap the sink, clear disconnect timer
+                                    p.tx = srv_tx.clone();
+                                    p.disconnected_at = None;
+                                } else {
+                                    r.players[seat_idx] = Some(Player {
+                                        name: my_nick.clone(),
+                                        seat: seat_u8,
+                                        pubkey: None,
+                                        zcash_address: None,
+                                        tx: srv_tx.clone(),
+                                        disconnected_at: None,
+                                    });
+                                }
+                                escrow_room = Some(room_arc.clone());
+                                escrow_seat = Some(seat_u8);
+                                // push current room escrow coords immediately so the
+                                // client can join the FROST DKG room + show deposit UI.
+                                let _ = srv_tx.send(r.room_info());
+                                if r.escrow_address.is_empty() || !r.deposits_satisfied() {
+                                    let ready = r.deposits_satisfied() && r.player_count() >= 2;
+                                    let _ = srv_tx.send(ServerMsg::DepositStatus {
+                                        escrow_address: r.escrow_address.clone(),
+                                        seat_addresses: r.seat_deposit_addresses.clone(),
+                                        seat_payout_addresses: r.seat_payout_addresses.clone(),
+                                        player_a_deposit: r.deposits.get(0).copied().unwrap_or(0),
+                                        player_b_deposit: r.deposits.get(1).copied().unwrap_or(0),
+                                        required: r.required_deposit,
+                                        ready,
+                                    });
+                                }
+                                // replay in-flight settlement so a mid-payout reconnect
+                                // lands in the signing view.
+                                if r.payout_triggered {
+                                    if let Some(s) = r.payout_signing_state.clone() {
+                                        let elapsed = s.broadcast_at.elapsed().as_secs();
+                                        let remaining = PRIORITY_SIGNER_FALLBACK_SECS.saturating_sub(elapsed);
+                                        let _ = srv_tx.send(ServerMsg::PayoutSigningRequest {
+                                            relay_room: s.relay_room,
+                                            plan: s.plan,
+                                            priority_seat: s.priority_seat,
+                                            fallback_secs_remaining: remaining,
+                                        });
+                                    }
+                                    if let Some(txid) = r.payout_complete_txid.clone() {
+                                        let _ = srv_tx.send(ServerMsg::PayoutComplete { txid });
+                                    }
+                                    if let Some(reason) = r.payout_failed_reason.clone() {
+                                        let _ = srv_tx.send(ServerMsg::PayoutFailed { reason });
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Some("msg") => {
                 let Some(room) = my_room.clone() else { continue };
@@ -1353,6 +1536,208 @@ async fn handle_relay_socket(socket: WebSocket, state: AppState) {
                             let _ = p.tx.send(frame(serde_json::json!({ "t": "msg", "text": text, "nick": my_nick, "ts": ts })));
                         }
                     }
+                }
+            }
+            // Server-facing CONTROL frame (staked tables only). Carries a ClientMsg
+            // under "msg". This is DISTINCT from the opaque `_enc` peer payloads
+            // (which arrive as `{"t":"msg","text":..}` and are forwarded blind above):
+            // the server NEVER parses card/action content. We only handle the escrow-
+            // relevant variants — DkgComplete (drives escrow-address agreement) and
+            // Leave (co-signed game-over => settlement/payout). Action / StartHand /
+            // any card content is intentionally NOT handled here: no server-side engine
+            // runs for a staked P2P table, so those stay peer-to-peer and blind.
+            Some("srv") => {
+                let Some(room_arc) = escrow_room.clone() else { continue };
+                let Some(seat) = escrow_seat else { continue };
+                let inner = match v.get("msg") {
+                    Some(m) => m.clone(),
+                    None => continue,
+                };
+                let cmsg: ClientMsg = match serde_json::from_value(inner) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                match cmsg {
+                    ClientMsg::DkgComplete { escrow_ua, orchard_fvk } => {
+                        let mut r = room_arc.lock().await;
+                        if r.frost_room_code.is_none() || (seat as usize) >= r.dkg_reported_ua.len() {
+                            continue;
+                        }
+                        tracing::info!(
+                            "relay room {} seat {}: dkg complete ua={} fvk_tail=…{}",
+                            r.code, seat, &escrow_ua[..escrow_ua.len().min(24)],
+                            &orchard_fvk[orchard_fvk.len().saturating_sub(8)..],
+                        );
+                        r.dkg_reported_ua[seat as usize] = Some(escrow_ua.clone());
+                        let seated: Vec<usize> = r.players.iter().enumerate()
+                            .filter_map(|(i, p)| p.as_ref().map(|_| i))
+                            .collect();
+                        let all_match = seated.len() >= 2 && seated.iter().all(|&i| {
+                            r.dkg_reported_ua.get(i).and_then(|u| u.as_deref()) == Some(escrow_ua.as_str())
+                        });
+                        if all_match && r.escrow_address != escrow_ua {
+                            tracing::info!("relay room {}: escrow UA agreed by all players: {}", r.code, escrow_ua);
+                            r.escrow_address = escrow_ua.clone();
+                            let info = r.room_info();
+                            r.broadcast(&info);
+                        }
+                    }
+                    ClientMsg::Settlement { a_stack, b_stack, a_addr, b_addr, log_hash, sig } => {
+                        // Co-signed WINNER payout. Each seat independently signs the agreed
+                        // final outcome (seat 0 = player A, seat 1 = player B) with its session
+                        // Ed25519 key — the same key pinned on-chain in the deposit memo. We
+                        // collect both submissions; only when BOTH seats submit AND their claims
+                        // (stacks, addrs, log_hash) MATCH do we call escrow /settle with both
+                        // sigs and then trigger the on-chain payout to the actual winner.
+                        //
+                        // ESCROW_URL unset (free-play / bot tables) ⇒ no-op: nothing to settle.
+                        let Some(escrow_url) = state.escrow_url.clone() else {
+                            tracing::debug!("settlement ignored — no ESCROW_URL (free-play)");
+                            continue;
+                        };
+                        let (settle_req, code) = {
+                            let mut r = room_arc.lock().await;
+                            if r.bot_friendly {
+                                continue; // chip-only tables never settle on-chain
+                            }
+                            if r.payout_triggered {
+                                tracing::info!("relay room {}: seat {} settlement ignored — payout already in flight", r.code, seat);
+                                continue;
+                            }
+                            let idx = seat as usize;
+                            if idx >= r.settlement_submissions.len() {
+                                continue;
+                            }
+                            let sub = SettlementSubmission {
+                                a_stack, b_stack,
+                                a_addr: a_addr.clone(), b_addr: b_addr.clone(),
+                                log_hash: log_hash.clone(), sig: sig.clone(),
+                            };
+                            tracing::info!(
+                                "relay room {}: seat {} settlement claim a_stack={} b_stack={}",
+                                r.code, seat, a_stack, b_stack,
+                            );
+                            r.settlement_submissions[idx] = Some(sub);
+                            // both seats submitted?
+                            let a = r.settlement_submissions.get(0).and_then(|s| s.clone());
+                            let b = r.settlement_submissions.get(1).and_then(|s| s.clone());
+                            let (Some(a), Some(b)) = (a, b) else {
+                                continue; // still waiting for the other seat
+                            };
+                            // claims must agree exactly (sig excluded) or we refuse to settle.
+                            if a.claim() != b.claim() {
+                                tracing::warn!(
+                                    "relay room {}: SETTLEMENT DISPUTE — seat claims disagree; NOT settling. \
+                                     a=({},{},{},{},{}) b=({},{},{},{},{})",
+                                    r.code,
+                                    a.a_stack, a.b_stack, a.a_addr, a.b_addr, a.log_hash,
+                                    b.a_stack, b.b_stack, b.a_addr, b.b_addr, b.log_hash,
+                                );
+                                continue; // safe default: leave unsettled; Leave→refund remains the fallback
+                            }
+                            // agreed. build the escrow SettleReq carrying BOTH seats' sigs.
+                            // seat 0 signature = player_a_sig, seat 1 = player_b_sig.
+                            r.payout_triggered = true;
+                            let req = escrow_client::SettleReq {
+                                player_a_stack: a.a_stack,
+                                player_b_stack: a.b_stack,
+                                player_a_address: a.a_addr.clone(),
+                                player_b_address: a.b_addr.clone(),
+                                action_log_hash: a.log_hash.clone(),
+                                player_a_sig: a.sig.clone(),
+                                player_b_sig: b.sig.clone(),
+                            };
+                            (req, r.code.clone())
+                        };
+
+                        // /settle (verify co-sign + record plan) then drive the on-chain payout.
+                        let room_clone = room_arc.clone();
+                        let rooms_clone = state.rooms.clone();
+                        tokio::spawn(async move {
+                            if let Err(e) = escrow_client::settle(&escrow_url, &code, &settle_req).await {
+                                tracing::error!("settle {}: escrow rejected co-signed outcome: {}", code, e);
+                                let mut r = room_clone.lock().await;
+                                r.payout_triggered = false; // allow retry / Leave fallback
+                                r.broadcast(&ServerMsg::PayoutFailed { reason: format!("settle: {}", e) });
+                                return;
+                            }
+                            tracing::info!("settle {}: escrow accepted co-signed outcome; initiating winner payout", code);
+                            // Build the payout plan from the SETTLED outcome (winner-weighted),
+                            // one output per seat with a positive payout. Amounts here mirror the
+                            // proportional split the escrow computed at /settle.
+                            let total = settle_req.player_a_stack + settle_req.player_b_stack;
+                            let (payouts, addrs) = (
+                                [settle_req.player_a_stack, settle_req.player_b_stack],
+                                [settle_req.player_a_address.clone(), settle_req.player_b_address.clone()],
+                            );
+                            let mut plan: Vec<PayoutLineJson> = Vec::new();
+                            {
+                                let r = room_clone.lock().await;
+                                let deposits_total = r.deposits.iter().sum::<u64>();
+                                let fee = TX_PAYOUT_FEE_ZAT.min(deposits_total);
+                                let distributable = deposits_total.saturating_sub(fee);
+                                for seat in 0u8..2 {
+                                    let amt = if total > 0 {
+                                        (distributable as u128 * payouts[seat as usize] as u128 / total as u128) as u64
+                                    } else {
+                                        distributable / 2
+                                    };
+                                    if amt > 0 {
+                                        plan.push(PayoutLineJson { seat, address: addrs[seat as usize].clone(), amount_zat: amt });
+                                    }
+                                }
+                            }
+                            if plan.is_empty() {
+                                tracing::warn!("settle {}: empty payout plan — nothing to pay", code);
+                                return;
+                            }
+                            // priority signer = seat 0 (arbitrary; trigger_payout swaps on timeout).
+                            trigger_payout(rooms_clone, room_clone, escrow_url, code, plan, 0).await;
+                        });
+                        notify_lobby_tables(&state.rooms, &state.lobby_users).await;
+                    }
+                    ClientMsg::Leave => {
+                        // Game-over co-signed settlement, P2P edition. The players agreed
+                        // on the outcome peer-to-peer (cards never touched the server); a
+                        // Leave frame is the trigger to settle the pre-funded deposits per
+                        // the deposit-derived settlement_plan and start on-chain payout.
+                        let mut r = room_arc.lock().await;
+                        if r.payout_triggered {
+                            tracing::info!("relay room {}: seat {} leave ignored — payout already in flight", r.code, seat);
+                            continue;
+                        }
+                        tracing::info!("relay room {}: seat {} leaving — settling", r.code, seat);
+                        r.payout_triggered = true;
+                        let payouts = r.settlement_plan();
+                        r.broadcast(&ServerMsg::GameOver {
+                            reason: format!("seat {} left the table", seat),
+                            payouts: payouts.clone(),
+                        });
+                        let pczt_plan: Vec<PayoutLineJson> = payouts.iter().filter_map(|(s, amt)| {
+                            r.seat_payout_addresses.get(*s as usize)
+                                .and_then(|opt| opt.as_ref())
+                                .map(|addr| PayoutLineJson { seat: *s, address: addr.clone(), amount_zat: *amt })
+                        }).collect();
+                        let code = r.code.clone();
+                        r.action_deadline = None;
+                        drop(r);
+                        if !pczt_plan.is_empty() {
+                            if let Some(escrow_url) = state.escrow_url.clone() {
+                                let room_clone = room_arc.clone();
+                                let rooms_clone = state.rooms.clone();
+                                tokio::spawn(async move {
+                                    trigger_payout(rooms_clone, room_clone, escrow_url, code, pczt_plan, seat).await;
+                                });
+                            } else {
+                                tracing::warn!("no ESCROW_URL configured — skipping on-chain payout");
+                            }
+                        }
+                        notify_lobby_tables(&state.rooms, &state.lobby_users).await;
+                    }
+                    // Every other ClientMsg (Action, StartHand, ReportDeposit, Chat, …)
+                    // is NOT a server-facing control message on a staked P2P table —
+                    // ignore. Card/action content is exchanged peer-to-peer via `_enc`.
+                    _ => {}
                 }
             }
             Some("part") => break,
@@ -1371,6 +1756,21 @@ async fn handle_relay_socket(socket: WebSocket, state: AppState) {
             if peers.is_empty() { rooms.remove(&room); }
         }
     }
+
+    // staked bridge: mark our Room seat disconnected (keep it for the reconnect
+    // window / settlement replay) and stop the ServerMsg forwarder.
+    if let (Some(room_arc), Some(seat)) = (escrow_room, escrow_seat) {
+        let mut r = room_arc.lock().await;
+        if let Some(Some(p)) = r.players.get_mut(seat as usize) {
+            p.disconnected_at = Some(tokio::time::Instant::now());
+        }
+        r.broadcast(&ServerMsg::OpponentDisconnected {
+            seat,
+            reconnect_secs: RECONNECT_WINDOW.as_secs(),
+        });
+    }
+    if let Some(fwd) = srv_forward_task { fwd.abort(); }
+
     send_task.abort();
 }
 
@@ -1567,6 +1967,7 @@ struct RemoteEscrow {
     address: Option<String>,
     frost_relay_url: Option<String>,
     frost_room_code: Option<String>,
+    payout_token: Option<String>,
 }
 
 /// fetch escrow setup from poker-escrow if configured; logs and returns default on failure.
@@ -1592,6 +1993,7 @@ async fn remote_escrow_for(
                 address: setup.escrow_address,
                 frost_relay_url: setup.frost_relay_url,
                 frost_room_code: setup.frost_room_code,
+                payout_token: setup.payout_token,
             }
         }
         Err(e) => {
@@ -2036,6 +2438,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                         let _ = tx.send(ServerMsg::DepositStatus {
                             escrow_address: r.escrow_address.clone(),
                             seat_addresses: r.seat_deposit_addresses.clone(),
+                            seat_payout_addresses: r.seat_payout_addresses.clone(),
                             player_a_deposit: r.deposits.get(0).copied().unwrap_or(0),
                             player_b_deposit: r.deposits.get(1).copied().unwrap_or(0),
                             required: r.required_deposit,
@@ -2305,6 +2708,7 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                         r.broadcast(&ServerMsg::DepositStatus {
                             escrow_address: r.escrow_address.clone(),
                             seat_addresses: r.seat_deposit_addresses.clone(),
+                            seat_payout_addresses: r.seat_payout_addresses.clone(),
                             player_a_deposit: r.deposits.get(0).copied().unwrap_or(0),
                             player_b_deposit: r.deposits.get(1).copied().unwrap_or(0),
                             required: r.required_deposit,
@@ -2401,6 +2805,9 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
                     for tx in &txs { let _ = tx.send(msg.clone()); }
                 });
             }
+            // Co-signed settlement only flows over the P2P `srv` relay (staked tables);
+            // the centralized/free-play server engine has no such outcome to settle.
+            ClientMsg::Settlement { .. } => {}
         }
     }
 
@@ -2486,6 +2893,11 @@ async fn main() {
         // default). `/ws` kept as an alias for local/dev without HAProxy.
         .route("/p2p", axum::routing::get(relay_handler))
         .route("/ws", axum::routing::get(relay_handler))
+        // HAProxy routes ALL `/ws*` to the separate FROST relay (:50053), which
+        // shadowed lobby chat + the zid e2ee relay. Serve them off non-`/ws`
+        // paths so they reach us; `/ws/*` kept as aliases for local/dev.
+        .route("/lobby", axum::routing::get(lobby_ws_handler))
+        .route("/zid", axum::routing::get(zid_relay_handler))
         .route("/ws/lobby", axum::routing::get(lobby_ws_handler))
         .route("/ws/zid", axum::routing::get(zid_relay_handler))
         .route("/api/tables", axum::routing::get(list_tables))

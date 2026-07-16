@@ -534,6 +534,48 @@ fn verify_settlement_sig(pubkey: &[u8; 32], msg: &[u8], sig_hex: &str) -> bool {
     vk.verify(msg, &Signature::from_bytes(&sig_arr)).is_ok()
 }
 
+/// On-chain tx fee reserved from the pot for the payout transaction. The settle
+/// plan and the payout builder MUST agree on this value or the tx won't balance.
+const TX_PAYOUT_FEE_ZAT: u64 = 10_000;
+
+/// Pure, testable settlement split. Given the pot and the co-signed final stacks,
+/// produce the payout outputs. Reserves BOTH the rake (to `house_addr`) AND the
+/// on-chain tx fee, so `sum(outputs) + TX_PAYOUT_FEE_ZAT == total_pot` exactly —
+/// `payout_b` is the exact remainder of `distributable`, so proportional truncation
+/// never strands funds. Winner-take-all skips the zero output. Seat 0 = A, seat 1 = B.
+fn compute_settlement_outputs(
+    code: &str,
+    total_pot: u64,
+    rake_bps: u16,
+    a_stack: u64,
+    b_stack: u64,
+    a_addr: &str,
+    b_addr: &str,
+    house_addr: &str,
+) -> (Vec<PayoutOutput>, u64, u64, u64) {
+    let rake = (total_pot as u128 * rake_bps as u128 / 10_000) as u64;
+    // reserve rake AND the tx fee; the fee is covered by players' pre-funded fee_per_seat.
+    let distributable = total_pot.saturating_sub(rake).saturating_sub(TX_PAYOUT_FEE_ZAT);
+    let total_stacks = a_stack + b_stack;
+    let payout_a = if total_stacks > 0 {
+        (distributable as u128 * a_stack as u128 / total_stacks as u128) as u64
+    } else {
+        distributable / 2
+    };
+    let payout_b = distributable - payout_a; // exact remainder — no truncation loss
+    let mut outputs = Vec::new();
+    if payout_a > 0 {
+        outputs.push(PayoutOutput { address: a_addr.to_string(), amount: payout_a, memo: format!("zk.poker payout room={}", code) });
+    }
+    if payout_b > 0 {
+        outputs.push(PayoutOutput { address: b_addr.to_string(), amount: payout_b, memo: format!("zk.poker payout room={}", code) });
+    }
+    if rake > 0 {
+        outputs.push(PayoutOutput { address: house_addr.to_string(), amount: rake, memo: format!("zk.poker rake room={}", code) });
+    }
+    (outputs, payout_a, payout_b, rake)
+}
+
 async fn settle(
     State(state): State<AppState>,
     Path(code): Path<String>,
@@ -605,49 +647,19 @@ async fn settle(
     room.player_a_address = Some(req.player_a_address.clone());
     room.player_b_address = Some(req.player_b_address.clone());
 
-    // compute rake
+    // compute the payout split — reserves rake AND the tx fee so the on-chain tx
+    // balances exactly when the payout builder spends this plan (see HIGH-1/HIGH-2).
     let total_pot = room.player_a_deposit + room.player_b_deposit;
-    let rake = (total_pot as u128 * room.rake_bps as u128 / 10000) as u64;
-    let distributable = total_pot - rake;
-
-    // proportional payout based on final stacks
-    let total_stacks = req.player_a_stack + req.player_b_stack;
-    let payout_a = if total_stacks > 0 {
-        distributable * req.player_a_stack / total_stacks
-    } else {
-        distributable / 2
-    };
-    let payout_b = distributable - payout_a;
+    let (outputs, payout_a, payout_b, rake) = compute_settlement_outputs(
+        &code, total_pot, room.rake_bps,
+        req.player_a_stack, req.player_b_stack,
+        &req.player_a_address, &req.player_b_address, &state.house_address,
+    );
 
     room.final_stacks = Some((payout_a, payout_b));
     room.game_active = false;
 
-    // build payout plan: one output per player (skip zero payouts) + rake to house
     let escrow_hex = hex::encode(&room.escrow_address);
-    let mut outputs = Vec::new();
-
-    if payout_a > 0 {
-        outputs.push(PayoutOutput {
-            address: req.player_a_address.clone(),
-            amount: payout_a,
-            memo: format!("zk.poker payout room={}", code),
-        });
-    }
-    if payout_b > 0 {
-        outputs.push(PayoutOutput {
-            address: req.player_b_address.clone(),
-            amount: payout_b,
-            memo: format!("zk.poker payout room={}", code),
-        });
-    }
-    if rake > 0 {
-        outputs.push(PayoutOutput {
-            address: state.house_address.clone(),
-            amount: rake,
-            memo: format!("zk.poker rake room={}", code),
-        });
-    }
-
     let plan = PayoutPlan {
         room: code.clone(),
         escrow_source: escrow_hex.clone(),
@@ -753,12 +765,12 @@ async fn initiate_payout(
             room.dkg_public_key_package_hex.as_ref(),
         ) {
             (Some(fvk), Some(kp), Some(seed), Some(pkg)) => {
-                (fvk.clone(), kp.clone(), seed.clone(), pkg.clone(), room.notes.clone())
+                (fvk.clone(), kp.clone(), seed.clone(), pkg.clone(), room.notes.clone(), room.payout_plan.clone())
             }
             _ => return json_response(serde_json::json!({"error": "DKG not complete; no key material to sign with"})),
         }
     };
-    let (fvk_hex, kp_hex, seed_hex, pkg_hex, notes) = snap;
+    let (fvk_hex, kp_hex, seed_hex, pkg_hex, notes, settled_plan) = snap;
 
     if notes.is_empty() {
         return json_response(serde_json::json!({"error": "no unspent notes — nothing to spend"}));
@@ -775,19 +787,33 @@ async fn initiate_payout(
     };
 
     let mainnet = matches!(state.network, zcash_protocol::consensus::NetworkType::Main);
-    let mut outputs = Vec::with_capacity(req.outputs.len());
-    for (i, out) in req.outputs.iter().enumerate() {
-        let addr = match tx_build::parse_orchard_ua(&out.address, mainnet) {
+    // HIGH-1: if the room was co-signed via /settle, spend the escrow's OWN recorded
+    // plan (bound to both players' signatures over the outcome) instead of trusting
+    // the caller's `req.outputs`. A token holder therefore cannot redirect a settled
+    // pot. Only the refund/abandonment path (no /settle) uses caller outputs, and that
+    // remains token-gated. The settled plan already reserves rake + TX_PAYOUT_FEE_ZAT.
+    let (resolved_outputs, fee_zat): (Vec<(String, u64)>, u64) = match &settled_plan {
+        Some(plan) => (
+            plan.outputs.iter().map(|o| (o.address.clone(), o.amount)).collect(),
+            TX_PAYOUT_FEE_ZAT,
+        ),
+        None => (
+            req.outputs.iter().map(|o| (o.address.clone(), o.amount_zat)).collect(),
+            if req.fee_zat == 0 { TX_PAYOUT_FEE_ZAT } else { req.fee_zat },
+        ),
+    };
+    let mut outputs = Vec::with_capacity(resolved_outputs.len());
+    for (i, (addr_str, amount_zat)) in resolved_outputs.iter().enumerate() {
+        let addr = match tx_build::parse_orchard_ua(addr_str, mainnet) {
             Ok(a) => a,
             Err(e) => return json_response(serde_json::json!({"error": format!("output {} address: {}", i, e)})),
         };
         outputs.push(tx_build::PayoutOutput {
             address: addr,
-            amount_zat: out.amount_zat,
+            amount_zat: *amount_zat,
             memo: [0u8; 512],
         });
     }
-    let fee_zat = if req.fee_zat == 0 { 10_000 } else { req.fee_zat };
     let plan = tx_build::PayoutPlan { outputs, fee_zat };
 
     let zidecar = match zecli::client::ZidecarClient::connect(&state.zidecar_url).await {
@@ -827,9 +853,9 @@ async fn initiate_payout(
     }
     tracing::info!("payout initiated for {}: relay_room={} actions={}", code, relay_room, pczt_result.alphas.len());
 
-    let (disp_recipient, disp_amount) = req.outputs.iter()
-        .find(|o| o.amount_zat > 0)
-        .map(|o| (o.address.clone(), o.amount_zat))
+    let (disp_recipient, disp_amount) = resolved_outputs.iter()
+        .find(|(_, amt)| *amt > 0)
+        .map(|(addr, amt)| (addr.clone(), *amt))
         .unwrap_or_else(|| (String::new(), 0));
 
     let bg_rooms = state.rooms.clone();
@@ -1287,6 +1313,57 @@ mod tests {
     use super::*;
     use axum::http::StatusCode;
     use std::collections::HashSet;
+
+    // ── settlement split arithmetic (HIGH-1/HIGH-2 fix) ────────────────────────
+    // The critical invariant for a payout that BALANCES on-chain:
+    //   sum(outputs) + TX_PAYOUT_FEE_ZAT == total_pot
+    // i.e. player payouts + rake + tx fee exactly consume the pot (deposits), so the
+    // payout tx has zero change and never under/over-funds. Players pre-fund the fee.
+    fn sum_outputs(outs: &[PayoutOutput]) -> u64 { outs.iter().map(|o| o.amount).sum() }
+
+    #[test]
+    fn settlement_balances_exactly_no_rake() {
+        // heads-up: each seat deposited buyin(100k) + fee_per_seat(5k) => pot 210k
+        let pot = 210_000;
+        let (outs, a, b, rake) = compute_settlement_outputs("R", pot, 0, 1500, 500, "u1a", "u1b", "u1house");
+        assert_eq!(rake, 0);
+        assert_eq!(a + b, pot - TX_PAYOUT_FEE_ZAT);           // distributable = pot - fee
+        assert_eq!(sum_outputs(&outs) + TX_PAYOUT_FEE_ZAT, pot); // balances
+        assert_eq!(outs.len(), 2);                            // A + B, no rake output
+        assert!(a > b);                                       // A had the bigger stack
+    }
+
+    #[test]
+    fn settlement_winner_take_all_skips_zero_output() {
+        let pot = 210_000;
+        let (outs, a, b, _) = compute_settlement_outputs("R", pot, 0, 2000, 0, "u1a", "u1b", "u1house");
+        assert_eq!(a, pot - TX_PAYOUT_FEE_ZAT);
+        assert_eq!(b, 0);
+        assert_eq!(outs.len(), 1);                            // only the winner's output
+        assert_eq!(sum_outputs(&outs) + TX_PAYOUT_FEE_ZAT, pot);
+    }
+
+    #[test]
+    fn settlement_with_rake_balances_and_pays_house() {
+        let pot = 210_000;
+        let (outs, a, b, rake) = compute_settlement_outputs("R", pot, 100, 1000, 1000, "u1a", "u1b", "u1house");
+        assert_eq!(rake, pot * 100 / 10_000);                 // 1%
+        // distributable = pot - rake - fee, split evenly
+        assert_eq!(a + b, pot - rake - TX_PAYOUT_FEE_ZAT);
+        assert_eq!(sum_outputs(&outs) + TX_PAYOUT_FEE_ZAT, pot); // A + B + rake + fee = pot
+        assert_eq!(outs.len(), 3);                            // A, B, house
+        assert!(outs.iter().any(|o| o.address == "u1house" && o.amount == rake));
+    }
+
+    #[test]
+    fn settlement_even_split_no_truncation_loss() {
+        // odd distributable must not lose a zatoshi: payout_b is the exact remainder
+        let pot = 30_001 + TX_PAYOUT_FEE_ZAT; // distributable = 30_001 (odd)
+        let (_outs, a, b, _) = compute_settlement_outputs("R", pot, 0, 1, 1, "u1a", "u1b", "u1h");
+        assert_eq!(a + b, pot - TX_PAYOUT_FEE_ZAT);           // no zatoshi stranded
+        assert_eq!(a, 15_000);
+        assert_eq!(b, 15_001);                               // remainder to B
+    }
 
     #[test]
     fn deposits_gate_requires_both_seats() {

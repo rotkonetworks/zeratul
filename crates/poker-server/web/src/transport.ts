@@ -29,6 +29,8 @@ export interface WireMessage {
 export interface TransportProvider {
   connect(room: string, nick: string): void
   send(msg: WireMessage): void
+  /** send a control frame to the SERVER escrow coordinator (staked tables). */
+  sendServer(msg: unknown): void
   disconnect(): void
   readonly connected: () => boolean
   readonly encrypted: () => boolean
@@ -36,6 +38,9 @@ export interface TransportProvider {
 
 /** callback for incoming peer messages */
 export type OnPeerMessage = (msg: WireMessage) => void
+
+/** callback for inbound server control frames (ServerMsg carried in `srv` frames) */
+export type OnServerMessage = (msg: unknown) => void
 
 /** callback for room events */
 export type OnRoomEvent = (event: 'joined' | 'opponent_joined' | 'opponent_left' | 'opponent_disconnected' | 'opponent_reconnected' | 'error' | 'encrypted', data?: string, seat?: number) => void
@@ -123,6 +128,7 @@ export function createRelayTransport(
   onRoom: OnRoomEvent,
   sessionIdentity?: SessionIdentity,
   reconnectConfig?: Partial<ReconnectConfig>,
+  onServer?: OnServerMessage,
 ): TransportProvider {
   const config = { ...DEFAULT_RECONNECT, ...reconnectConfig }
   const [connected, setConnected] = createSignal(false)
@@ -284,6 +290,15 @@ export function createRelayTransport(
         break
       }
 
+      case 'srv': {
+        // server-originated escrow control frame (RoomInfo / DepositStatus /
+        // PayoutSigningRequest / PayoutComplete …). Distinct from opaque `_enc`
+        // peer frames — the server only ever emits these for staked tables.
+        const inner = msg['msg']
+        if (inner) onServer?.(inner)
+        break
+      }
+
       case 'error':
         onRoom('error', msg['msg'] as string)
         break
@@ -386,6 +401,14 @@ export function createRelayTransport(
     ws.send(JSON.stringify({ t: 'msg', text: JSON.stringify(msg) }))
   }
 
+  /** send a control frame to the SERVER escrow coordinator (staked tables).
+   *  wrapped as `{t:'srv',msg}` — NOT a peer `msg` frame, so it never reaches
+   *  the opponent and is never encrypted. the server demuxes on `t == "srv"`. */
+  function sendServer(msg: unknown) {
+    if (!ws || ws.readyState !== WebSocket.OPEN || !currentRoom) return
+    ws.send(JSON.stringify({ t: 'srv', msg }))
+  }
+
   /** send game message — encrypted if session key available */
   function send(msg: WireMessage) {
     if (!ws || ws.readyState !== WebSocket.OPEN || !currentRoom) return
@@ -418,7 +441,7 @@ export function createRelayTransport(
     setEncrypted(false)
   }
 
-  return { connect, send, disconnect, connected, encrypted }
+  return { connect, send, sendServer, disconnect, connected, encrypted }
 }
 
 /** get room code from URL path (empty = create new) */

@@ -36,7 +36,8 @@ export async function createChannel(
   let ws: WebSocket | null = null
 
   // connect to relay
-  const url = relayUrl || `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws/zid`
+  // `/zid`, not `/ws/zid`: HAProxy routes `/ws*` to the FROST relay.
+  const url = relayUrl || `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/zid`
   ws = new WebSocket(url)
 
   ws.onopen = () => {

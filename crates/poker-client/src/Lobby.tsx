@@ -225,8 +225,12 @@ export default function Lobby(props: {
               install the <span class="text-zec-yellow">zafu</span> browser extension to play.
               every action is signed with your key.
             </div>
-            <a href="https://github.com/niconicobar/zafu" target="_blank"
-              class="text-9px text-zec-yellow underline">get zafu extension</a>
+            <div class="flex items-center justify-center gap-3">
+              <a href="https://chromewebstore.google.com/detail/zafu-wallet-beta/bhlogefpcebekhjpomlodifcelldoimn" target="_blank"
+                class="btn btn-primary text-9px px-4 py-1.5 no-underline">install from chrome web store</a>
+              <a href="https://github.com/rotkonetworks/zafu" target="_blank"
+                class="text-9px text-neutral-500 underline hover:text-zec-yellow">source</a>
+            </div>
           </div>
         </Show>
 
