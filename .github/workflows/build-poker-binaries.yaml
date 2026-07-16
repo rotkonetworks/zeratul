@@ -33,6 +33,9 @@ jobs:
         uses: actions-rust-lang/setup-rust-toolchain@v1
         with:
           toolchain: stable
+          # this is a release-artifact build, not a lint gate — don't let the action's
+          # default `-D warnings` turn pre-existing warnings into hard errors.
+          rustflags: ""
 
       - name: Install protobuf-compiler
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
