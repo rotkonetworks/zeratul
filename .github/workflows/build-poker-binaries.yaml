@@ -24,6 +24,10 @@ jobs:
   build:
     # ubuntu-22.04 = glibc 2.35 (<= prod's 2.41) so the binary loads on prod.
     runs-on: ubuntu-22.04
+    env:
+      # poker-escrow is a standalone manifest; unify both builds into one target dir
+      # so the staging step finds both binaries under target/release/.
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
     steps:
       - uses: actions/checkout@v4
         with:
