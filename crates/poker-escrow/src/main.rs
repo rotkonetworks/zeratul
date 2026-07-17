@@ -901,12 +901,31 @@ async fn initiate_payout(
             room.dkg_public_key_package_hex.as_ref(),
         ) {
             (Some(fvk), Some(kp), Some(seed), Some(pkg)) => {
-                (fvk.clone(), kp.clone(), seed.clone(), pkg.clone(), room.notes.clone(), room.payout_plan.clone())
+                let both_confirmed = both_deposits_satisfied(
+                    room.player_a_deposit, room.player_b_deposit, room.required_deposit);
+                (fvk.clone(), kp.clone(), seed.clone(), pkg.clone(), room.notes.clone(), room.payout_plan.clone(), both_confirmed)
             }
             _ => return json_response(serde_json::json!({"error": "DKG not complete; no key material to sign with"})),
         }
     };
-    let (fvk_hex, kp_hex, seed_hex, pkg_hex, notes, settled_plan) = snap;
+    let (fvk_hex, kp_hex, seed_hex, pkg_hex, notes, settled_plan, both_confirmed) = snap;
+
+    // 0-CONF THEFT GUARD (choke point — every payout flows through here). A co-signed
+    // /settle plan already passed the confirmed-deposit guard when it was recorded, so
+    // `settled_plan == Some` is safe. But the UNSETTLED path (Leave / abandonment refund,
+    // `settled_plan == None`) spends caller-supplied `req.outputs`; it MUST NOT pay out
+    // unless BOTH deposits are CONFIRMED on-chain — otherwise a winner could be paid from
+    // the honest seat's mempool-only (never-confirmed) deposit (0-conf free-roll theft).
+    // Fail-closed: funds stay in the vault; recover via /cancel or /arbitrate refund.
+    if settled_plan.is_none() && !both_confirmed {
+        tracing::warn!("payout/initiate BLOCKED for {} — unsettled payout while a deposit is unconfirmed", code);
+        return json_response(serde_json::json!({
+            "error": "unsettled payout blocked: a deposit is not confirmed on-chain — a payout \
+                      cannot exceed confirmed funds. settle after confirmation, or use cancel/arbitrate \
+                      to refund confirmed deposits.",
+            "deposit_pending_confirmation": true,
+        }));
+    }
 
     if notes.is_empty() {
         return json_response(serde_json::json!({"error": "no unspent notes — nothing to spend"}));
