@@ -189,6 +189,40 @@ struct EscrowRoom {
     /// credits, to decrement pending when a note confirms (promotion), and to evict pending when
     /// a note leaves the mempool without confirming. EPHEMERAL — never persisted.
     pending_deposits: std::collections::HashMap<String, PendingDeposit>,
+    /// A co-signed `/settle` outcome that arrived while a deposit was still unconfirmed on-chain.
+    /// FIX 1: instead of turning a valid co-signed plan into a terminal failure, we RECORD it here
+    /// and the confirmed-deposit scanner completes it (builds `payout_plan`) the moment both
+    /// deposits confirm. Fail-closed: it NEVER executes while a deposit is unconfirmed, and if a
+    /// deposit is EVICTED (never confirms) the queued settlement is abandoned (see
+    /// `evicted_shortfall`). Persisted so a restart still completes the queued settlement.
+    settle_pending: Option<PendingSettlement>,
+    /// FIX 2: set when a pending (mempool-seen) note is EVICTED for a seat whose CONFIRMED deposit
+    /// is still short. Marks the room as having lost a never-confirmed buy-in, so the queued
+    /// settled-plan path must NOT auto-execute a full-pot payout (that pot would be the other
+    /// seat's real money). Recovery is via `/cancel` refund-each-own-confirmed or `/arbitrate`.
+    /// Persisted so the guard survives a restart.
+    evicted_shortfall: bool,
+    /// FIX 3: reason string when DKG (`run_dkg`) errored, leaving the room permanently unable to
+    /// derive an escrow address / co-sign. Surfaced via `get_room` (`dkg_failed`) so the room can
+    /// be shown as terminally failed instead of "setting up forever". Persisted.
+    dkg_failed: Option<String>,
+}
+
+/// A co-signed settlement recorded while a deposit is still unconfirmed (FIX 1). Captures exactly
+/// the inputs `settle` needs to (re)build the payout plan once both deposits confirm — including
+/// BOTH players' Ed25519 signatures over the outcome, so the queued plan stays non-repudiable and
+/// re-verifiable. EPHEMERAL money is never moved from this; it only unblocks the CONFIRMED path.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PendingSettlement {
+    pub player_a_stack: u64,
+    pub player_b_stack: u64,
+    pub player_a_address: String,
+    pub player_b_address: String,
+    pub action_log_hash: String,
+    pub player_a_sig: String,
+    pub player_b_sig: String,
+    /// wall-clock ms the co-signed outcome was first queued (dedup / audit).
+    pub queued_at: u64,
 }
 
 /// One mempool-seen deposit tracked in `EscrowRoom::pending_deposits`. EPHEMERAL — never on disk.
@@ -344,6 +378,9 @@ async fn create_room_trusted_dealer(
         player_a_deposit_pending: 0,
         player_b_deposit_pending: 0,
         pending_deposits: std::collections::HashMap::new(),
+        settle_pending: None,
+        evicted_shortfall: false,
+        dkg_failed: None,
     };
 
     let payout_token_hex = hex::encode(room.payout_token);
@@ -377,6 +414,7 @@ async fn create_room_dkg(
         state.frost_relay_url.clone(),
         state.network,
         state.zidecar_url.clone(),
+        state.house_address.clone(),
         state.persist.clone(),
     ).await {
         Ok(p) => p,
@@ -452,6 +490,15 @@ async fn get_room(
             "both_deposited": room.player_a_deposit >= room.required_deposit
                 && room.player_b_deposit >= room.required_deposit,
             "both_payout_addresses_known": room.seat_payout_address.iter().take(2).all(|a| a.is_some()),
+            // FIX 1: a co-signed settlement is queued and will execute once both deposits confirm.
+            // Client shows "settling — waiting for confirmation" instead of a terminal failure.
+            "settle_pending_confirmation": room.settle_pending.is_some() && room.payout_plan.is_none(),
+            // FIX 2: a pending buy-in was evicted while its seat's confirmed deposit was short —
+            // the queued settlement can no longer pay a full pot; recovery is refund/arbitrate.
+            "evicted_shortfall": room.evicted_shortfall,
+            // FIX 3: DKG errored — the room is terminally unable to co-sign (not "setting up").
+            "dkg_failed": room.dkg_failed.is_some(),
+            "dkg_failed_reason": room.dkg_failed,
         })),
         None => Json(serde_json::json!({"error": "room not found"})),
     }
@@ -665,6 +712,198 @@ fn compute_settlement_outputs(
     (outputs, payout_a, payout_b, rake)
 }
 
+/// Outcome of verifying the co-signing gate for a settlement request. Pure of side effects on the
+/// room so it can be reused by both `/settle` and the confirmed scanner completing a queued plan.
+enum CosignCheck {
+    Ok,
+    /// a JSON error body the handler should return verbatim (bad sigs / unpinned identities / …)
+    Reject(serde_json::Value),
+}
+
+/// Verify BOTH seats co-signed the exact outcome with their on-chain-pinned Ed25519 identity keys,
+/// and that signed destinations match any on-chain-pinned payout address. No room mutation. Mirrors
+/// the gate previously inlined in `settle` so a queued settlement re-uses the identical rule.
+fn verify_settle_cosign(
+    room: &EscrowRoom,
+    code: &str,
+    a_stack: u64, b_stack: u64,
+    a_addr: &str, b_addr: &str,
+    log_hash: &str,
+    a_sig: &str, b_sig: &str,
+) -> CosignCheck {
+    let allow_unsigned = std::env::var("ESCROW_ALLOW_UNSIGNED_SETTLE")
+        .ok().as_deref() == Some("1");
+    let pk_a = room.seat_identity_pubkey.get(0).and_then(|p| *p);
+    let pk_b = room.seat_identity_pubkey.get(1).and_then(|p| *p);
+    match (pk_a, pk_b) {
+        (Some(pk_a), Some(pk_b)) => {
+            let msg = settlement_message(code, a_stack, b_stack, a_addr, b_addr, log_hash);
+            let a_ok = verify_settlement_sig(&pk_a, msg.as_bytes(), a_sig);
+            let b_ok = verify_settlement_sig(&pk_b, msg.as_bytes(), b_sig);
+            if !a_ok || !b_ok {
+                tracing::warn!("settle REJECTED room={} — bad player signatures (a_ok={} b_ok={})", code, a_ok, b_ok);
+                return CosignCheck::Reject(serde_json::json!({
+                    "error": "settlement requires a valid Ed25519 signature from BOTH seats' pinned identity keys",
+                    "player_a_sig_ok": a_ok,
+                    "player_b_sig_ok": b_ok,
+                }));
+            }
+            // defence in depth: if a payout address was pinned on-chain, the signed
+            // destination must match it — a signature can't redirect to a fresh addr.
+            for (i, (req_addr, pinned)) in [
+                (a_addr, room.seat_payout_address.get(0).and_then(|a| a.clone())),
+                (b_addr, room.seat_payout_address.get(1).and_then(|a| a.clone())),
+            ].into_iter().enumerate() {
+                if let Some(p) = pinned {
+                    if p != req_addr {
+                        tracing::warn!("settle REJECTED room={} seat={} — payout addr != on-chain pinned addr", code, i);
+                        return CosignCheck::Reject(serde_json::json!({"error": "payout address does not match the on-chain pinned address"}));
+                    }
+                }
+            }
+            tracing::info!("settle room={} — both player signatures verified", code);
+            CosignCheck::Ok
+        }
+        _ if allow_unsigned => {
+            tracing::warn!("settle room={} — UNSIGNED (ESCROW_ALLOW_UNSIGNED_SETTLE=1, demo only)", code);
+            CosignCheck::Ok
+        }
+        _ => {
+            tracing::warn!("settle REJECTED room={} — seat identities not pinned on-chain; cannot verify co-signing", code);
+            CosignCheck::Reject(serde_json::json!({
+                "error": "seat identities are not pinned on-chain (deposit memo must carry `;id:<pubkey>`); \
+                          settlement cannot be verified. set ESCROW_ALLOW_UNSIGNED_SETTLE=1 for demo only.",
+            }))
+        }
+    }
+}
+
+/// Build + record the CONFIRMED payout plan for a co-signed outcome. Callers MUST already have
+/// verified (a) both deposits confirmed via `both_deposits_satisfied` and (b) the co-signing gate.
+/// Idempotent: if a `payout_plan` is already present it is a no-op (a duplicate `/settle` or a
+/// scanner re-entry must not double-apply). Returns the plan actually in effect.
+#[allow(clippy::too_many_arguments)]
+fn finalize_settlement(
+    room: &mut EscrowRoom,
+    house_address: &str,
+    persist: Option<&persist::Store>,
+    code: &str,
+    a_stack: u64, b_stack: u64,
+    a_addr: &str, b_addr: &str,
+    log_hash: &str,
+    a_sig: &str, b_sig: &str,
+) -> PayoutPlan {
+    // IDEMPOTENCY: a plan already exists → don't rebuild or re-journal. Clear any queued
+    // settlement so we don't try to complete it twice.
+    if let Some(existing) = room.payout_plan.clone() {
+        room.settle_pending = None;
+        return existing;
+    }
+
+    room.player_a_address = Some(a_addr.to_string());
+    room.player_b_address = Some(b_addr.to_string());
+
+    let total_pot = room.player_a_deposit + room.player_b_deposit;
+    let (outputs, payout_a, payout_b, rake) = compute_settlement_outputs(
+        code, total_pot, room.rake_bps,
+        a_stack, b_stack, a_addr, b_addr, house_address,
+    );
+
+    room.final_stacks = Some((payout_a, payout_b));
+    room.game_active = false;
+
+    let plan = PayoutPlan {
+        room: code.to_string(),
+        escrow_source: hex::encode(&room.escrow_address),
+        escrow_value: total_pot,
+        outputs: outputs.clone(),
+        action_log_hash: log_hash.to_string(),
+        settled_at: now_ms(),
+    };
+    room.payout_plan = Some(plan.clone());
+    // a queued settlement (if any) is now fulfilled — clear it.
+    room.settle_pending = None;
+
+    if let Some(s) = persist {
+        s.save_room(room);
+    }
+
+    journal::record(code, "settlement_finalized", serde_json::json!({
+        "player_a_stack": a_stack,
+        "player_b_stack": b_stack,
+        "player_a_address": a_addr,
+        "player_b_address": b_addr,
+        "action_log_hash": log_hash,
+        "player_a_sig": a_sig,
+        "player_b_sig": b_sig,
+        "payout_a": payout_a,
+        "payout_b": payout_b,
+        "rake": rake,
+        "total_pot": total_pot,
+    }));
+
+    tracing::info!("settle: room={} A={} B={} rake={} outputs={} log={}",
+        code, payout_a, payout_b, rake, outputs.len(),
+        &log_hash[..log_hash.len().min(16)]);
+
+    plan
+}
+
+/// FIX 1 completion hook, called by the confirmed-deposit scanner after it credits new confirmed
+/// notes. If a co-signed settlement was queued while a deposit was unconfirmed, and BOTH deposits
+/// are NOW confirmed, and no eviction-shortfall taints the room, this re-verifies the co-signing
+/// against the (possibly newly-pinned) identity keys and builds the CONFIRMED payout plan. Holds
+/// the room lock (caller passes `&mut EscrowRoom`). Idempotent via `finalize_settlement`.
+///
+/// Fail-closed conditions that leave the queued settlement untouched (no payout):
+///   - either deposit still short (`both_deposits_satisfied` false),
+///   - `evicted_shortfall` set (a never-confirmed buy-in was evicted — see FIX 2),
+///   - co-signing no longer verifies (identity keys weren't pinned / signatures invalid).
+pub fn try_complete_pending_settlement(
+    room: &mut EscrowRoom,
+    house_address: &str,
+    persist: Option<&persist::Store>,
+    code: &str,
+) {
+    // nothing queued, or already finalized → nothing to do.
+    if room.payout_plan.is_some() || room.settle_pending.is_none() {
+        return;
+    }
+    // FIX 2: a pending buy-in was evicted for a still-short seat — the pot is not fully confirmed
+    // by both seats' own money. Do NOT auto-execute; leave recovery to /cancel or /arbitrate.
+    if room.evicted_shortfall {
+        tracing::warn!("pending settle NOT completed room={} — evicted_shortfall set (unconfirmed buy-in); use refund/arbitrate", code);
+        return;
+    }
+    // both deposits must be CONFIRMED (money gate).
+    if !both_deposits_satisfied(room.player_a_deposit, room.player_b_deposit, room.required_deposit) {
+        return;
+    }
+    let pending = room.settle_pending.clone().expect("checked is_some above");
+    // re-verify the co-signing now that both deposits (and their pinned identity keys) are on-chain.
+    if let CosignCheck::Reject(_) = verify_settle_cosign(
+        room, code,
+        pending.player_a_stack, pending.player_b_stack,
+        &pending.player_a_address, &pending.player_b_address,
+        &pending.action_log_hash, &pending.player_a_sig, &pending.player_b_sig,
+    ) {
+        tracing::error!("pending settle NOT completed room={} — queued co-signing failed re-verification; leaving queued", code);
+        return;
+    }
+    journal::record(code, "settlement_completed_on_confirmation", serde_json::json!({
+        "queued_at": pending.queued_at,
+        "player_a_deposit": room.player_a_deposit,
+        "player_b_deposit": room.player_b_deposit,
+    }));
+    tracing::info!("pending settle COMPLETING room={} — both deposits confirmed, executing queued co-signed plan", code);
+    let _ = finalize_settlement(
+        room, house_address, persist, code,
+        pending.player_a_stack, pending.player_b_stack,
+        &pending.player_a_address, &pending.player_b_address,
+        &pending.action_log_hash, &pending.player_a_sig, &pending.player_b_sig,
+    );
+}
+
 async fn settle(
     State(state): State<AppState>,
     Path(code): Path<String>,
@@ -676,140 +915,92 @@ async fn settle(
         None => return Json(serde_json::json!({"error": "room not found"})),
     };
 
-    if !room.game_active {
+    // IDEMPOTENCY: a settlement already finalized → return the existing plan. A duplicate
+    // /settle with the same (or any) outcome must NOT double-apply.
+    if let Some(plan) = room.payout_plan.clone() {
+        return Json(serde_json::json!({"settled": true, "payout_plan": plan, "duplicate": true}));
+    }
+
+    if !room.game_active && room.settle_pending.is_none() {
         return Json(serde_json::json!({"error": "game not active"}));
     }
 
-    // ── 0-conf theft guard (fail-closed) ────────────────────────────────────
+    // ── player co-signing gate ──────────────────────────────────────────────
+    // Settlement decides who gets the pot. Require BOTH seats to sign the exact outcome with
+    // the Ed25519 identity key each pinned on-chain in their deposit memo. The operator holds no
+    // signing key here, so it cannot forge a payout. Fail closed. We verify the co-signing FIRST
+    // (before the confirmed-deposit guard) so a valid co-signed plan can be QUEUED even when a
+    // deposit hasn't confirmed yet — see FIX 1 below.
+    if let CosignCheck::Reject(body) = verify_settle_cosign(
+        room, &code,
+        req.player_a_stack, req.player_b_stack,
+        &req.player_a_address, &req.player_b_address,
+        &req.action_log_hash, &req.player_a_sig, &req.player_b_sig,
+    ) {
+        return Json(body);
+    }
+
+    // ── 0-conf theft guard (fail-closed) — FIX 1: QUEUE instead of discard ──────────────────
     // The hand may have been DEALT the instant both buy-ins were seen in the mempool
-    // (deal_ready = confirmed+pending), but the payout must NEVER move more than the
-    // value that actually CONFIRMED into the vault. If either seat's on-chain-confirmed
-    // deposit is still short — its mempool tx never mined (dropped / RBF'd / double-spent) —
-    // refuse to settle. Otherwise a player could enter on an unconfirmed deposit, win, and be
-    // paid out of the honest seat's real deposit (free-roll theft). This is transient for a
-    // legit fast hand: retry after the block lands (~75s), or /cancel to refund confirmed
-    // deposits. Money paths stay confirmed-only; see run_mempool_watch + deal_ready.
+    // (deal_ready = confirmed+pending), but the payout must NEVER move more than the value that
+    // actually CONFIRMED into the vault. If either seat's on-chain-confirmed deposit is still
+    // short, we do NOT execute the payout. But — unlike before — we also do NOT discard the
+    // co-signed outcome (which turned into a terminal PayoutFailed upstream with no retry).
+    // Instead we RECORD it as `settle_pending`; the confirmed-deposit scanner completes it
+    // (builds the payout plan) the instant both deposits confirm. If a deposit is EVICTED rather
+    // than confirmed, the queued settlement is abandoned (`evicted_shortfall`) and funds stay
+    // recoverable via /cancel refund-each-own-confirmed or /arbitrate. Money paths stay
+    // confirmed-only; see run_deposit_poll's completion hook + run_mempool_watch eviction.
     if !both_deposits_satisfied(room.player_a_deposit, room.player_b_deposit, room.required_deposit) {
+        room.settle_pending = Some(PendingSettlement {
+            player_a_stack: req.player_a_stack,
+            player_b_stack: req.player_b_stack,
+            player_a_address: req.player_a_address.clone(),
+            player_b_address: req.player_b_address.clone(),
+            action_log_hash: req.action_log_hash.clone(),
+            player_a_sig: req.player_a_sig.clone(),
+            player_b_sig: req.player_b_sig.clone(),
+            queued_at: now_ms(),
+        });
+        // persist the queued co-signed outcome so a restart still completes it on confirmation.
+        if let Some(s) = state.persist.as_ref() {
+            s.save_room(room);
+        }
+        journal::record(&code, "settlement_queued_pending_confirmation", serde_json::json!({
+            "player_a_stack": req.player_a_stack,
+            "player_b_stack": req.player_b_stack,
+            "player_a_address": req.player_a_address,
+            "player_b_address": req.player_b_address,
+            "action_log_hash": req.action_log_hash,
+            "player_a_sig": req.player_a_sig,
+            "player_b_sig": req.player_b_sig,
+            "player_a_deposit": room.player_a_deposit,
+            "player_b_deposit": room.player_b_deposit,
+            "required_deposit": room.required_deposit,
+        }));
         tracing::warn!(
-            "settle BLOCKED room={} — unconfirmed deposit shortfall (a={} b={} required={}); \
-             refusing 0-conf payout, funds remain in vault",
+            "settle QUEUED room={} — co-signed outcome accepted but a deposit is unconfirmed \
+             (a={} b={} required={}); will execute automatically on confirmation",
             code, room.player_a_deposit, room.player_b_deposit, room.required_deposit,
         );
         return Json(serde_json::json!({
-            "error": "settlement blocked: a deposit is not yet confirmed on-chain — a payout \
-                      cannot exceed confirmed funds. wait for confirmation and retry, or cancel \
-                      to refund confirmed deposits.",
-            "deposit_pending_confirmation": true,
+            "settled": false,
+            "settle_pending_confirmation": true,
+            "message": "settlement accepted and queued — it executes automatically once both \
+                        deposits confirm on-chain. no payout moves until then.",
             "player_a_deposit": room.player_a_deposit,
             "player_b_deposit": room.player_b_deposit,
             "required_deposit": room.required_deposit,
         }));
     }
 
-    // ── player co-signing gate ──────────────────────────────────────────────
-    // Settlement decides who gets the pot. Require BOTH seats to sign the exact
-    // outcome with the Ed25519 identity key each pinned on-chain in their deposit
-    // memo. The operator holds no signing key here, so it cannot forge a payout.
-    // Fail closed: no pinned identities (and no explicit demo override) ⇒ refuse.
-    let allow_unsigned = std::env::var("ESCROW_ALLOW_UNSIGNED_SETTLE")
-        .ok().as_deref() == Some("1");
-    let pk_a = room.seat_identity_pubkey.get(0).and_then(|p| *p);
-    let pk_b = room.seat_identity_pubkey.get(1).and_then(|p| *p);
-    match (pk_a, pk_b) {
-        (Some(pk_a), Some(pk_b)) => {
-            let msg = settlement_message(
-                &code, req.player_a_stack, req.player_b_stack,
-                &req.player_a_address, &req.player_b_address, &req.action_log_hash,
-            );
-            let a_ok = verify_settlement_sig(&pk_a, msg.as_bytes(), &req.player_a_sig);
-            let b_ok = verify_settlement_sig(&pk_b, msg.as_bytes(), &req.player_b_sig);
-            if !a_ok || !b_ok {
-                tracing::warn!("settle REJECTED room={} — bad player signatures (a_ok={} b_ok={})", code, a_ok, b_ok);
-                return Json(serde_json::json!({
-                    "error": "settlement requires a valid Ed25519 signature from BOTH seats' pinned identity keys",
-                    "player_a_sig_ok": a_ok,
-                    "player_b_sig_ok": b_ok,
-                }));
-            }
-            // defence in depth: if a payout address was pinned on-chain, the signed
-            // destination must match it — a signature can't redirect to a fresh addr.
-            for (i, (req_addr, pinned)) in [
-                (&req.player_a_address, room.seat_payout_address.get(0).and_then(|a| a.clone())),
-                (&req.player_b_address, room.seat_payout_address.get(1).and_then(|a| a.clone())),
-            ].into_iter().enumerate() {
-                if let Some(p) = pinned {
-                    if &p != req_addr {
-                        tracing::warn!("settle REJECTED room={} seat={} — payout addr != on-chain pinned addr", code, i);
-                        return Json(serde_json::json!({"error": "payout address does not match the on-chain pinned address"}));
-                    }
-                }
-            }
-            tracing::info!("settle room={} — both player signatures verified", code);
-        }
-        _ if allow_unsigned => {
-            tracing::warn!("settle room={} — UNSIGNED (ESCROW_ALLOW_UNSIGNED_SETTLE=1, demo only)", code);
-        }
-        _ => {
-            tracing::warn!("settle REJECTED room={} — seat identities not pinned on-chain; cannot verify co-signing", code);
-            return Json(serde_json::json!({
-                "error": "seat identities are not pinned on-chain (deposit memo must carry `;id:<pubkey>`); \
-                          settlement cannot be verified. set ESCROW_ALLOW_UNSIGNED_SETTLE=1 for demo only.",
-            }));
-        }
-    }
-
-    // store player addresses
-    room.player_a_address = Some(req.player_a_address.clone());
-    room.player_b_address = Some(req.player_b_address.clone());
-
-    // compute the payout split — reserves rake AND the tx fee so the on-chain tx
-    // balances exactly when the payout builder spends this plan (see HIGH-1/HIGH-2).
-    let total_pot = room.player_a_deposit + room.player_b_deposit;
-    let (outputs, payout_a, payout_b, rake) = compute_settlement_outputs(
-        &code, total_pot, room.rake_bps,
+    // both confirmed + co-signed → finalize now.
+    let plan = finalize_settlement(
+        room, &state.house_address, state.persist.as_ref(), &code,
         req.player_a_stack, req.player_b_stack,
-        &req.player_a_address, &req.player_b_address, &state.house_address,
+        &req.player_a_address, &req.player_b_address,
+        &req.action_log_hash, &req.player_a_sig, &req.player_b_sig,
     );
-
-    room.final_stacks = Some((payout_a, payout_b));
-    room.game_active = false;
-
-    let escrow_hex = hex::encode(&room.escrow_address);
-    let plan = PayoutPlan {
-        room: code.clone(),
-        escrow_source: escrow_hex.clone(),
-        escrow_value: total_pot,
-        outputs: outputs.clone(),
-        action_log_hash: req.action_log_hash.clone(),
-        settled_at: now_ms(),
-    };
-
-    room.payout_plan = Some(plan.clone());
-
-    // persist the payout plan + final stacks + player addresses so a restart can still pay out
-    if let Some(s) = state.persist.as_ref() {
-        s.save_room(room);
-    }
-
-    // durable dispute artifact: the exact outcome plus BOTH players' co-signatures
-    // over it. Non-repudiable — survives restart so a payout can always be justified.
-    journal::record(&code, "settlement_finalized", serde_json::json!({
-        "player_a_stack": req.player_a_stack,
-        "player_b_stack": req.player_b_stack,
-        "player_a_address": req.player_a_address,
-        "player_b_address": req.player_b_address,
-        "action_log_hash": req.action_log_hash,
-        "player_a_sig": req.player_a_sig,
-        "player_b_sig": req.player_b_sig,
-        "payout_a": payout_a,
-        "payout_b": payout_b,
-        "rake": rake,
-        "total_pot": total_pot,
-    }));
-
-    tracing::info!("settle: room={} A={} B={} rake={} outputs={} log={}",
-        code, payout_a, payout_b, rake, outputs.len(),
-        &req.action_log_hash[..req.action_log_hash.len().min(16)]);
 
     Json(serde_json::json!({
         "settled": true,
@@ -1775,6 +1966,7 @@ async fn main() {
                 state.zidecar_url.clone(),
                 fvk_hex,
                 seat_addr_bytes,
+                state.house_address.clone(),
                 state.persist.clone(),
             );
         }
@@ -2085,6 +2277,166 @@ mod tests {
         let a = new_payout_token();
         let b = new_payout_token();
         assert_ne!(a, b);
+    }
+
+    // ── FIX 1/2: pending-settlement lifecycle ─────────────────────────────────
+    //
+    // Exercises `try_complete_pending_settlement` — the state machine that turns a co-signed
+    // /settle recorded while a deposit was unconfirmed into an executed CONFIRMED payout plan:
+    //   accepted-while-unconfirmed  → does NOT execute (no plan)
+    //   both deposits confirm        → executes (builds payout_plan, clears settle_pending)
+    //   deposit evicted instead      → does NOT execute (evicted_shortfall guard)
+    //   idempotency                  → a second completion is a no-op
+
+    /// Build a minimal DKG-complete-ish EscrowRoom with seat 0/1 identity keys pinned and a
+    /// co-signed `settle_pending` queued. Uses a real osst keygen so the curve fields are valid.
+    fn room_with_queued_settlement(a_conf: u64, b_conf: u64, required: u64) -> (EscrowRoom, String) {
+        use ed25519_dalek::{SigningKey, Signer};
+        let code = "QUEUE1".to_string();
+
+        // real osst material (mirrors make_legacy_osst)
+        let mut rng = rand::thread_rng();
+        let (_a, _b, jury, group_pubkey) =
+            osst::redpallas::zcash::setup_escrow(1, 1, &mut rng).expect("setup_escrow");
+        let escrow_address = osst::redpallas::zcash::derive_address_bytes(&group_pubkey);
+        let server_share = jury.node_shares.into_iter().next().unwrap();
+
+        // two seat identity keys + a co-signed outcome over the exact settlement message
+        let sk_a = SigningKey::from_bytes(&[3u8; 32]);
+        let sk_b = SigningKey::from_bytes(&[4u8; 32]);
+        let pk_a = sk_a.verifying_key().to_bytes();
+        let pk_b = sk_b.verifying_key().to_bytes();
+        let (a_addr, b_addr) = ("u1alicepayoutaddr", "u1bobpayoutaddr");
+        let (a_stack, b_stack, log_hash) = (1500u64, 500u64, "deadbeefcafe");
+        let msg = settlement_message(&code, a_stack, b_stack, a_addr, b_addr, log_hash);
+        let a_sig = hex::encode(sk_a.sign(msg.as_bytes()).to_bytes());
+        let b_sig = hex::encode(sk_b.sign(msg.as_bytes()).to_bytes());
+
+        let room = EscrowRoom {
+            code: code.clone(),
+            escrow_ua: Some("u1escrow".to_string()),
+            frost_relay_url: None,
+            frost_room_code: None,
+            dkg_key_package_hex: None,
+            dkg_public_key_package_hex: None,
+            dkg_orchard_fvk_hex: None,
+            dkg_sk_hex: None,
+            dkg_ephemeral_seed_hex: None,
+            seat_addresses: vec![None, None],
+            seat_addr_bytes: vec![None, None],
+            seat_payout_address: vec![Some(a_addr.to_string()), Some(b_addr.to_string())],
+            seat_identity_pubkey: vec![Some(pk_a), Some(pk_b)],
+            notes: Vec::new(),
+            last_scanned_height: 0,
+            payout_status: PayoutStatus::None,
+            escrow_address,
+            group_pubkey,
+            server_share,
+            player_a_share_hex: String::new(),
+            player_b_share_hex: String::new(),
+            player_a_deposit: a_conf,
+            player_b_deposit: b_conf,
+            required_deposit: required,
+            rake_bps: 0,
+            rake_paid: false,
+            game_active: true,
+            player_a_address: None,
+            player_b_address: None,
+            final_stacks: None,
+            payout_plan: None,
+            pending_nonces: None,
+            created_at: now_ms(),
+            payout_token: new_payout_token(),
+            counted_deposits: std::collections::HashSet::new(),
+            player_a_deposit_pending: 0,
+            player_b_deposit_pending: 0,
+            pending_deposits: std::collections::HashMap::new(),
+            settle_pending: Some(PendingSettlement {
+                player_a_stack: a_stack,
+                player_b_stack: b_stack,
+                player_a_address: a_addr.to_string(),
+                player_b_address: b_addr.to_string(),
+                action_log_hash: log_hash.to_string(),
+                player_a_sig: a_sig,
+                player_b_sig: b_sig,
+                queued_at: now_ms(),
+            }),
+            evicted_shortfall: false,
+            dkg_failed: None,
+        };
+        (room, code)
+    }
+
+    #[test]
+    fn pending_settlement_does_not_execute_while_unconfirmed() {
+        let required = 100_000;
+        // seat B never confirmed — money gate shut.
+        let (mut room, code) = room_with_queued_settlement(required, 0, required);
+        try_complete_pending_settlement(&mut room, "u1house", None, &code);
+        assert!(room.payout_plan.is_none(), "must NOT build a plan while a deposit is unconfirmed");
+        assert!(room.settle_pending.is_some(), "queued settlement must remain for later completion");
+    }
+
+    #[test]
+    fn pending_settlement_executes_once_both_confirm() {
+        let required = 100_000;
+        // both confirmed now (a block landed for both seats).
+        let (mut room, code) = room_with_queued_settlement(required, required, required);
+        try_complete_pending_settlement(&mut room, "u1house", None, &code);
+        assert!(room.payout_plan.is_some(), "must build the CONFIRMED payout plan once both confirm");
+        assert!(room.settle_pending.is_none(), "queued settlement cleared after completion");
+        // the plan spends exactly the confirmed pot (no rake here) minus the tx fee.
+        let plan = room.payout_plan.clone().unwrap();
+        let sum: u64 = plan.outputs.iter().map(|o| o.amount).sum();
+        assert_eq!(sum + TX_PAYOUT_FEE_ZAT, 2 * required, "plan balances against confirmed pot");
+
+        // IDEMPOTENCY: a second completion (e.g. scanner re-entry) must not rebuild/duplicate.
+        let settled_at_before = room.payout_plan.as_ref().unwrap().settled_at;
+        try_complete_pending_settlement(&mut room, "u1house", None, &code);
+        assert_eq!(
+            room.payout_plan.as_ref().unwrap().settled_at, settled_at_before,
+            "second completion is a no-op (same plan, not rebuilt)"
+        );
+    }
+
+    #[test]
+    fn pending_settlement_does_not_execute_on_eviction() {
+        let required = 100_000;
+        // seat B's deposit was seen in the mempool (dealt the hand) but got EVICTED, never
+        // confirmed. Confirmed b=0, and the eviction reconciliation marked the room.
+        let (mut room, code) = room_with_queued_settlement(required, 0, required);
+        room.evicted_shortfall = true; // set by run_mempool_watch eviction (FIX 2)
+        try_complete_pending_settlement(&mut room, "u1house", None, &code);
+        assert!(room.payout_plan.is_none(), "evicted_shortfall must block auto-completion");
+        assert!(room.settle_pending.is_some(), "queued settlement left for refund/arbitrate recovery");
+
+        // Even if — hypothetically — a later confirmation made both counters satisfy the gate,
+        // the evicted_shortfall taint keeps the settled-plan auto-path shut (theft guard).
+        room.player_b_deposit = required;
+        try_complete_pending_settlement(&mut room, "u1house", None, &code);
+        assert!(room.payout_plan.is_none(), "taint persists — settled auto-payout stays blocked");
+    }
+
+    #[test]
+    fn finalize_settlement_is_idempotent() {
+        let required = 100_000;
+        let (mut room, code) = room_with_queued_settlement(required, required, required);
+        let pending = room.settle_pending.clone().unwrap();
+        let first = finalize_settlement(
+            &mut room, "u1house", None, &code,
+            pending.player_a_stack, pending.player_b_stack,
+            &pending.player_a_address, &pending.player_b_address,
+            &pending.action_log_hash, &pending.player_a_sig, &pending.player_b_sig,
+        );
+        // second call with the same inputs returns the SAME already-recorded plan (no rebuild)
+        let second = finalize_settlement(
+            &mut room, "u1house", None, &code,
+            pending.player_a_stack, pending.player_b_stack,
+            &pending.player_a_address, &pending.player_b_address,
+            &pending.action_log_hash, &pending.player_a_sig, &pending.player_b_sig,
+        );
+        assert_eq!(first.settled_at, second.settled_at, "idempotent: same plan returned, not rebuilt");
+        assert!(room.settle_pending.is_none());
     }
 
     // ── BUG 3: deposit dedup ──────────────────────────────────────────────

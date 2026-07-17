@@ -27,7 +27,7 @@ use serde::{Deserialize, Serialize};
 
 use pasta_curves::pallas::Scalar as PallasScalar;
 
-use crate::{EscrowRoom, PayoutPlan, PayoutStatus};
+use crate::{EscrowRoom, PayoutPlan, PayoutStatus, PendingSettlement};
 
 // ---------------------------------------------------------------------------
 // Serializable mirror of scanner::DepositNote
@@ -99,6 +99,19 @@ pub struct PersistedRoom {
     // ── capability + bookkeeping ──
     pub payout_token: [u8; 32],
     pub created_at: u64,
+
+    // ── FIX 1/2/3: queued-settlement + terminal-failure state (default for old files) ──
+    /// A co-signed settlement queued while a deposit was unconfirmed (FIX 1). Completed by the
+    /// confirmed scanner once both deposits land; abandoned if a deposit is evicted.
+    #[serde(default)]
+    pub settle_pending: Option<PendingSettlement>,
+    /// A pending buy-in was evicted while its seat's confirmed deposit was still short (FIX 2).
+    /// Blocks the queued settled-plan path from auto-paying a full pot that isn't fully confirmed.
+    #[serde(default)]
+    pub evicted_shortfall: bool,
+    /// DKG errored — room is terminally unable to co-sign (FIX 3).
+    #[serde(default)]
+    pub dkg_failed: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -195,6 +208,9 @@ impl PersistedRoom {
             escrow_address: r.escrow_address,
             payout_token: r.payout_token,
             created_at: r.created_at,
+            settle_pending: r.settle_pending.clone(),
+            evicted_shortfall: r.evicted_shortfall,
+            dkg_failed: r.dkg_failed.clone(),
         }
     }
 
@@ -260,6 +276,11 @@ impl PersistedRoom {
             player_a_deposit_pending: 0,
             player_b_deposit_pending: 0,
             pending_deposits: std::collections::HashMap::new(),
+            // FIX 1/2/3: queued co-signed settlement + terminal-failure flags survive a restart so
+            // the confirmed scanner can still complete a queued settlement and the guards persist.
+            settle_pending: self.settle_pending,
+            evicted_shortfall: self.evicted_shortfall,
+            dkg_failed: self.dkg_failed,
         })
     }
 }
@@ -501,6 +522,9 @@ mod tests {
             player_a_deposit_pending: 0,
             player_b_deposit_pending: 0,
             pending_deposits: std::collections::HashMap::new(),
+            settle_pending: None,
+            evicted_shortfall: false,
+            dkg_failed: None,
         }
     }
 

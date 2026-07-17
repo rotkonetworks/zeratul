@@ -46,6 +46,7 @@ pub async fn provision(
     relay_url: String,
     network: zcash_protocol::consensus::NetworkType,
     zidecar_url: String,
+    house_address: String,
     store: Option<crate::persist::Store>,
 ) -> Result<DkgProvision, String> {
     let nick = format!("escrow-{}", room_code);
@@ -63,6 +64,7 @@ pub async fn provision(
     let bg_code = room_code.clone();
     let bg_network = network;
     let bg_zidecar = zidecar_url;
+    let bg_house = house_address;
     let bg_store = store;
     tokio::spawn(async move {
         let result = frost_dkg::run_dkg(
@@ -70,7 +72,7 @@ pub async fn provision(
             1, // we're the only one in the room when we just created it
             true, bg_network, DKG_TIMEOUT,
         ).await;
-        write_dkg_result(bg_rooms, &bg_code, result, bg_network, bg_zidecar, bg_store).await;
+        write_dkg_result(bg_rooms, &bg_code, result, bg_network, bg_zidecar, bg_house, bg_store).await;
     });
 
     Ok(DkgProvision { frost_room_code })
@@ -82,16 +84,29 @@ async fn write_dkg_result(
     result: Result<frost_dkg::DkgOutput, frost_dkg::DkgError>,
     network: zcash_protocol::consensus::NetworkType,
     zidecar_url: String,
+    house_address: String,
     store: Option<crate::persist::Store>,
 ) {
     let out = match result {
         Ok(o) => o,
-        Err(e) => { tracing::error!("dkg failed for {}: {}", code, e); return; }
+        // FIX 3: DKG errored (e.g. "frost capability denied"). Previously this just logged and
+        // returned, leaving a permanent zombie room stuck "setting up forever" with no signal.
+        // Journal a `dkg_failed` event and mark the room so `get_room` can surface it as
+        // terminally failed instead of pending.
+        Err(e) => {
+            let reason = e.to_string();
+            tracing::error!("dkg failed for {}: {}", code, reason);
+            mark_dkg_failed(&rooms, code, reason, store.as_ref()).await;
+            return;
+        }
     };
     let (seat_uas, seat_bytes) = match derive_seat_addresses(&out, network) {
         Ok(v) => v,
         Err(e) => {
+            // seat-address derivation is part of DKG completion — a failure here is equally
+            // terminal for the room, so surface it the same way.
             tracing::error!("seat address derive for {} failed: {}", code, e);
+            mark_dkg_failed(&rooms, code, format!("seat address derive: {}", e), store.as_ref()).await;
             return;
         }
     };
@@ -133,6 +148,7 @@ async fn write_dkg_result(
         zidecar_url.clone(),
         fvk_hex.clone(),
         vec![Some(seat_bytes[0]), Some(seat_bytes[1])],
+        house_address,
         store.clone(),
         false, // fresh room: anchor the scan cursor at the current tip
     ));
@@ -147,6 +163,34 @@ async fn write_dkg_result(
     ));
 }
 
+/// FIX 3: mark a room's DKG as terminally failed. Journals a `dkg_failed` event, sets
+/// `room.dkg_failed = Some(reason)` (surfaced by `get_room`), fires a dispute alert, and persists
+/// so the terminal state survives a restart. The room is left in the map (not removed) so operators
+/// and clients can see WHY it failed rather than it silently vanishing or appearing to hang.
+async fn mark_dkg_failed(
+    rooms: &Rooms,
+    code: &str,
+    reason: String,
+    store: Option<&crate::persist::Store>,
+) {
+    crate::journal::record(code, "dkg_failed", serde_json::json!({ "reason": reason }));
+    crate::notify::dispute_alert(
+        "🚨 zk.poker DKG failed",
+        &format!("room {} DKG failed: {} — room is terminally unusable, no funds should have been deposited", code, reason),
+        "rotating_light",
+        code,
+    );
+    let mut rooms_lock = rooms.lock().await;
+    if let Some(room) = rooms_lock.get_mut(code) {
+        room.dkg_failed = Some(reason);
+        if let Some(s) = store {
+            s.save_room(room);
+        }
+    } else {
+        tracing::warn!("dkg failed for unknown room {}", code);
+    }
+}
+
 /// Resume the deposit scanner for a room restored from disk after a restart. Unlike a fresh
 /// room, a resumed room keeps its persisted `last_scanned_height` so deposits that landed
 /// while the service was down are still detected — NOT re-anchored to the current tip.
@@ -159,6 +203,7 @@ pub fn resume_deposit_poll(
     zidecar_url: String,
     fvk_hex: String,
     seat_addr_bytes: Vec<Option<[u8; 43]>>,
+    house_address: String,
     store: Option<crate::persist::Store>,
 ) {
     tokio::spawn(run_deposit_poll(
@@ -167,6 +212,7 @@ pub fn resume_deposit_poll(
         zidecar_url.clone(),
         fvk_hex.clone(),
         seat_addr_bytes.clone(),
+        house_address,
         store.clone(),
         true,
     ));
@@ -183,12 +229,14 @@ pub fn resume_deposit_poll(
 /// skipped. The one exception is a persisted cursor of 0 (the process crashed in the narrow
 /// window between DKG completion and the first tip-init, before any deposit was possible —
 /// the escrow UA had only just been derived): re-anchor to tip to avoid a full genesis rescan.
+#[allow(clippy::too_many_arguments)]
 async fn run_deposit_poll(
     rooms: Rooms,
     code: String,
     zidecar_url: String,
     fvk_hex: String,
     seat_addr_bytes: Vec<Option<[u8; 43]>>,
+    house_address: String,
     store: Option<crate::persist::Store>,
     resume: bool,
 ) {
@@ -305,6 +353,11 @@ async fn run_deposit_poll(
                 if let Some(s) = store.as_ref() {
                     s.save_room(room);
                 }
+                // FIX 1: a co-signed settlement may have been QUEUED while a deposit was
+                // unconfirmed. Now that we just credited confirmed notes, try to complete it — it
+                // executes (builds the CONFIRMED payout plan) iff both deposits are confirmed and
+                // no eviction-shortfall taints the room. Fail-closed inside the helper.
+                crate::try_complete_pending_settlement(room, &house_address, store.as_ref(), &code);
             }
             Err(e) => tracing::warn!("deposit poll {}: scan: {}", code, e),
         }
@@ -407,6 +460,7 @@ async fn run_mempool_watch(
             })
             .map(|(key, _)| key.clone())
             .collect();
+        let mut shortfall_marked = false;
         for key in to_evict {
             if let Some(pd) = room.pending_deposits.remove(&key) {
                 match pd.seat {
@@ -414,11 +468,45 @@ async fn run_mempool_watch(
                     1 => room.player_b_deposit_pending = room.player_b_deposit_pending.saturating_sub(pd.value_zat),
                     _ => {}
                 }
+                // FIX 2: reconcile a live/queued hand against this eviction. If the evicted note's
+                // seat is still short on CONFIRMED value, the buy-in it represented never landed —
+                // the pot is NOT fully backed by both seats' own confirmed money. Mark the room so
+                // the queued/attempted SETTLED-plan path cannot auto-pay a full pot (which would be
+                // theft from the honest seat). The initiate_payout guard already blocks the
+                // UNSETTLED path; this closes the SETTLED-plan path's completion hook.
+                let seat_confirmed = match pd.seat {
+                    0 => room.player_a_deposit,
+                    1 => room.player_b_deposit,
+                    _ => room.required_deposit, // unknown seat: treat as covered (no spurious taint)
+                };
+                if seat_confirmed < room.required_deposit && !room.evicted_shortfall {
+                    room.evicted_shortfall = true;
+                    shortfall_marked = true;
+                    crate::journal::record(&code, "evicted_shortfall", serde_json::json!({
+                        "seat": pd.seat,
+                        "value_zat": pd.value_zat,
+                        "seat_confirmed": seat_confirmed,
+                        "required_deposit": room.required_deposit,
+                        "had_queued_settlement": room.settle_pending.is_some(),
+                    }));
+                    tracing::warn!(
+                        "mempool watch {}: seat={} pending val={} EVICTED while confirmed={} < required={} — \
+                         marking evicted_shortfall; settled payout auto-completion blocked, use refund/arbitrate",
+                        code, pd.seat, pd.value_zat, seat_confirmed, room.required_deposit,
+                    );
+                }
                 crate::journal::record(&code, "deposit_evicted", serde_json::json!({
                     "seat": pd.seat,
                     "value_zat": pd.value_zat,
                 }));
                 tracing::info!("mempool watch {}: seat={} val={} evicted (left mempool unconfirmed)", code, pd.seat, pd.value_zat);
+            }
+        }
+        // persist the eviction-shortfall taint (normally the mempool ledger is ephemeral, but this
+        // flag is a durable money-safety guard that must survive a restart).
+        if shortfall_marked {
+            if let Some(s) = _store.as_ref() {
+                s.save_room(room);
             }
         }
     }
@@ -502,6 +590,9 @@ pub fn empty_room(
         player_a_deposit_pending: 0,
         player_b_deposit_pending: 0,
         pending_deposits: std::collections::HashMap::new(),
+        settle_pending: None,
+        evicted_shortfall: false,
+        dkg_failed: None,
     }
 }
 
