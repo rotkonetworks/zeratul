@@ -161,6 +161,13 @@ export class WasmGame {
         return ret >>> 0;
     }
     /**
+     * @returns {number}
+     */
+    last_raise_size() {
+        const ret = wasm.wasmgame_last_raise_size(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * @param {number} buyin
      * @param {number} small_blind
      * @param {number} big_blind

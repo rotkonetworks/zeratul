@@ -30,7 +30,7 @@ function cardToJson(idx: number): CardJson {
 
 export type EngineEvent =
   | { type: 'acted'; seat: number; action: string; amount: number; newStack: number; pot: number }
-  | { type: 'fold_win'; winner: number; payout: number; stacks: [number, number] }
+  | { type: 'fold_win'; winner: number; payout: number; stacks: number[] }
   | { type: 'phase_advance'; phase: string; communityCount: number }
   | { type: 'showdown_ready' }
   | { type: 'allin_showdown' }
@@ -44,8 +44,12 @@ const ACTION_MAP: Record<string, number> = { fold: 0, check: 1, call: 2, bet: 3,
 // ============================================================================
 
 export interface EngineApi {
-  /** apply an action, returns pure events */
-  apply: (seat: number, action: string, amount: number) => EngineEvent[]
+  /** apply an action, returns pure events. `seq` is the GLOBAL action index
+   *  (== engine.action_count + 1). Pass 0 to bypass the engine's sequence guard
+   *  (legacy). Passing the real seq turns on the engine's built-in gap/dup/reorder
+   *  rejection (`"wrong sequence"`), which is what keeps the two peers' engines from
+   *  silently forking on a dropped/reordered message. */
+  apply: (seat: number, action: string, amount: number, seq?: number) => EngineEvent[]
   /** deal a new hand */
   deal: (myCards: [number, number], oppCards: [number, number], community: number[], isHost: boolean) => void
   /** compute valid actions for a seat */
@@ -84,11 +88,11 @@ export function createEngineApi(WasmGameClass: any, buyin: number, sb: number, b
     }
   }
 
-  function apply(seat: number, action: string, amount: number): EngineEvent[] {
+  function apply(seat: number, action: string, amount: number, seq: number = 0): EngineEvent[] {
     if (!engine) return [] // no WASM, caller uses JS fallback
 
     const [valid, handOver, winner, payout, advance] =
-      engine.apply_action(seat, ACTION_MAP[action] ?? 0, amount, 0)
+      engine.apply_action(seat, ACTION_MAP[action] ?? 0, amount, seq)
 
     if (!valid) {
       return [{ type: 'rejected', seat, action, reason: engine.debug_state() }]
@@ -105,12 +109,12 @@ export function createEngineApi(WasmGameClass: any, buyin: number, sb: number, b
       pot: engine.pot(),
     })
 
-    if (handOver && winner < 2) {
+    if (handOver && winner < engine.num_players()) {
       events.push({
         type: 'fold_win',
         winner,
         payout,
-        stacks: [engine.stack(0), engine.stack(1)],
+        stacks: allStacks(),
       })
       return events
     }
@@ -148,22 +152,50 @@ export function createEngineApi(WasmGameClass: any, buyin: number, sb: number, b
     if (!engine || engine.acting_seat() !== seat) return null
     const myStack = engine.stack(seat)
     const myBet = engine.bet(seat)
-    const oppBet = engine.bet(1 - seat)
-    const toCall = oppBet - myBet
+    // N-player: the amount to call is measured against the HIGHEST bet at the table,
+    // not a phantom `1 - seat` opponent (which is a bogus index for num_players>2 and
+    // makes the UI offer check/bet while the engine actually accepts only call/raise).
+    // maxBet over every seat mirrors the engine's own `max_bet = bets.iter().max()`.
+    const bets = allBets()
+    const maxBet = bets.reduce((m, b) => Math.max(m, b), 0)
+    const toCall = maxBet - myBet
 
-    const minBet = bb // big blind is minimum bet/raise
+    const minBet = bb // big blind is minimum bet/raise (matches engine's raise-below-minimum gate)
     const actions: ValidAction[] = [{ kind: 'fold', min_amount: 0, max_amount: 0 }]
 
+    // amounts are ADDITIONAL chips this seat commits (engine adds `amount` to bets[seat]),
+    // clamped to the stack so a short seat can always shove for less than a full min-raise.
     if (toCall <= 0) {
       actions.push({ kind: 'check', min_amount: 0, max_amount: 0 })
       if (myStack > 0) actions.push({ kind: 'bet', min_amount: Math.min(minBet, myStack), max_amount: myStack })
     } else {
       actions.push({ kind: 'call', min_amount: Math.min(toCall, myStack), max_amount: Math.min(toCall, myStack) })
+      // a raise must cover the call plus at least one min-bet on top; if the stack can't,
+      // the seat can still get the chips in via all-in (offered below).
       if (myStack > toCall) actions.push({ kind: 'raise', min_amount: Math.min(toCall + minBet, myStack), max_amount: myStack })
     }
     if (myStack > 0) actions.push({ kind: 'allin', min_amount: myStack, max_amount: myStack })
 
     return { type: 'prompt', seat, validActions: actions }
+  }
+
+  /** all seats' current-round bets. Uses the engine's N-player getter, falling back to a
+   *  per-seat loop on older WASM builds. Length == num_players. */
+  function allBets(): number[] {
+    try { return Array.from(engine.all_bets()) }
+    catch {
+      const n = engine.num_players()
+      return Array.from({ length: n }, (_, i) => engine.bet(i))
+    }
+  }
+
+  /** all seats' stacks. N-player getter with per-seat fallback. Length == num_players. */
+  function allStacks(): number[] {
+    try { return Array.from(engine.all_stacks()) }
+    catch {
+      const n = engine.num_players()
+      return Array.from({ length: n }, (_, i) => engine.stack(i))
+    }
   }
 
   function updateCommunity(community: number[]) {

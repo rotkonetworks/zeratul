@@ -10,6 +10,7 @@
 import { createSignal } from 'solid-js'
 import type { ServerMsg } from './types'
 import { createRelayTransport, getRoomFromUrl, setRoomInUrl } from './transport'
+import { relayBase } from './config'
 import { createGame, loadWasmEngine } from './game'
 import { zid } from './zid'
 import type { ZidIdentity } from './zid'
@@ -30,6 +31,17 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
   let transport: ReturnType<typeof createRelayTransport> | null = null
   let announced = false
   let media: MediaState | null = null
+  // one wallet delegation per page session — cached so a re-join / double sit-down
+  // reuses it instead of popping the wallet a second time.
+  let cachedZid: ZidIdentity | null = null
+  // rules-handshake self-heal: the host proposes and the guest auto-accepts, but a single
+  // dropped relay frame would otherwise deadlock both sides forever ("waiting for opponent
+  // to confirm"). We keep re-sending (idempotent — the negotiate layer guards on gameStarted)
+  // until the accept lands, then stop.
+  let rulesAgreedLocal = false
+  let hostRulesRetry: ReturnType<typeof setInterval> | null = null
+  let hostRetryStarted = false
+  function stopHostRulesRetry() { if (hostRulesRetry) { clearInterval(hostRulesRetry); hostRulesRetry = null } }
   // staked (real-money) table: escrow control frames flow over the /p2p `srv`
   // channel to the server coordinator. false for free-play (no escrow at all).
   let isStaked = false
@@ -39,14 +51,15 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
     const room = getRoomFromUrl()
     if (!room) return
 
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     let ws: WebSocket
     let intentionalClose = false
     let reconnectAttempts = 0
     const maxRetries = 10
 
     function open() {
-      ws = new WebSocket(`${proto}//${location.host}/${room}/ws`)
+      // relayBase(): user-selectable relay origin (default same-origin). This `/{room}/ws`
+      // path is a legacy alias kept for local/dev; prod dials `/p2p` via transport.ts.
+      ws = new WebSocket(`${relayBase()}/${room}/ws`)
 
       ws.onopen = () => {
         setConnected(true)
@@ -100,6 +113,15 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
 
   async function connect(name: string, customRules?: { smallBlind: number; bigBlind: number; buyin: number }, staked?: boolean) {
     isStaked = !!staked
+    // Idempotent (re)connect: if a previous transport is still around (double "sit down",
+    // a remount), disconnect it FIRST so its relay socket frees its seat instead of lingering
+    // as a phantom opponent / triggering "room full". Reset per-session state for the new table.
+    if (transport) { try { transport.disconnect() } catch {} transport = null }
+    game = null
+    announced = false
+    stopHostRulesRetry()
+    rulesAgreedLocal = false
+    hostRetryStarted = false
     // P2P over the blind relay: both clients run the engine + mental-poker
     // ceremony locally and exchange only ciphertext through the server relay.
     // the operator never sees cards, and the two players never open a socket to
@@ -111,8 +133,11 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
     const room = getRoomFromUrl()
 
     // session identity via zid SDK (zafu wallet, or ephemeral ed25519)
-    const zidIdentity = await zid.connect({ appName: 'poker.zk.bot', tradingMode: true })
-    if (name) zid.setName(name)
+    if (!cachedZid) cachedZid = await zid.connect({ appName: 'zkbtc.org', tradingMode: true })
+    const zidIdentity = cachedZid
+    // Refresh the cached identity's name too, or a nick change never takes effect
+    // (cachedZid pins the name from the first connect for the double-sign fix).
+    if (name) { zid.setName(name); zidIdentity.name = name }
     const sess: SessionIdentity = {
       ...zidIdentity,
       sessionPubKey: zidIdentity.pubkey,
@@ -128,17 +153,36 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
 
     function buildGame(isHost: boolean) {
       if (game) return
+      // fresh handshake state for this table (guards against stale flags on rejoin)
+      rulesAgreedLocal = false
+      hostRetryStarted = false
+      stopHostRulesRetry()
       // media: WebRTC voice/video (opt-in, direct P2P, signaling over the relay)
-      media = createMedia((msg) => transport!.send(msg))
+      media = createMedia((msg) => transport!.send(msg), !isHost)
       game = createGame(transport!, isHost, name, {
         onMsg,
         onLog: (t) => console.log('[game]', t),
         onRulesProposed: (rules, fromSelf) => {
-          onMsg({ type: 'RulesProposed', buyin: rules.buyin, smallBlind: rules.smallBlind, bigBlind: rules.bigBlind, fromSelf })
-          // guest auto-accepts host's rules (they chose to join this table)
-          if (!fromSelf && !isHost) setTimeout(() => game?.acceptRules(), 500)
+          // Don't re-flash the proposal prompt once we've already agreed (host re-proposals
+          // during self-heal would otherwise make the guest's UI flicker).
+          if (!(rulesAgreedLocal && !fromSelf)) {
+            onMsg({ type: 'RulesProposed', buyin: rules.buyin, smallBlind: rules.smallBlind, bigBlind: rules.bigBlind, fromSelf })
+          }
+          // Guest auto-accepts the host's rules (they chose to join this table). Re-accept on
+          // EVERY proposal — if a prior accept was dropped, the host re-proposes and this heals it.
+          if (!fromSelf && !isHost) setTimeout(() => game?.acceptRules(), 400)
+          // Host: after proposing, keep re-proposing until the guest's accept arrives, so a
+          // single dropped frame can't strand the table on "waiting for opponent to confirm".
+          if (fromSelf && isHost && !hostRetryStarted) {
+            hostRetryStarted = true
+            let tries = 0
+            hostRulesRetry = setInterval(() => {
+              if (rulesAgreedLocal || tries++ >= 8) { stopHostRulesRetry(); return }
+              game?.proposeRules(rules)
+            }, 2500)
+          }
         },
-        onRulesAccepted: () => onMsg({ type: 'RulesAccepted' }),
+        onRulesAccepted: () => { rulesAgreedLocal = true; stopHostRulesRetry(); onMsg({ type: 'RulesAccepted' }) },
         onEscrowReady: (addr) => onMsg({ type: 'RoomInfo', code: room ?? '', jury_nodes: 5, jury_threshold: 3, escrow: addr }),
         onDepositConfirmed: () => {},
         onTimerTick: (s) => { if (s >= 0) onMsg({ type: 'TimerTick', secondsLeft: s }) },
@@ -162,8 +206,20 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
           case 'joined':
             setConnected(true)
             if (mySeat < 0) {
-              mySeat = typeof seat === 'number' ? seat : (room ? 1 : 0)
-              console.log('[ws] joined room:', data, 'seat:', mySeat)
+              const relaySeat = typeof seat === 'number' ? seat : (room ? 1 : 0)
+              // Seat/role STABILITY across reconnect. The relay assigns seats by live join
+              // order and collapses the slot list on disconnect, so a reloading HOST would
+              // rejoin as seat 1 and flip host<->guest (breaking the shuffle A/B roles →
+              // nobody deals). The relay forwards blind between the two peers regardless of
+              // seat, so the seat only decides OUR isHost / shuffle role — pin the first seat
+              // we got for this room (keyed by nick so two tabs in one browser don't clash)
+              // and reuse it on reload so host stays host and guest stays guest.
+              const rc = (data ?? room) as string | undefined
+              const seatKey = rc ? `poker_seat:${rc}:${name}` : null
+              const pinned = seatKey ? localStorage.getItem(seatKey) : null
+              mySeat = pinned !== null ? parseInt(pinned, 10) : relaySeat
+              if (seatKey && pinned === null) localStorage.setItem(seatKey, String(mySeat))
+              console.log('[ws] joined room:', data, 'seat:', mySeat, pinned !== null ? '(pinned)' : `(relay ${relaySeat})`)
               buildGame(mySeat === 0)
               onMsg({ type: 'Seated', seat: mySeat, name })
               // guest (joined second) announces immediately; host announces when
@@ -212,7 +268,13 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
         // frost coords → triggers DKG), DepositStatus, PayoutSigningRequest,
         // PayoutComplete/Failed. Dispatch straight into the App message handler.
         const m = sm as ServerMsg & { type?: string }
-        if (m?.type === 'RoomInfo') isStaked = true
+        // Only a REAL-MONEY RoomInfo flips this connection to staked. Prefer the server's
+        // explicit `staked` flag; fall back to the presence of FROST DKG coords (older relay).
+        // A bare RoomInfo (free-play / relay bookkeeping) must NOT enable escrow control frames.
+        if (m?.type === 'RoomInfo') {
+          const ri = m as ServerMsg & { staked?: boolean; frost_relay_url?: string; frost_room_code?: string }
+          if (ri.staked === true || (ri.frost_relay_url && ri.frost_room_code)) isStaked = true
+        }
         // feed per-seat payout addresses (pinned on-chain, surfaced by the server) to the
         // game so both peers can build the identical co-signed settlement message at game over.
         if (m?.type === 'DepositStatus' && Array.isArray((m as any).seat_payout_addresses)) {
@@ -221,6 +283,23 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
         onMsg(m as ServerMsg)
       },
     )
+
+    // Transport-level reliability signals (added in transport.ts):
+    // • onDesync: the seq/ack layer detected loss/reorder it could not repair
+    //   (e.g. the peer acked a seq we never sent). Surface it — game.ts's own
+    //   per-hand action-seq guard voids/resyncs the hand; this catches the case
+    //   where a frame vanished BELOW the game layer so no engine seq gap appears.
+    // • onFatal: crypto handshake did not complete symmetrically (or X25519 init
+    //   failed) → refuse to run a half-plaintext staked table.
+    transport.onDesync((reason) => {
+      console.warn('[ws] transport desync:', reason)
+      onMsg({ type: 'Status', phase: 'desync',
+        message: 'connection desync detected — the current hand may be void; your deposit is safe.' })
+    })
+    transport.onFatal((reason) => {
+      console.error('[ws] transport fatal:', reason)
+      onMsg({ type: 'Error', message: `secure channel failed: ${reason}` })
+    })
 
     transport.connect(room, name)
   }
@@ -245,6 +324,11 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
       // (NOT the peer). the server records this seat's agreed escrow UA and,
       // once both seats match, pins escrow_address + re-broadcasts RoomInfo.
       transport?.sendServer(data)
+    } else if (data['type'] === 'EscrowFault') {
+      // client-detected escrow problem → server coordinator over /p2p `srv` channel,
+      // which forwards it to the escrow's durable journal (client_fault event).
+      // only meaningful on staked tables; harmless no-op otherwise.
+      if (isStaked) transport?.sendServer({ type: 'EscrowFault', phase: data['phase'], detail: data['detail'] })
     } else if (data['type'] === 'Chat') {
       transport?.send({ t: 'chat', d: { text: data['text'] } })
     } else if (data['type'] === 'Leave') {
@@ -257,6 +341,9 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
       } else {
         transport?.disconnect()
       }
+    } else {
+      // no route matched — surface it instead of silently dropping the frame
+      console.warn('[ws] unrouted send, frame dropped:', data['type'], data)
     }
   }
 

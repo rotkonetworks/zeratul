@@ -16,40 +16,36 @@ path = "src/guest.rs"
 [[bin]]
 name = "cfr-train"
 path = "src/cfr/train.rs"
-required-features = ["std"]
+required-features = ["std", "cfr"]
 
 [[bin]]
 name = "cfr-bench"
 path = "src/cfr/bench.rs"
-required-features = ["std"]
+required-features = ["std", "cfr"]
 
 [[bin]]
 name = "cfr-selfplay"
 path = "src/cfr/selfplay_bin.rs"
-required-features = ["std"]
+required-features = ["std", "cfr"]
 
 [[bin]]
 name = "cfr-bot"
 path = "src/cfr/bot_client.rs"
-required-features = ["bot"]
+required-features = ["bot", "cfr"]
 
-[[bin]]
-name = "cfr-evolve"
-path = "src/cfr/evolve_bin.rs"
-required-features = ["std"]
-
-[[bin]]
-name = "cfr-analyze"
-path = "src/cfr/analyze_bin.rs"
-required-features = ["std"]
+# NOTE: cfr-evolve (src/cfr/evolve_bin.rs) and cfr-analyze (src/cfr/analyze_bin.rs) were
+# removed — their source files do not exist, which broke target resolution for the whole crate.
 
 [features]
 default = ["std"]
 std = []
 # for PolkaVM guest (no_std, no_main)
 pvm = []
-# for WASM browser (std, wasm-bindgen)
+# for WASM browser (std, wasm-bindgen). Deliberately does NOT pull in `cfr` — the AI-bot
+# trainer is not part of the browser engine.
 wasm = ["std", "dep:wasm-bindgen", "dep:serde", "dep:serde-wasm-bindgen"]
+# CFR AI-bot training subsystem (opt-in; currently unbuildable pending missing modules).
+cfr = ["std"]
 # GPU-accelerated hand evaluation via ROCm HIP
 gpu = ["std"]
 # parallel CFR training (for multi-core servers)

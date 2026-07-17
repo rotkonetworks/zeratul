@@ -6,6 +6,7 @@
  */
 
 import type { ZidChannel } from './types'
+import { relayBase } from '../config'
 
 type SessionKey = {
   pubkey: string
@@ -37,7 +38,7 @@ export async function createChannel(
 
   // connect to relay
   // `/zid`, not `/ws/zid`: HAProxy routes `/ws*` to the FROST relay.
-  const url = relayUrl || `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/zid`
+  const url = relayUrl || `${relayBase()}/zid`
   ws = new WebSocket(url)
 
   ws.onopen = () => {

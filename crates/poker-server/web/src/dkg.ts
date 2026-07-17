@@ -14,6 +14,19 @@
  * Caches the result for the session to avoid repeated round-trips.
  */
 let frostCapabilityGranted: boolean | null = null
+
+/** Reject a sendMessage round-trip the extension never answers, so the DKG/capability
+ *  chain surfaces a (retryable) error instead of hanging on "agree on stakes" forever. */
+function withTimeout<T>(p: Promise<T>, ms: number, onTimeout: T): Promise<T> {
+  return Promise.race([
+    p,
+    new Promise<T>(resolve => setTimeout(() => {
+      console.error(`[poker-dkg] extension round-trip timed out after ${ms}ms`)
+      resolve(onTimeout)
+    }, ms)),
+  ])
+}
+
 export async function ensureFrostCapability(): Promise<boolean> {
   if (frostCapabilityGranted === true) { console.log('[poker-dkg] ensureFrostCapability: cached=true'); return true }
   const extId = findZafuExtensionId()
@@ -23,7 +36,7 @@ export async function ensureFrostCapability(): Promise<boolean> {
     console.warn('[poker-dkg] ensureFrostCapability: chrome.runtime.sendMessage unavailable'); return false
   }
   console.log('[poker-dkg] ensureFrostCapability: sending zafu_request_capability { capability: frost }')
-  const granted = await new Promise<boolean>(resolve => {
+  const granted = await withTimeout(new Promise<boolean>(resolve => {
     chrome.runtime.sendMessage(
       extId,
       { type: 'zafu_request_capability', capability: 'frost' },
@@ -37,7 +50,7 @@ export async function ensureFrostCapability(): Promise<boolean> {
         resolve(!!resp?.granted || !!resp?.success)
       },
     )
-  })
+  }), 30_000, false)
   console.log('[poker-dkg] ensureFrostCapability: granted=', granted)
   frostCapabilityGranted = granted
   return granted
