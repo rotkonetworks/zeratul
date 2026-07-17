@@ -293,6 +293,43 @@ impl PersistedRoom {
 #[derive(Clone)]
 pub struct Store {
     dir: PathBuf,
+    /// AEAD key for encrypting persisted secret-bearing state at rest. `None` = plaintext
+    /// (backward-compatible; loud warning at open). Set via `ESCROW_PERSIST_KEY` (64-hex).
+    key: Option<[u8; 32]>,
+}
+
+/// 8-byte file magic marking an encrypted room file. Plaintext room files are JSON and start
+/// with `{`, so the two are unambiguous — a store can read old plaintext files and new
+/// encrypted files transparently.
+const ENC_MAGIC: &[u8; 8] = b"ZKESCE1\0";
+
+/// Encrypt `plaintext` → `magic ++ 24-byte XNonce ++ ciphertext+tag` (XChaCha20-Poly1305).
+fn encrypt_blob(key: &[u8; 32], plaintext: &[u8]) -> Result<Vec<u8>, String> {
+    use chacha20poly1305::{aead::Aead, KeyInit, XChaCha20Poly1305, XNonce};
+    use rand::RngCore;
+    let cipher = XChaCha20Poly1305::new(key.into());
+    let mut nonce_bytes = [0u8; 24];
+    rand::rngs::OsRng.fill_bytes(&mut nonce_bytes); // 192-bit random nonce → reuse-safe
+    let nonce = XNonce::from_slice(&nonce_bytes);
+    let ct = cipher.encrypt(nonce, plaintext).map_err(|e| format!("encrypt: {}", e))?;
+    let mut out = Vec::with_capacity(ENC_MAGIC.len() + 24 + ct.len());
+    out.extend_from_slice(ENC_MAGIC);
+    out.extend_from_slice(&nonce_bytes);
+    out.extend_from_slice(&ct);
+    Ok(out)
+}
+
+/// Decrypt a blob produced by `encrypt_blob`. Fails (not panics) on a wrong key / tamper.
+fn decrypt_blob(key: &[u8; 32], blob: &[u8]) -> Result<Vec<u8>, String> {
+    use chacha20poly1305::{aead::Aead, KeyInit, XChaCha20Poly1305, XNonce};
+    if blob.len() < ENC_MAGIC.len() + 24 {
+        return Err("encrypted room file too short".into());
+    }
+    let nonce = XNonce::from_slice(&blob[ENC_MAGIC.len()..ENC_MAGIC.len() + 24]);
+    let cipher = XChaCha20Poly1305::new(key.into());
+    cipher
+        .decrypt(nonce, &blob[ENC_MAGIC.len() + 24..])
+        .map_err(|_| "decrypt failed — wrong ESCROW_PERSIST_KEY or tampered file".to_string())
 }
 
 impl Store {
@@ -327,7 +364,36 @@ impl Store {
             }
         }
         tracing::info!("persist: state dir {}", path.display());
-        Some(Store { dir: path })
+        // Optional encryption-at-rest for the secret-bearing key material. ESCROW_PERSIST_KEY is
+        // 64 hex chars (32 bytes). If set but malformed we FAIL CLOSED (disable persistence) so the
+        // operator can't run believing state is encrypted when it isn't. Unset = plaintext (loud).
+        let key = match std::env::var("ESCROW_PERSIST_KEY") {
+            Ok(s) if !s.trim().is_empty() => {
+                match hex::decode(s.trim()) {
+                    Ok(b) if b.len() == 32 => {
+                        let mut k = [0u8; 32];
+                        k.copy_from_slice(&b);
+                        tracing::info!("persist: encryption-at-rest ENABLED (XChaCha20-Poly1305)");
+                        Some(k)
+                    }
+                    _ => {
+                        tracing::error!(
+                            "persist: ESCROW_PERSIST_KEY is not 64 hex chars (32 bytes) — refusing to \
+                             run with a bad encryption key. Persistence DISABLED until fixed."
+                        );
+                        return None;
+                    }
+                }
+            }
+            _ => {
+                tracing::warn!(
+                    "persist: ESCROW_PERSIST_KEY unset — room key material is stored in PLAINTEXT on \
+                     disk. Set a 64-hex key to encrypt it at rest."
+                );
+                None
+            }
+        };
+        Some(Store { dir: path, key })
     }
 
     fn room_path(&self, code: &str) -> PathBuf {
@@ -349,10 +415,16 @@ impl Store {
     fn save_room_inner(&self, room: &EscrowRoom) -> Result<(), String> {
         let persisted = PersistedRoom::from_room(room);
         let json = serde_json::to_vec_pretty(&persisted).map_err(|e| format!("serialize: {}", e))?;
+        // encrypt the whole blob at rest when a key is configured (secret shares never hit disk
+        // in plaintext); otherwise write plaintext JSON (backward-compatible).
+        let blob = match &self.key {
+            Some(k) => encrypt_blob(k, &json)?,
+            None => json,
+        };
         let final_path = self.room_path(&room.code);
         let tmp_path = self.dir.join(format!("{}.json.tmp", sanitize(&room.code)));
 
-        write_private(&tmp_path, &json).map_err(|e| format!("write tmp: {}", e))?;
+        write_private(&tmp_path, &blob).map_err(|e| format!("write tmp: {}", e))?;
         std::fs::rename(&tmp_path, &final_path).map_err(|e| {
             // clean up the temp file so a rename failure doesn't leave litter
             let _ = std::fs::remove_file(&tmp_path);
@@ -397,8 +469,18 @@ impl Store {
 
     fn load_one(&self, path: &Path) -> Result<EscrowRoom, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("read: {}", e))?;
+        // Encrypted files start with ENC_MAGIC; plaintext (legacy) files are JSON starting with
+        // '{'. Decrypt encrypted files (requires the key); read plaintext files directly.
+        let json = if bytes.starts_with(ENC_MAGIC) {
+            let key = self.key.as_ref().ok_or_else(|| {
+                "room file is encrypted but ESCROW_PERSIST_KEY is not set".to_string()
+            })?;
+            decrypt_blob(key, &bytes)?
+        } else {
+            bytes
+        };
         let persisted: PersistedRoom =
-            serde_json::from_slice(&bytes).map_err(|e| format!("deserialize: {}", e))?;
+            serde_json::from_slice(&json).map_err(|e| format!("deserialize: {}", e))?;
         persisted.into_room()
     }
 
@@ -616,6 +698,53 @@ mod tests {
         store.remove_room(&paid);
         assert_eq!(store.load_all().len(), 0, "Broadcast room file should be gone");
 
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ── encryption-at-rest (ESCROW_PERSIST_KEY) ──────────────────────────────
+    fn keyed_store(dir: &std::path::Path, key: [u8; 32]) -> Store {
+        let _ = std::fs::create_dir_all(dir);
+        Store { dir: dir.to_path_buf(), key: Some(key) }
+    }
+
+    #[test]
+    fn encrypted_roundtrip_and_file_is_ciphertext() {
+        let tmp = std::env::temp_dir().join(format!("escrow-enc-rt-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        let store = keyed_store(&tmp, [7u8; 32]);
+        let room = sample_room();
+        store.save_room(&room);
+        // on-disk file must be CIPHERTEXT (magic header), never plaintext JSON / field names
+        let raw = std::fs::read(store.room_path(&room.code)).unwrap();
+        assert!(raw.starts_with(ENC_MAGIC), "encrypted file must start with magic");
+        assert!(!raw.windows(4).any(|w| w == b"dkg_"), "no plaintext field names may leak");
+        // …and it decrypts back to the exact secret material
+        let loaded = store.load_all();
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].dkg_key_package_hex, room.dkg_key_package_hex);
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn wrong_key_cannot_decrypt() {
+        let tmp = std::env::temp_dir().join(format!("escrow-enc-wrong-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        keyed_store(&tmp, [1u8; 32]).save_room(&sample_room());
+        assert_eq!(keyed_store(&tmp, [2u8; 32]).load_all().len(), 0, "wrong key must not decrypt");
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    #[test]
+    fn plaintext_file_still_loads_when_key_set() {
+        let tmp = std::env::temp_dir().join(format!("escrow-enc-compat-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+        // legacy plaintext room (no key) …
+        let _ = std::fs::create_dir_all(&tmp);
+        Store { dir: tmp.clone(), key: None }.save_room(&sample_room());
+        // … must still load under a keyed store (backward-compat: magic-header detection)
+        let loaded = keyed_store(&tmp, [9u8; 32]).load_all();
+        assert_eq!(loaded.len(), 1, "legacy plaintext file must still load");
+        assert_eq!(loaded[0].code, "TESTROOM");
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
