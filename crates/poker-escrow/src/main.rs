@@ -1912,6 +1912,12 @@ struct Args {
     /// HTTP port to bind
     #[arg(long, env = "ESCROW_PORT", default_value_t = 3034)]
     port: u16,
+    /// HTTP bind host. Defaults to 127.0.0.1 (LOOPBACK): the escrow is an INTERNAL service the
+    /// relay reaches over localhost, and it serves revenue/audit/room data that must NOT be
+    /// public. Only set 0.0.0.0 if you have deliberately firewalled the port / front it with an
+    /// authenticated reverse proxy.
+    #[arg(long, env = "ESCROW_BIND", default_value = "127.0.0.1")]
+    bind: String,
     /// Durable event-journal file (dispute/audit trail). Empty = disabled.
     #[arg(long, env = "ESCROW_JOURNAL", default_value = "journal/events.jsonl")]
     journal: String,
@@ -2065,7 +2071,11 @@ async fn main() {
         .route("/health", axum::routing::get(health))
         .with_state(state);
 
-    let addr = format!("0.0.0.0:{}", args.port);
+    let addr = format!("{}:{}", args.bind, args.port);
+    if args.bind == "0.0.0.0" || args.bind == "::" {
+        tracing::warn!("poker-escrow bound to {} — PUBLICLY reachable unless firewalled; it serves \
+                        /accounting, /audit and room state. Prefer ESCROW_BIND=127.0.0.1.", args.bind);
+    }
     tracing::info!("poker-escrow listening on http://{}", addr);
 
     let listener = tokio::net::TcpListener::bind(addr).await.unwrap();
