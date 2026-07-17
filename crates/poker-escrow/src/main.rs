@@ -2055,10 +2055,21 @@ async fn main() {
     // on-chain check — on mainnet that is instant theft (deal + settle against ZEC never sent).
     // A real-money escrow with this combo is a misconfiguration; refuse to start rather than
     // custody funds unsafely. (Testnet/demo may run trusted-dealer mode.)
-    if matches!(state.network, zcash_protocol::consensus::NetworkType::Main) && !state.verify_deposits {
+    let mainnet = matches!(state.network, zcash_protocol::consensus::NetworkType::Main);
+    if mainnet && !state.verify_deposits {
         tracing::error!(
             "REFUSING TO START: network=Main but verify_deposits=false — self-reported deposits \
              would be credited with REAL ZEC. Set ESCROW_VERIFY_DEPOSITS=true for mainnet."
+        );
+        std::process::exit(1);
+    }
+    // Sibling guardrail: the settle path honours ESCROW_ALLOW_UNSIGNED_SETTLE=1 as a DEMO bypass of
+    // the player co-signing gate. On mainnet that lets the operator settle/pay out WITHOUT both
+    // players' signatures — i.e. forge payouts against real ZEC. Never allow the bypass on mainnet.
+    if mainnet && std::env::var("ESCROW_ALLOW_UNSIGNED_SETTLE").ok().as_deref() == Some("1") {
+        tracing::error!(
+            "REFUSING TO START: network=Main with ESCROW_ALLOW_UNSIGNED_SETTLE=1 — settlements would \
+             bypass player co-signing (forgeable payouts). Unset it for mainnet."
         );
         std::process::exit(1);
     }
