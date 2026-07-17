@@ -1528,6 +1528,57 @@ async fn get_audit(Path(code): Path<String>) -> impl IntoResponse {
     }))
 }
 
+/// GET /accounting — business rollup over the durable journal: house revenue (Σrake),
+/// volume (Σpot), games settled, deposits, payouts, disputes. Read-only aggregate (no
+/// addresses/sigs). Counts `settlement_finalized` only — a queued settlement that later
+/// completes still emits one `settlement_finalized`, so pots/rake are never double-counted.
+async fn get_accounting() -> impl IntoResponse {
+    let events = journal::read_all();
+    let (mut rooms, mut settled, mut volume, mut rake, mut dep_n, mut dep_v,
+         mut pay_ok, mut pay_fail, mut disputes, mut dkg_fail, mut rulings) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+    let (mut first_ms, mut last_ms) = (u64::MAX, 0u64);
+    for e in &events {
+        if let Some(ts) = e.get("ts").and_then(|t| t.as_u64()) {
+            first_ms = first_ms.min(ts);
+            last_ms = last_ms.max(ts);
+        }
+        let d = e.get("data");
+        let u = |k: &str| d.and_then(|d| d.get(k)).and_then(|v| v.as_u64()).unwrap_or(0);
+        match e.get("kind").and_then(|k| k.as_str()).unwrap_or("") {
+            "room_created" => rooms += 1,
+            "settlement_finalized" => { settled += 1; volume += u("total_pot"); rake += u("rake"); }
+            "deposit_detected" => { dep_n += 1; dep_v += u("value_zat"); }
+            "payout_broadcast" => pay_ok += 1,
+            "payout_failed" => pay_fail += 1,
+            "client_fault" => disputes += 1,
+            "dkg_failed" => dkg_fail += 1,
+            "arbiter_ruling" => rulings += 1,
+            _ => {}
+        }
+    }
+    let zec = |z: u64| z as f64 / 1e8;
+    Json(serde_json::json!({
+        "events_total": events.len(),
+        "first_event_ms": if first_ms == u64::MAX { 0 } else { first_ms },
+        "last_event_ms": last_ms,
+        "rooms_created": rooms,
+        "games_settled": settled,
+        "deposits_detected": dep_n,
+        "deposits_value_zat": dep_v,
+        "deposits_value_zec": zec(dep_v),
+        "volume_zat": volume,
+        "volume_zec": zec(volume),
+        "rake_collected_zat": rake,        // house revenue
+        "rake_collected_zec": zec(rake),   // house revenue
+        "payouts_broadcast": pay_ok,
+        "payouts_failed": pay_fail,
+        "disputes": disputes,
+        "dkg_failed": dkg_fail,
+        "arbiter_rulings": rulings,
+    }))
+}
+
 // ── Dispute-resolution dashboard ───────────────────────────────────────────
 
 /// GET /disputes — operator overview page (rooms needing attention first).
@@ -1988,6 +2039,7 @@ async fn main() {
         .route("/room/{code}/fault", axum::routing::post(report_fault))
         .route("/room/{code}/arbitrate", axum::routing::post(arbitrate))
         .route("/audit/{code}", axum::routing::get(get_audit))
+        .route("/accounting", axum::routing::get(get_accounting))
         .route("/disputes", axum::routing::get(get_disputes))
         .route("/dispute/{code}", axum::routing::get(get_dispute))
         .route("/health", axum::routing::get(health))
