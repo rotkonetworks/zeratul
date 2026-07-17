@@ -494,6 +494,19 @@ async fn run_mempool_watch(
                          marking evicted_shortfall; settled payout auto-completion blocked, use refund/arbitrate",
                         code, pd.seat, pd.value_zat, seat_confirmed, room.required_deposit,
                     );
+                    // Operator push: a mempool-seen buy-in vanished without confirming while its seat is
+                    // short — the classic 0-conf-double-spend signature. Auto-payout is already blocked;
+                    // the operator should know so they can refund/arbitrate rather than wait.
+                    crate::notify::dispute_alert(
+                        "🚨 zk.poker 0-conf shortfall",
+                        &format!(
+                            "room {} seat {}: mempool buy-in ({} zat) EVICTED, confirmed {} < required {} \
+                             — possible 0-conf double-spend. Settled auto-payout blocked; refund/arbitrate.",
+                            code, pd.seat, pd.value_zat, seat_confirmed, room.required_deposit,
+                        ),
+                        "shortfall",
+                        &code,
+                    );
                 }
                 crate::journal::record(&code, "deposit_evicted", serde_json::json!({
                     "seat": pd.seat,
