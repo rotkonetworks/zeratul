@@ -735,6 +735,21 @@ mod tests {
     }
 
     #[test]
+    fn encrypted_blob_rejects_tamper_and_truncation() {
+        let key = [3u8; 32];
+        let blob = encrypt_blob(&key, b"FROST secret shares").expect("encrypt");
+        assert_eq!(decrypt_blob(&key, &blob).unwrap(), b"FROST secret shares"); // roundtrip
+        // flip a ciphertext byte → Poly1305 tag must reject (no silent corruption of key material)
+        let mut tampered = blob.clone();
+        let last = tampered.len() - 1;
+        tampered[last] ^= 0x01;
+        assert!(decrypt_blob(&key, &tampered).is_err(), "tampered ciphertext must be rejected");
+        // truncated blob must error, never panic
+        assert!(decrypt_blob(&key, &blob[..10]).is_err(), "truncated blob must be rejected");
+        assert!(decrypt_blob(&key, ENC_MAGIC).is_err(), "magic-only must be rejected");
+    }
+
+    #[test]
     fn plaintext_file_still_loads_when_key_set() {
         let tmp = std::env::temp_dir().join(format!("escrow-enc-compat-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
