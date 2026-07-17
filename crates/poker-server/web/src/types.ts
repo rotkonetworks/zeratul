@@ -34,6 +34,6 @@ export type ServerMsg =
   | { type: 'OpponentAbandoned'; seat: number }
   | { type: 'DepositStatus'; escrow_address: string; seat_addresses?: (string | null)[]; seat_payout_addresses?: (string | null)[]; player_a_deposit: number; player_b_deposit: number; player_a_pending?: number; player_b_pending?: number; required: number; ready: boolean }
   | { type: 'InviteLink'; url: string }
-  | { type: 'Status'; phase: 'connecting' | 'encrypting' | 'shuffling' | 'dealing' | 'playing' | 'showdown' | 'settling'; message: string }
+  | { type: 'Status'; phase: 'connecting' | 'encrypting' | 'shuffling' | 'dealing' | 'playing' | 'showdown' | 'settling' | 'over' | 'desync'; message: string }
   | { type: 'Chat'; from: string; text: string }
   | { type: 'Error'; message: string }

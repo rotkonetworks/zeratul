@@ -59,9 +59,9 @@ export function Settings(props: { connected: boolean; onClose: () => void }) {
         </p>
 
         <div class="flex items-center gap-2 mb-4 text-10px">
-          <span class={`w-2 h-2 rounded-full ${props.connected ? 'bg-green-500' : 'bg-neutral-600'}`} />
+          <span class={`w-2 h-2 rounded-full ${props.connected ? 'bg-green-500' : 'bg-amber-500/70'}`} />
           <span class="text-neutral-400">
-            {props.connected ? 'connected to' : 'not connected ·'} <span class="font-mono text-neutral-200">{currentOrigin()}</span>
+            {props.connected ? 'live connection to' : 'idle — connects when you sit at a table ·'} <span class="font-mono text-neutral-200">{currentOrigin()}</span>
           </span>
         </div>
 
@@ -72,8 +72,9 @@ export function Settings(props: { connected: boolean; onClose: () => void }) {
             <span class="flex-1 text-12px">this host <span class="text-neutral-500">(default · {location.host})</span></span>
           </label>
 
-          {/* curated presets */}
-          <For each={RELAY_PRESETS}>{(p) => (
+          {/* curated presets — hide any that resolve to the current host, since "this host"
+              above already offers it (avoids a duplicate e.g. zkbtc.org shown twice). */}
+          <For each={RELAY_PRESETS.filter(p => { try { return new URL(p.url).host !== location.host } catch { return true } })}>{(p) => (
             <label class="flex items-center gap-2 px-3 py-2 rounded border border-white/8 hover:border-white/20 cursor-pointer">
               <input type="radio" name="relay" checked={choice() === p.url} onChange={() => setChoice(p.url)} />
               <span class="flex-1 text-12px">{p.name} <span class="font-mono text-neutral-500 text-10px">{p.url}</span></span>

@@ -17,7 +17,10 @@
 mod fuzz;
 #[cfg(test)]
 mod hand_tests;
-#[cfg(feature = "std")]
+// cfr = the CFR AI-bot training subsystem. It is NOT needed by the game engine or the
+// WASM build (WasmGame), and it is gated behind its own `cfr` feature so a default/wasm
+// build stays lean and does not drag in the bot trainer. Build the bot with `--features cfr`.
+#[cfg(all(feature = "std", feature = "cfr"))]
 pub mod cfr;
 
 #[cfg(not(feature = "std"))]
@@ -138,6 +141,9 @@ pub struct GameState {
     pub acting_seat: u8,
     pub round_actions: u8,
     pub last_aggressor: u8,
+    /// size of the last legal raise increment this round (min-raise baseline).
+    /// defaults to big_blind at the start of each betting round.
+    pub last_raise_size: u32,
     pub action_count: u32,
     pub last_action_hash: [u8; 32],
     /// rake collected this hand
@@ -463,6 +469,7 @@ impl GameState {
             acting_seat: 0,
             round_actions: 0,
             last_aggressor: 255,
+            last_raise_size: rules.big_blind,
             action_count: 0,
             last_action_hash: [0; 32],
             rake: 0,
@@ -487,6 +494,39 @@ impl GameState {
             s = (s + 1) % n;
         }
         seat // shouldn't happen
+    }
+
+    /// deterministic button seat for the current hand.
+    ///
+    /// pure function of `hand_number` and the set of seats that can play this
+    /// hand (Active or AllIn — i.e. not busted/empty/sitting-out). both engines
+    /// compute the identical button regardless of which hand-end path each ran,
+    /// so blinds always post from the same seats and the engines never desync.
+    ///
+    /// walks `hand_number` steps around the seat ring starting from seat 0,
+    /// counting only playable seats, so the button advances by exactly one
+    /// playable seat per hand (skipping busted seats consistently).
+    fn button_for_hand(&self) -> u8 {
+        let n = self.num_players as usize;
+        let playable: [bool; MAX_SEATS] = {
+            let mut p = [false; MAX_SEATS];
+            for i in 0..n {
+                p[i] = matches!(self.seat_state[i], SeatState::Active | SeatState::AllIn);
+            }
+            p
+        };
+        let count = (0..n).filter(|&i| playable[i]).count();
+        if count == 0 { return 0; }
+        // target index among playable seats, rotating one seat per hand
+        let target = (self.hand_number as usize).wrapping_sub(1) % count;
+        let mut seen = 0;
+        for i in 0..n {
+            if playable[i] {
+                if seen == target { return i as u8; }
+                seen += 1;
+            }
+        }
+        0
     }
 
     /// small blind seat (next active after button)
@@ -559,6 +599,12 @@ impl GameState {
             }
         }
 
+        // derive the button as a PURE function of hand_number (fix #3): both
+        // engines must pick the identical button every hand regardless of which
+        // hand-end path each executed. must run after seat states are reset so
+        // busted seats are skipped consistently on both sides.
+        self.button = self.button_for_hand();
+
         // post blinds
         let sb = self.sb_seat() as usize;
         let bb = self.bb_seat() as usize;
@@ -571,11 +617,40 @@ impl GameState {
         self.contributed[sb] += sb_amount;
         self.contributed[bb] += bb_amount;
         self.pot = sb_amount + bb_amount;
+        // the BB posting sets the min-raise baseline for the preflop round.
+        self.last_raise_size = self.rules.big_blind;
         // a blind that empties a short stack is an all-in
         if self.stacks[sb] == 0 { self.seat_state[sb] = SeatState::AllIn; }
         if self.stacks[bb] == 0 { self.seat_state[bb] = SeatState::AllIn; }
 
         self.acting_seat = self.first_preflop();
+
+        // fix #1: the chosen first-to-act may itself be all-in (a blind emptied a
+        // short stack). advance to the next seat that can actually act so apply()
+        // never rejects everyone and deadlocks the hand.
+        let can_act = |st: &Self, i: usize| {
+            st.seat_state[i] == SeatState::Active && st.stacks[i] > 0
+        };
+        if !can_act(self, self.acting_seat as usize) {
+            self.acting_seat = self.next_active_in_round(self.acting_seat);
+        }
+
+        // if there is no live betting left to resolve — either nobody can act, or
+        // the single remaining actor has already matched the top bet (nothing to
+        // call) — equalize and skip straight to showdown, exactly like the
+        // apply()/advance_phase() skip-to-showdown paths. a lone actor who still
+        // owes chips keeps the turn so they can call or fold.
+        let max_bet = self.bets.iter().take(self.num_players as usize).copied().max().unwrap_or(0);
+        let actors: Vec<usize> = (0..self.num_players as usize)
+            .filter(|&i| can_act(self, i))
+            .collect();
+        let no_pending_action = actors.is_empty()
+            || (actors.len() == 1 && self.bets[actors[0]] >= max_bet);
+        if no_pending_action {
+            self.equalize_bets();
+            self.phase = Phase::Showdown;
+            self.community_count = 5;
+        }
     }
 
     /// apply a signed action
@@ -617,7 +692,8 @@ impl GameState {
                     self.pot = 0;
                     self.contributed = [0; MAX_SEATS];
                     self.phase = Phase::Settled;
-                    self.button = self.next_active(self.button);
+                    // button is NOT rotated here (fix #3): the next deal() derives
+                    // it deterministically from hand_number so both engines agree.
                     return Ok(ActionResult {
                         valid: true, hand_over: true,
                         winner: winner as u8, payout, advance_phase: false,
@@ -652,12 +728,41 @@ impl GameState {
 
             Action::Bet | Action::Raise => {
                 if action.amount == 0 { return Err("bet amount must be > 0"); }
+                // `amount` is the chip delta added this action (raise-BY). the
+                // resulting total bet must be a real raise-TO above the current
+                // max_bet and respect the min-raise increment.
                 let amount = action.amount.min(self.stacks[seat]);
-                if amount < self.rules.big_blind && amount < self.stacks[seat] {
-                    return Err("raise below minimum");
+                let all_in = amount == self.stacks[seat];
+                let new_bet = self.bets[seat] + amount;
+                let to_call = max_bet.saturating_sub(self.bets[seat]);
+
+                // fix #4: a raise must strictly exceed the current top bet, and
+                // when facing a bet must add at least the last raise increment on
+                // top of the call — UNLESS the player is going all-in for less.
+                if !all_in {
+                    if new_bet <= max_bet {
+                        return Err("raise below minimum");
+                    }
+                    let min_delta = if max_bet == 0 {
+                        self.rules.big_blind
+                    } else {
+                        to_call + self.last_raise_size
+                    };
+                    if amount < min_delta {
+                        return Err("raise below minimum");
+                    }
                 }
+
+                // update the min-raise baseline to this raise's increment above
+                // the previous top bet. an all-in raising by less than a full
+                // increment does not reopen betting, so it leaves the baseline.
+                let raise_over = new_bet.saturating_sub(max_bet);
+                if raise_over >= self.last_raise_size && raise_over > 0 {
+                    self.last_raise_size = raise_over;
+                }
+
                 self.stacks[seat] -= amount;
-                self.bets[seat] += amount;
+                self.bets[seat] = new_bet;
                 self.contributed[seat] += amount;
                 self.pot += amount;
                 // H6: if stack hits 0 from a bet/raise, mark as all-in
@@ -673,6 +778,12 @@ impl GameState {
                 self.contributed[seat] += amount;
                 self.pot += amount;
                 self.seat_state[seat] = SeatState::AllIn;
+                // a full all-in raise resets the min-raise baseline; an all-in
+                // for less than a full raise leaves it (action not reopened).
+                let raise_over = self.bets[seat].saturating_sub(max_bet);
+                if raise_over >= self.last_raise_size && raise_over > 0 {
+                    self.last_raise_size = raise_over;
+                }
             }
         }
 
@@ -720,18 +831,31 @@ impl GameState {
     /// check if the current betting round is complete
     fn is_round_complete(&self, last_action: &SignedAction) -> bool {
         // all ACTIVE (not all-in, not folded) players must have equal bets
-        let active_bets: Vec<u32> = (0..self.num_players as usize)
-            .filter(|&i| self.seat_state[i] == SeatState::Active)
-            .map(|i| self.bets[i])
-            .collect();
-        if active_bets.is_empty() { return true; } // everyone all-in or folded
-        let all_equal = active_bets.iter().all(|&b| b == active_bets[0]);
-        let was_passive = matches!(last_action.action, Action::Check | Action::Call);
-        // count only active players (not all-in) for round completion
-        let active_non_allin = (0..self.num_players as usize)
+        let n = self.num_players as usize;
+        let max_bet = self.bets.iter().take(n).copied().max().unwrap_or(0);
+
+        // seats that can still act (Active with chips). all-in seats have already
+        // committed everything and cannot be asked to act again.
+        let active_non_allin = (0..n)
             .filter(|&i| self.seat_state[i] == SeatState::Active && self.stacks[i] > 0)
             .count() as u8;
-        all_equal && was_passive && self.round_actions >= active_non_allin.max(2)
+
+        // every seat that can still act must have matched the top bet, otherwise
+        // there is still a call/raise/fold owed.
+        let all_matched = (0..n)
+            .filter(|&i| self.seat_state[i] == SeatState::Active && self.stacks[i] > 0)
+            .all(|i| self.bets[i] == max_bet);
+        if !all_matched { return false; }
+
+        let was_passive = matches!(last_action.action, Action::Check | Action::Call);
+
+        // fix #2: when ≤1 player can still act (everyone else is all-in or
+        // folded) and bets are already matched, the round is over — there is
+        // nobody left to raise, so requiring ≥2 actions would hang the hand.
+        // otherwise fall back to the normal rule: bets equal, last action
+        // passive, and every live actor has had a turn this round.
+        active_non_allin <= 1
+            || (was_passive && self.round_actions >= active_non_allin.max(2))
     }
 
     /// next active player who can still act (not folded, not all-in)
@@ -810,6 +934,7 @@ impl GameState {
         self.bets = [0; MAX_SEATS];
         self.round_actions = 0;
         self.last_aggressor = 255;
+        self.last_raise_size = self.rules.big_blind;
 
         // how many players can still act?
         let active_with_chips = (0..self.num_players as usize)
@@ -994,8 +1119,9 @@ impl GameState {
         self.pot = 0;
         self.contributed = [0; MAX_SEATS];
         self.phase = Phase::Settled;
-        // rotate button to next active player
-        self.button = self.next_active(self.button);
+        // button is NOT rotated here (fix #3): the next deal() derives it
+        // deterministically from hand_number, so a side that never calls
+        // showdown() still ends up on the identical button next hand.
 
         // return the headline (main-pot) winner seat.
         headline_winner.unwrap_or(0)
@@ -1211,6 +1337,7 @@ mod wasm {
         pub fn acting_seat(&self) -> u8 { self.state.acting_seat }
         pub fn round_actions(&self) -> u8 { self.state.round_actions }
         pub fn num_players(&self) -> u8 { self.state.num_players }
+        pub fn last_raise_size(&self) -> u32 { self.state.last_raise_size }
 
         pub fn debug_state(&self) -> String {
             format!("phase={:?} acting={} bets=[{},{}] stacks=[{},{}] pot={} round_actions={} seq={}",
@@ -1468,6 +1595,9 @@ mod tests {
         state.phase = Phase::Showdown;
         state.community_count = 5;
         state.pot = 100;
+        state.contributed = [0; MAX_SEATS];
+        state.contributed[0] = 50;
+        state.contributed[1] = 50;
         let winner = state.showdown();
         assert_eq!(winner, 0); // pair of 2s beats A-K high
     }
@@ -1479,6 +1609,9 @@ mod tests {
         state.phase = Phase::Showdown;
         state.community_count = 5;
         state.pot = 100;
+        state.contributed = [0; MAX_SEATS];
+        state.contributed[0] = 50;
+        state.contributed[1] = 50;
         let winner = state.showdown();
         assert_eq!(winner, 0); // flush beats straight
     }
@@ -1637,6 +1770,206 @@ mod tests {
         let paid: u32 = state.stacks.iter().take(3).sum();
         assert_eq!(paid, 1045, "distributed pot + rake must equal total");
         assert_eq!(paid + state.rake, 1100, "chip conservation with rake");
+    }
+
+    // ------------------------------------------------------------------
+    // Regression tests for the four confirmed liveness/desync bugs.
+    // ------------------------------------------------------------------
+
+    /// helper: assert chips are conserved (stacks + pot + rake).
+    fn assert_conserved(state: &GameState, expected: u32, ctx: &str) {
+        let n = state.num_players as usize;
+        let total: u32 = state.stacks.iter().take(n).sum::<u32>() + state.pot + state.rake;
+        assert_eq!(total, expected, "chip leak {}: stacks={:?} pot={} rake={}",
+            ctx, &state.stacks[..n], state.pot, state.rake);
+    }
+
+    #[test]
+    fn test_deal_allin_blind_does_not_deadlock() {
+        // BUG #1: a posted blind that empties a short stack marks the seat AllIn,
+        // but deal() used to leave acting_seat on a seat that cannot act -> every
+        // apply() returns an error and the hand is locked forever.
+        // HU stacks=[3,1000], blinds 5/10. seat0 is BTN/SB, posts 3 -> all-in.
+        let rules = Rules { buyin: 1000, small_blind: 5, big_blind: 10, ..Rules::default() };
+        let mut state = GameState::new(rules, 2);
+        state.stacks = [3, 1000, 0, 0, 0, 0, 0, 0, 0, 0];
+        let initial: u32 = 3 + 1000;
+        state.deal(&[[12, 11], [13, 14]], [29, 31, 33, 47, 41]);
+
+        // seat0 posts SB 3 -> all-in; seat1 posts BB 10. only seat1 could act,
+        // but with only one player able to act the hand must skip to showdown.
+        assert_eq!(state.seat_state[0], SeatState::AllIn, "short blind is all-in");
+        assert_eq!(state.phase, Phase::Showdown, "no live betting -> showdown");
+        assert_conserved(&state, initial, "post-deal all-in blind");
+
+        state.showdown();
+        assert_conserved(&state, initial, "after showdown");
+    }
+
+    #[test]
+    fn test_allin_then_call_completes_round() {
+        // BUG #2: HU, BB is short and all-in; the other player calls -> bets are
+        // equal, only one non-all-in player remains, but is_round_complete used
+        // to require >=2 actions so the round never closed and next_active kept
+        // returning the same seat -> permanent hang.
+        let rules = Rules { buyin: 1000, small_blind: 5, big_blind: 10, ..Rules::default() };
+        let mut state = GameState::new(rules, 2);
+        state.stacks = [1000, 8, 0, 0, 0, 0, 0, 0, 0, 0];
+        let initial: u32 = 1008;
+        state.deal(&[[12, 11], [0, 1]], [29, 31, 33, 47, 41]);
+
+        // HU: seat0 = BTN/SB acts first. seat1 = BB posted 8 (all-in, < 10 BB).
+        assert_eq!(state.seat_state[1], SeatState::AllIn, "short BB is all-in");
+        assert_eq!(state.acting_seat, 0, "SB acts first HU");
+
+        // seat0 calls -> bets equal, seat1 all-in. round must close to showdown.
+        let r = state.apply(&make_action(0, Action::Call, 0, 0)).unwrap();
+        assert_eq!(state.phase, Phase::Showdown, "all-in-then-call must reach showdown");
+        assert!(r.hand_over || state.phase == Phase::Showdown);
+        assert_conserved(&state, initial, "after call closes round");
+
+        state.showdown();
+        assert_conserved(&state, initial, "after showdown");
+    }
+
+    #[test]
+    fn test_button_is_pure_function_of_hand_number() {
+        // BUG #3: button must be identical on both engines regardless of which
+        // hand-end path ran. Derived purely from hand_number in deal().
+        let mut a = GameState::new(Rules::default(), 3);
+        let mut b = GameState::new(Rules::default(), 3);
+
+        // engine A ends every hand via showdown(); engine B ends via fold.
+        for h in 0..6u32 {
+            a.deal(&[[12, 11], [10, 9], [8, 7]], [29, 31, 33, 47, 41]);
+            b.deal(&[[12, 11], [10, 9], [8, 7]], [29, 31, 33, 47, 41]);
+            // buttons must match at deal time every hand
+            assert_eq!(a.button, b.button, "button desync at hand {}", h + 1);
+            // button advances by one seat per hand (3-handed, no busts)
+            assert_eq!(a.button as u32, h % 3, "button rotation wrong at hand {}", h + 1);
+
+            // drive A to a settled state one way and B another; button for next
+            // hand is recomputed in deal() so the divergent paths don't matter.
+            a.phase = Phase::Settled;
+            b.button = 99; // deliberately corrupt B's button between hands
+            b.phase = Phase::Settled;
+        }
+    }
+
+    #[test]
+    fn test_button_matches_regardless_of_showdown_call() {
+        // Two engines: one calls showdown() on the all-in path, the other never
+        // does (relies on the apply() result). Next hand's button must match.
+        let seed_cards: [[u8; 2]; 2] = [[12, 11], [0, 1]];
+        let board = [29, 31, 33, 47, 41];
+
+        let mut host = GameState::new(Rules::default(), 2);
+        let mut peer = GameState::new(Rules::default(), 2);
+        for _ in 0..4 {
+            host.deal(&seed_cards, board);
+            peer.deal(&seed_cards, board);
+            assert_eq!(host.button, peer.button);
+
+            // both all-in to showdown
+            host.apply(&make_action(host.acting_seat, Action::AllIn, 0, 0)).unwrap();
+            host.apply(&make_action(host.acting_seat, Action::AllIn, 0, 0)).unwrap();
+            peer.apply(&make_action(peer.acting_seat, Action::AllIn, 0, 0)).unwrap();
+            peer.apply(&make_action(peer.acting_seat, Action::AllIn, 0, 0)).unwrap();
+
+            // HOST calls showdown(); PEER does not (simulates the non-host side).
+            host.showdown();
+            peer.phase = Phase::Settled; // peer resolves without showdown()
+            // resync stacks so the next deal is comparable (in the real system
+            // both sides agree on stacks via the FROST-settled result).
+            peer.stacks = host.stacks;
+            peer.hand_number = host.hand_number;
+        }
+    }
+
+    #[test]
+    fn test_raise_must_be_raise_to_not_undercall() {
+        // BUG #4: a "raise" delta that leaves bets[seat] <= max_bet is an
+        // under-call and must be rejected; a legal raise updates the baseline.
+        let rules = Rules { buyin: 1000, small_blind: 5, big_blind: 10, ..Rules::default() };
+        let mut state = GameState::new(rules, 3);
+        state.deal(&[[12, 11], [10, 9], [8, 7]], [29, 31, 33, 47, 41]);
+        // 3-handed: SB=1, BB=2, UTG=0 acts first. max_bet = BB = 10.
+        let utg = state.acting_seat;
+        assert_eq!(state.bets[state.sb_seat() as usize], 5);
+        assert_eq!(state.bets[state.bb_seat() as usize], 10);
+
+        // an under-min raise BY 1 (would total 11, only +1 over the BB) is illegal.
+        let bad = state.apply(&make_action(utg, Action::Raise, 1, 0));
+        assert!(bad.is_err(), "under-min raise must be rejected");
+
+        // a legal min-raise: to_call(10) + last_raise_size(10) = 20 delta -> total 20.
+        let good = state.apply(&make_action(utg, Action::Raise, 20, 0));
+        assert!(good.is_ok(), "min raise-to must be accepted: {:?}", good.err());
+        assert_eq!(state.bets[utg as usize], 20, "raise is TO 20");
+        assert_eq!(state.last_raise_size, 10, "raise increment recorded");
+    }
+
+    #[test]
+    fn test_reraise_min_raise_tracks_last_increment() {
+        // facing a raise, the next min-raise must cover to_call + last increment.
+        let rules = Rules { buyin: 1000, small_blind: 5, big_blind: 10, ..Rules::default() };
+        let mut state = GameState::new(rules, 3);
+        state.deal(&[[12, 11], [10, 9], [8, 7]], [29, 31, 33, 47, 41]);
+        let utg = state.acting_seat;
+        // UTG raises TO 30 (delta 30, increment 20 over BB 10).
+        state.apply(&make_action(utg, Action::Raise, 30, 0)).unwrap();
+        assert_eq!(state.last_raise_size, 20);
+
+        // next actor faces 30, must add to_call + 20. bets currently: their blind.
+        let s = state.acting_seat as usize;
+        let to_call = 30 - state.bets[s];
+        // a raise delta of exactly to_call + 20 - 1 is illegal.
+        let bad = state.apply(&make_action(s as u8, Action::Raise, to_call + 20 - 1, 0));
+        assert!(bad.is_err(), "sub-min re-raise rejected");
+        // to_call + 20 is legal.
+        let good = state.apply(&make_action(s as u8, Action::Raise, to_call + 20, 0));
+        assert!(good.is_ok(), "legal re-raise accepted: {:?}", good.err());
+        assert_eq!(state.bets[s], 50, "re-raise TO 50");
+    }
+
+    #[test]
+    fn test_allin_for_less_than_min_raise_allowed() {
+        // an all-in below the min-raise is always legal (does not reopen action).
+        let rules = Rules { buyin: 1000, small_blind: 5, big_blind: 10, ..Rules::default() };
+        let mut state = GameState::new(rules, 3);
+        state.stacks = [1000, 1000, 14, 0, 0, 0, 0, 0, 0, 0];
+        let initial: u32 = 2014;
+        state.deal(&[[12, 11], [10, 9], [8, 7]], [29, 31, 33, 47, 41]);
+        let utg = state.acting_seat; // seat2 has only 14
+        // seat2 all-in for 14 total (< min raise to 20) must be accepted.
+        let r = state.apply(&make_action(utg, Action::AllIn, 0, 0));
+        assert!(r.is_ok(), "all-in for less must be allowed: {:?}", r.err());
+        assert_eq!(state.seat_state[utg as usize], SeatState::AllIn);
+        assert_conserved(&state, initial, "after all-in for less");
+    }
+
+    #[test]
+    fn test_multiway_allin_conservation_full_flow() {
+        // N=4, mixed stacks, everyone shoves; chips must be conserved through
+        // showdown across main + side pots.
+        let rules = Rules { buyin: 1000, small_blind: 5, big_blind: 10, ..Rules::default() };
+        let mut state = GameState::new(rules, 4);
+        state.stacks = [50, 200, 700, 1000, 0, 0, 0, 0, 0, 0];
+        let initial: u32 = 50 + 200 + 700 + 1000;
+        state.deal(&[[12, 25], [11, 24], [2, 15], [0, 13]], BOARD_RAINBOW);
+
+        let mut guard = 0;
+        while state.phase != Phase::Showdown && state.phase != Phase::Settled {
+            let seat = state.acting_seat;
+            if state.apply(&make_action(seat, Action::AllIn, 0, 0)).is_err() {
+                let _ = state.apply(&make_action(seat, Action::Call, 0, 0));
+            }
+            guard += 1;
+            assert!(guard < 32, "no infinite loop");
+        }
+        assert_conserved(&state, initial, "pre-showdown 4-way");
+        state.showdown();
+        assert_conserved(&state, initial, "post-showdown 4-way");
     }
 }
 

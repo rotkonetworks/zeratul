@@ -718,6 +718,95 @@ fn compute_settlement_outputs(
     (outputs, payout_a, payout_b, rake)
 }
 
+/// One depositor for the refund path: where its own money goes back, and how much it
+/// CONFIRMED into the vault. Modular / N-seat: `/cancel` and the unsigned-exit guard build a
+/// `Vec<SeatRefund>` (today 2 seats; a future multiway table has N) rather than hardcoding
+/// seat0/seat1. `address` is the seat's on-chain-pinned payout/refund address.
+#[derive(Clone, Debug)]
+struct SeatRefund {
+    address: String,
+    confirmed_deposit: u64,
+}
+
+/// The single, escrow-authoritative refund split: give each seat back EXACTLY its own confirmed
+/// deposit, minus a proportional share of the on-chain tx fee. This is the ONLY unsigned money
+/// exit the escrow will build itself — it can never pay a seat more than that seat confirmed, so
+/// it is always safe under a 0-conf shortfall (an unconfirmed/evicted buy-in simply isn't in
+/// `confirmed_deposit`). No rake is charged on a refund. Conservation holds exactly:
+/// `sum(outputs) + fee == sum(confirmed_deposit)`. The last non-zero seat absorbs the fee
+/// remainder so proportional truncation never strands a zatoshi. Generalises to N seats.
+///
+/// Returns `(outputs, per_seat_refund_amounts)`. A seat with a zero refund emits no output.
+fn compute_refund_outputs(code: &str, seats: &[SeatRefund]) -> (Vec<PayoutOutput>, Vec<u64>) {
+    let total_confirmed: u64 = seats.iter().map(|s| s.confirmed_deposit).sum();
+    // reserve the on-chain tx fee from the pot, distributed proportionally to each seat's stake.
+    let distributable = total_confirmed.saturating_sub(TX_PAYOUT_FEE_ZAT);
+    let mut amounts = vec![0u64; seats.len()];
+    // index of the last seat with a non-zero confirmed deposit — it absorbs the fee remainder so
+    // the sum is exact (no proportional-truncation loss).
+    let last_funded = seats.iter().rposition(|s| s.confirmed_deposit > 0);
+    let mut allocated: u64 = 0;
+    for (i, s) in seats.iter().enumerate() {
+        if total_confirmed == 0 || s.confirmed_deposit == 0 { continue; }
+        if Some(i) == last_funded {
+            // exact remainder → never strands a zatoshi.
+            amounts[i] = distributable - allocated;
+        } else {
+            let share = (distributable as u128 * s.confirmed_deposit as u128 / total_confirmed as u128) as u64;
+            amounts[i] = share;
+            allocated += share;
+        }
+    }
+    let mut outputs = Vec::new();
+    for (i, s) in seats.iter().enumerate() {
+        if amounts[i] > 0 {
+            outputs.push(PayoutOutput {
+                address: s.address.clone(),
+                amount: amounts[i],
+                memo: format!("zk.poker refund room={}", code),
+            });
+        }
+    }
+    (outputs, amounts)
+}
+
+/// Snapshot each seat's refund basis (pinned refund address + CONFIRMED deposit) from a room, as a
+/// per-seat vector. Seat 0 = A, seat 1 = B today; extend `seat_payout_address`/the deposit vector
+/// for N seats. A seat with no pinned address is dropped from the basis (nowhere to refund it) —
+/// its funds strand until an address is pinned or `/arbitrate` rules, which is the safe default.
+fn room_seat_refunds(room: &EscrowRoom) -> Vec<SeatRefund> {
+    let confirmed = [room.player_a_deposit, room.player_b_deposit];
+    let mut seats = Vec::new();
+    for (i, dep) in confirmed.iter().enumerate() {
+        if let Some(Some(addr)) = room.seat_payout_address.get(i) {
+            seats.push(SeatRefund { address: addr.clone(), confirmed_deposit: *dep });
+        }
+    }
+    seats
+}
+
+/// Does a caller-supplied unsigned output set match the escrow's OWN refund-each-own-confirmed
+/// split? This is the ONLY unsigned split the escrow will spend without a co-signed plan
+/// (Settle-C1). We recompute the authoritative refund and require the caller's outputs to be a
+/// subset-equal match (same address→amount pairs, in any order). Anything else — a winner-take-all
+/// split, a shifted amount, an extra recipient — is a non-refund exit and must be rejected unless
+/// it carries a co-signed `/settle` plan or an `/arbitrate` operator ruling.
+fn outputs_match_refund(req_outputs: &[(String, u64)], refund_outputs: &[PayoutOutput]) -> bool {
+    if req_outputs.len() != refund_outputs.len() {
+        return false;
+    }
+    // match as a multiset of (address, amount) — order-independent, no double-matching.
+    let mut remaining: Vec<&PayoutOutput> = refund_outputs.iter().collect();
+    for (addr, amt) in req_outputs {
+        if let Some(pos) = remaining.iter().position(|o| &o.address == addr && o.amount == *amt) {
+            remaining.remove(pos);
+        } else {
+            return false;
+        }
+    }
+    remaining.is_empty()
+}
+
 /// Outcome of verifying the co-signing gate for a settlement request. Pure of side effects on the
 /// room so it can be reused by both `/settle` and the confirmed scanner completing a queued plan.
 enum CosignCheck {
@@ -1100,12 +1189,16 @@ async fn initiate_payout(
             (Some(fvk), Some(kp), Some(seed), Some(pkg)) => {
                 let both_confirmed = both_deposits_satisfied(
                     room.player_a_deposit, room.player_b_deposit, room.required_deposit);
-                (fvk.clone(), kp.clone(), seed.clone(), pkg.clone(), room.notes.clone(), room.payout_plan.clone(), both_confirmed)
+                // Basis for the escrow's OWN refund split (Settle-C1): each seat's pinned refund
+                // address paired with its CONFIRMED deposit. Per-seat vector so this generalises
+                // beyond 2 seats.
+                let refund_basis = room_seat_refunds(room);
+                (fvk.clone(), kp.clone(), seed.clone(), pkg.clone(), room.notes.clone(), room.payout_plan.clone(), both_confirmed, refund_basis)
             }
             _ => return json_response(serde_json::json!({"error": "DKG not complete; no key material to sign with"})),
         }
     };
-    let (fvk_hex, kp_hex, seed_hex, pkg_hex, notes, settled_plan, both_confirmed) = snap;
+    let (fvk_hex, kp_hex, seed_hex, pkg_hex, notes, settled_plan, both_confirmed, refund_basis) = snap;
 
     // 0-CONF THEFT GUARD (choke point — every payout flows through here). A co-signed
     // /settle plan already passed the confirmed-deposit guard when it was recorded, so
@@ -1139,20 +1232,49 @@ async fn initiate_payout(
     };
 
     let mainnet = matches!(state.network, zcash_protocol::consensus::NetworkType::Main);
-    // HIGH-1: if the room was co-signed via /settle, spend the escrow's OWN recorded
-    // plan (bound to both players' signatures over the outcome) instead of trusting
-    // the caller's `req.outputs`. A token holder therefore cannot redirect a settled
-    // pot. Only the refund/abandonment path (no /settle) uses caller outputs, and that
-    // remains token-gated. The settled plan already reserves rake + TX_PAYOUT_FEE_ZAT.
+    // Settle-C1 / HIGH-1: money leaves the escrow by exactly TWO gated paths.
+    //   (1) A co-signed /settle (or /arbitrate) plan is recorded → spend the escrow's OWN
+    //       `payout_plan` (bound to both seats' signatures, or the operator PIN). The caller's
+    //       `req.outputs` are IGNORED here, so a token holder cannot redirect a settled pot.
+    //   (2) No co-signed plan → the ONLY permissible unsigned exit is the escrow's OWN
+    //       refund-each-seat-its-own-confirmed-deposit split, which the escrow COMPUTES itself.
+    //       A caller-chosen winner/amount split (e.g. winner-take-all) is a non-refund exit with
+    //       no loser signature and is REJECTED. Winner-take-all without a co-sign must go through
+    //       /arbitrate (operator PIN). This closes the un-gated money exit the auditor found.
     let (resolved_outputs, fee_zat): (Vec<(String, u64)>, u64) = match &settled_plan {
         Some(plan) => (
             plan.outputs.iter().map(|o| (o.address.clone(), o.amount)).collect(),
             TX_PAYOUT_FEE_ZAT,
         ),
-        None => (
-            req.outputs.iter().map(|o| (o.address.clone(), o.amount_zat)).collect(),
-            if req.fee_zat == 0 { TX_PAYOUT_FEE_ZAT } else { req.fee_zat },
-        ),
+        None => {
+            // The escrow's authoritative refund split — each seat gets back only its own
+            // confirmed deposit. This is the single source of the unsigned split.
+            let (refund_outputs, _amounts) = compute_refund_outputs(&code, &refund_basis);
+            let req_pairs: Vec<(String, u64)> =
+                req.outputs.iter().map(|o| (o.address.clone(), o.amount_zat)).collect();
+            // If the caller sent no outputs, they are asking for the default refund. Otherwise the
+            // caller's outputs MUST equal the escrow's refund split — any other split is a
+            // non-refund exit that requires a co-signed /settle or an /arbitrate ruling.
+            if !req_pairs.is_empty() && !outputs_match_refund(&req_pairs, &refund_outputs) {
+                tracing::warn!("payout/initiate REJECTED for {} — unsigned non-refund split (no co-signed plan)", code);
+                return json_response(serde_json::json!({
+                    "error": "unsigned payout must be the escrow's refund-each-own-confirmed-deposit split. \
+                              a winner/amount split requires a co-signed /settle (both seats) or /arbitrate \
+                              (operator PIN). the escrow will not spend a caller-chosen split without a co-sign.",
+                    "refund_required": true,
+                }));
+            }
+            if refund_outputs.is_empty() {
+                return json_response(serde_json::json!({
+                    "error": "nothing to refund: no seat has both a pinned refund address and a confirmed \
+                              deposit. use /arbitrate once addresses/deposits are on-chain.",
+                }));
+            }
+            (
+                refund_outputs.iter().map(|o| (o.address.clone(), o.amount)).collect(),
+                TX_PAYOUT_FEE_ZAT,
+            )
+        }
     };
     let mut outputs = Vec::with_capacity(resolved_outputs.len());
     for (i, (addr_str, amount_zat)) in resolved_outputs.iter().enumerate() {
@@ -1820,6 +1942,123 @@ async fn arbitrate(
     })).into_response()
 }
 
+#[derive(Debug, Deserialize)]
+struct CancelReq {
+    /// Per-room capability token (same secret as `payout/initiate`). May also be supplied via the
+    /// `X-Payout-Token` header; the header takes precedence.
+    #[serde(default)]
+    payout_token: Option<String>,
+}
+
+/// POST /room/{code}/cancel — SELF-SERVICE recovery (Settle-C2). Sets the room's `payout_plan` to
+/// the escrow's OWN refund-each-seat-its-own-CONFIRMED-deposit split, then fires the normal FROST
+/// payout path (which spends that recorded plan — HIGH-1). Token-gated like every money exit.
+///
+/// This is the `/cancel` route the comments promised: when a co-signed /settle can't complete
+/// (e.g. a mempool buy-in was evicted, leaving a 0-conf shortfall), honest confirmed funds no
+/// longer strand on operator-PIN availability — either seat's driver can call this to get each
+/// player their own confirmed money back.
+///
+/// SAFE under a shortfall by construction: `compute_refund_outputs` pays each seat only what that
+/// seat CONFIRMED, so an unconfirmed/evicted buy-in is simply never in the split — no seat is ever
+/// paid from the other's money. NO rake. Idempotent: if a `payout_plan` already exists (a prior
+/// cancel/settle/arbitrate), it is returned unchanged. Journaled + persisted like the other plans.
+async fn cancel_room(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    headers: axum::http::HeaderMap,
+    Json(req): Json<CancelReq>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+    let header_token = headers
+        .get("x-payout-token")
+        .and_then(|v| v.to_str().ok())
+        .map(str::to_string);
+
+    let plan_result = {
+        let mut rooms = state.rooms.lock().await;
+        let Some(room) = rooms.get_mut(&code) else {
+            return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "room not found"}))).into_response();
+        };
+        // AUTH: bind this money-moving request to the room's creation secret. Fail closed.
+        if let Err((status, msg)) = check_payout_token(
+            &room.payout_token, header_token.as_deref(), req.payout_token.as_deref(),
+        ) {
+            tracing::warn!("cancel REJECTED for {}: {}", code, msg);
+            return (status, Json(serde_json::json!({"error": msg}))).into_response();
+        }
+
+        // IDEMPOTENCY: a plan already exists (settle / arbitrate / a prior cancel) → return it
+        // unchanged. Never rebuild or double-journal.
+        if let Some(plan) = room.payout_plan.clone() {
+            return Json(serde_json::json!({
+                "ok": true, "refund_plan": plan, "duplicate": true,
+                "message": "a payout/refund plan already exists for this room — returned unchanged",
+            })).into_response();
+        }
+
+        // Build the escrow's OWN refund split from each seat's CONFIRMED deposit + pinned address.
+        let seats = room_seat_refunds(room);
+        let (outputs, amounts) = compute_refund_outputs(&code, &seats);
+        let total_confirmed: u64 = seats.iter().map(|s| s.confirmed_deposit).sum();
+        if outputs.is_empty() {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                "error": "nothing to refund: no seat has both a pinned refund address and a confirmed \
+                          deposit above the tx fee.",
+                "total_confirmed": total_confirmed,
+            }))).into_response();
+        }
+
+        room.game_active = false;
+        // final_stacks mirrors the refund amounts (seat 0 = A, seat 1 = B) for the accounting view.
+        room.final_stacks = Some((amounts.first().copied().unwrap_or(0), amounts.get(1).copied().unwrap_or(0)));
+        let plan = PayoutPlan {
+            room: code.clone(),
+            escrow_source: hex::encode(&room.escrow_address),
+            escrow_value: total_confirmed,
+            outputs,
+            action_log_hash: "cancel:refund-each-own-confirmed".to_string(),
+            settled_at: now_ms(),
+        };
+        room.payout_plan = Some(plan.clone());
+        // a queued co-signed settlement (if any) is superseded by the refund — clear it so the
+        // scanner won't also try to complete it.
+        room.settle_pending = None;
+        if let Some(s) = state.persist.as_ref() {
+            s.save_room(room);
+        }
+        (room.payout_token, plan, amounts)
+    };
+    let (token, plan, amounts) = plan_result;
+
+    journal::record(&code, "cancel_refund_plan", serde_json::json!({
+        "refund_amounts": amounts,
+        "escrow_value": plan.escrow_value,
+        "outputs": plan.outputs.len(),
+    }));
+    tracing::info!("cancel: room={} refund plan set ({} outputs, {} zat) — firing payout", code, plan.outputs.len(), plan.escrow_value);
+
+    // fire the existing payout path in-process, using the room's own token. It consumes the bound
+    // refund plan we just set (HIGH-1). Completion still needs a beneficiary's share to co-sign.
+    let token_hex = hex::encode(token);
+    let bg_state = state.clone();
+    let bg_code = code.clone();
+    tokio::spawn(async move {
+        let mut h = axum::http::HeaderMap::new();
+        if let Ok(v) = axum::http::HeaderValue::from_str(&token_hex) {
+            h.insert("x-payout-token", v);
+        }
+        let ireq = InitiatePayoutReq { outputs: vec![], fee_zat: 0, anchor_height: None, payout_token: None };
+        let _ = initiate_payout(State(bg_state), Path(bg_code), h, Json(ireq)).await;
+    });
+
+    Json(serde_json::json!({
+        "ok": true,
+        "refund_plan": plan,
+        "message": "cancelled — refunding each seat its own confirmed deposit; needs a wallet online to co-sign (2-of-3)",
+    })).into_response()
+}
+
 // ---------------------------------------------------------------------------
 // Background deposit monitor
 // ---------------------------------------------------------------------------
@@ -2176,6 +2415,7 @@ async fn main() {
         .route("/room/{code}/sign-round2", axum::routing::post(frost_sign_round2))
         .route("/room/{code}/fault", axum::routing::post(report_fault))
         .route("/room/{code}/arbitrate", axum::routing::post(arbitrate))
+        .route("/room/{code}/cancel", axum::routing::post(cancel_room))
         .route("/audit/{code}", axum::routing::get(get_audit))
         .route("/accounting", axum::routing::get(get_accounting))
         .route("/disputes", axum::routing::get(get_disputes))
@@ -2678,5 +2918,128 @@ mod tests {
         // same HTTP report replayed — no double count
         if counted.insert(http_key.clone()) { balance += 500; }
         assert_eq!(balance, 1500, "replayed HTTP report must not credit twice");
+    }
+
+    // ── Settle-C1 / C2 / HIGH-1: refund split is the single unsigned money exit ────────────────
+
+    #[test]
+    fn refund_pays_each_seat_its_own_confirmed_deposit() {
+        // two seats, unequal confirmed deposits. Each gets back its OWN confirmed money,
+        // minus a proportional share of the tx fee. Conservation: sum + fee == total confirmed.
+        let seats = vec![
+            SeatRefund { address: "u1a".into(), confirmed_deposit: 120_000 },
+            SeatRefund { address: "u1b".into(), confirmed_deposit: 80_000 },
+        ];
+        let total: u64 = seats.iter().map(|s| s.confirmed_deposit).sum();
+        let (outs, amounts) = compute_refund_outputs("R", &seats);
+        assert_eq!(outs.len(), 2);
+        // conservation holds exactly
+        assert_eq!(amounts.iter().sum::<u64>() + TX_PAYOUT_FEE_ZAT, total);
+        assert_eq!(sum_outputs(&outs) + TX_PAYOUT_FEE_ZAT, total);
+        // A (bigger deposit) gets back more than B, and neither exceeds its own deposit.
+        assert!(amounts[0] > amounts[1]);
+        assert!(amounts[0] <= 120_000 && amounts[1] <= 80_000);
+        // no rake, no house output
+        assert!(outs.iter().all(|o| o.memo.contains("refund")));
+    }
+
+    #[test]
+    fn refund_is_safe_under_shortfall() {
+        // 0-conf shortfall: seat B's buy-in was seen in mempool (dealt) but NEVER confirmed /
+        // was evicted → B's CONFIRMED deposit is 0. The vault holds only A's real money. A refund
+        // must return A its own deposit and pay B NOTHING — it can never pay B from A's money.
+        let required = 100_000u64;
+        let seats = vec![
+            SeatRefund { address: "u1a".into(), confirmed_deposit: required },
+            SeatRefund { address: "u1b".into(), confirmed_deposit: 0 },
+        ];
+        let (outs, amounts) = compute_refund_outputs("R", &seats);
+        assert_eq!(outs.len(), 1, "only the funded seat gets an output");
+        assert_eq!(amounts[1], 0, "unconfirmed/evicted seat is paid nothing");
+        assert_eq!(amounts[0], required - TX_PAYOUT_FEE_ZAT, "A gets back only its own confirmed deposit");
+        // conservation against the CONFIRMED pot (A's deposit), never the phantom 0-conf pot.
+        assert_eq!(sum_outputs(&outs) + TX_PAYOUT_FEE_ZAT, required);
+    }
+
+    #[test]
+    fn refund_generalises_to_n_seats() {
+        // forward-looking: a future multiway table has N depositors. Conservation must still hold
+        // and each seat gets back at most its own confirmed deposit.
+        let seats = vec![
+            SeatRefund { address: "u1a".into(), confirmed_deposit: 50_000 },
+            SeatRefund { address: "u1b".into(), confirmed_deposit: 50_001 },
+            SeatRefund { address: "u1c".into(), confirmed_deposit: 33_333 },
+            SeatRefund { address: "u1d".into(), confirmed_deposit: 0 },
+        ];
+        let total: u64 = seats.iter().map(|s| s.confirmed_deposit).sum();
+        let (outs, amounts) = compute_refund_outputs("R", &seats);
+        assert_eq!(outs.len(), 3, "the zero-deposit seat emits no output");
+        assert_eq!(amounts.iter().sum::<u64>() + TX_PAYOUT_FEE_ZAT, total, "conservation across N seats");
+        for (i, s) in seats.iter().enumerate() {
+            assert!(amounts[i] <= s.confirmed_deposit, "no seat is paid more than it confirmed");
+        }
+    }
+
+    #[test]
+    fn unsigned_non_refund_split_is_rejected() {
+        // Settle-C1: the gate `initiate_payout` applies for the unsigned (no co-signed plan) exit.
+        // The escrow computes its OWN refund split; a caller-chosen winner-take-all split must NOT
+        // match it and must be rejected.
+        let seats = vec![
+            SeatRefund { address: "u1a".into(), confirmed_deposit: 100_000 },
+            SeatRefund { address: "u1b".into(), confirmed_deposit: 100_000 },
+        ];
+        let (refund_outputs, _) = compute_refund_outputs("R", &seats);
+
+        // (a) winner-take-all: A grabs the whole confirmed pot, B gets nothing → REJECTED.
+        let winner_take_all = vec![("u1a".to_string(), 200_000 - TX_PAYOUT_FEE_ZAT)];
+        assert!(!outputs_match_refund(&winner_take_all, &refund_outputs),
+            "an unsigned winner-take-all split must not pass as a refund");
+
+        // (b) a redirected refund (right amounts, attacker address) → REJECTED.
+        let redirected = vec![
+            ("u1attacker".to_string(), refund_outputs[0].amount),
+            ("u1b".to_string(), refund_outputs[1].amount),
+        ];
+        assert!(!outputs_match_refund(&redirected, &refund_outputs),
+            "a redirected destination must not pass as a refund");
+
+        // (c) a shifted amount (steal 1 zat from B to A) → REJECTED.
+        let shifted = vec![
+            ("u1a".to_string(), refund_outputs[0].amount + 1),
+            ("u1b".to_string(), refund_outputs[1].amount - 1),
+        ];
+        assert!(!outputs_match_refund(&shifted, &refund_outputs),
+            "a shifted split must not pass as a refund");
+
+        // (d) the EXACT refund split (any order) → accepted.
+        let exact_reordered = vec![
+            ("u1b".to_string(), refund_outputs[1].amount),
+            ("u1a".to_string(), refund_outputs[0].amount),
+        ];
+        assert!(outputs_match_refund(&exact_reordered, &refund_outputs),
+            "the escrow's own refund split must be accepted regardless of output order");
+    }
+
+    #[test]
+    fn cancel_refund_plan_matches_confirmed_and_conserves() {
+        // /cancel builds its refund plan from room_seat_refunds. Prove the plan the handler would
+        // record refunds each seat its own confirmed deposit and conserves against the confirmed
+        // pot — even under a shortfall (seat B unconfirmed).
+        let required = 100_000;
+        let (mut room, _code) = room_with_queued_settlement(required, 0, required); // B unconfirmed
+        let seats = room_seat_refunds(&room);
+        // both seats have a pinned payout address; only A has a confirmed deposit.
+        assert_eq!(seats.len(), 2);
+        assert_eq!(seats[0].confirmed_deposit, required);
+        assert_eq!(seats[1].confirmed_deposit, 0);
+        let (outs, amounts) = compute_refund_outputs("QUEUE1", &seats);
+        assert_eq!(outs.len(), 1, "only the confirmed seat is refunded under shortfall");
+        assert_eq!(amounts[0], required - TX_PAYOUT_FEE_ZAT);
+        assert_eq!(amounts[1], 0, "unconfirmed seat refunded nothing — never from A's money");
+        assert_eq!(sum_outputs(&outs) + TX_PAYOUT_FEE_ZAT, required, "conserves against confirmed pot");
+        // sanity: the refund never exceeds what the vault actually holds (A's confirmed deposit).
+        assert!(sum_outputs(&outs) <= room.player_a_deposit + room.player_b_deposit);
+        let _ = &mut room;
     }
 }

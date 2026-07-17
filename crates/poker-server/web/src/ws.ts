@@ -31,6 +31,9 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
   let transport: ReturnType<typeof createRelayTransport> | null = null
   let announced = false
   let media: MediaState | null = null
+  // one wallet delegation per page session — cached so a re-join / double sit-down
+  // reuses it instead of popping the wallet a second time.
+  let cachedZid: ZidIdentity | null = null
   // rules-handshake self-heal: the host proposes and the guest auto-accepts, but a single
   // dropped relay frame would otherwise deadlock both sides forever ("waiting for opponent
   // to confirm"). We keep re-sending (idempotent — the negotiate layer guards on gameStarted)
@@ -110,6 +113,15 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
 
   async function connect(name: string, customRules?: { smallBlind: number; bigBlind: number; buyin: number }, staked?: boolean) {
     isStaked = !!staked
+    // Idempotent (re)connect: if a previous transport is still around (double "sit down",
+    // a remount), disconnect it FIRST so its relay socket frees its seat instead of lingering
+    // as a phantom opponent / triggering "room full". Reset per-session state for the new table.
+    if (transport) { try { transport.disconnect() } catch {} transport = null }
+    game = null
+    announced = false
+    stopHostRulesRetry()
+    rulesAgreedLocal = false
+    hostRetryStarted = false
     // P2P over the blind relay: both clients run the engine + mental-poker
     // ceremony locally and exchange only ciphertext through the server relay.
     // the operator never sees cards, and the two players never open a socket to
@@ -121,8 +133,11 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
     const room = getRoomFromUrl()
 
     // session identity via zid SDK (zafu wallet, or ephemeral ed25519)
-    const zidIdentity = await zid.connect({ appName: 'poker.zk.bot', tradingMode: true })
-    if (name) zid.setName(name)
+    if (!cachedZid) cachedZid = await zid.connect({ appName: 'zkbtc.org', tradingMode: true })
+    const zidIdentity = cachedZid
+    // Refresh the cached identity's name too, or a nick change never takes effect
+    // (cachedZid pins the name from the first connect for the double-sign fix).
+    if (name) { zid.setName(name); zidIdentity.name = name }
     const sess: SessionIdentity = {
       ...zidIdentity,
       sessionPubKey: zidIdentity.pubkey,
@@ -143,7 +158,7 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
       hostRetryStarted = false
       stopHostRulesRetry()
       // media: WebRTC voice/video (opt-in, direct P2P, signaling over the relay)
-      media = createMedia((msg) => transport!.send(msg))
+      media = createMedia((msg) => transport!.send(msg), !isHost)
       game = createGame(transport!, isHost, name, {
         onMsg,
         onLog: (t) => console.log('[game]', t),
@@ -268,6 +283,23 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
         onMsg(m as ServerMsg)
       },
     )
+
+    // Transport-level reliability signals (added in transport.ts):
+    // • onDesync: the seq/ack layer detected loss/reorder it could not repair
+    //   (e.g. the peer acked a seq we never sent). Surface it — game.ts's own
+    //   per-hand action-seq guard voids/resyncs the hand; this catches the case
+    //   where a frame vanished BELOW the game layer so no engine seq gap appears.
+    // • onFatal: crypto handshake did not complete symmetrically (or X25519 init
+    //   failed) → refuse to run a half-plaintext staked table.
+    transport.onDesync((reason) => {
+      console.warn('[ws] transport desync:', reason)
+      onMsg({ type: 'Status', phase: 'desync',
+        message: 'connection desync detected — the current hand may be void; your deposit is safe.' })
+    })
+    transport.onFatal((reason) => {
+      console.error('[ws] transport fatal:', reason)
+      onMsg({ type: 'Error', message: `secure channel failed: ${reason}` })
+    })
 
     transport.connect(room, name)
   }

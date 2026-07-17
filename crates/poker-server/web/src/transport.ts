@@ -24,18 +24,51 @@ export interface WireMessage {
   d: unknown
   /** relay-assigned timestamp (ms since epoch). neutral clock for disputes. */
   relayTs?: number
+  /** transport reliability seq (added/stripped by ReliableChannel — internal). */
+  _s?: number
+  /** piggybacked cumulative ack (highest contiguous seq the sender has delivered). */
+  _a?: number
+  /** crypto key-epoch id the frame was minted under (stale-key detection). */
+  _e?: number
 }
 
 /** transport provider interface */
 export interface TransportProvider {
   connect(room: string, nick: string): void
   send(msg: WireMessage): void
-  /** send a control frame to the SERVER escrow coordinator (staked tables). */
-  sendServer(msg: unknown): void
+  /** send a control frame to the SERVER escrow coordinator (staked tables).
+   *  returns a delivery handle callers can await/inspect (see {@link ControlDelivery}). */
+  sendServer(msg: unknown): ControlDelivery
   disconnect(): void
   readonly connected: () => boolean
   readonly encrypted: () => boolean
+  /** register a callback fired when the reliability layer detects unrecoverable
+   *  frame loss / reordering it could not repair, so game.ts can void a staked hand.
+   *  (game.ts already dedups + gap-detects on its OWN action-seq; this surfaces
+   *  the TRANSPORT-level view — e.g. a peer that acks a seq we never got.) */
+  onDesync(cb: OnDesync): void
+  /** register a HARD-error callback: the crypto handshake did not complete
+   *  symmetrically within the timeout, or X25519 init failed. game.ts should
+   *  refuse to start / void any staked hand rather than play half-plaintext. */
+  onFatal(cb: OnFatal): void
 }
+
+/** in-flight handle for a server control frame. `acked()` flips true once the
+ *  frame has been written to an OPEN relay socket (the relay forwards `srv`
+ *  frames blind and the poker-server does not emit an application ack, so this
+ *  is a SOCKET-level delivery guarantee: the frame left this client and will be
+ *  retransmitted across reconnects until it does). */
+export interface ControlDelivery {
+  readonly acked: () => boolean
+  /** resolves once the frame has been flushed to an OPEN socket. */
+  readonly done: Promise<void>
+}
+
+/** transport-level desync/loss notification (distinct from game.ts's engine desync). */
+export type OnDesync = (reason: string) => void
+
+/** unrecoverable handshake / crypto failure. */
+export type OnFatal = (reason: string) => void
 
 /** callback for incoming peer messages */
 export type OnPeerMessage = (msg: WireMessage) => void
@@ -105,6 +138,138 @@ function fromB64(s: string): Uint8Array {
 }
 
 // ============================================================================
+// Reliability layer: per-peer transport-level seq + cumulative ack + retransmit
+// ============================================================================
+//
+// The relay is a blind fire-and-forget pipe: a `msg` frame queued but unflushed
+// when the socket dies (or sent by the peer during our reconnect gap) is lost
+// with no redelivery. This layer sits UNDER the crypto/send path and gives each
+// peer channel an exactly-once, in-order stream:
+//
+//   • every outbound app frame gets a monotonic transport seq `_s` (per channel)
+//   • every frame piggybacks our cumulative ack `_a` = highest CONTIGUOUS seq we
+//     have delivered from that peer, so the peer can retire its retransmit buffer
+//   • un-acked frames stay in `unacked` (a seq→frame ring) and are retransmitted,
+//     in order, on reconnect / re-key
+//   • inbound frames are delivered in seq order; a gap holds later frames until
+//     the missing seq is (re)delivered — head-of-line, never silent drop
+//   • a stale duplicate (`_s <= rxContig`) is dropped as an already-applied frame
+//   • each frame is tagged with the crypto key-epoch `_e`; a frame minted under a
+//     superseded epoch is surfaced (not mis-decrypted) — see KeyEpoch below
+//
+// It is keyed PER PEER (`ReliableChannel` per peerId), so a future multiway table
+// just holds one channel per opponent — nothing here assumes exactly one peer.
+
+/** an outbound frame wrapped with its reliability envelope, kept for retransmit. */
+interface OutboundRecord {
+  seq: number
+  epoch: number
+  /** the inner app WireMessage (already sequence-tagged) awaiting ack. */
+  msg: WireMessage
+}
+
+/**
+ * Reliable ordered stream state for a SINGLE peer channel. Pure bookkeeping —
+ * it does not touch the socket; the transport pumps it via take/deliver hooks.
+ */
+class ReliableChannel {
+  /** next outbound transport seq to assign. */
+  private txSeq = 0
+  /** un-acked outbound frames, oldest first (bounded retransmit ring). */
+  private unacked: OutboundRecord[] = []
+  /** highest CONTIGUOUS inbound seq we have delivered upward. */
+  private rxContig = -1
+  /** out-of-order inbound frames held until their predecessor arrives. */
+  private rxBuffer = new Map<number, WireMessage>()
+  /** cap so a malicious/broken peer can't grow buffers without bound. */
+  private static readonly MAX_UNACKED = 512
+  private static readonly MAX_GAP = 256
+
+  /** stamp an outbound app frame with seq + epoch + our cumulative ack, and
+   *  retain it for retransmit until the peer acks it. */
+  stamp(msg: WireMessage, epoch: number): WireMessage {
+    const seq = this.txSeq++
+    const wrapped: WireMessage = { ...msg, _s: seq, _e: epoch, _a: this.rxContig } as WireMessage
+    this.unacked.push({ seq, epoch, msg: wrapped })
+    if (this.unacked.length > ReliableChannel.MAX_UNACKED) this.unacked.shift()
+    return wrapped
+  }
+
+  /** re-stamp the un-acked tail under a (possibly new) epoch for retransmit after
+   *  reconnect / re-key. Refreshes the piggybacked ack to our latest contiguous rx. */
+  tailForRetransmit(epoch: number): WireMessage[] {
+    return this.unacked.map(r => {
+      r.epoch = epoch
+      r.msg = { ...r.msg, _e: epoch, _a: this.rxContig } as WireMessage
+      return r.msg
+    })
+  }
+
+  /** our current cumulative ack (highest contiguous inbound seq). */
+  ackSeq(): number { return this.rxContig }
+
+  /** retire everything the peer has acknowledged (cumulative). */
+  applyAck(ackedThrough: number): void {
+    if (ackedThrough < 0) return
+    while (this.unacked.length && this.unacked[0].seq <= ackedThrough) this.unacked.shift()
+  }
+
+  /**
+   * Ingest an inbound wrapped frame. Returns the ordered list of inner app
+   * frames ready to deliver (0, 1, or a run flushed after a gap fills), plus a
+   * `desync` reason string if the peer acked past what we ever sent OR the gap
+   * exceeded MAX_GAP (unrecoverable). Reserved transport frames must NOT be
+   * passed here — only app frames carrying `_s`.
+   */
+  ingest(frame: WireMessage): { deliver: WireMessage[]; ack: number; reAck: boolean; desync?: string } {
+    const w = frame as WireMessage & { _s?: number; _a?: number }
+    // retire our outbound tail on the peer's piggybacked cumulative ack.
+    if (typeof w._a === 'number') {
+      if (w._a >= this.txSeq) {
+        return { deliver: [], ack: this.rxContig, reAck: false, desync: `peer acked seq ${w._a} but we only sent ${this.txSeq - 1}` }
+      }
+      this.applyAck(w._a)
+    }
+    const seq = w._s
+    if (typeof seq !== 'number') {
+      // un-sequenced app frame (legacy peer / pre-handshake) — pass through as-is.
+      return { deliver: [this.strip(frame)], ack: this.rxContig, reAck: false }
+    }
+    if (seq <= this.rxContig) {
+      // already delivered — duplicate/retransmit. Drop, but re-ack so the peer
+      // retires it (else it retransmits forever).
+      return { deliver: [], ack: this.rxContig, reAck: true }
+    }
+    if (seq - this.rxContig > ReliableChannel.MAX_GAP) {
+      return { deliver: [], ack: this.rxContig, reAck: false, desync: `inbound gap too large: got ${seq}, contiguous at ${this.rxContig}` }
+    }
+    this.rxBuffer.set(seq, frame)
+    // flush the contiguous run starting at rxContig+1.
+    const deliver: WireMessage[] = []
+    let next = this.rxContig + 1
+    while (this.rxBuffer.has(next)) {
+      deliver.push(this.strip(this.rxBuffer.get(next)!))
+      this.rxBuffer.delete(next)
+      this.rxContig = next
+      next++
+    }
+    // if we buffered a frame but could not advance (gap), re-ack so the peer knows
+    // our contiguous high-water mark and keeps retransmitting only the missing seq.
+    const reAck = deliver.length === 0
+    return { deliver, ack: this.rxContig, reAck }
+  }
+
+  /** strip the reliability envelope so game.ts sees the unchanged inner frame. */
+  private strip(frame: WireMessage): WireMessage {
+    const { _s, _a, _e, ...inner } = frame as any
+    return inner as WireMessage
+  }
+
+  /** whether we are still waiting on any inbound frame (held rxBuffer). */
+  hasGap(): boolean { return this.rxBuffer.size > 0 }
+}
+
+// ============================================================================
 // WebSocket relay transport (same-origin /ws)
 // ============================================================================
 
@@ -149,7 +314,69 @@ export function createRelayTransport(
   let sessionKey: CryptoKey | null = null
   let pendingMessages: WireMessage[] = []
 
+  // ---- reliability + crypto-epoch state (see ReliableChannel) --------------
+  // one reliable stream per peer. keyed by the peer's session pubkey; anon peers
+  // (no session identity) share the DEFAULT_PEER key. Generalises to N peers: a
+  // multiway table just populates more entries — nothing below assumes one peer.
+  const DEFAULT_PEER = '_anon'
+  const channels = new Map<string, ReliableChannel>()
+  function channelFor(peer: string | null): ReliableChannel {
+    const id = peer || DEFAULT_PEER
+    let ch = channels.get(id)
+    if (!ch) { ch = new ReliableChannel(); channels.set(id, ch) }
+    return ch
+  }
+  // monotonic crypto key-epoch: bumped on every (re)derive so a frame minted
+  // under a superseded key is detectable rather than mis-decrypted/dropped.
+  let keyEpoch = 0
+  // inbound `_enc` frames that arrived BEFORE sessionKey derived — replayed in
+  // order once the key is ready (fix #2: never silently drop the peer's first
+  // encrypted frames during async key derivation).
+  let earlyEnc: { payload: string; relayTs?: number }[] = []
+  // outbound SERVER control frames awaiting an OPEN socket (fix #5): queue while
+  // closed, flush on reconnect, retry until written. Each carries its delivery handle.
+  interface PendingControl { msg: unknown; resolve: () => void; delivered: { v: boolean } }
+  let controlQueue: PendingControl[] = []
+  // symmetric-handshake watchdog (fix #3): once a peer is present, BOTH sides
+  // must derive a session key within this budget or we raise a hard fatal error.
+  const HANDSHAKE_TIMEOUT_MS = 15000
+  let handshakeTimer: ReturnType<typeof setTimeout> | null = null
+  let handshakeFailed = false
+  let onDesyncCb: OnDesync | null = null
+  let onFatalCb: OnFatal | null = null
+
+  function clearHandshakeTimer() { if (handshakeTimer) { clearTimeout(handshakeTimer); handshakeTimer = null } }
+  /** arm the symmetric-encryption deadline. Called when a peer is first seen.
+   *  If sessionKey is not derived by the deadline, the handshake is asymmetric
+   *  (one side plaintext / one side never keyed) → surface a HARD error so
+   *  game.ts refuses to start / voids a staked hand instead of degrading. */
+  function armHandshakeWatchdog() {
+    if (handshakeTimer || sessionKey || handshakeFailed) return
+    handshakeTimer = setTimeout(() => {
+      handshakeTimer = null
+      if (!sessionKey && !handshakeFailed) {
+        handshakeFailed = true
+        console.error('[crypto] symmetric handshake did not complete within', HANDSHAKE_TIMEOUT_MS, 'ms — refusing to run half-plaintext')
+        onFatalCb?.('encryption handshake failed — channel is not symmetrically encrypted')
+        onRoom('error', 'encryption handshake failed')
+      }
+    }, HANDSHAKE_TIMEOUT_MS)
+  }
+
   function connect(room: string, nick: string) {
+    // Idempotency guard: never run two parallel relay sockets. If a socket is still live
+    // from a prior connect() (double-click "sit down", a remount), close it FIRST. An
+    // orphaned socket stays open on the relay STILL HOLDING ITS SEAT — the new socket then
+    // sees it as a phantom "opponent" (or is rejected "room full"), deadlocking the table.
+    // No-op on the normal first connect (ws is null).
+    if (ws && ws.readyState !== WebSocket.CLOSED) {
+      intentionalClose = true
+      try { ws.send(JSON.stringify({ t: 'part' })) } catch {}
+      try { ws.close() } catch {}
+    }
+    ws = null
+    currentRoom = null
+    hasJoined = false
     currentNick = nick
     isCreator = !room
     intentionalClose = false
@@ -163,7 +390,20 @@ export function createRelayTransport(
     const relayUrl = `${relayBase()}/p2p`
     ws = new WebSocket(relayUrl)
 
+    // relay-unreachable watchdog: if the socket doesn't open promptly, treat the relay as
+    // down and surface an error (the browser's own connect timeout can be 30s+ of silence).
+    let openTimer: ReturnType<typeof setTimeout> | null = setTimeout(() => {
+      if (ws && ws.readyState !== WebSocket.OPEN) {
+        console.warn('[relay] connect timeout —', relayUrl, 'unreachable')
+        try { ws.close() } catch {}
+      }
+    }, 8000)
+    const clearOpenTimer = () => { if (openTimer) { clearTimeout(openTimer); openTimer = null } }
+
+    ws.onerror = () => { console.warn('[relay] websocket error on', relayUrl) }
+
     ws.onopen = async () => {
+      clearOpenTimer()
       setConnected(true)
       reconnectAttempts = 0
       console.log('[relay] connected', currentRoom ? '(reconnect)' : '(new)')
@@ -172,7 +412,14 @@ export function createRelayTransport(
         ephemeral = await generateEphemeralKey()
         console.log('[crypto] ephemeral key generated')
       } catch (e) {
-        console.warn('[crypto] X25519 not available:', e)
+        // fix #3: X25519 init failure must fail LOUDLY. A staked table cannot run
+        // one-directional plaintext, so we surface a fatal error instead of silently
+        // proceeding unencrypted (which would let one side encrypt while we can't).
+        console.error('[crypto] X25519 init FAILED — cannot establish encrypted channel:', e)
+        ephemeral = null
+        handshakeFailed = true
+        onFatalCb?.('X25519 unavailable — cannot encrypt this table')
+        onRoom('error', 'encryption unavailable on this device')
       }
 
       if (isCreator && !currentRoom) {
@@ -182,6 +429,9 @@ export function createRelayTransport(
         hasJoined = false // reset for reconnect
         ws!.send(JSON.stringify({ t: 'join', room: r, nick: currentNick }))
       }
+      // fix #5: socket is OPEN again — flush any control frames that queued while
+      // it was down. (Peer game frames are retransmitted after re-key, below.)
+      flushControlQueue()
     }
 
     ws.onmessage = (ev) => {
@@ -191,21 +441,28 @@ export function createRelayTransport(
     }
 
     ws.onclose = () => {
+      clearOpenTimer()
       setConnected(false)
       if (intentionalClose) return
 
-      // auto-reconnect if we have a room
+      // auto-reconnect if we have an established room
       if (currentRoom && reconnectAttempts < config.maxRetries) {
         reconnectAttempts++
         const delay = config.retryDelay * Math.min(reconnectAttempts, 3)
         console.log(`[relay] disconnected, reconnecting in ${delay}ms (attempt ${reconnectAttempts})`)
         // preserve session key — peer might still have it
         setTimeout(() => doConnect(currentRoom!), delay)
+      } else if (!currentRoom) {
+        // the INITIAL connection never succeeded → the relay is unreachable. Surface it loudly
+        // so the UI can prompt the user to pick another relay, instead of hanging on "connecting".
+        console.warn('[relay] initial connect failed —', `${relayBase()}/p2p`, 'unreachable')
+        onRoom('error', `relay unreachable: ${relayBase()}`)
       } else {
-        console.log('[relay] disconnected, giving up')
+        console.log('[relay] disconnected after exhausting retries')
         sessionKey = null
         ephemeral = null
         setEncrypted(false)
+        onRoom('error', 'lost connection to relay')
       }
     }
   }
@@ -242,9 +499,9 @@ export function createRelayTransport(
               sendRaw({ t: '_keyex', d: { pk: ephemeral.publicKeyB64 } })
             }
           }
-          if (count >= 2) onRoom('opponent_joined')
+          if (count >= 2) { armHandshakeWatchdog(); onRoom('opponent_joined') }
         } else {
-          if (count >= 2) onRoom('opponent_joined')
+          if (count >= 2) { armHandshakeWatchdog(); onRoom('opponent_joined') }
         }
         break
       }
@@ -266,6 +523,7 @@ export function createRelayTransport(
       case 'system': {
         const text = msg['text'] as string
         if (text.includes('joined')) {
+          armHandshakeWatchdog() // fix #3: a peer is present → require symmetric crypto
           if (opponentSeen) {
             onRoom('opponent_reconnected')
           } else {
@@ -290,7 +548,24 @@ export function createRelayTransport(
         } else if (text.includes('left') || text.includes('closed')) {
           // opponent disconnected — give them time to reconnect
           onRoom('opponent_disconnected', String(config.opponentTimeout))
-          // don't wipe session key yet — they might reconnect
+          // Reset the peer crypto lock so a NEW opponent (or the same one reconnecting with a
+          // fresh ephemeral) can complete key exchange. Without this the session stays locked to
+          // the departed peer's session key → the newcomer's keyex is rejected ("unknown peer")
+          // and their frames fail to decrypt. Whoever (re)joins re-sends their keyex regardless.
+          peerSessionPub = null
+          sessionKey = null
+          setEncrypted(false)
+          opponentSeen = false
+          // reliability/crypto reset for a fresh peer: drop the departed peer's
+          // channel (its seq space does not carry to a newcomer) and disarm the
+          // handshake watchdog until the next peer appears. earlyEnc is cleared so
+          // a newcomer's frames are not replayed under a stale (null) key.
+          // (2-seat table: clear() is fine; a multiway table would delete only the
+          //  departed peer's channel by id.)
+          channels.clear()
+          earlyEnc = []
+          handshakeFailed = false
+          clearHandshakeTimer()
         }
         break
       }
@@ -351,25 +626,48 @@ export function createRelayTransport(
       if (ephemeral) {
         try {
           const newKey = await deriveSharedKey(ephemeral.keyPair.privateKey, theirPk)
-          if (sessionKey) {
+          const wasRekey = !!sessionKey
+          if (wasRekey) {
             console.log('[crypto] re-keyed (opponent reconnected)')
           } else {
             console.log('[crypto] session key derived (AES-256-GCM)')
           }
-          const wasRekey = !!sessionKey
           sessionKey = newKey
+          // fix #4: every re-derive advances the key-epoch. Outbound frames are
+          // stamped with it; the peer surfaces (does not mis-decrypt) a frame that
+          // arrives under a superseded epoch.
+          keyEpoch++
           setEncrypted(true)
+          clearHandshakeTimer()          // fix #3: symmetric handshake completed on our side
+          handshakeFailed = false
           onRoom('encrypted')
-          // M1: only flush pending on initial key exchange, not re-key
-          // stale messages from before reconnect could corrupt peer state
+
+          // fix #2: replay inbound `_enc` frames that arrived before the key was
+          // ready, IN ORDER, instead of dropping them.
+          const buffered = earlyEnc
+          earlyEnc = []
+          for (const e of buffered) await decryptAndDeliver(e.payload, e.relayTs)
+
+          const ch = channelFor(peerSessionPub)
           if (!wasRekey) {
-            for (const m of pendingMessages) send(m)
+            // fix #1/#4: flush any app frames queued during the initial handshake.
+            // These have not been sequence-stamped yet, so route them through send()
+            // which stamps + buffers them for retransmit.
+            const queued = pendingMessages
+            pendingMessages = []
+            for (const m of queued) send(m)
           } else {
-            if (pendingMessages.length > 0) {
-              console.log('[crypto] dropped', pendingMessages.length, 'stale pending messages after re-key')
-            }
+            // fix #4: DO NOT blind-drop un-sent actions on re-key. Any pendingMessages
+            // (queued mid-handshake) still need to go; hand them to send() so they are
+            // stamped under the NEW epoch, then retransmit the un-acked tail.
+            const queued = pendingMessages
+            pendingMessages = []
+            for (const m of queued) send(m)
           }
-          pendingMessages = []
+          // fix #1: retransmit the un-acked outbound tail under the current epoch so
+          // frames in flight when the old socket died are redelivered exactly once
+          // (the peer dedups on `_s <= rxContig`).
+          for (const w of ch.tailForRetransmit(keyEpoch)) sendEnvelope(w)
         } catch (e) {
           console.warn('[crypto] DH failed:', e)
         }
@@ -377,27 +675,102 @@ export function createRelayTransport(
       return
     }
 
-    // encrypted message
-    if (wireMsg.t === '_enc') {
-      if (!sessionKey) {
-        console.warn('[crypto] encrypted msg but no session key')
-        return
-      }
-      try {
-        const plaintext = await decryptPayload(sessionKey, (wireMsg.d as any).p)
-        const inner: WireMessage = JSON.parse(plaintext)
-        inner.relayTs = relayTs // propagate relay timestamp through encryption
-        console.log('[relay] peer (dec):', inner.t)
-        onPeer(inner)
-      } catch (e) {
-        console.warn('[crypto] decrypt failed:', e)
-      }
+    // bare cumulative-ack from the peer (fix #1): retire our un-acked outbound tail.
+    if (wireMsg.t === '_ack') {
+      const a = (wireMsg as WireMessage & { _a?: number })._a
+      if (typeof a === 'number') channelFor(peerSessionPub).applyAck(a)
       return
     }
 
-    // plaintext message (pre-encryption or fallback)
-    console.log('[relay] peer:', wireMsg.t)
-    onPeer(wireMsg)
+    // encrypted message
+    if (wireMsg.t === '_enc') {
+      const payload = (wireMsg.d as any).p as string
+      if (!sessionKey) {
+        // fix #2: the peer's first `_enc` frames can arrive while OUR key derivation
+        // is still in flight (async). BUFFER them and replay in order once the key
+        // derives, instead of warn+drop (which silently lost the opening frames).
+        console.log('[crypto] _enc before session key — buffering for replay')
+        earlyEnc.push({ payload, relayTs })
+        return
+      }
+      await decryptAndDeliver(payload, relayTs)
+      return
+    }
+
+    // plaintext peer frame (any non-reserved tag: game action, media signaling,
+    // chat — they ALL flow through the encrypted reliable stream once keyed).
+    // fix #3: if we HAVE an ephemeral key and expect encryption, a plaintext frame
+    // from the peer means the channel is asymmetric (they are sending clear while we
+    // would encrypt). We must NOT silently accept it and run half-plaintext on a
+    // table with money at stake — raise a hard fatal so game.ts can void/refuse.
+    if (ephemeral && !sessionKey && !handshakeFailed) {
+      console.error('[crypto] peer sent PLAINTEXT game frame while we expect encryption — asymmetric channel, refusing')
+      handshakeFailed = true
+      clearHandshakeTimer()
+      onFatalCb?.('peer is not encrypting — channel is one-way plaintext')
+      onRoom('error', 'peer channel not encrypted')
+      return
+    }
+    // no ephemeral at all (crypto unavailable both sides / free-play) → plaintext ok.
+    deliverInbound(wireMsg, relayTs)
+  }
+
+  /** decrypt an `_enc` payload and route the inner frame through the reliability
+   *  channel (ordered, exactly-once). */
+  async function decryptAndDeliver(payload: string, relayTs?: number) {
+    if (!sessionKey) return
+    try {
+      const plaintext = await decryptPayload(sessionKey, payload)
+      const inner: WireMessage = JSON.parse(plaintext)
+      inner.relayTs = relayTs // propagate relay timestamp through encryption
+      // a bare `_ack` may ride INSIDE the encrypted envelope — retire our tail and
+      // stop (it is not an app frame and must not enter the ordered stream).
+      if (inner.t === '_ack') {
+        const a = (inner as WireMessage & { _a?: number })._a
+        if (typeof a === 'number') channelFor(peerSessionPub).applyAck(a)
+        return
+      }
+      deliverInbound(inner, relayTs)
+    } catch (e) {
+      console.warn('[crypto] decrypt failed:', e)
+    }
+  }
+
+  /** feed an inbound app frame through the peer's ReliableChannel: retire our
+   *  acked tail, reorder, dedup, and deliver the in-order run to onPeer. Surfaces
+   *  a transport-level desync (not an engine desync) via onDesync. */
+  function deliverInbound(frame: WireMessage, relayTs?: number) {
+    // fix #4: explicit key-epoch detection. A frame minted under a superseded key
+    // cannot even decrypt under the current one (distinct AES key per epoch), so a
+    // frame reaching here whose `_e` predates ours indicates a re-key crossing —
+    // log it. The reliability seq still dedups/reorders it correctly.
+    const fe = (frame as WireMessage & { _e?: number })._e
+    if (typeof fe === 'number' && fe < keyEpoch) {
+      console.warn('[crypto] frame from stale key-epoch', fe, '(current', keyEpoch, ') — reordered across re-key')
+    }
+    const ch = channelFor(peerSessionPub)
+    const { deliver, ack, reAck, desync } = ch.ingest(frame)
+    if (desync) {
+      console.warn('[reliability] transport desync:', desync)
+      onDesyncCb?.(desync)
+    }
+    for (const inner of deliver) {
+      if (relayTs !== undefined && inner.relayTs === undefined) inner.relayTs = relayTs
+      console.log('[relay] peer:', inner.t)
+      onPeer(inner)
+    }
+    // Ack home so the peer retires its retransmit buffer: after we advance our
+    // contiguous rx (delivered ≥ 1), or on a duplicate / held-gap (reAck) so a
+    // retransmitting peer sees our high-water mark instead of resending forever.
+    if (deliver.length > 0 || reAck) sendAck(ch, ack)
+  }
+
+  /** send a bare cumulative-ack frame (no app payload) so the peer retires its
+   *  un-acked tail during quiet periods. Reserved transport tag `_ack`. */
+  function sendAck(_ch: ReliableChannel, ackThrough: number) {
+    // ack rides inside a reserved frame; it is itself un-sequenced (not reliable —
+    // a lost ack is harmless, the next frame re-carries the cumulative value).
+    sendEnvelope({ t: '_ack', d: {}, _a: ackThrough } as WireMessage)
   }
 
   /** send raw (unencrypted) through relay */
@@ -408,31 +781,79 @@ export function createRelayTransport(
 
   /** send a control frame to the SERVER escrow coordinator (staked tables).
    *  wrapped as `{t:'srv',msg}` — NOT a peer `msg` frame, so it never reaches
-   *  the opponent and is never encrypted. the server demuxes on `t == "srv"`. */
-  function sendServer(msg: unknown) {
-    if (!ws || ws.readyState !== WebSocket.OPEN || !currentRoom) return
-    ws.send(JSON.stringify({ t: 'srv', msg }))
+   *  the opponent and is never encrypted. the server demuxes on `t == "srv"`.
+   *
+   *  fix #5: a dropped Settlement/DkgComplete → escrow never gets a co-sign →
+   *  refund. So we QUEUE the frame if the socket is not OPEN and flush it on
+   *  reconnect, retrying until it is written. Returns a ControlDelivery the caller
+   *  can inspect so it never marks something "sent" that wasn't put on the wire.
+   *  (The poker-server does not emit an application ack for `srv` frames — this is
+   *  a socket-level delivery guarantee, not an end-to-end one.) */
+  function sendServer(msg: unknown): ControlDelivery {
+    const delivered = { v: false }
+    let resolveDone!: () => void
+    const done = new Promise<void>(r => { resolveDone = r })
+    const entry: PendingControl = { msg, delivered, resolve: resolveDone }
+    controlQueue.push(entry)
+    flushControlQueue()
+    return { acked: () => delivered.v, done }
   }
 
-  /** send game message — encrypted if session key available */
-  function send(msg: WireMessage) {
+  /** write any queued server control frames to an OPEN socket; leave them queued
+   *  (for reconnect retransmit) if it is not. */
+  function flushControlQueue() {
     if (!ws || ws.readyState !== WebSocket.OPEN || !currentRoom) return
+    const pending = controlQueue
+    controlQueue = []
+    for (const c of pending) {
+      try {
+        ws.send(JSON.stringify({ t: 'srv', msg: c.msg }))
+        c.delivered.v = true
+        c.resolve()
+      } catch (e) {
+        // put it back at the head for the next flush (socket died mid-write).
+        console.warn('[srv] control frame send failed, requeueing:', e)
+        controlQueue.unshift(c)
+        break
+      }
+    }
+  }
 
+  /** send game message — stamped for reliable ordered delivery, encrypted if a
+   *  session key is available. This is the PUBLIC api game.ts calls. */
+  function send(msg: WireMessage) {
     if (sessionKey) {
-      // encrypt
-      const plaintext = JSON.stringify(msg)
-      encryptPayload(sessionKey, plaintext).then(encrypted => {
-        sendRaw({ t: '_enc', d: { p: encrypted } })
-      }).catch(e => {
-        // C2: NEVER fall back to plaintext — drop the message
-        console.error('[crypto] encrypt failed, message DROPPED:', e)
-      })
+      // stamp with transport seq + epoch + piggybacked ack, retain for retransmit,
+      // then put it on the wire.
+      const wrapped = channelFor(peerSessionPub).stamp(msg, keyEpoch)
+      sendEnvelope(wrapped)
     } else if (ephemeral) {
-      // key exchange in progress, queue
+      // key exchange in progress — queue; flushed (and stamped) once the key derives.
       pendingMessages.push(msg)
     } else {
-      // no crypto available, plaintext
-      sendRaw(msg)
+      // no crypto available anywhere (free-play, both sides plaintext): still stamp
+      // so ordering/dedup holds, then send in the clear.
+      const wrapped = channelFor(peerSessionPub).stamp(msg, keyEpoch)
+      sendEnvelope(wrapped)
+    }
+  }
+
+  /** put an already-stamped wrapped frame on the wire: encrypt if we have a key,
+   *  else plaintext. Used by send(), retransmit, and ack frames. If the socket is
+   *  not OPEN the frame is NOT lost — it stays in the channel's un-acked ring and
+   *  is retransmitted on reconnect (fix #1). */
+  function sendEnvelope(wrapped: WireMessage) {
+    if (sessionKey) {
+      const plaintext = JSON.stringify(wrapped)
+      encryptPayload(sessionKey, plaintext).then(enc => {
+        sendRaw({ t: '_enc', d: { p: enc } })
+      }).catch(e => {
+        // C2: NEVER fall back to plaintext. The frame is still in the un-acked ring
+        // (if sequenced), so a later retransmit re-attempts it — not silently lost.
+        console.error('[crypto] encrypt failed, will retransmit on next epoch:', e)
+      })
+    } else {
+      sendRaw(wrapped)
     }
   }
 
@@ -444,9 +865,19 @@ export function createRelayTransport(
     currentRoom = null
     sessionKey = null
     setEncrypted(false)
+    clearHandshakeTimer()
+    channels.clear()
+    earlyEnc = []
+    // fail any control frames that never made it to an OPEN socket so callers
+    // awaiting delivery are not left hanging (their .done resolves; .acked stays false).
+    for (const c of controlQueue) c.resolve()
+    controlQueue = []
   }
 
-  return { connect, send, sendServer, disconnect, connected, encrypted }
+  function onDesync(cb: OnDesync) { onDesyncCb = cb }
+  function onFatal(cb: OnFatal) { onFatalCb = cb }
+
+  return { connect, send, sendServer, disconnect, connected, encrypted, onDesync, onFatal }
 }
 
 /** get room code from URL path (empty = create new) */

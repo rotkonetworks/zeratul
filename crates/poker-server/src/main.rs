@@ -598,11 +598,17 @@ impl Room {
         }
     }
 
-    /// payout plan for the room — `(seat, zatoshi)` pairs. Derived from real deposits, not
-    /// engine defaults: a seat that never deposited is excluded outright. Each seat's basis is
-    /// `deposit - fee_per_seat` so the per-player share of the on-chain fee comes out of the
-    /// pre-funded amount rather than reducing winnings post-hoc. Total of all outputs +
-    /// `TX_PAYOUT_FEE_ZAT` equals total deposits.
+    /// payout plan for the room — `(seat, zatoshi)` pairs. Derived from real deposits + this
+    /// server's OWN poker engine stacks. Each seat's basis is `deposit - fee_per_seat` so the
+    /// per-player share of the on-chain fee comes out of the pre-funded amount. Total of all
+    /// outputs + `TX_PAYOUT_FEE_ZAT` equals total deposits.
+    ///
+    /// SETTLE-HIGH-1 / Settle-C1: this is a SERVER-COMPUTED split and is therefore valid ONLY on
+    /// server-engine tables (the `/ws` handler), where the server dealt the cards and legitimately
+    /// knows the stacks. It MUST NEVER be used on a ZK/relay `/p2p` table: there the server never
+    /// saw the cards, `self.engine` is meaningless, and the escrow is the single split authority
+    /// (co-signed `/settle` winner-exit, or `/cancel` refund-each-own). The relay Leave/settle
+    /// paths no longer call this.
     fn settlement_plan(&self) -> Vec<(u8, u64)> {
         let initial = self.engine.rules.min_buy_in as u64;
         let stacks = self.engine.stacks();
@@ -1036,7 +1042,20 @@ async fn trigger_payout(
     };
 
     let relay_room = match escrow_client::initiate_payout(&escrow_url, &code, &req).await {
-        Ok(resp) => resp.relay_room,
+        // `/payout/initiate` opens the relay room before responding, so it is present inline; fall
+        // back to a status poll defensively in case a future escrow build defers it.
+        Ok(resp) => match resp.relay_room {
+            Some(rr) => rr,
+            None => match escrow_client::resolve_relay_room(&escrow_url, &code).await {
+                Ok(rr) => rr,
+                Err(e) => {
+                    tracing::error!("payout {}: could not resolve relay room: {}", code, e);
+                    let mut r = room.lock().await;
+                    r.broadcast(&ServerMsg::PayoutFailed { reason: format!("relay room: {}", e) });
+                    return;
+                }
+            },
+        },
         Err(e) => {
             tracing::error!("payout {}: initiate failed: {}", code, e);
             let mut r = room.lock().await;
@@ -1044,6 +1063,102 @@ async fn trigger_payout(
             return;
         }
     };
+    // server passed the outputs in here, so the display plan is exactly what we sent.
+    drive_payout_signing(rooms, room, escrow_url, code, relay_room, plan, priority_seat).await;
+}
+
+/// ZK/relay + refund entry point: the escrow is the SINGLE split authority. Instead of the
+/// server computing outputs, it asks the escrow to build the plan — either the co-signed winner
+/// plan already recorded at `/settle` (`SettledPayout`) or the self-service refund-each-own plan
+/// (`Cancel`). The escrow returns the relay room AND the plan it computed (for display only), and
+/// the rest of the flow (signing request broadcast + status poll) is shared with `trigger_payout`.
+///
+/// This is the ONLY payout path used by the ZK/relay `/p2p` handler: the server never sends a
+/// caller-chosen winner split to the escrow on a ZK table (it cannot validate one — cards never
+/// touched the server).
+enum EscrowComputedPayout {
+    /// Drive the on-chain payout for an outcome already verified at `/settle` (winner-exit).
+    SettledPayout,
+    /// Self-service abandonment refund: escrow refunds each depositor their own confirmed deposit.
+    Cancel { reason: String },
+}
+
+async fn trigger_escrow_computed_payout(
+    rooms: Rooms,
+    room: Arc<Mutex<Room>>,
+    escrow_url: String,
+    code: String,
+    kind: EscrowComputedPayout,
+    priority_seat: u8,
+) {
+    // fail-closed capability token — same gate as /payout/initiate.
+    let payout_token = room.lock().await.payout_token.clone();
+    let resp = match kind {
+        EscrowComputedPayout::SettledPayout => {
+            let req = escrow_client::InitiateSettledPayoutReq {
+                // empty: the escrow spends the co-signed plan it recorded at /settle and ignores
+                // these — the server asserts no split of its own on a settled game.
+                outputs: Vec::new(),
+                fee_zat: Some(TX_PAYOUT_FEE_ZAT),
+                anchor_height: None,
+                payout_token,
+            };
+            escrow_client::initiate_settled_payout(&escrow_url, &code, &req).await
+        }
+        EscrowComputedPayout::Cancel { reason } => {
+            let req = escrow_client::CancelRefundReq {
+                reason,
+                payout_token,
+                fee_zat: Some(TX_PAYOUT_FEE_ZAT),
+            };
+            escrow_client::cancel_refund(&escrow_url, &code, &req).await
+        }
+    };
+    let resp = match resp {
+        Ok(resp) => resp,
+        Err(e) => {
+            tracing::error!("payout {}: escrow-computed initiate failed: {}", code, e);
+            let mut r = room.lock().await;
+            r.payout_triggered = false; // allow retry / operator arbitration
+            r.broadcast(&ServerMsg::PayoutFailed { reason: format!("initiate: {}", e) });
+            return;
+        }
+    };
+    // Resolve the FROST relay room. The settled `/payout/initiate` path returns it inline; the
+    // `/cancel` path responds before opening the relay room, so we poll `/payout/status` for it.
+    let relay_room = match resp.relay_room {
+        Some(rr) => rr,
+        None => match escrow_client::resolve_relay_room(&escrow_url, &code).await {
+            Ok(rr) => rr,
+            Err(e) => {
+                tracing::error!("payout {}: could not resolve escrow relay room: {}", code, e);
+                let mut r = room.lock().await;
+                r.payout_triggered = false; // allow retry / operator arbitration
+                r.broadcast(&ServerMsg::PayoutFailed { reason: format!("relay room: {}", e) });
+                return;
+            }
+        },
+    };
+    // display plan comes from the escrow (the split authority), not from us.
+    let plan: Vec<PayoutLineJson> = resp.plan.into_iter()
+        .map(|l| PayoutLineJson { seat: l.seat, address: l.address, amount_zat: l.amount_zat })
+        .collect();
+    drive_payout_signing(rooms, room, escrow_url, code, relay_room, plan, priority_seat).await;
+}
+
+/// Shared payout tail: broadcast the `PayoutSigningRequest`, remember it for reconnect replay,
+/// then poll `/payout/status` until terminal — flipping the priority signer after the fallback
+/// window so an unresponsive seat can't stall the co-sign. Used by every payout shape (server
+/// outputs, escrow-computed winner plan, escrow-computed refund).
+async fn drive_payout_signing(
+    rooms: Rooms,
+    room: Arc<Mutex<Room>>,
+    escrow_url: String,
+    code: String,
+    relay_room: String,
+    plan: Vec<PayoutLineJson>,
+    priority_seat: u8,
+) {
     tracing::info!("payout {}: signing room={} priority_seat={}", code, relay_room, priority_seat);
 
     {
@@ -1636,12 +1751,37 @@ async fn handle_relay_socket(socket: WebSocket, state: AppState) {
                 let Some(room) = my_room.clone() else { continue };
                 let Some(text) = v.get("text").and_then(|x| x.as_str()) else { continue };
                 let ts = now_ms();
-                let rooms = state.relay_rooms.lock().await;
-                if let Some(peers) = rooms.get(&room) {
+                let mut rooms = state.relay_rooms.lock().await;
+                if let Some(peers) = rooms.get_mut(&room) {
+                    // Transport HIGH-2 fix: prune peers whose socket has already closed BEFORE
+                    // fanning out. `is_closed()` is true once the send_task broke (the receiver
+                    // half was dropped), so `tx.send()` into it returns Ok into an orphaned
+                    // channel and the frame is silently swallowed — an action lost to a stale
+                    // connection. The stale-channel prune previously ran ONLY in `join`; run it
+                    // here too so we never route a frame into a dead peer. (Per-peer, so it is
+                    // already multiway-safe.)
+                    peers.retain(|p| p.tx.same_channel(&tx) || !p.tx.is_closed());
+                    // Fan out to the OTHER live peers, counting real deliveries. `send()` into a
+                    // still-open unbounded channel is our best delivery signal short of an app-ack.
+                    let mut delivered = 0usize;
+                    let mut recipients = 0usize;
                     for p in peers.iter() {
                         if !p.tx.same_channel(&tx) {
-                            let _ = p.tx.send(frame(serde_json::json!({ "t": "msg", "text": text, "nick": my_nick, "ts": ts })));
+                            recipients += 1;
+                            if p.tx.send(frame(serde_json::json!({ "t": "msg", "text": text, "nick": my_nick, "ts": ts }))).is_ok() {
+                                delivered += 1;
+                            }
                         }
+                    }
+                    // Surface non-delivery so the sender can retransmit on reconnect instead of
+                    // assuming the peer got it. Only when there was someone we SHOULD have reached
+                    // but the channel was dead — an empty room (peer not yet joined) is not a loss.
+                    if recipients == 0 || delivered < recipients {
+                        let _ = tx.send(frame(serde_json::json!({
+                            "t": "undelivered",
+                            "reason": if recipients == 0 { "no_peer" } else { "peer_gone" },
+                            "ts": ts,
+                        })));
                     }
                 }
             }
@@ -1789,74 +1929,73 @@ async fn handle_relay_socket(socket: WebSocket, state: AppState) {
                                 return;
                             }
                             tracing::info!("settle {}: escrow accepted co-signed outcome; initiating winner payout", code);
-                            // Build the payout plan from the SETTLED outcome (winner-weighted),
-                            // one output per seat with a positive payout. Amounts here mirror the
-                            // proportional split the escrow computed at /settle.
-                            let total = settle_req.player_a_stack + settle_req.player_b_stack;
-                            let (payouts, addrs) = (
-                                [settle_req.player_a_stack, settle_req.player_b_stack],
-                                [settle_req.player_a_address.clone(), settle_req.player_b_address.clone()],
-                            );
-                            let mut plan: Vec<PayoutLineJson> = Vec::new();
-                            {
-                                let r = room_clone.lock().await;
-                                let deposits_total = r.deposits.iter().sum::<u64>();
-                                let fee = TX_PAYOUT_FEE_ZAT.min(deposits_total);
-                                let distributable = deposits_total.saturating_sub(fee);
-                                for seat in 0u8..2 {
-                                    let amt = if total > 0 {
-                                        (distributable as u128 * payouts[seat as usize] as u128 / total as u128) as u64
-                                    } else {
-                                        distributable / 2
-                                    };
-                                    if amt > 0 {
-                                        plan.push(PayoutLineJson { seat, address: addrs[seat as usize].clone(), amount_zat: amt });
-                                    }
-                                }
-                            }
-                            if plan.is_empty() {
-                                tracing::warn!("settle {}: empty payout plan — nothing to pay", code);
-                                return;
-                            }
-                            // priority signer = seat 0 (arbitrary; trigger_payout swaps on timeout).
-                            trigger_payout(rooms_clone, room_clone, escrow_url, code, plan, 0).await;
+                            // Settle-HIGH-1 fix: the server does NOT compute the winner split.
+                            // The escrow already verified BOTH seats' signatures over the outcome
+                            // at /settle and recorded the payout_plan; it is the SINGLE split
+                            // authority (owns fee handling + rounding). We only ask it to drive
+                            // that recorded plan on-chain. No amounts, no addresses derived here —
+                            // that removes the second, rake-dropping/differently-rounded split.
+                            //
+                            // priority signer = seat 0 (arbitrary; drive_payout_signing swaps on timeout).
+                            trigger_escrow_computed_payout(
+                                rooms_clone, room_clone, escrow_url, code,
+                                EscrowComputedPayout::SettledPayout, 0,
+                            ).await;
                         });
                         notify_lobby_tables(&state.rooms, &state.lobby_users).await;
                     }
                     ClientMsg::Leave => {
-                        // Game-over co-signed settlement, P2P edition. The players agreed
-                        // on the outcome peer-to-peer (cards never touched the server); a
-                        // Leave frame is the trigger to settle the pre-funded deposits per
-                        // the deposit-derived settlement_plan and start on-chain payout.
+                        // Settle-C1 fix: a `Leave` on a ZK/relay table is an ABANDONMENT, not a
+                        // co-signed game-over. Cards never touched the server, so it CANNOT know a
+                        // winner and MUST NOT send a caller/server-chosen winner split to the
+                        // escrow (the old `settlement_plan()` → unsigned winner payout is gone).
+                        //
+                        // The only two safe money-exits are:
+                        //   1. a completed co-signed `/settle` (winner-exit) — handled in the
+                        //      `Settlement` arm above; the two seats sign the agreed outcome; or
+                        //   2. refund-EACH-OWN-confirmed — the escrow's self-service `/cancel`
+                        //      path, which the escrow computes (no split here). Winner-take-all on
+                        //      a disputed abandonment goes through the operator's `/arbitrate`, NOT
+                        //      an auto server split.
+                        // So a bare `Leave` triggers ONLY the escrow-computed refund-each-own.
                         let mut r = room_arc.lock().await;
                         if r.payout_triggered {
                             tracing::info!("relay room {}: seat {} leave ignored — payout already in flight", r.code, seat);
                             continue;
                         }
-                        tracing::info!("relay room {}: seat {} leaving — settling", r.code, seat);
+                        tracing::info!("relay room {}: seat {} leaving — requesting escrow refund-each-own", r.code, seat);
                         r.payout_triggered = true;
-                        let payouts = r.settlement_plan();
+                        // GameOver with an EMPTY payouts vec: the server no longer asserts any
+                        // per-seat amounts. The authoritative plan arrives via the escrow-computed
+                        // PayoutSigningRequest that trigger_escrow_computed_payout broadcasts.
                         r.broadcast(&ServerMsg::GameOver {
-                            reason: format!("seat {} left the table", seat),
-                            payouts: payouts.clone(),
+                            reason: format!("seat {} left the table — refunding each deposit", seat),
+                            payouts: Vec::new(),
                         });
-                        let pczt_plan: Vec<PayoutLineJson> = payouts.iter().filter_map(|(s, amt)| {
-                            r.seat_payout_addresses.get(*s as usize)
-                                .and_then(|opt| opt.as_ref())
-                                .map(|addr| PayoutLineJson { seat: *s, address: addr.clone(), amount_zat: *amt })
-                        }).collect();
+                        // Any staked seat with a deposit can be refunded — generalize per-seat
+                        // (multiway-ready): if NOBODY deposited there is nothing to refund.
+                        let any_deposit = r.deposits.iter().any(|&d| d > 0);
                         let code = r.code.clone();
                         r.action_deadline = None;
                         drop(r);
-                        if !pczt_plan.is_empty() {
+                        if any_deposit {
                             if let Some(escrow_url) = state.escrow_url.clone() {
                                 let room_clone = room_arc.clone();
                                 let rooms_clone = state.rooms.clone();
+                                // priority signer = the seat that stayed (opponent of the leaver),
+                                // so the present player signs first; drive_payout_signing swaps on
+                                // timeout. Heads-up: opponent of `seat`. (Per-seat generalization
+                                // for multiway would rotate through the still-present seats.)
+                                let priority = if seat == 0 { 1 } else { 0 };
                                 tokio::spawn(async move {
-                                    trigger_payout(rooms_clone, room_clone, escrow_url, code, pczt_plan, seat).await;
+                                    trigger_escrow_computed_payout(
+                                        rooms_clone, room_clone, escrow_url, code,
+                                        EscrowComputedPayout::Cancel { reason: "leave".into() },
+                                        priority,
+                                    ).await;
                                 });
                             } else {
-                                tracing::warn!("no ESCROW_URL configured — skipping on-chain payout");
+                                tracing::warn!("no ESCROW_URL configured — skipping on-chain refund");
                             }
                         }
                         notify_lobby_tables(&state.rooms, &state.lobby_users).await;

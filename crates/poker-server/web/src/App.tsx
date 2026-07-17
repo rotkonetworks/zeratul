@@ -418,9 +418,9 @@ export default function App() {
         setActing(-1)
         break
       case 'Chat':
-        if (msg.seat !== mySeat()) {
-          log(`${msg.name}: ${msg.text}`, 'text-neutral-300')
-        }
+        // chat arrives from the P2P transport as { from:'opp', text } (ws.ts) — msg.name/seat
+        // don't exist here, which rendered "undefined:". Show the peer label instead.
+        log(`${(msg as any).from === 'opp' ? 'opponent' : ((msg as any).name ?? 'opponent')}: ${msg.text}`, 'text-neutral-300')
         break
       case 'JuryVote':
         setJuryProgress(`jury ${msg.node}/${msg.total}`)
@@ -612,6 +612,11 @@ export default function App() {
         break
       case 'Error':
         log(`err: ${msg.message}`)
+        // relay unreachable / lost → open the relay picker so the player can switch nodes
+        // instead of being stranded on a dead relay ("connecting…" forever).
+        if (/relay unreachable|lost connection to relay/i.test(msg.message || '')) {
+          setShowSettings(true)
+        }
         break
     }
   }
@@ -627,10 +632,87 @@ export default function App() {
   // 'mic'/'cam': the local control the user clicked. 'incoming': the user is
   // responding to the opponent's offer (accepting connects the mic by default).
   const [pendingMedia, setPendingMedia] = createSignal<'mic' | 'cam' | 'incoming' | null>(null)
-  // click-to-enlarge: which video tile is expanded ('remote' | 'local' | null).
-  const [enlargedVideo, setEnlargedVideo] = createSignal<'remote' | 'local' | null>(null)
-  const toggleEnlarge = (which: 'remote' | 'local') =>
-    setEnlargedVideo(prev => (prev === which ? null : which))
+  // True when the browser's autoplay policy blocked the REMOTE video from
+  // playing (it carries the opponent's audio, which browsers refuse to autoplay
+  // without a user gesture). We surface a "tap to play" overlay so the user is
+  // never stuck at a black tile; the tap is the gesture that unblocks it.
+  const [remoteNeedsTap, setRemoteNeedsTap] = createSignal(false)
+
+  // Bind a MediaStream to a <video> and drive playback explicitly instead of
+  // trusting the `autoplay` attribute. Two reasons this matters here:
+  //   1. ontrack builds a FRESH MediaStream on every renegotiation (the cam
+  //      re-attach fix). prop:srcObject updates reactively, but a reactive
+  //      srcObject swap does NOT re-trigger autoplay, so a video track added
+  //      after an audio-only call would never paint → the "camera black" bug.
+  //   2. A remote stream with audio is blocked by autoplay policy unless muted;
+  //      we must NOT mute the remote (we want to hear the opponent), so play()
+  //      can reject → we flip a "tap to play" flag instead of silently failing.
+  // `muted` mutes only the LOCAL preview (echo cancellation); the remote is live.
+  function bindVideo(
+    el: HTMLVideoElement,
+    stream: () => MediaStream | null,
+    opts: { muted: boolean; onBlocked?: (blocked: boolean) => void },
+  ) {
+    el.muted = opts.muted
+    el.autoplay = true
+    el.playsInline = true
+    createEffect(() => {
+      const s = stream()
+      // Re-bind on every new reference (a new track was added/swapped).
+      if (el.srcObject !== s) el.srcObject = s
+      if (!s) { opts.onBlocked?.(false); return }
+      // Explicitly (re)start playback after the bind. If the policy blocks it
+      // (remote audio, no gesture yet), report it so the UI shows a tap overlay.
+      el.play()
+        .then(() => opts.onBlocked?.(false))
+        .catch(() => opts.onBlocked?.(true))
+    })
+  }
+
+  // Where each floating video tile sits (px from top-left of viewport). Persisted
+  // for the session so a tile the user parked stays put across re-renders. null =
+  // "not placed yet" → CSS default corner is used until first drag.
+  const [remotePos, setRemotePos] = createSignal<{ x: number; y: number } | null>(null)
+  const [localPos, setLocalPos] = createSignal<{ x: number; y: number } | null>(null)
+
+  // Make a floating panel draggable by pointer. Grabbing anywhere on the panel
+  // moves it (except elements marked data-nodrag, e.g. the resize corner / play
+  // button). Uses pointer capture so the drag survives fast moves and leaving the
+  // element, and clamps to the viewport so a tile can never be lost off-screen.
+  function makeDraggable(
+    el: HTMLElement,
+    setPos: (p: { x: number; y: number }) => void,
+  ) {
+    let startX = 0, startY = 0, originX = 0, originY = 0, dragging = false
+    const onDown = (e: PointerEvent) => {
+      // Ignore drags that start on the native resize corner or opt-out children.
+      if ((e.target as HTMLElement)?.closest('[data-nodrag]')) return
+      // Only start a drag from empty tile chrome, never from the resize handle:
+      // the browser's ::-webkit-resizer sits in the bottom-right ~16px.
+      const r = el.getBoundingClientRect()
+      if (e.clientX > r.right - 18 && e.clientY > r.bottom - 18) return
+      originX = r.left; originY = r.top
+      startX = e.clientX; startY = e.clientY
+      dragging = true
+      el.setPointerCapture(e.pointerId)
+    }
+    const onMove = (e: PointerEvent) => {
+      if (!dragging) return
+      const dx = e.clientX - startX, dy = e.clientY - startY
+      const w = el.offsetWidth, h = el.offsetHeight
+      const x = Math.min(Math.max(0, originX + dx), window.innerWidth - w)
+      const y = Math.min(Math.max(0, originY + dy), window.innerHeight - h)
+      setPos({ x, y })
+    }
+    const onUp = (e: PointerEvent) => {
+      dragging = false
+      try { el.releasePointerCapture(e.pointerId) } catch { /* ignore */ }
+    }
+    el.addEventListener('pointerdown', onDown)
+    el.addEventListener('pointermove', onMove)
+    el.addEventListener('pointerup', onUp)
+    el.addEventListener('pointercancel', onUp)
+  }
 
   // Entry point for the mic/cam buttons: if the user has already acknowledged,
   // toggle immediately; otherwise open the consent dialog and remember intent.
@@ -1678,28 +1760,94 @@ export default function App() {
                     >disconnect</button>
                   </Show>
                 </div>
-                <div class="flex gap-1">
-                  {/* click a tile to toggle enlarge (both self- and remote views) */}
-                  <Show when={media()?.remoteStream()}>
-                    <video
-                      class={`rounded border border-white/15 object-cover cursor-pointer transition-all ${enlargedVideo() === 'remote' ? 'w-40 h-30' : 'w-16 h-12'}`}
-                      autoplay playsinline
-                      title="Click to enlarge / shrink"
-                      onClick={() => toggleEnlarge('remote')}
-                      prop:srcObject={media()?.remoteStream() ?? null}
-                    />
-                  </Show>
-                  <Show when={media()?.localStream() && media()?.camEnabled()}>
-                    <video
-                      class={`rounded border border-white/10 object-cover opacity-60 cursor-pointer transition-all ${enlargedVideo() === 'local' ? 'w-32 h-24 opacity-90' : 'w-12 h-9'}`}
-                      autoplay playsinline muted
-                      title="Click to enlarge / shrink"
-                      onClick={() => toggleEnlarge('local')}
-                      prop:srcObject={media()?.localStream() ?? null}
-                    />
+              </div>
+
+              {/* Floating video tiles — free to DRAG anywhere and RESIZE (drag the
+                  bottom-right corner). Rendered position:fixed so they float over
+                  the table; positions persist for the session. */}
+              <Show when={media()?.remoteStream()}>
+                {/* REMOTE tile — NOT muted (we want to hear + see the opponent). */}
+                <div
+                  data-tile="remote"
+                  class="fixed z-40 overflow-hidden rounded border border-white/20 bg-black/80 shadow-lg cursor-move"
+                  style={{
+                    left: remotePos() ? `${remotePos()!.x}px` : 'auto',
+                    top: remotePos() ? `${remotePos()!.y}px` : '80px',
+                    right: remotePos() ? 'auto' : '16px',
+                    width: '176px',
+                    height: '132px',
+                    resize: 'both',
+                    'min-width': '96px',
+                    'min-height': '72px',
+                  }}
+                  ref={el => makeDraggable(el, setRemotePos)}
+                >
+                  <video
+                    class="w-full h-full object-cover pointer-events-none"
+                    ref={el => bindVideo(el, () => media()?.remoteStream() ?? null, {
+                      muted: false,
+                      onBlocked: setRemoteNeedsTap,
+                    })}
+                  />
+                  <span class="absolute top-0 left-0 px-1 text-9px text-white/60 bg-black/40 rounded-br pointer-events-none">opponent</span>
+                  <Show when={remoteNeedsTap()}>
+                    <button
+                      data-nodrag
+                      class="absolute inset-0 flex items-center justify-center bg-black/60 text-10px text-white"
+                      title="Autoplay was blocked — tap to start the opponent's video/audio."
+                      onClick={(e) => {
+                        e.stopPropagation()
+                        const v = (e.currentTarget.parentElement?.querySelector('video') as HTMLVideoElement | null)
+                        v?.play().then(() => setRemoteNeedsTap(false)).catch(() => {})
+                      }}
+                    >tap to play</button>
                   </Show>
                 </div>
-              </div>
+              </Show>
+              <Show when={media()?.localStream() && media()?.camEnabled()}>
+                {/* LOCAL preview — MUTED to avoid hearing your own mic (echo). */}
+                <div
+                  data-tile="local"
+                  class="fixed z-40 overflow-hidden rounded border border-white/15 bg-black/80 shadow-lg cursor-move opacity-80 hover:opacity-100"
+                  style={{
+                    left: localPos() ? `${localPos()!.x}px` : 'auto',
+                    top: localPos() ? `${localPos()!.y}px` : '220px',
+                    right: localPos() ? 'auto' : '16px',
+                    width: '128px',
+                    height: '96px',
+                    resize: 'both',
+                    'min-width': '80px',
+                    'min-height': '60px',
+                  }}
+                  ref={el => makeDraggable(el, setLocalPos)}
+                >
+                  <video
+                    class="w-full h-full object-cover pointer-events-none"
+                    ref={el => bindVideo(el, () => media()?.localStream() ?? null, { muted: true })}
+                  />
+                  <span class="absolute top-0 left-0 px-1 text-9px text-white/60 bg-black/40 rounded-br pointer-events-none">you</span>
+                </div>
+              </Show>
+
+              {/* media error + retry — every failure mode (permission denied,
+                  device busy, no device, negotiation/ICE failure) lands here with
+                  a clear message and a Retry that re-runs just the failed step, so
+                  the user is never stuck without a page reload. */}
+              <Show when={media()?.lastError()}>
+                <div class="mx-1 mb-1 px-2 py-1.5 rounded border border-red-500/40 bg-red-500/5 flex items-center justify-between gap-2">
+                  <span class="text-11px text-red-300 leading-tight">{media()?.lastError()?.message}</span>
+                  <div class="flex gap-1 flex-shrink-0">
+                    <button
+                      class="text-11px px-2 py-0.5 rounded border border-white/15 text-neutral-500 hover:text-neutral-300"
+                      onClick={() => media()?.clearError()}
+                    >Dismiss</button>
+                    <button
+                      class="text-11px px-2 py-0.5 rounded border border-green-500 text-green-400 hover:bg-green-500/10"
+                      onClick={() => media()?.retry()}
+                    >Retry</button>
+                  </div>
+                </div>
+              </Show>
 
               {/* incoming media: opponent started video/voice but we haven't opted in.
                   We never auto-connect (no PC, no ICE, no IP leak) — we prompt, and
