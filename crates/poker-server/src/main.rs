@@ -1511,6 +1511,14 @@ async fn handle_relay_socket(socket: WebSocket, state: AppState) {
                 if let Some(n) = v.get("nick").and_then(|x| x.as_str()) { my_nick = n.to_string(); }
                 let mut rooms = state.relay_rooms.lock().await;
                 let peers = rooms.entry(room.clone()).or_default();
+                // Prune peers whose socket has already closed BEFORE the full-check. A client that
+                // reconnects (or a user who refreshed after a failed attempt) opens a NEW channel;
+                // its OLD channel lingers in `peers` until the disconnect cleanup (peers.retain
+                // below) fires. If the reconnect races ahead of that cleanup, the room looks full
+                // and the client rejects ITSELF with a bogus "room full", then retries forever
+                // (the reconnect loop seen in the field). Dropping dead channels first makes
+                // reconnect collision-free and also fixes seat = peers.len() drifting on stale slots.
+                peers.retain(|p| !p.tx.is_closed());
                 // heads-up: cap at 2 players (spectators are a later, separate path)
                 if peers.iter().all(|p| !p.tx.same_channel(&tx)) && peers.len() >= 2 {
                     drop(rooms);
