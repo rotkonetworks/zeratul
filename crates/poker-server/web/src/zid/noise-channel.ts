@@ -26,6 +26,7 @@ import { x25519, edwardsToMontgomeryPub, edwardsToMontgomeryPriv } from '@noble/
 import { sha256 } from '@noble/hashes/sha256';
 import { extract, expand } from '@noble/hashes/hkdf';
 import type { ZidChannel } from './types';
+import { relayBase } from '../config';
 
 // -- constants --
 
@@ -395,8 +396,7 @@ export async function createNoiseChannel(
   const isInitiator = session.pubkey < peerPubkey;
 
   // `/zid`, not `/ws/zid`: HAProxy routes `/ws*` to the FROST relay.
-  const url =
-    relayUrl || `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/zid`;
+  const url = relayUrl || `${relayBase()}/zid`;
 
   const handshakeComplete = new Promise<void>((resolve, reject) => {
     ws = new WebSocket(url);

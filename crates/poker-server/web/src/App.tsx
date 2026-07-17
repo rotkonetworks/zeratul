@@ -2,6 +2,7 @@ import { createSignal, For, Show, createEffect, onCleanup } from 'solid-js'
 import { createSocket } from './ws'
 import { Card } from './Card'
 import Lobby, { type Table } from './Lobby'
+import { Settings } from './Settings'
 import { detectZafu } from './zid/provider'
 import { getPositionShort } from './positions'
 import { requestPokerDkg, requestDeletePokerMultisig, requestPokerSign } from './dkg'
@@ -49,6 +50,10 @@ export default function App() {
   const [seatAddresses, setSeatAddresses] = createSignal<(string | null)[]>([])
   const [depositA, setDepositA] = createSignal(0)
   const [depositB, setDepositB] = createSignal(0)
+  // mempool-seen (0-conf) per-seat value — UX only, never money. Lets the deposit view show
+  // "seen in mempool — dealing…" the instant a tx lands, instead of waiting ~75s for a block.
+  const [pendingA, setPendingA] = createSignal(0)
+  const [pendingB, setPendingB] = createSignal(0)
   const [depositReady, setDepositReady] = createSignal(false)
   // set true once the player has triggered a Send-with-zafu — used to warn against double-sending
   // while the tx is still in mempool. cleared when deposit confirms (myReady) or table leaves.
@@ -111,9 +116,25 @@ export default function App() {
   const [escrow, setEscrow] = createSignal('')
   // guard so re-broadcast RoomInfo doesn't spawn a second zafu popup
   let dkgStartedFor = ''
-  // guard so repeated DepositStatus(ready) broadcasts start the staked hand only once
-  let stakedHandStarted = false
+  // guard so repeated DepositStatus(ready) broadcasts start the staked hand only once — and,
+  // CRUCIALLY, so a host RELOAD does not re-fire StartHand and re-deal a real-money hand. A
+  // plain in-memory boolean resets on reload; persist it per room in localStorage so the deal
+  // trigger survives a page refresh. Keyed by room so distinct tables don't collide.
+  const stakedStartKey = () => `poker_staked_started:${currentRoom()}`
+  const stakedHandStarted = () => {
+    try { return !!localStorage.getItem(stakedStartKey()) } catch { return false }
+  }
+  const markStakedHandStarted = () => {
+    try { localStorage.setItem(stakedStartKey(), '1') } catch {}
+  }
   const [pendingRules, setPendingRules] = createSignal<{ buyin: number; smallBlind: number; bigBlind: number; turnTimeout: number; fromSelf: boolean } | null>(null)
+  // both players have agreed on the stakes/rules — drives the "agree on stakes" step
+  const [rulesAgreed, setRulesAgreed] = createSignal(false)
+  // set when we've sat with an opponent present but the hand still hasn't started after a
+  // grace period — the handshake likely dropped or the opponent walked away. Drives a clear
+  // escape so nobody is ever *permanently* stuck on "waiting for opponent to confirm".
+  const [handshakeStuck, setHandshakeStuck] = createSignal(false)
+  const [showSettings, setShowSettings] = createSignal(false)
   const [oppDisconnected, setOppDisconnected] = createSignal(false)
   const [reconnectCountdown, setReconnectCountdown] = createSignal(0)
   // tracked so OpponentReconnected / Seated / OpponentLeft can clear the running tick
@@ -144,6 +165,8 @@ export default function App() {
   }
 
   const opp = () => mySeat() === 0 ? 1 : 0
+  // an opponent is seated (oppName is reset to the em-dash placeholder when empty/left)
+  const oppHere = () => oppName() !== '—'
   const myStack = () => stacks()[mySeat()] ?? 0
   const oppStack = () => stacks()[opp()] ?? 0
   const myBet = () => bets()[mySeat()] ?? 0
@@ -210,6 +233,7 @@ export default function App() {
         break
       case 'RulesAccepted':
         setPendingRules(null)
+        setRulesAgreed(true)
         log('rules accepted', 'c-green')
         break
       case 'OpponentLeft':
@@ -217,7 +241,12 @@ export default function App() {
         setOppDisconnected(false)
         setReconnectCountdown(0)
         setOppName('\u2014')
+        setRulesAgreed(false)
+        setPendingRules(null)
         setActions([])
+        // close the P2P media channel + stop our own cam/mic \u2014 the peer is gone for good, so
+        // the RTCPeerConnection is dead and leaving the camera light on is a privacy footgun.
+        media()?.cleanup()
         setView('waiting')
         log('opponent left')
         break
@@ -229,7 +258,18 @@ export default function App() {
         log(`opponent disconnected (${msg.reconnect_secs}s to reconnect)`, 'c-red')
         reconnectInterval = setInterval(() => {
           setReconnectCountdown(c => {
-            if (c <= 1) { clearReconnectInterval(); return 0 }
+            if (c <= 1) {
+              clearReconnectInterval()
+              // Safety net: the server normally broadcasts OpponentLeft when the reconnect
+              // window expires, which tears the table down. But if that frame is dropped we'd
+              // sit on a frozen "0s" table forever. Give it a short grace, then if the opponent
+              // still hasn't returned, locally treat them as gone (reuses the OpponentLeft path,
+              // which also closes the media channel).
+              setTimeout(() => {
+                if (oppDisconnected()) onMsg({ type: 'OpponentLeft', seat: opp() })
+              }, 5000)
+              return 0
+            }
             return c - 1
           })
         }, 1000)
@@ -399,9 +439,14 @@ export default function App() {
         if (msg.escrow && msg.escrow.length > 5) {
           setEscrow(msg.escrow)
         }
-        // a server RoomInfo carrying FROST DKG coords (or a real escrow UA) is authoritative
-        // proof this is a real-money table — mark staked so hand-start gates on deposits.
-        if ((msg.frost_relay_url && msg.frost_room_code) || (msg.escrow && msg.escrow.length > 5)) {
+        // Real-money detection. The server now sends an explicit `staked` boolean on RoomInfo
+        // (true ONLY for real-money tables) — trust it verbatim when present. When it's absent
+        // (older relay), fall back to the FROST-coords / real-escrow-UA heuristic. The `u1mock…`
+        // free-play mock escrow (>5 chars, from negotiate.ts) is excluded from the fallback so a
+        // FREE table can't get flipped into the staked "deposit to vault" flow.
+        if (typeof msg.staked === 'boolean') {
+          setStaked(msg.staked)
+        } else if ((msg.frost_relay_url && msg.frost_room_code) || (msg.escrow && msg.escrow.length > 5 && !msg.escrow.startsWith('u1mock'))) {
           setStaked(true)
         }
         if (msg.required_deposit) setRequiredDeposit(msg.required_deposit)
@@ -445,9 +490,17 @@ export default function App() {
               send({ type: 'DkgComplete', escrow_ua: res.address, orchard_fvk: res.orchardFvk })
             } else {
               log(`multisig setup failed: ${res.error}`, 'c-red')
+              // report to the escrow journal — the server/escrow can't otherwise see
+              // that THIS client's DKG ceremony failed. lets operators triage a stuck room.
+              send({ type: 'EscrowFault', phase: 'dkg', detail: `multisig setup failed: ${res.error ?? 'unknown'}` })
               localStorage.removeItem(dkgFiredKey)
               dkgStartedFor = ''
             }
+          }).catch(err => {
+            log(`multisig setup error: ${err}`, 'c-red')
+            send({ type: 'EscrowFault', phase: 'dkg', detail: `multisig setup threw: ${err}` })
+            localStorage.removeItem(dkgFiredKey)
+            dkgStartedFor = ''
           })
         } else if (dkgAlreadyFired && (!msg.escrow || msg.escrow.length === 0)) {
           dkgStartedFor = msg.code
@@ -461,6 +514,8 @@ export default function App() {
         if (msg.escrow_address) setEscrow(msg.escrow_address)
         setDepositA(msg.player_a_deposit)
         setDepositB(msg.player_b_deposit)
+        setPendingA(msg.player_a_pending ?? 0)
+        setPendingB(msg.player_b_pending ?? 0)
         setRequiredDeposit(msg.required)
         setDepositReady(msg.ready)
         // once DKG produced seat addresses + deposits still pending, sit users in the deposit
@@ -473,8 +528,8 @@ export default function App() {
         // on-chain. The server sends DepositStatus{ready:true} only when both seats are funded.
         // Host (seat 0) starts the deal exactly once; the guest follows via the P2P deal message.
         // Free-play tables ignore this path — they start immediately via negotiate.onReady.
-        if (staked() && msg.ready && !stakedHandStarted && mySeat() === 0 && v !== 'settlement') {
-          stakedHandStarted = true
+        if (staked() && msg.ready && !stakedHandStarted() && mySeat() === 0 && v !== 'settlement') {
+          markStakedHandStarted()
           log('both deposits confirmed — dealing', 'c-green')
           send({ type: 'StartHand' })
         }
@@ -532,6 +587,7 @@ export default function App() {
         // safely take the user home without auto-rejoining a settled room
         localStorage.removeItem('poker_last_session')
         localStorage.removeItem(`poker_dkg_fired:${roomCode()}`)
+        localStorage.removeItem(`poker_staked_started:${roomCode()}`)
         setLastSession(null)
         // schedule deletion of the multisig vault 24h from now — it's spent + useless
         void requestDeletePokerMultisig({
@@ -546,10 +602,6 @@ export default function App() {
         setView('settlement')
         break
       }
-      case 'DepositStatus':
-        log(`deposits: A=${msg.player_a_deposit} B=${msg.player_b_deposit} ${msg.ready ? '✓ ready' : 'waiting...'}`,
-          msg.ready ? 'c-green' : 'c-zec-yellow')
-        break
       case 'InviteLink':
         setInviteUrl(window.location.origin + msg.url)
         break
@@ -557,9 +609,6 @@ export default function App() {
         setGameStatus(msg.message)
         if (msg.message.includes('verified')) setDeckVerified(true)
         if (msg.phase === 'dealing') setDeckVerified(false) // reset for new hand
-        break
-      case 'Chat':
-        log(`${msg.from}: ${msg.text}`, 'text-cyan-400')
         break
       case 'Error':
         log(`err: ${msg.message}`)
@@ -660,6 +709,14 @@ export default function App() {
         // bot table or server didn't open a settlement → safe to scrub session + bounce
         localStorage.removeItem('poker_last_session')
         localStorage.removeItem(`poker_dkg_fired:${roomCode()}`)
+        localStorage.removeItem(`poker_staked_started:${roomCode()}`)
+        // drop the reconnect seat pin(s) for this room — leaving is intentional, so a future
+        // visit should get a fresh role rather than reclaim this one.
+        const seatPrefix = `poker_seat:${roomCode()}:`
+        for (let i = localStorage.length - 1; i >= 0; i--) {
+          const k = localStorage.key(i)
+          if (k && k.startsWith(seatPrefix)) localStorage.removeItem(k)
+        }
         setLastSession(null)
         history.pushState(null, '', '/')
         setView('casino')
@@ -756,6 +813,142 @@ export default function App() {
     if (logEl) logEl.scrollTop = logEl.scrollHeight
   })
 
+  // Watchdog: if we linger on the waiting screen with an opponent present, the rules
+  // handshake was probably dropped (ws.ts auto-retries for ~20s first). Surface an escape.
+  createEffect(() => {
+    const lingering = view() === 'waiting' && oppHere()
+    setHandshakeStuck(false)
+    if (!lingering) return
+    const t = setTimeout(() => {
+      if (view() === 'waiting' && oppHere()) setHandshakeStuck(true)
+    }, 24000)
+    onCleanup(() => clearTimeout(t))
+  })
+
+  // ── agreement / handshake tracker ────────────────────────────────────────────
+  // Honest, shared view of where the two players are before the deal: joined →
+  // stakes agreed → (if real) escrow funded → deal. Reflects real signals, not a
+  // fake spinner, so both sides always know what they're waiting on.
+  type StepState = 'done' | 'active' | 'pending'
+  // ZEC amount formatter for the tracker (zats → human ZEC)
+  const fmtZecAmt = (zats: number) => {
+    const z = zats / 1e8
+    return (z >= 1 ? z.toFixed(1) : z >= 0.01 ? z.toFixed(2) : z.toFixed(4)).replace(/\.?0+$/, '') + ' ZEC'
+  }
+  // best available buy-in (zats): live escrow figure, else the tier we chose, else the pot rules
+  const buyinZat = () => depositBuyinZat() || selectedTable()?.buyin || 0
+  function agreementSteps(): { label: string; sub?: string; state: StepState }[] {
+    const steps: { label: string; sub?: string; state: StepState }[] = []
+    steps.push({ label: 'Table created', state: 'done' })
+    steps.push({
+      label: oppHere() ? `${oppName()} joined` : 'Waiting for opponent',
+      sub: oppHere() ? undefined : 'share the invite link below',
+      state: oppHere() ? 'done' : 'active',
+    })
+    if (staked()) {
+      // escrow setup beginning (addresses issued / deposit view) implies stakes settled,
+      // so the step never hangs even if the flow skips an explicit rules round-trip.
+      const stakesDone = rulesAgreed() || seatAddresses().some(a => a) || view() === 'deposit'
+      const buyinLabel = buyinZat() ? `${fmtZecAmt(buyinZat())} buy-in` : 'the buy-in'
+      steps.push({
+        label: 'Agree on stakes',
+        sub: pendingRules() && !pendingRules()!.fromSelf
+          ? `${buyinLabel} — needs your OK`
+          : stakesDone ? buyinLabel
+          : `${buyinLabel} — both players confirm`,
+        state: !oppHere() ? 'pending' : stakesDone ? 'done' : 'active',
+      })
+      const req = requiredDeposit()
+      const myDep = mySeat() === 0 ? depositA() : depositB()
+      const oppDep = mySeat() === 0 ? depositB() : depositA()
+      const bothFunded = req > 0 && myDep >= req && oppDep >= req
+      steps.push({
+        label: 'Fund escrow',
+        sub: req > 0
+          ? `you ${myDep >= req ? '✓ funded' : '… pending'} · opponent ${oppDep >= req ? '✓ funded' : '… pending'}`
+          : 'each player deposits their buy-in to the 2-of-3 vault',
+        state: !stakesDone ? 'pending' : bothFunded ? 'done' : 'active',
+      })
+      steps.push({ label: 'Deal', state: bothFunded ? 'active' : 'pending' })
+    } else {
+      steps.push({ label: 'Free play — nothing at stake', state: oppHere() ? 'done' : 'pending' })
+      steps.push({ label: 'Deal', state: oppHere() ? 'active' : 'pending' })
+    }
+    return steps
+  }
+
+  const AgreementTracker = () => (
+    <div class="mx-auto max-w-sm text-left mb-5">
+      <div class="flex items-center justify-between mb-2">
+        <span class="text-neutral-500 text-10px uppercase tracking-wider">agreement</span>
+        <span class={`text-10px uppercase tracking-wider ${staked() ? 'text-zec-yellow' : 'text-neutral-500'}`}>
+          {staked() ? `real ZEC${buyinZat() ? ` · ${fmtZecAmt(buyinZat())}` : ''}` : 'free play'}
+        </span>
+      </div>
+      <div class="flex flex-col">
+        <For each={agreementSteps()}>
+          {(s, i) => (
+            <div class="flex items-start gap-2.5 py-1">
+              <div class="flex flex-col items-center self-stretch">
+                <div class={`w-4 h-4 rounded-full flex items-center justify-center shrink-0 text-9px ${
+                  s.state === 'done' ? 'bg-green-500 text-black'
+                  : s.state === 'active' ? 'border-2 border-zec-yellow text-zec-yellow animate-pulse'
+                  : 'border border-white/15 text-transparent'
+                }`}>{s.state === 'done' ? '✓' : '•'}</div>
+                <Show when={i() < agreementSteps().length - 1}>
+                  <div class={`w-px flex-1 min-h-3 ${s.state === 'done' ? 'bg-green-500/40' : 'bg-white/10'}`} />
+                </Show>
+              </div>
+              <div class="pb-1">
+                <div class={`text-12px leading-tight ${
+                  s.state === 'done' ? 'text-white/80' : s.state === 'active' ? 'text-zec-yellow' : 'text-neutral-600'
+                }`}>{s.label}</div>
+                <Show when={s.sub}>
+                  <div class="text-10px text-neutral-500 leading-tight mt-0.5">{s.sub}</div>
+                </Show>
+              </div>
+            </div>
+          )}
+        </For>
+      </div>
+    </div>
+  )
+
+  // Compact table chat for the pre-game states (waiting / deposit). Same P2P chat pipe as
+  // the in-hand sidebar — social from the moment both players are seated, not just mid-hand.
+  let preChatEl: HTMLDivElement | undefined
+  createEffect(() => { logs(); if (preChatEl) preChatEl.scrollTop = preChatEl.scrollHeight })
+  const TableChat = () => (
+    <div class="mx-auto max-w-sm mt-5 border border-white/10 rounded-lg overflow-hidden text-left">
+      <div class="px-2.5 py-1 bg-neutral-900/50 border-b border-white/10 text-10px text-neutral-400 uppercase tracking-wider">
+        chat with {oppName()}
+      </div>
+      <div ref={el => (preChatEl = el)} class="h-24 overflow-y-auto px-2 py-1 font-mono text-10px bg-zec-surface/50 leading-relaxed">
+        <For each={logs().slice(-40)}>
+          {l => <div class={`text-neutral-600 ${l.cls}`}>{l.text}</div>}
+        </For>
+      </div>
+      <div class="flex gap-1 px-2 py-1 flex-wrap border-t border-white/10">
+        {['hi', 'nh', 'gg', 'gl', 'wow', '...'].map(r =>
+          <button class="text-10px px-1.5 py-0.5 rounded border border-white/10 text-neutral-600 hover:text-zec-yellow hover:border-zec-yellow/40"
+            onClick={() => { send({ type: 'Chat', text: r }); log(`you: ${r}`, 'text-white') }}>{r}</button>
+        )}
+      </div>
+      <form class="flex border-t border-white/10" onSubmit={(e) => {
+        e.preventDefault()
+        const input = e.currentTarget.querySelector('input') as HTMLInputElement
+        const msg = input.value.trim()
+        if (!msg) return
+        input.value = ''
+        send({ type: 'Chat', text: msg })
+        log(`you: ${msg}`, 'text-white')
+      }}>
+        <input class="flex-1 bg-transparent text-11px px-2 py-1.5 text-white outline-none placeholder-neutral-700" placeholder="say something…" maxLength={200} />
+        <button type="submit" class="text-10px px-2 text-neutral-600 hover:text-neutral-400">↵</button>
+      </form>
+    </div>
+  )
+
   return (
     <div class="h-[100dvh] flex flex-col bg-zec-dark font-sans text-white">
           {/* titlebar \u2014 full-width top bar */}
@@ -772,7 +965,16 @@ export default function App() {
               </span>
             </Show>
             <span class={`w-2 h-2 rounded-full ${connected() ? 'bg-green-500' : 'bg-neutral-600'}`} />
+            <button
+              class="ml-2 text-11px text-neutral-500 hover:text-zec-yellow leading-none"
+              title="relay settings"
+              onClick={() => setShowSettings(true)}
+            >{'⚙'}</button>
           </div>
+
+          <Show when={showSettings()}>
+            <Settings connected={connected()} onClose={() => setShowSettings(false)} />
+          </Show>
 
           {/* main content — fills the viewport, centers non-game views */}
           <div class="flex-1 min-h-0 overflow-y-auto flex flex-col">
@@ -884,11 +1086,16 @@ export default function App() {
                 title="leave table — settles escrow and pays out"
               >leave</button>
               <div class="text-zec-yellow text-11px uppercase tracking-2px mb-4">
-                waiting for players
+                {oppHere() ? 'getting ready' : 'waiting for players'}
               </div>
 
+              {/* agreement / handshake tracker — where the two players are before the deal */}
+              <AgreementTracker />
+
               {/* invite — a shareable link is ALWAYS available (it's just this room's URL);
-                  contacts is an optional extra when the wallet exposes a picker */}
+                  contacts is an optional extra when the wallet exposes a picker.
+                  Only show while we still need an opponent. */}
+              <Show when={!oppHere()}>
               {(() => {
                 const link = () => inviteUrl() || `${location.origin}/${roomCode() || currentRoom()}`
                 const copy = () => { navigator.clipboard?.writeText(link()); log('copied invite link', 'c-green') }
@@ -925,23 +1132,48 @@ export default function App() {
                   </div>
                 )
               })()}
+              </Show>
+
+              {/* stake agreement action — accept the opponent's proposed stakes.
+                  This is the live action for the "agree on stakes" step above. */}
               <Show when={pendingRules() && !pendingRules()?.fromSelf}>
-                <div class="mt-4 p-4 border border-white/15 rounded">
-                  <div class="text-neutral-400 text-10px uppercase tracking-wider mb-2">opponent proposes</div>
+                <div class="mt-1 p-4 border border-zec-yellow/30 bg-zec-yellow/5 rounded max-w-sm mx-auto">
+                  <div class="text-neutral-400 text-10px uppercase tracking-wider mb-2">opponent proposes stakes</div>
                   <div class="text-white text-12px font-mono mb-3">
                     {pendingRules()!.smallBlind}/{pendingRules()!.bigBlind} blinds · {pendingRules()!.buyin} buyin
                   </div>
                   <button class="btn btn-primary text-11px px-6" onClick={() => send({ type: 'AcceptRules' })}>
-                    accept
+                    accept stakes
                   </button>
                 </div>
               </Show>
-              <Show when={!pendingRules()}>
-                <div class="flex items-end justify-center gap-1 h-6">
-                  <For each={[0,.07,.14,.21,.28,.35]}>
-                    {d => <div class="w-1 rounded-sm bg-zec-yellow animate-pulse" style={`animation-delay:${d}s; height: 60%`} />}
-                  </For>
+              <Show when={pendingRules()?.fromSelf}>
+                <div class="text-neutral-500 text-11px max-w-sm mx-auto">
+                  waiting for opponent to accept your stakes…
                 </div>
+              </Show>
+
+              {/* stuck-state escape — the handshake auto-retries first (ws.ts); if we're still
+                  here after the grace period the opponent likely dropped or walked away. Never
+                  leave anyone permanently stuck: offer a clear, safe way out (no funds are in
+                  escrow yet at this stage). */}
+              <Show when={handshakeStuck()}>
+                <div class="mt-4 p-3 border border-red-500/40 bg-red-500/5 rounded max-w-sm mx-auto text-left">
+                  <div class="text-red-300 text-12px font-semibold mb-1">taking longer than expected</div>
+                  <div class="text-neutral-400 text-11px leading-snug mb-3">
+                    your opponent hasn't confirmed — they may have stepped away or lost connection.
+                    nothing is at stake yet.
+                  </div>
+                  <div class="flex gap-2">
+                    <button class="btn btn-primary text-11px px-4 py-1.5" onClick={leaveTable}>return to lobby</button>
+                    <button class="btn text-11px px-4 py-1.5" onClick={() => setHandshakeStuck(false)}>keep waiting</button>
+                  </div>
+                </div>
+              </Show>
+
+              {/* once both are seated, let them talk while the table sets up */}
+              <Show when={oppHere()}>
+                <TableChat />
               </Show>
             </div>
           </Show>
@@ -957,6 +1189,9 @@ export default function App() {
               <div class="text-zec-yellow text-11px uppercase tracking-2px mb-1 text-center">deposit to play</div>
               <div class="text-neutral-500 text-11px text-center mb-4">2-of-3 multisig escrow (you + opp + house)</div>
 
+              {/* same agreement tracker as the waiting screen — continuity through the handshake */}
+              <AgreementTracker />
+
               {(() => {
                 const seat = mySeat()
                 const myAddr = seatAddresses()[seat] ?? null
@@ -965,6 +1200,12 @@ export default function App() {
                 const req = requiredDeposit()
                 const myReady = myDep >= req
                 const oppReady = oppDep >= req
+                // 0-conf: tx visible in the mempool but not yet mined. Deal already starts on
+                // this (server gate = confirmed+pending); show it so the ~75s block wait feels instant.
+                const myPend = seat === 0 ? pendingA() : pendingB()
+                const oppPend = seat === 0 ? pendingB() : pendingA()
+                const mySeen = !myReady && (myDep + myPend) >= req
+                const oppSeen = !oppReady && (oppDep + oppPend) >= req
                 const reqZec = (req / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')
                 const myZec = (myDep / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')
                 const oppZec = (oppDep / 1e8).toFixed(8).replace(/0+$/, '').replace(/\.$/, '')
@@ -1006,10 +1247,13 @@ export default function App() {
                         <div class="mt-1 text-neutral-600 text-11px">refunds and winnings land here. paste your zafu / wallet orchard UA.</div>
                       </div>
                       <button
-                        class="mt-3 w-full btn btn-secondary text-10px disabled:opacity-40 disabled:cursor-not-allowed"
-                        disabled={!payoutOverride()}
+                        class="mt-3 w-full btn btn-primary text-12px py-2.5 disabled:opacity-40 disabled:cursor-not-allowed"
+                        disabled={!payoutOverride() || (sendTriggered() && !myReady)}
                         onClick={() => {
                           try {
+                            // FUND-SAFETY: never dispatch a second send while the first is still
+                            // unconfirmed — a repeat click would over-deposit real ZEC.
+                            if (sendTriggered() && !myReady) { log('deposit already sent — waiting for confirmation', 'c-zec-yellow'); return }
                             const addr = payoutOverride()
                             if (!addr) { log('paste a payout address first', 'c-red'); return }
                             const providers = (window as any)[Symbol.for('penumbra')]
@@ -1028,9 +1272,43 @@ export default function App() {
                               memo,
                             }, () => {})
                             setSendTriggered(true)
+                            // deposit-fault detector: a deposit confirms in ~1-2 blocks (~75s).
+                            // if it's still uncredited after 4 min, the scan may have missed it
+                            // (wrong address, missing memo, scanner lag) — exactly the failure
+                            // that stranded the earlier test deposit. Report it to the escrow
+                            // journal so it surfaces instead of silently hanging.
+                            setTimeout(() => {
+                              const dep = seat === 0 ? depositA() : depositB()
+                              if (dep < requiredDeposit()) {
+                                send({ type: 'EscrowFault', phase: 'deposit', detail: `deposit not credited after 4m: sent ${req} zat to ${myAddr}` })
+                                log('deposit not detected yet — flagged to escrow for review', 'c-zec-yellow')
+                              }
+                            }, 240000)
                           } catch (e: any) { log(`zafu send failed: ${e?.message ?? e}`, 'c-red') }
                         }}
-                      >Send with zafu</button>
+                      >{sendTriggered() && !myReady ? 'Deposit sent — confirming…' : `Send ${reqZec} ZEC with zafu`}</button>
+                      <Show when={!payoutOverride()}>
+                        <div class="mt-1.5 text-zec-yellow/70 text-11px text-center">enter your payout address above to continue</div>
+                      </Show>
+                      {/* need ZEC? point at the exchanges that list it */}
+                      <div class="mt-3 pt-3 border-t border-white/10">
+                        <div class="text-neutral-500 text-11px mb-1.5">need ZEC? buy it and send to your wallet:</div>
+                        <div class="flex flex-wrap gap-1.5">
+                          {[
+                            ['Binance', 'https://www.binance.com/en/trade/ZEC_USDT'],
+                            ['Kraken', 'https://www.kraken.com/prices/zcash'],
+                            ['Coinbase', 'https://www.coinbase.com/price/zcash'],
+                            ['Hyperliquid', 'https://app.hyperliquid.xyz/trade/ZEC'],
+                            ['NEAR Intents', 'https://near-intents.org/'],
+                          ].map(([label, url]) => (
+                            <a href={url} target="_blank" rel="noopener"
+                              class="text-11px px-2 py-1 rounded bg-zec-surface border border-white/10 text-zec-text hover:border-zec-yellow/50 no-underline">{label}</a>
+                          ))}
+                        </div>
+                        <div class="mt-1.5 text-neutral-600 text-11px leading-relaxed">
+                          exchanges send transparent <span class="font-mono">t1…</span> ZEC — tap <span class="text-white/60">shield</span> in zafu once to get your private <span class="font-mono">u1…</span> address.
+                        </div>
+                      </div>
                       <div class="mt-2 text-neutral-600 text-11px leading-relaxed">
                         sending from an external wallet? attach memo:{' '}
                         <span class="font-mono text-neutral-500">zk.poker/v1/payout:&lt;your-u1-address&gt;</span>
@@ -1045,8 +1323,12 @@ export default function App() {
                         <span class={myReady ? 'c-green' : 'c-zec-yellow'}>{myZec}</span>
                         <span class="text-neutral-600"> / {reqZec} ZEC</span>
                       </div>
-                      <div class={`text-11px mt-1 flex items-center gap-1 ${myReady ? 'c-green' : 'text-neutral-500'}`}>
-                        <Show when={myReady} fallback={<><div class="i-lucide-loader-2 animate-spin h-3 w-3" /><span>waiting for tx in block</span></>}>
+                      <div class={`text-11px mt-1 flex items-center gap-1 ${myReady ? 'c-green' : mySeen ? 'c-zec-yellow' : 'text-neutral-500'}`}>
+                        <Show when={myReady} fallback={
+                          <Show when={mySeen} fallback={<><div class="i-lucide-loader-2 animate-spin h-3 w-3" /><span>waiting for tx in block</span></>}>
+                            <div class="i-lucide-loader-2 animate-spin h-3 w-3" /><span>seen in mempool — dealing…</span>
+                          </Show>
+                        }>
                           <span>✓ deposited</span>
                         </Show>
                       </div>
@@ -1057,8 +1339,12 @@ export default function App() {
                         <span class={oppReady ? 'c-green' : 'c-zec-yellow'}>{oppZec}</span>
                         <span class="text-neutral-600"> / {reqZec} ZEC</span>
                       </div>
-                      <div class={`text-11px mt-1 flex items-center gap-1 ${oppReady ? 'c-green' : 'text-neutral-500'}`}>
-                        <Show when={oppReady} fallback={<><div class="i-lucide-loader-2 animate-spin h-3 w-3" /><span>waiting for tx in block</span></>}>
+                      <div class={`text-11px mt-1 flex items-center gap-1 ${oppReady ? 'c-green' : oppSeen ? 'c-zec-yellow' : 'text-neutral-500'}`}>
+                        <Show when={oppReady} fallback={
+                          <Show when={oppSeen} fallback={<><div class="i-lucide-loader-2 animate-spin h-3 w-3" /><span>waiting for tx in block</span></>}>
+                            <div class="i-lucide-loader-2 animate-spin h-3 w-3" /><span>seen in mempool — dealing…</span>
+                          </Show>
+                        }>
                           <span>✓ deposited</span>
                         </Show>
                       </div>
@@ -1075,6 +1361,9 @@ export default function App() {
                   </div>
                 </>
               })()}
+              <Show when={oppHere()}>
+                <TableChat />
+              </Show>
             </div>
           </Show>
 
@@ -1374,6 +1663,13 @@ export default function App() {
                     onClick={() => requestMedia('cam')}
                     title="Video chat connects you directly to your opponent and reveals your IP address."
                   >{media()?.camEnabled() ? 'cam on' : 'cam'}</button>
+                  <Show when={media()?.camEnabled()}>
+                    <button
+                      class={`text-11px px-2 py-0.5 rounded border ${media()?.blurMode() !== 'off' ? 'border-green-500 text-green-400' : 'border-white/15 text-neutral-600 hover:text-neutral-400'}`}
+                      onClick={() => media()?.setBlurMode(media()?.blurMode() === 'off' ? 'blur' : 'off')}
+                      title="Blur your webcam background (processed locally, only the blurred video is sent to your opponent)."
+                    >{media()?.blurUnavailable() ? 'blur n/a' : media()?.blurMode() === 'blur' ? 'blur on' : 'blur'}</button>
+                  </Show>
                   <Show when={media()?.acknowledged()}>
                     <button
                       class="text-11px px-2 py-0.5 rounded border border-white/15 text-neutral-600 hover:text-red-400 hover:border-red-500/50"
@@ -1390,7 +1686,7 @@ export default function App() {
                       autoplay playsinline
                       title="Click to enlarge / shrink"
                       onClick={() => toggleEnlarge('remote')}
-                      ref={(el: HTMLVideoElement) => { el.srcObject = media()!.remoteStream() }}
+                      prop:srcObject={media()?.remoteStream() ?? null}
                     />
                   </Show>
                   <Show when={media()?.localStream() && media()?.camEnabled()}>
@@ -1399,7 +1695,7 @@ export default function App() {
                       autoplay playsinline muted
                       title="Click to enlarge / shrink"
                       onClick={() => toggleEnlarge('local')}
-                      ref={(el: HTMLVideoElement) => { el.srcObject = media()!.localStream() }}
+                      prop:srcObject={media()?.localStream() ?? null}
                     />
                   </Show>
                 </div>

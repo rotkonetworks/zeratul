@@ -34,6 +34,7 @@
 
 import { createSignal } from 'solid-js'
 import type { WireMessage } from './transport'
+import { createVideoBlur, type BlurMode } from './video-blur'
 
 export interface MediaState {
   localStream: () => MediaStream | null
@@ -55,6 +56,21 @@ export interface MediaState {
   incomingPending: () => boolean
   /** dismiss the incoming-media prompt without opting in (stays disconnected) */
   dismissIncoming: () => void
+  /**
+   * Background-processing mode for the OUTGOING webcam ('off' | 'blur' | 'image').
+   * Applied via RTCRtpSender.replaceTrack — no renegotiation. Ignored when the cam
+   * is off; re-applied when the cam is (re)enabled.
+   */
+  blurMode: () => BlurMode
+  /**
+   * Change the outgoing-webcam background mode. Falls back to the raw stream (and
+   * flips blurUnavailable) if the segmentation model can't initialise.
+   */
+  setBlurMode: (m: BlurMode) => Promise<void>
+  /** provide a background image for 'image' mode (same-origin / object URL). */
+  setBlurImage: (img: HTMLImageElement | ImageBitmap | null) => void
+  /** true if blur was requested but the model failed to init (sending raw). */
+  blurUnavailable: () => boolean
   toggleMic: () => Promise<void>
   toggleCam: () => Promise<void>
   handleSignal: (msg: WireMessage) => void
@@ -81,9 +97,18 @@ export function createMedia(
   // touch it (no PC, no ICE, no IP leak) — we only raise this flag so the UI can
   // surface a consent prompt. The peer's repeated offers just re-arm the flag.
   const [incomingPending, setIncomingPending] = createSignal(false)
+  // Outgoing webcam background processing (blur / image). See video-blur.ts.
+  const [blurMode, setBlurMode] = createSignal<BlurMode>('off')
+  const [blurUnavailable, setBlurUnavailable] = createSignal(false)
 
   let pc: RTCPeerConnection | null = null
   let makingOffer = false
+  // The pipeline that turns the raw camera track into a blurred/image one.
+  const blur = createVideoBlur()
+  // The UNPROCESSED camera track. `localStream` (what the <video> preview + the
+  // RTCRtpSender hold) may carry the PROCESSED track instead; we keep the raw one
+  // here so we can revert to it, restart processing, or stop it on teardown.
+  let rawCamTrack: MediaStreamTrack | null = null
 
   function ensurePeerConnection() {
     if (pc) return pc
@@ -98,13 +123,20 @@ export function createMedia(
 
     pc.ontrack = (e) => {
       console.log('[media] remote track:', e.track.kind)
-      if (e.streams[0]) {
-        setRemoteStream(e.streams[0])
-      } else {
-        const stream = remoteStream() || new MediaStream()
-        stream.addTrack(e.track)
-        setRemoteStream(stream)
+      // Rebuild the remote stream from ALL current receiver tracks. When a track
+      // is added by a later renegotiation (e.g. video turned on after an
+      // audio-only call is already up), the browser fires ontrack with the SAME
+      // MediaStream object in e.streams[0] it used for the earlier audio track.
+      // Reusing that reference makes setRemoteStream a no-op for the `===` signal,
+      // so the bound <video> never re-attaches and the new video track is never
+      // painted (the classic "mic works, cam never shows" bug). Building a fresh
+      // MediaStream every time yields a new reference → the signal fires → the
+      // <video> element re-binds srcObject and renders audio + video together.
+      const stream = new MediaStream()
+      for (const r of pc!.getReceivers()) {
+        if (r.track) stream.addTrack(r.track)
       }
+      setRemoteStream(stream)
     }
 
     pc.onconnectionstatechange = () => {
@@ -162,6 +194,55 @@ export function createMedia(
     }
   }
 
+  // The RTCRtpSender currently carrying video (if any).
+  function videoSender(): RTCRtpSender | null {
+    return pc?.getSenders().find(s => s.track?.kind === 'video') ?? null
+  }
+
+  // Swap the video track the PEER receives WITHOUT renegotiation, and swap the
+  // same track into localStream so the local <video> preview mirrors what we send.
+  async function swapVideoTrack(next: MediaStreamTrack) {
+    const sender = videoSender()
+    if (sender && sender.track?.id !== next.id) {
+      try { await sender.replaceTrack(next) } catch (e) { console.warn('[media] replaceTrack failed:', e) }
+    }
+    const stream = localStream()
+    if (stream) {
+      const cur = stream.getVideoTracks()[0]
+      if (cur && cur.id !== next.id) {
+        stream.removeTrack(cur)
+        stream.addTrack(next)
+        // Re-emit a fresh MediaStream reference so the bound <video> re-binds.
+        setLocalStream(stream)
+      }
+    }
+  }
+
+  // Apply the requested blur mode to the outgoing webcam. Safe to call when the
+  // cam is off (no-op) or when the model is unavailable (reverts to raw + flag).
+  async function applyBlurMode(mode: BlurMode) {
+    setBlurMode(mode)
+    setBlurUnavailable(false)
+    // No camera running: remember the choice; it's applied when the cam is on.
+    if (!camEnabled() || !rawCamTrack) return
+
+    if (mode === 'off') {
+      await blur.setMode('off')
+      await swapVideoTrack(rawCamTrack)
+      return
+    }
+    try {
+      await blur.setMode(mode, rawCamTrack)
+      const out = blur.outputTrack()
+      if (out) await swapVideoTrack(out)
+      else throw new Error('no processed track')
+    } catch {
+      // Model failed to init / too weak: keep sending the RAW track, surface flag.
+      setBlurUnavailable(true)
+      await swapVideoTrack(rawCamTrack)
+    }
+  }
+
   async function toggleMic() {
     // Consent gate: refuse to touch the mic / create a peer connection until the
     // user has acknowledged the IP-exposure tradeoff. The UI must call
@@ -197,14 +278,22 @@ export function createMedia(
       // disable camera
       const stream = localStream()
       stream?.getVideoTracks().forEach(t => { t.enabled = false })
+      // Stop the blur pipeline (the raw track stays live but disabled).
+      blur.setMode('off').catch(() => {})
       setCamEnabled(false)
     } else {
       // enable camera
       try {
         const stream = await getLocalMedia(micEnabled(), true)
+        // The raw camera track from getUserMedia. This is what we blur; it is also
+        // what lands in the PC sender initially (before any blur is applied).
+        rawCamTrack = stream.getVideoTracks()[0] ?? null
+        if (rawCamTrack) rawCamTrack.enabled = true
         addTracksToPC(stream)
-        stream.getVideoTracks().forEach(t => { t.enabled = true })
         setCamEnabled(true)
+        // If the user had already picked a blur mode, apply it now. This does the
+        // replaceTrack swap so the peer receives the processed track from the off.
+        if (blurMode() !== 'off') await applyBlurMode(blurMode())
       } catch (e) {
         console.warn('[media] camera access denied:', e)
       }
@@ -261,6 +350,11 @@ export function createMedia(
   // Fully stop media and close the peer connection, without touching the
   // consent flag. Shared by revoke() and cleanup().
   function teardown() {
+    // Stop the blur pipeline + its canvas-capture track, and the raw camera track
+    // (which may have been swapped out of localStream and so is not stopped below).
+    blur.stop()
+    rawCamTrack?.stop()
+    rawCamTrack = null
     localStream()?.getTracks().forEach(t => t.stop())
     setLocalStream(null)
     setRemoteStream(null)
@@ -270,6 +364,7 @@ export function createMedia(
     setMicEnabled(false)
     setCamEnabled(false)
     setConnected(false)
+    setBlurUnavailable(false)
   }
 
   function acknowledge() {
@@ -310,6 +405,10 @@ export function createMedia(
     revoke,
     incomingPending,
     dismissIncoming,
+    blurMode,
+    setBlurMode: applyBlurMode,
+    setBlurImage: (img) => blur.setBackgroundImage(img),
+    blurUnavailable,
     toggleMic,
     toggleCam,
     handleSignal,

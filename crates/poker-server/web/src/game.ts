@@ -280,10 +280,20 @@ export function createGame(
 
   let lastStacks: [number, number] = [0, 0]
   let handGeneration = 0 // increments each hand, stale prompts from previous hands are ignored
+  // reconnect-resync dedup: a duplicate/re-delivered `seated` must NOT re-run the resync (it
+  // nulls engineApi + re-schedules beginDeal → double-deal + desync). Track the handNum we last
+  // resynced at and suppress a repeat within a short in-flight window.
+  let lastResyncHandNum = -1
+  let resyncInFlight = false
 
   function handComplete() {
     clearTurnTimer()
     clearOppTimer()
+    // stop any ceremony/readiness retry loops still firing for the hand just finished so they
+    // don't leak or bleed into the next hand (beginDeal→shuffle.reset() also clears shuffle's,
+    // but a folded/settled hand may not deal again).
+    shuffle.cleanup()
+    negotiation.cleanup()
     // check if someone is busted using the last known stacks
     // (not engine stacks — guest engine doesn't call showdown)
     const [s0, s1] = lastStacks
@@ -587,8 +597,8 @@ export function createGame(
     switch (msg.t) {
       case 'seated': {
         const d = msg.d as any
-        const oppName = typeof d === 'string' ? d : d.name
-        const oppMode = typeof d === 'object' ? d.mode : 'anon'
+        const oppName = (typeof d === 'string' ? d : d?.name) || 'anon'
+        const oppMode = (typeof d === 'object' ? d?.mode : undefined) || 'anon'
         cb.onMsg({ type: 'OpponentJoined', seat: oppSeat, name: `${oppName} (${oppMode})` })
         if (isHost) negotiation.proposeRules(negotiation.rules())
         // Bidirectional reconnect resync (free play). A peer that (re)announces `seated` AFTER
@@ -602,13 +612,25 @@ export function createGame(
         // tables are excluded — a mid-hand reconnect there must be resolved against the escrow/
         // server hand-state authority, not silently re-dealt with real money committed.
         if (handNum > 0 && !staked) {
+          // dedup: ignore a repeat `seated` for a resync we already drove (or one in flight).
+          // Without this a duplicate/re-delivered frame nulls engineApi + re-schedules beginDeal
+          // → the host double-deals and the two sides desync.
+          if (resyncInFlight || lastResyncHandNum === handNum) {
+            cb.onLog('duplicate seated ignored (resync already in progress)')
+            break
+          }
+          resyncInFlight = true
+          lastResyncHandNum = handNum
           cb.onLog('opponent rejoined — resyncing for a fresh hand')
           clearTurnTimer()
           clearOppTimer()
+          shuffle.cleanup()
+          negotiation.cleanup()
           send({ t: 'resync', d: { handId: shuffle.currentHandId(), rules: negotiation.rules() } })
           engineApi = null
           ensureEngine()
-          if (isHost) setTimeout(() => beginDeal(), 500)
+          if (isHost) setTimeout(() => { resyncInFlight = false; beginDeal() }, 500)
+          else resyncInFlight = false
         }
         break
       }
@@ -622,6 +644,8 @@ export function createGame(
         const rd = msg.d as any
         clearTurnTimer()
         clearOppTimer()
+        shuffle.cleanup()
+        negotiation.cleanup()
         if (typeof rd?.handId === 'number') shuffle.setHandIdBaseline(rd.handId)
         if (rd?.rules && isHost) negotiation.proposeRules(rd.rules)
         engineApi = null
@@ -712,12 +736,12 @@ export function createGame(
 
   function announce() {
     send({ t: 'seated', d: identity ? {
-      name: myName,
+      name: myName || 'anon',
       sessionPub: identity.sessionPubKey,
-      mode: identity.mode,
+      mode: identity.mode || 'anon',
       zafuPub: identity.zafuPubKey,
       delegation: identity.delegation,
-    } : myName })
+    } : (myName || 'anon') })
   }
 
   return {

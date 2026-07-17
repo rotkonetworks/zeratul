@@ -14,6 +14,7 @@
 import { createSignal } from 'solid-js'
 import type { SessionIdentity } from './identity'
 import { signKeyExchange } from './identity'
+import { relayBase } from './config'
 
 /** what we send over the wire (opaque to relay) */
 export interface WireMessage {
@@ -157,9 +158,9 @@ export function createRelayTransport(
   }
 
   function doConnect(room: string) {
-    const proto = location.protocol === 'https:' ? 'wss:' : 'ws:'
     // `/p2p`, not `/ws`: prod HAProxy routes `/ws*` to a different relay service.
-    const relayUrl = `${proto}//${location.host}/p2p`
+    // relayBase() is the user-selectable relay origin (default: same host that served us).
+    const relayUrl = `${relayBase()}/p2p`
     ws = new WebSocket(relayUrl)
 
     ws.onopen = async () => {
@@ -251,9 +252,13 @@ export function createRelayTransport(
       case 'msg': {
         if (!hasJoined) break
         const text = msg['text'] as string
-        const nick = msg['nick'] as string
         const relayTs = msg['ts'] as number | undefined
-        if (nick === currentNick) break
+        // NOTE: no self-echo suppression here. The relay server forwards a `msg` frame ONLY to
+        // the OTHER peers (it skips the sender's own channel — `same_channel` guard server-side),
+        // so a `msg` we receive is always from the peer. Filtering on `nick === currentNick`
+        // used to silently DROP real peer frames whenever both nicks were empty/equal (two
+        // anon players) — wedging the ceremony. The encrypted-payload path additionally binds
+        // to the peer's session key (peerSessionPub), so identity is enforced cryptographically.
         handlePeerText(text, relayTs)
         break
       }

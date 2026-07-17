@@ -21,6 +21,7 @@
 
 import type { WireMsg } from './service'
 import type { ServerMsg, CardJson } from './types'
+import { repeatUntil } from './negotiate'
 
 const RANKS = ['2','3','4','5','6','7','8','9','T','J','Q','K','A']
 const SUITS = ['s','h','d','c']
@@ -78,6 +79,8 @@ export interface ShuffleApi {
    *  host must deal at a handId ABOVE the still-connected peer's, or the peer's
    *  `isNewHand` check rejects the fresh deal). No-op if `n` is not higher. */
   setHandIdBaseline: (n: number) => void
+  /** cancel any in-flight ceremony retry timers (hand complete / disconnect). */
+  cleanup: () => void
 }
 
 export function createShuffle(
@@ -103,8 +106,32 @@ export function createShuffle(
   let communityRevealed = 0
   let communityCards = [0, 0, 0, 0, 0]
   let handId = 0 // increments each deal to distinguish new hands
+  // idempotency guards so a RE-delivered shuffle_init/shuffle_done (from the ceremony retry
+  // loops below) is processed exactly once — shuffle_and_prove / verify_and_apply are stateful
+  // and must never run twice for the same hand.
+  let shuffleInitDone = false // guest applied host's shuffle_init
+  let shuffleDoneApplied = false // host applied guest's shuffle_done
+  let doneFrame: { deck: any; proof: any } | null = null // guest's shuffle_done, kept for re-send
+
+  // ── ceremony self-heal ────────────────────────────────────
+  // The shuffle/deal frames are fire-and-forget over the lossy blind relay; a single dropped
+  // shuffle_pk / shuffle_init / reveal frame wedges the hand forever. We drive each step with a
+  // cancelable repeatUntil (see negotiate.ts): resend our OWN committed frame — which is always
+  // harmless to re-send — until the local predicate proving the step landed becomes true.
+  // Every retry is registered here and cancelled on reset() (new hand) / cancelRetries().
+  const retries = new Set<() => void>()
+  function track(cancel: () => void) {
+    retries.add(cancel)
+    // wrap so the entry self-removes once its loop stops (predicate met or maxTries hit)
+    return () => { cancel(); retries.delete(cancel) }
+  }
+  function cancelRetries() {
+    for (const c of retries) c()
+    retries.clear()
+  }
 
   function reset() {
+    cancelRetries()
     shuffleKeys = null
     shuffleState = null
     myPkHex = ''
@@ -117,6 +144,9 @@ export function createShuffle(
     oppHoleRevealed = false
     communityRevealed = 0
     communityCards = [0, 0, 0, 0, 0]
+    shuffleInitDone = false
+    shuffleDoneApplied = false
+    doneFrame = null
   }
 
   // own vs opponent hole-card deck positions (heads-up: host=A holds 0,1)
@@ -142,9 +172,14 @@ export function createShuffle(
     handId++
     reset()
     freshKeys()
+    const hand = handId
     cb.onLog('shuffling deck...')
     cb.onMsg({ type: 'Status', phase: 'shuffling', message: 'exchanging keys...' })
-    send({ t: 'shuffle_pk', d: { pk: myPkHex, pop: myPopHex, hand: handId } })
+    // Retry the key frame until the opponent's key arrives (or we moved on to a newer hand).
+    track(repeatUntil(
+      () => send({ t: 'shuffle_pk', d: { pk: myPkHex, pop: myPopHex, hand } }),
+      () => !!oppPkHex || handId !== hand,
+    ))
     maybeContinue()
   }
 
@@ -154,6 +189,9 @@ export function createShuffle(
   }
 
   function hostShuffle() {
+    // run the shuffle exactly once per hand — maybeContinue() re-fires on every shuffle_pk
+    // retry, but shuffle_and_prove is stateful and must not run twice.
+    if (shuffleState) return
     // constructor verifies both proofs of possession — a rogue key throws here
     try {
       shuffleState = new ShuffleStateClass(myPkHex, oppPkHex, myPopHex, oppPopHex)
@@ -165,13 +203,26 @@ export function createShuffle(
     cb.onMsg({ type: 'Status', phase: 'shuffling', message: 'shuffling deck...' })
     const result = JSON.parse(shuffleState.shuffle_and_prove(0))
     cb.onMsg({ type: 'Status', phase: 'shuffling', message: 'proving shuffle...' })
-    send({ t: 'shuffle_init', d: {
+    const initFrame = {
       pk_a: myPkHex, pk_b: oppPkHex, pop_a: myPopHex, pop_b: oppPopHex,
       pre_deck: preDeck, deck: result.deck, proof: result.proof,
-    } })
+    }
+    // Retry shuffle_init until the guest's shuffle_done lands (guest processes it idempotently).
+    track(repeatUntil(
+      () => send({ t: 'shuffle_init', d: initFrame }),
+      () => shuffleDoneApplied,
+    ))
   }
 
   function onShuffleInit(d: any) {
+    // idempotent: the host retries shuffle_init until it gets our shuffle_done. On a repeat we
+    // must NOT re-run the stateful shuffle — but we DO re-send our stored shuffle_done, so a
+    // dropped guest→host shuffle_done self-heals against the host's shuffle_init retry.
+    if (shuffleInitDone) {
+      if (doneFrame) send({ t: 'shuffle_done', d: doneFrame })
+      return
+    }
+    shuffleInitDone = true
     // guest creates state from the INITIAL (pre-shuffle) deck so the
     // transcript matches the host's before proving. the constructor also
     // verifies both proofs of possession and that the initial deck is canonical.
@@ -199,13 +250,17 @@ export function createShuffle(
     cb.onLog('shuffle: guest shuffling...')
     const result = JSON.parse(shuffleState.shuffle_and_prove(1))
     cb.onLog('shuffle: guest done')
-    send({ t: 'shuffle_done', d: { deck: result.deck, proof: result.proof } })
-    sendShares([0, 1, 2, 3])
+    doneFrame = { deck: result.deck, proof: result.proof }
+    send({ t: 'shuffle_done', d: doneFrame })
+    sendHoleShares()
     tryRevealHoleCards()
   }
 
   function onShuffleDone(d: any) {
     if (!shuffleState) return
+    // idempotent: the host applies the guest's shuffle exactly once. The guest may re-send
+    // shuffle_done (its heal path); a second verify_and_apply would corrupt the deck state.
+    if (shuffleDoneApplied) return
     // host verifies guest's shuffle proof (Chaum-Pedersen)
     try {
       const valid = shuffleState.verify_and_apply(d.deck, d.proof)
@@ -219,9 +274,22 @@ export function createShuffle(
       abort(`shuffle verification error: ${e}`)
       return
     }
+    shuffleDoneApplied = true // stops the shuffle_init retry loop
 
-    sendShares([0, 1, 2, 3])
+    sendHoleShares()
     tryRevealHoleCards()
+  }
+
+  /** Release the opponent's hole-card decryption shares (positions 0-3, minus our own —
+   *  see C5 in sendShares) and keep re-sending until WE have dealt (shuffleReady). Both peers
+   *  run this loop: each becomes ready only after receiving the OTHER's retried shares, so the
+   *  two loops converge on mutual readiness and a single dropped reveal frame self-heals.
+   *  Re-sending is idempotent — the peer just re-stores the same share. */
+  function sendHoleShares() {
+    track(repeatUntil(
+      () => sendShares([0, 1, 2, 3]),
+      () => shuffleReady,
+    ))
   }
 
   // ── share exchange ────────────────────────────────────────
@@ -310,19 +378,24 @@ export function createShuffle(
 
   function revealShowdown() {
     if (!shuffleState || !shuffleKeys) return
-    // release the shares we withheld during the hand (C5) for OUR hole
-    // positions, so the opponent can bind our claimed cards to the deck.
-    const shares: Record<number, Share> = {}
-    for (const pos of myHolePositions) {
-      const parsed = parseShare(shuffleKeys.decrypt_share(shuffleState, pos))
-      if (parsed) {
-        myShares.set(pos, parsed)
-        shares[pos] = parsed
+    // release the shares we withheld during the hand (C5) for OUR hole positions, so the
+    // opponent can bind our claimed cards to the deck. Retry until WE have verified THEIR hole
+    // cards (oppHoleRevealed) — both peers run this, so mutual retry converges even if a single
+    // showdown reveal frame drops. Re-sending our own committed shares is harmless.
+    const sendMyHoleShares = () => {
+      const shares: Record<number, Share> = {}
+      for (const pos of myHolePositions) {
+        const parsed = parseShare(shuffleKeys.decrypt_share(shuffleState, pos))
+        if (parsed) {
+          myShares.set(pos, parsed)
+          shares[pos] = parsed
+        }
+      }
+      if (Object.keys(shares).length > 0) {
+        send({ t: 'reveal', d: { shares } })
       }
     }
-    if (Object.keys(shares).length > 0) {
-      send({ t: 'reveal', d: { shares } })
-    }
+    track(repeatUntil(sendMyHoleShares, () => oppHoleRevealed))
     // the opponent's shares may already be here (they revealed first)
     tryRevealOppHoleCards()
   }
@@ -351,13 +424,18 @@ export function createShuffle(
   function revealCommunity(phase: string) {
     if (!shuffleState || !shuffleKeys) return
     let positions: number[] = []
-    if (phase === 'flop') positions = [4, 5, 6]
-    else if (phase === 'turn') positions = [7]
-    else if (phase === 'river') positions = [8]
+    let need = 0 // communityRevealed count that proves this phase's cards are on the table
+    if (phase === 'flop') { positions = [4, 5, 6]; need = 3 }
+    else if (phase === 'turn') { positions = [7]; need = 4 }
+    else if (phase === 'river') { positions = [8]; need = 5 }
     else return
-    sendShares(positions)
-    // also tell peer what phase we advanced to
-    send({ t: 'phase', d: { phase } })
+    // Retry sending our shares + phase marker until the board reaches this phase locally
+    // (communityRevealed >= need). We need the PEER's shares to reveal, so re-sending ours keeps
+    // driving their side too. Idempotent — the peer just re-stores the same shares.
+    track(repeatUntil(
+      () => { sendShares(positions); send({ t: 'phase', d: { phase } }) },
+      () => communityRevealed >= need,
+    ))
     tryRevealCommunity()
   }
 
@@ -412,10 +490,16 @@ export function createShuffle(
             send({ t: 'shuffle_pk', d: { pk: myPkHex, pop: myPopHex, hand: handId } })
           }
         } else {
-          // reply to our own shuffle_pk (same hand) — just store their key + pop
+          // reply to our own shuffle_pk (same hand) — store their key + pop. This also fires when
+          // the peer RE-sends its shuffle_pk (its own retry loop). If we're the guest and haven't
+          // begun shuffling yet, re-emit OUR key so a dropped guest→host reply self-heals against
+          // the host's retry. Re-sending our committed key is harmless (host just re-stores it).
           oppPkHex = d.pk
           oppPopHex = d.pop ?? ''
           cb.onLog('shuffle: got opponent key')
+          if (!isHost && available && myPkHex && !shuffleState) {
+            send({ t: 'shuffle_pk', d: { pk: myPkHex, pop: myPopHex, hand: handId } })
+          }
         }
         maybeContinue()
         return true
@@ -457,5 +541,6 @@ export function createShuffle(
     community: () => communityCards,
     currentHandId: () => handId,
     setHandIdBaseline: (n: number) => { if (n > handId) handId = n },
+    cleanup: cancelRetries,
   }
 }

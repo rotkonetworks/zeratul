@@ -26,13 +26,13 @@ export type ServerMsg =
   | { type: 'JurySettlement'; verified: boolean; threshold: number; contributions: number }
   | { type: 'RulesProposed'; buyin: number; smallBlind: number; bigBlind: number; fromSelf: boolean }
   | { type: 'RulesAccepted' }
-  | { type: 'RoomInfo'; code: string; jury_nodes: number; jury_threshold: number; escrow: string; frost_relay_url?: string; frost_room_code?: string; seat_addresses?: (string | null)[]; required_deposit: number; buyin_zat?: number; fee_per_seat?: number }
+  | { type: 'RoomInfo'; code: string; jury_nodes: number; jury_threshold: number; escrow: string; staked?: boolean; frost_relay_url?: string; frost_room_code?: string; seat_addresses?: (string | null)[]; required_deposit: number; buyin_zat?: number; fee_per_seat?: number }
   | { type: 'GameOver'; reason: string; payouts: [number, number][] }
   | { type: 'PayoutSigningRequest'; relay_room: string; plan: { seat: number; address: string; amount_zat: number }[]; priority_seat: number; fallback_secs_remaining: number }
   | { type: 'PayoutComplete'; txid: string }
   | { type: 'PayoutFailed'; reason: string }
   | { type: 'OpponentAbandoned'; seat: number }
-  | { type: 'DepositStatus'; escrow_address: string; seat_addresses?: (string | null)[]; seat_payout_addresses?: (string | null)[]; player_a_deposit: number; player_b_deposit: number; required: number; ready: boolean }
+  | { type: 'DepositStatus'; escrow_address: string; seat_addresses?: (string | null)[]; seat_payout_addresses?: (string | null)[]; player_a_deposit: number; player_b_deposit: number; player_a_pending?: number; player_b_pending?: number; required: number; ready: boolean }
   | { type: 'InviteLink'; url: string }
   | { type: 'Status'; phase: 'connecting' | 'encrypting' | 'shuffling' | 'dealing' | 'playing' | 'showdown' | 'settling'; message: string }
   | { type: 'Chat'; from: string; text: string }
