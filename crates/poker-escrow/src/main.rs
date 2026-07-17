@@ -2199,6 +2199,18 @@ mod tests {
     use axum::http::StatusCode;
     use std::collections::HashSet;
 
+    #[test]
+    fn ct_eq_is_correct_for_auth_compare() {
+        // a bug here would be an auth-bypass on the read-token gate.
+        assert!(ct_eq(b"", b""));
+        assert!(ct_eq(b"secret-token", b"secret-token"));
+        assert!(!ct_eq(b"secret-token", b"secret-toke"));   // length differs
+        assert!(!ct_eq(b"secret-token", b"secret-tokeX"));   // last byte differs
+        assert!(!ct_eq(b"Xecret-token", b"secret-token"));   // first byte differs
+        assert!(!ct_eq(b"token", b""));                      // empty vs non-empty
+        assert!(!ct_eq(b"", b"token"));
+    }
+
     // ── settlement split arithmetic (HIGH-1/HIGH-2 fix) ────────────────────────
     // The critical invariant for a payout that BALANCES on-chain:
     //   sum(outputs) + TX_PAYOUT_FEE_ZAT == total_pot
