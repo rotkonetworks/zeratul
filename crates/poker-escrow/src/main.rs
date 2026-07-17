@@ -2050,6 +2050,19 @@ async fn main() {
     tracing::info!("network: {:?}", state.network);
     tracing::info!("use_dkg: {} (relay: {})", state.use_dkg, state.frost_relay_url);
 
+    // FAIL-CLOSED guardrail: never run on MAINNET while trusting self-reported deposits. With
+    // verify_deposits=false the HTTP /deposit path credits a caller's claimed amount without an
+    // on-chain check — on mainnet that is instant theft (deal + settle against ZEC never sent).
+    // A real-money escrow with this combo is a misconfiguration; refuse to start rather than
+    // custody funds unsafely. (Testnet/demo may run trusted-dealer mode.)
+    if matches!(state.network, zcash_protocol::consensus::NetworkType::Main) && !state.verify_deposits {
+        tracing::error!(
+            "REFUSING TO START: network=Main but verify_deposits=false — self-reported deposits \
+             would be credited with REAL ZEC. Set ESCROW_VERIFY_DEPOSITS=true for mainnet."
+        );
+        std::process::exit(1);
+    }
+
     // durable dispute/audit journal — survives restart (unlike in-memory room state)
     if !args.journal.trim().is_empty() {
         journal::init(&args.journal);
