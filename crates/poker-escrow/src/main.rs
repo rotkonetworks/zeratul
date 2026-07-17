@@ -1291,6 +1291,14 @@ async fn run_payout_signing(
                 "amount_zat": disp_amount_zat,
                 "fee_zat": fee_zat,
             }));
+            // Positive push so the operator gets a real-time reconciliation signal every time
+            // money actually leaves the vault (not only on failures).
+            notify::dispute_alert(
+                "✅ zk.poker payout broadcast",
+                &format!("room {} paid out: {} zat (fee {}) tx={}", code, disp_amount_zat, fee_zat, res.txid),
+                "payout",
+                &code,
+            );
             let mut rl = rooms.lock().await;
             if let Some(room) = rl.get_mut(&code) {
                 room.payout_status = PayoutStatus::Broadcast { txid: res.txid, relay_room };
