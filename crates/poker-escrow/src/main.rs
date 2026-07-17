@@ -1497,14 +1497,32 @@ async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
         if r.dkg_failed.is_some() { dkg_failed += 1; }
     }
     drop(rooms);
+    let persistence = state.persist.is_some();
+    let house_payable = house_addr_payable(&state.house_address);
+    let mainnet = matches!(state.network, zcash_protocol::consensus::NetworkType::Main);
+    // Go-live gate for handling REAL money on mainnet: verified deposits, DKG custody, a payable
+    // house, durable audit journal, AND persistence (so a restart never strands in-flight funds).
+    // Surfaces exactly what's missing so the operator isn't guessing.
+    let mut blockers: Vec<&str> = Vec::new();
+    if !persistence { blockers.push("persistence_disabled"); }
+    if !house_payable { blockers.push("house_not_payable"); }
+    if !state.verify_deposits { blockers.push("deposit_verification_off"); }
+    if !state.use_dkg { blockers.push("dkg_off"); }
+    if !journal::is_enabled() { blockers.push("journal_disabled"); }
+    let ready_for_real_money = mainnet && blockers.is_empty();
     Json(serde_json::json!({
         "network": format!("{:?}", state.network),
         "verify_deposits": state.verify_deposits,
         "use_dkg": state.use_dkg,
+        "zidecar_url": state.zidecar_url,
+        "frost_relay_url": state.frost_relay_url,
         // the operational red flag: persistence OFF means a restart strands in-flight funds.
-        "persistence_enabled": state.persist.is_some(),
-        "house_payable": house_addr_payable(&state.house_address),
+        "persistence_enabled": persistence,
+        "house_payable": house_payable,
         "journal_enabled": journal::is_enabled(),
+        // one-glance go-live readiness + exactly what's blocking it.
+        "ready_for_real_money": ready_for_real_money,
+        "go_live_blockers": blockers,
         "rooms_total": total,
         "rooms_game_active": game_active,
         "rooms_awaiting_deposits": awaiting_deposits,
