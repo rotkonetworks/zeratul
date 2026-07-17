@@ -653,10 +653,16 @@ fn house_addr_payable(addr: &str) -> bool {
     let a = addr.trim();
     if a.len() < 20 { return false; }
     if a.contains("placeholder") || a.contains("demo") || a.contains("...") { return false; }
-    a.starts_with("u1")            // mainnet unified
-        || a.starts_with("utest1") // testnet unified
-        || a.starts_with("zs1")    // mainnet sapling
-        || a.starts_with("ztestsapling1") // testnet sapling
+    // The rake is paid as an ORCHARD output, so the house MUST be an Orchard-capable unified
+    // address. DECODE it (not just prefix-check): a typo'd/truncated UA — or a sapling-only /
+    // transparent address — would otherwise pass a prefix check, reserve rake, and then break
+    // the ENTIRE winner payout at PCZT recipient-decode time. On a decode failure we treat the
+    // house as unpayable → rake is dropped and the winner's payout still succeeds. Network is
+    // inferred from the UA prefix (u1 = mainnet, utest1 = testnet).
+    let mainnet = if a.starts_with("u1") { true }
+        else if a.starts_with("utest1") { false }
+        else { return false; };
+    crate::tx_build::parse_orchard_ua(a, mainnet).is_ok()
 }
 
 /// produce the payout outputs. Reserves BOTH the rake (to `house_addr`) AND the
@@ -1963,6 +1969,20 @@ async fn main() {
     };
 
     tracing::info!("house address: {}", state.house_address);
+    // Validate the house address at BOOT (not mid-settlement) so a typo/wrong-pool/placeholder
+    // address is surfaced immediately. house_addr_payable now actually decodes it as an
+    // Orchard-capable UA. An unpayable house never breaks a winner's payout (rake is just
+    // dropped), but the operator should know up-front whether rake will actually be collected.
+    if state.house_address.trim().is_empty() {
+        tracing::warn!("house address UNSET — rake DISABLED (set HOUSE_ADDRESS to collect rake)");
+    } else if house_addr_payable(&state.house_address) {
+        tracing::info!("house address VALIDATED — payable Orchard UA, rake collectible");
+    } else {
+        tracing::warn!(
+            "house address is a placeholder or NOT an Orchard-capable UA — rake DISABLED \
+             (winner payouts unaffected; set a real HOUSE_ADDRESS to collect rake)"
+        );
+    }
     tracing::info!("zidecar: {}", state.zidecar_url);
     tracing::info!("verify_deposits: {}", state.verify_deposits);
     tracing::info!("network: {:?}", state.network);
@@ -2087,8 +2107,9 @@ mod tests {
         assert_eq!(sum_outputs(&outs) + TX_PAYOUT_FEE_ZAT, pot);
     }
 
-    // a realistic-length unified address fixture (real u1 addresses are ~80+ chars)
-    const HOUSE_OK: &str = "u1q2payablehouseaddressfixture000000000000000000000000000000000000000000000house";
+    // a REAL, decodable mainnet Orchard UA (house_addr_payable now actually decodes, so a
+    // gibberish fixture would be — correctly — treated as unpayable and charge 0 rake).
+    const HOUSE_OK: &str = "u14hnh66qv4qhy8psewqkljghznh265rna5k77zwy6dvyyqq6x6r8dum59h4l0krpl0m5jhyjnj5szkjyj2k836fkvtqst6eqeg5z68lve";
 
     #[test]
     fn settlement_with_rake_balances_and_pays_house() {
@@ -2119,15 +2140,19 @@ mod tests {
     }
 
     #[test]
-    fn house_addr_payable_accepts_real_prefixes_rejects_junk() {
+    fn house_addr_payable_requires_decodable_orchard_ua() {
+        // real mainnet Orchard UA decodes → payable
         assert!(house_addr_payable(HOUSE_OK));
-        assert!(house_addr_payable("ztestsapling1qqqqqqqqqqqqqqqqqqqqqqqqqqqqreal"));
-        assert!(!house_addr_payable("u1placeholderhouse"));
-        assert!(!house_addr_payable("demo_house_addr"));
-        assert!(!house_addr_payable("ztestsapling1..."));
-        assert!(!house_addr_payable(""));
-        assert!(!house_addr_payable("u1house"));            // too short to be real
-        assert!(!house_addr_payable("t1transparentaddressnotsupported12345")); // wrong network prefix
+        // rake is an ORCHARD output, so none of these can receive it (or don't decode) → unpayable,
+        // rake is dropped, winner payout is never broken:
+        assert!(!house_addr_payable("u1placeholderhouse"));                       // placeholder
+        assert!(!house_addr_payable("demo_house_addr"));                          // demo marker
+        assert!(!house_addr_payable(""));                                         // empty
+        assert!(!house_addr_payable("u1house"));                                  // too short
+        assert!(!house_addr_payable("t1transparentaddressnotsupported12345"));    // transparent
+        assert!(!house_addr_payable("ztestsapling1qqqqqqqqqqqqqqqqqqqqqqqqqqqqreal")); // sapling-only
+        // right prefix + realistic length but garbage body → must NOT decode as Orchard:
+        assert!(!house_addr_payable("u1garbagenotarealunifiedaddress00000000000000000000000000000000000000"));
     }
 
     #[test]
