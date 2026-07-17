@@ -1483,6 +1483,36 @@ async fn frost_sign_round2(
 
 async fn health() -> &'static str { "ok" }
 
+/// GET /status — read-only operational snapshot for the operator (loopback-only). Surfaces the
+/// config/health that matters at a glance: is persistence on (else a restart strands in-flight
+/// funds), is the house payable (rake collectible), verify/DKG/network mode, and live room counts.
+async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
+    let rooms = state.rooms.lock().await;
+    let total = rooms.len();
+    let (mut game_active, mut awaiting_deposits, mut pending_settle, mut dkg_failed) = (0u64, 0u64, 0u64, 0u64);
+    for r in rooms.values() {
+        if r.game_active { game_active += 1; }
+        if !both_deposits_satisfied(r.player_a_deposit, r.player_b_deposit, r.required_deposit) { awaiting_deposits += 1; }
+        if r.settle_pending.is_some() { pending_settle += 1; }
+        if r.dkg_failed.is_some() { dkg_failed += 1; }
+    }
+    drop(rooms);
+    Json(serde_json::json!({
+        "network": format!("{:?}", state.network),
+        "verify_deposits": state.verify_deposits,
+        "use_dkg": state.use_dkg,
+        // the operational red flag: persistence OFF means a restart strands in-flight funds.
+        "persistence_enabled": state.persist.is_some(),
+        "house_payable": house_addr_payable(&state.house_address),
+        "journal_enabled": journal::is_enabled(),
+        "rooms_total": total,
+        "rooms_game_active": game_active,
+        "rooms_awaiting_deposits": awaiting_deposits,
+        "settlements_pending_confirmation": pending_settle,
+        "rooms_dkg_failed": dkg_failed,
+    }))
+}
+
 /// Body for `POST /room/{code}/fault` — a client-detected escrow fault, forwarded by
 /// the poker-server relay. Recorded to the durable journal as a `client_fault` event.
 #[derive(Deserialize)]
@@ -2069,6 +2099,7 @@ async fn main() {
         .route("/disputes", axum::routing::get(get_disputes))
         .route("/dispute/{code}", axum::routing::get(get_dispute))
         .route("/health", axum::routing::get(health))
+        .route("/status", axum::routing::get(get_status))
         .with_state(state);
 
     let addr = format!("{}:{}", args.bind, args.port);

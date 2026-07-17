@@ -77,6 +77,11 @@ pub fn record(code: &str, kind: &str, data: Value) {
     }
 }
 
+/// True if the journal was `init`ed (durable audit trail active). Powers `/status`.
+pub fn is_enabled() -> bool {
+    JOURNAL.get().is_some()
+}
+
 /// Read back every event for one room, in journal (chronological) order. Returns
 /// an empty vec if the journal is disabled or unreadable. Powers `GET /audit/{code}`.
 pub fn read_room(code: &str) -> Vec<Value> {
