@@ -25,7 +25,10 @@ use serde_json::Value;
 
 struct Journal {
     path: PathBuf,
-    lock: Mutex<()>,
+    /// Hex SHA-256 of the previously-written line. Each entry commits to it (`prev`), so the log
+    /// is TAMPER-EVIDENT: altering / deleting / reordering any past line breaks the chain and is
+    /// detectable via `verify_chain`. Held together with the append so the chain advances atomically.
+    chain: Mutex<String>,
 }
 
 static JOURNAL: OnceLock<Journal> = OnceLock::new();
@@ -35,6 +38,13 @@ fn now_ms() -> u64 {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_millis() as u64)
         .unwrap_or(0)
+}
+
+fn sha256_hex(s: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut h = Sha256::new();
+    h.update(s.as_bytes());
+    hex::encode(h.finalize())
 }
 
 /// Initialise the journal at `path`. Creates parent dirs. Idempotent-ish: a second
@@ -48,33 +58,65 @@ pub fn init(path: impl Into<PathBuf>) {
             return;
         }
     }
-    let _ = JOURNAL.set(Journal { path, lock: Mutex::new(()) });
-    tracing::info!("journal: enabled");
+    // Resume the hash chain from the last existing line so a restart doesn't break the chain.
+    let resume = std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|c| c.lines().last().map(sha256_hex))
+        .unwrap_or_default();
+    let _ = JOURNAL.set(Journal { path, chain: Mutex::new(resume) });
+    tracing::info!("journal: enabled (tamper-evident hash chain)");
 }
 
 /// Append one event. Never panics; a write failure is logged and swallowed so the
 /// money path is never blocked by journal IO. No-op if the journal was not `init`ed.
 pub fn record(code: &str, kind: &str, data: Value) {
     let Some(j) = JOURNAL.get() else { return };
+    let mut chain = j.chain.lock().unwrap_or_else(|e| e.into_inner());
     let entry = serde_json::json!({
         "ts": now_ms(),
         "code": code,
         "kind": kind,
         "data": data,
+        "prev": *chain, // hash of the previous line ("" for the genesis entry)
     });
     let line = match serde_json::to_string(&entry) {
         Ok(s) => s,
         Err(e) => { tracing::warn!("journal: serialize failed: {}", e); return; }
     };
-    let _guard = j.lock.lock().unwrap_or_else(|e| e.into_inner());
     match OpenOptions::new().create(true).append(true).open(&j.path) {
         Ok(mut f) => {
             if let Err(e) = writeln!(f, "{}", line) {
                 tracing::warn!("journal: append failed: {}", e);
+            } else {
+                *chain = sha256_hex(&line); // advance the chain only after a durable write
             }
         }
         Err(e) => tracing::warn!("journal: open({}) failed: {}", j.path.display(), e),
     }
+}
+
+/// Verify the hash chain end-to-end: each line's `prev` must equal SHA-256 of the preceding line
+/// (genesis `prev` == ""). Ok(entries_verified) — or Err describing the first break, which means
+/// the journal was altered / truncated / reordered. Powers the `/status` integrity check.
+pub fn verify_chain() -> Result<usize, String> {
+    let Some(j) = JOURNAL.get() else { return Ok(0) };
+    let _guard = j.chain.lock().unwrap_or_else(|e| e.into_inner());
+    let content = match std::fs::read_to_string(&j.path) {
+        Ok(c) => c,
+        Err(_) => return Ok(0), // no file yet = empty, trivially intact
+    };
+    let mut prev = String::new();
+    let mut n = 0usize;
+    for (i, l) in content.lines().enumerate() {
+        let v: Value = serde_json::from_str(l).map_err(|e| format!("line {}: parse: {}", i, e))?;
+        let got = v.get("prev").and_then(|p| p.as_str()).unwrap_or("");
+        if got != prev {
+            return Err(format!("chain broken at line {} — audit log altered/truncated", i));
+        }
+        prev = sha256_hex(l);
+        n += 1;
+    }
+    Ok(n)
 }
 
 /// True if the journal was `init`ed (durable audit trail active). Powers `/status`.
@@ -86,7 +128,7 @@ pub fn is_enabled() -> bool {
 /// an empty vec if the journal is disabled or unreadable. Powers `GET /audit/{code}`.
 pub fn read_room(code: &str) -> Vec<Value> {
     let Some(j) = JOURNAL.get() else { return Vec::new() };
-    let _guard = j.lock.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = j.chain.lock().unwrap_or_else(|e| e.into_inner());
     let content = match std::fs::read_to_string(&j.path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
@@ -102,7 +144,7 @@ pub fn read_room(code: &str) -> Vec<Value> {
 /// list (which groups + classifies by room). Empty if disabled/unreadable.
 pub fn read_all() -> Vec<Value> {
     let Some(j) = JOURNAL.get() else { return Vec::new() };
-    let _guard = j.lock.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = j.chain.lock().unwrap_or_else(|e| e.into_inner());
     let content = match std::fs::read_to_string(&j.path) {
         Ok(c) => c,
         Err(_) => return Vec::new(),
@@ -143,6 +185,16 @@ mod tests {
 
         let b = read_room("room-B");
         assert_eq!(b.len(), 1, "room-B isolated from room-A");
+
+        // ── tamper-evident hash chain ────────────────────────────────────────
+        // an intact 4-entry chain verifies…
+        assert_eq!(verify_chain().expect("intact chain verifies"), 4);
+        // …and altering any past line breaks it (here: flip a byte in the middle entry's data).
+        let content = std::fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<String> = content.lines().map(String::from).collect();
+        lines[1] = lines[1].replace("100000", "999999"); // tamper with room-B's deposit amount
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        assert!(verify_chain().is_err(), "a tampered line must break the chain");
 
         let _ = std::fs::remove_file(&path);
     }

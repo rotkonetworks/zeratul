@@ -1528,6 +1528,8 @@ async fn get_status(State(state): State<AppState>) -> impl IntoResponse {
         "persistence_enabled": persistence,
         "house_payable": house_payable,
         "journal_enabled": journal::is_enabled(),
+        // tamper-evidence: false means the audit log's hash chain doesn't verify (altered/truncated).
+        "journal_chain_ok": journal::verify_chain().is_ok(),
         // one-glance go-live readiness + exactly what's blocking it.
         "ready_for_real_money": ready_for_real_money,
         "go_live_blockers": blockers,
