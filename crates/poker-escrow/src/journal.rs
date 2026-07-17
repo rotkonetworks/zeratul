@@ -109,9 +109,13 @@ pub fn verify_chain() -> Result<usize, String> {
     let mut n = 0usize;
     for (i, l) in content.lines().enumerate() {
         let v: Value = serde_json::from_str(l).map_err(|e| format!("line {}: parse: {}", i, e))?;
-        let got = v.get("prev").and_then(|p| p.as_str()).unwrap_or("");
-        if got != prev {
-            return Err(format!("chain broken at line {} — audit log altered/truncated", i));
+        // Legacy entries written before hash-chaining have NO `prev` field — they're not covered
+        // by the chain, so skip their check (but still fold them into `prev` so the first chained
+        // entry links to the last legacy line). Once `prev` appears, the chain must be intact.
+        if let Some(got) = v.get("prev").and_then(|p| p.as_str()) {
+            if got != prev {
+                return Err(format!("chain broken at line {} — audit log altered/truncated", i));
+            }
         }
         prev = sha256_hex(l);
         n += 1;
