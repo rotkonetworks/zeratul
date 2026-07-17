@@ -1581,20 +1581,50 @@ async fn report_fault(
 /// txids, settlement_finalized with BOTH player co-signatures, payout_broadcast txid,
 /// payout_failed, client_fault). This is what survives a restart and lets a dispute
 /// be adjudicated from cryptographic evidence rather than volatile memory.
-async fn get_audit(Path(code): Path<String>) -> impl IntoResponse {
+/// Constant-time byte compare — no token length/timing oracle.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() { return false; }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b.iter()) { diff |= x ^ y; }
+    diff == 0
+}
+
+/// Optional bearer-token gate for the sensitive read endpoints (/accounting = revenue,
+/// /audit = player addresses + co-sigs). Open when ESCROW_READ_TOKEN is unset — the endpoints
+/// are loopback+firewalled, so this is defense-in-depth for a future re-exposure. 401 on mismatch.
+fn check_read_token(headers: &axum::http::HeaderMap) -> Result<(), axum::response::Response> {
+    let want = match std::env::var("ESCROW_READ_TOKEN") {
+        Ok(t) if !t.trim().is_empty() => t,
+        _ => return Ok(()),
+    };
+    let got = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.strip_prefix("Bearer "))
+        .unwrap_or("");
+    if ct_eq(got.as_bytes(), want.trim().as_bytes()) {
+        Ok(())
+    } else {
+        Err((axum::http::StatusCode::UNAUTHORIZED, "read token required").into_response())
+    }
+}
+
+async fn get_audit(headers: axum::http::HeaderMap, Path(code): Path<String>) -> axum::response::Response {
+    if let Err(r) = check_read_token(&headers) { return r; }
     let events = journal::read_room(&code);
     Json(serde_json::json!({
         "code": code,
         "count": events.len(),
         "events": events,
-    }))
+    })).into_response()
 }
 
 /// GET /accounting — business rollup over the durable journal: house revenue (Σrake),
 /// volume (Σpot), games settled, deposits, payouts, disputes. Read-only aggregate (no
 /// addresses/sigs). Counts `settlement_finalized` only — a queued settlement that later
 /// completes still emits one `settlement_finalized`, so pots/rake are never double-counted.
-async fn get_accounting() -> impl IntoResponse {
+async fn get_accounting(headers: axum::http::HeaderMap) -> axum::response::Response {
+    if let Err(r) = check_read_token(&headers) { return r; }
     let events = journal::read_all();
     let (mut rooms, mut settled, mut volume, mut rake, mut dep_n, mut dep_v,
          mut pay_ok, mut pay_fail, mut disputes, mut dkg_fail, mut rulings) =
@@ -1638,7 +1668,7 @@ async fn get_accounting() -> impl IntoResponse {
         "disputes": disputes,
         "dkg_failed": dkg_fail,
         "arbiter_rulings": rulings,
-    }))
+    })).into_response()
 }
 
 // ── Dispute-resolution dashboard ───────────────────────────────────────────
