@@ -234,8 +234,13 @@ struct PendingDeposit {
     seat: u8,
     /// note value in zatoshis, added to the seat's `_pending` counter
     value_zat: u64,
-    /// wall-clock ms the note was first observed in the mempool; used by the eviction grace window
+    /// wall-clock ms the note was FIRST observed in the mempool (journaling / age).
     first_seen_ms: u64,
+    /// wall-clock ms the note was LAST seen in the mempool. Eviction measures absence from
+    /// here, not from `first_seen_ms`: a note that MINES leaves the mempool, and the block
+    /// scanner (20s poll) needs time to credit it — evicting on the first missing tick would
+    /// falsely flag a normal confirmation as a double-spend. See `VANISH_GRACE_MS`.
+    last_seen_ms: u64,
 }
 
 type Rooms = Arc<Mutex<HashMap<String, EscrowRoom>>>;
@@ -2867,6 +2872,34 @@ mod tests {
         room.player_b_deposit = required;
         try_complete_pending_settlement(&mut room, "u1house", None, &code);
         assert!(room.payout_plan.is_none(), "taint persists — settled auto-payout stays blocked");
+    }
+
+    #[test]
+    fn evicted_shortfall_false_positive_clears_on_confirm() {
+        // The eviction race: a deposit MINES (leaving the mempool) and the mempool watcher trips
+        // evicted_shortfall in the ~20s before the confirmed scan credits it. This must NOT strand
+        // a legitimately-funded game as a refund. run_deposit_poll clears the taint when the note
+        // confirms and BOTH seats are satisfied; here we exercise that exact decision.
+        let required = 100_000;
+
+        // (a) genuine double-spend — seat B never confirms → clear-decision is FALSE, taint latches.
+        assert!(!both_deposits_satisfied(required, 0, required),
+            "one seat short → real shortfall, taint must NOT clear (theft-safe)");
+
+        // (b) false positive — both mined/confirmed → clear-decision is TRUE.
+        assert!(both_deposits_satisfied(required, required, required),
+            "both confirmed → shortfall was a false positive, safe to clear");
+
+        // end-to-end: with the taint cleared (as run_deposit_poll does on confirm), the queued
+        // settlement completes to the WINNER instead of falling back to a refund-both wash.
+        let (mut room, code) = room_with_queued_settlement(required, required, required);
+        room.evicted_shortfall = true; // stale false-positive from the mine-vs-scan race
+        if both_deposits_satisfied(room.player_a_deposit, room.player_b_deposit, room.required_deposit) {
+            room.evicted_shortfall = false; // FIX #1: clear-on-confirm
+        }
+        try_complete_pending_settlement(&mut room, "u1house", None, &code);
+        assert!(room.payout_plan.is_some(), "winner is paid once the false-positive taint clears");
+        assert!(room.settle_pending.is_none(), "queued settlement completed, not left for refund");
     }
 
     #[test]

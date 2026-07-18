@@ -19,10 +19,13 @@ const DEPOSIT_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_sec
 /// opens promptly once both deposits are broadcast, without waiting for a block.
 const MEMPOOL_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(3);
 
-/// How long a pending (mempool-seen) note is retained after it stops appearing in the mempool
-/// before we evict it and reverse its pending credit. The grace window tolerates a single missed
-/// poll (e.g. a transient zidecar hiccup) so a still-valid tx isn't flapped out prematurely.
-const EVICTION_GRACE_MS: u64 = 30_000;
+/// How long a pending (mempool-seen) note may be ABSENT from the mempool before we evict it and
+/// reverse its pending credit. Measured from `last_seen_ms`, NOT `first_seen_ms`: a note that
+/// MINES also leaves the mempool, and the confirmed scanner (`DEPOSIT_POLL_INTERVAL` = 20s) needs
+/// time to credit it. This window must exceed that poll interval by a comfortable margin, or a
+/// normal confirmation gets falsely evicted as a "0-conf shortfall" (double-spend) before the
+/// block scan catches up. A genuinely dropped/RBF'd tx stays absent past this window → evicted.
+const VANISH_GRACE_MS: u64 = 90_000;
 
 /// Total expected participants in the FROST multisig (escrow + 2 players).
 const DKG_TOTAL: u16 = 3;
@@ -312,6 +315,29 @@ async fn run_deposit_poll(
                             "txid": hex::encode(&n.txid),
                             "block_height": n.block_height,
                         }));
+                        // CLEAR a false-positive shortfall taint. A deposit that mined leaves the
+                        // mempool and can trip run_mempool_watch's eviction (evicted_shortfall) in
+                        // the ~20s before this confirmed scan credits it. Now that BOTH seats are
+                        // confirmed-satisfied there is no real shortfall — the pot is fully backed —
+                        // so the settle-completion guard must not stay latched shut. Theft-safe: a
+                        // genuine double-spender's seat stays short, both_deposits_satisfied stays
+                        // false, and the flag is NOT cleared.
+                        if room.evicted_shortfall
+                            && room.player_a_deposit >= room.required_deposit
+                            && room.player_b_deposit >= room.required_deposit
+                        {
+                            room.evicted_shortfall = false;
+                            tracing::info!(
+                                "deposit room={}: both seats confirmed (a={} b={} req={}) — clearing \
+                                 false-positive evicted_shortfall (deposit mined, not dropped)",
+                                code, room.player_a_deposit, room.player_b_deposit, room.required_deposit,
+                            );
+                            crate::journal::record(&code, "evicted_shortfall_cleared", serde_json::json!({
+                                "player_a_deposit": room.player_a_deposit,
+                                "player_b_deposit": room.player_b_deposit,
+                                "required_deposit": room.required_deposit,
+                            }));
+                        }
                     } else {
                         tracing::debug!("deposit room={} seat={} nullifier already counted — skipping credit", code, n.seat);
                     }
@@ -377,7 +403,9 @@ async fn run_deposit_poll(
 ///     already pending (`pending_deposits`), insert a `PendingDeposit` and add its value to the
 ///     seat's pending counter.
 ///   - EVICT: for each existing pending entry whose key is NOT in this tick's mempool AND NOT in
-///     `counted_deposits` AND older than `EVICTION_GRACE_MS`, remove it and subtract its value.
+///     `counted_deposits` AND absent (from `last_seen_ms`) longer than `VANISH_GRACE_MS`, remove
+///     it and subtract its value. The grace exceeds the confirmed-scan interval so a note that
+///     MINED (also leaves the mempool) isn't evicted before the block scan credits it.
 ///
 /// Exits when the room disappears from `rooms` (mirrors `run_deposit_poll`). Does NOT persist —
 /// the pending ledger is ephemeral by design.
@@ -425,14 +453,17 @@ async fn run_mempool_watch(
             if room.counted_deposits.contains(&format!("note:{}", key)) {
                 continue;
             }
-            // already pending: skip (don't double-credit on a repeat poll).
-            if room.pending_deposits.contains_key(&key) {
+            // already pending: refresh last_seen so the vanish-grace only counts true absence,
+            // then skip (don't double-credit on a repeat poll).
+            if let Some(pd) = room.pending_deposits.get_mut(&key) {
+                pd.last_seen_ms = now_ms();
                 continue;
             }
             room.pending_deposits.insert(key, PendingDeposit {
                 seat: n.seat,
                 value_zat: n.value_zat,
                 first_seen_ms: now_ms(),
+                last_seen_ms: now_ms(),
             });
             match n.seat {
                 0 => room.player_a_deposit_pending = room.player_a_deposit_pending.saturating_add(n.value_zat),
@@ -456,7 +487,7 @@ async fn run_mempool_watch(
             .filter(|(key, pd)| {
                 !seen_this_tick.contains(*key)
                     && !room.counted_deposits.contains(&format!("note:{}", key))
-                    && now.saturating_sub(pd.first_seen_ms) > EVICTION_GRACE_MS
+                    && now.saturating_sub(pd.last_seen_ms) > VANISH_GRACE_MS
             })
             .map(|(key, _)| key.clone())
             .collect();
