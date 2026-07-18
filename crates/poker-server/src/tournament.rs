@@ -84,6 +84,10 @@ pub struct Tournament {
     /// time the relay ticker starts the bracket if ≥2 players are registered, else cancels it.
     #[serde(default)]
     pub scheduled_start: Option<u64>,
+    /// how much of the pot the winner re-risks into the next round, in basis points. 10000 = 100%
+    /// (stake doubles each round → winner-take-all). 7500 = ×1.5 per round; 5000 = flat stake, so
+    /// the winner banks half the pot each round ("everybody a bit a winner"). Paid tournaments only.
+    pub roll_bps: u16,
 }
 
 impl Tournament {
@@ -106,6 +110,7 @@ impl Tournament {
             matches: Vec::new(),
             rounds: 0,
             scheduled_start: None,
+            roll_bps: 10000, // 100% roll-forward (classic winner-take-all doubling) by default
         }
     }
 
@@ -123,7 +128,15 @@ impl Tournament {
         if !self.paid || round == 0 {
             return 0;
         }
-        self.buyin_zat.checked_shl(round - 1).unwrap_or(u64::MAX)
+        // round-1 stake = buyin; each later round the winner re-risks `roll_bps` of the pot
+        // (pot = 2× the current stake) and banks the rest. roll_bps=10000 → ×2 (classic doubling),
+        // 7500 → ×1.5, 5000 → flat stake. u128 math, saturating to u64.
+        let roll = self.roll_bps.clamp(1, 10000) as u128;
+        let mut stake = self.buyin_zat as u128;
+        for _ in 1..round {
+            stake = stake.saturating_mul(2).saturating_mul(roll) / 10000;
+        }
+        stake.min(u64::MAX as u128) as u64
     }
 
     /// One-line disclosure shown to players BEFORE they join a PAID tournament: for the P2P /
@@ -347,11 +360,13 @@ impl Registry {
         paid: bool,
         buyin_zat: u64,
         scheduled_start: Option<u64>,
+        roll_bps: u16,
     ) -> String {
         self.seq += 1;
         let id = format!("t{}", self.seq);
         let mut t = Tournament::new(id.clone(), name, organizer, paid, buyin_zat);
         t.scheduled_start = scheduled_start;
+        t.roll_bps = roll_bps.clamp(1, 10000); // guard 0/out-of-range → keep it a real fraction
         self.tournaments.insert(id.clone(), t);
         id
     }

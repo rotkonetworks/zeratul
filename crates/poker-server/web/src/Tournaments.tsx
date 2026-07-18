@@ -66,6 +66,7 @@ type Tournament = {
   rounds: number
   sponsor?: Sponsor
   scheduled_start?: number | null // unix seconds; auto-starts at this time (else manual)
+  roll_bps?: number // winner's per-round roll-forward (10000=100% doubling, 7500=×1.5, 5000=flat)
   players: string[]
   matches: Match[]
   // playable matches, annotated by the server with `room`/`paid`/`stake_zat`. Only these carry a
@@ -105,6 +106,16 @@ function startsLabel(ts?: number | null): string {
   if (secs < 3600) return `starts in ${Math.ceil(secs / 60)}m`
   if (secs < 86400) return `starts in ${Math.floor(secs / 3600)}h ${Math.ceil((secs % 3600) / 60)}m`
   return 'starts ' + new Date(ts * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+}
+
+// Preview the per-round stake ladder (ZEC) for a paid tournament given the round-1 buy-in and the
+// winner's roll-forward bps: stake_{r+1} = stake_r × 2 × rollBps/10000.
+function ladderPreview(buyin: number, rollBps: number): string {
+  if (!(buyin > 0)) return ''
+  const out: string[] = []
+  let s = buyin
+  for (let i = 0; i < 4; i++) { out.push(s.toFixed(s < 0.001 ? 4 : 3)); s = (s * 2 * rollBps) / 10000 }
+  return out.join(' → ') + ' ZEC'
 }
 
 // Last server-supplied error message (e.g. "need at least 2 players", "already registered").
@@ -262,6 +273,7 @@ function CreateForm(props: { onCreated: (id: string) => void }) {
   const [paid, setPaid] = createSignal(false)
   const [buyin, setBuyin] = createSignal('') // ZEC (decimal) buy-in for round 1
   const [startAt, setStartAt] = createSignal('') // <input datetime-local> value; empty = manual start
+  const [rollBps, setRollBps] = createSignal(10000) // winner's per-round roll-forward (paid only)
   const create = async () => {
     const n = name().trim()
     if (!n) { setErr('name your tournament'); return }
@@ -279,7 +291,7 @@ function CreateForm(props: { onCreated: (id: string) => void }) {
     setErr('')
     const res = await api<{ id: string }>('/tournaments', {
       method: 'POST',
-      body: JSON.stringify({ name: n, organizer: playerHandle(), paid: paid(), buyin_zat: buyinZat, scheduled_start: scheduledStart }),
+      body: JSON.stringify({ name: n, organizer: playerHandle(), paid: paid(), buyin_zat: buyinZat, scheduled_start: scheduledStart, roll_bps: paid() ? rollBps() : undefined }),
     })
     setBusy(false)
     if (res && res.id) {
@@ -333,6 +345,28 @@ function CreateForm(props: { onCreated: (id: string) => void }) {
             <input class="input-field text-12px flex-1 min-w-32" placeholder="ZEC per player, e.g. 0.01"
               value={buyin()} onInput={e => setBuyin(e.currentTarget.value)} />
           </label>
+          {/* roll-forward: how much of the pot the winner re-risks each round vs banks */}
+          <div>
+            <div class="text-10px text-white/50 mb-1">winner re-risks each round</div>
+            <div class="flex gap-1.5">
+              <For each={[[10000, '100%'], [7500, '75%'], [5000, '50%']] as [number, string][]}>
+                {opt =>
+                  <button
+                    class={`text-10px px-2.5 py-1 rounded-full border ${rollBps() === opt[0] ? 'bg-zec-yellow/15 text-zec-yellow border-zec-yellow/40' : 'bg-white/5 text-white/45 border-white/10'}`}
+                    onClick={() => setRollBps(opt[0])}
+                  >{opt[1]}</button>
+                }
+              </For>
+            </div>
+            <div class="text-9px text-neutral-500 mt-1.5 leading-relaxed">
+              {rollBps() === 10000
+                ? 'classic — the stake doubles each round and the winner takes all.'
+                : `winner banks ${((10000 - rollBps()) / 100).toFixed(0)}% of the pot each round, so deep runs profit even without winning.`}
+              <Show when={parseFloat(buyin()) > 0}>
+                {' stakes: '}<span class="font-mono text-white/60">{ladderPreview(parseFloat(buyin()), rollBps())}</span>
+              </Show>
+            </div>
+          </div>
           <div class="text-9px text-neutral-500 leading-relaxed">
             Peer-to-peer &amp; non-custodial — no house holds the pot. Each match is its own 2-of-3
             FROST escrow between the two players; the winner is paid to their own wallet and

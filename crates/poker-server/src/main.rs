@@ -2335,6 +2335,10 @@ struct CreateTournamentReq {
     /// unix seconds for a scheduled auto-start; omitted/null = organizer starts it manually.
     #[serde(default)]
     scheduled_start: Option<u64>,
+    /// winner's per-round roll-forward in basis points (10000 = 100% doubling; 7500 = ×1.5;
+    /// 5000 = flat, winner banks half the pot each round). Paid tournaments only. Default 10000.
+    #[serde(default)]
+    roll_bps: Option<u16>,
 }
 
 async fn create_tournament(
@@ -2342,7 +2346,10 @@ async fn create_tournament(
     Json(req): Json<CreateTournamentReq>,
 ) -> impl IntoResponse {
     let mut hub = state.tournaments.lock().await;
-    let id = hub.registry.create(req.name, req.organizer, req.paid, req.buyin_zat, req.scheduled_start);
+    let id = hub.registry.create(
+        req.name, req.organizer, req.paid, req.buyin_zat,
+        req.scheduled_start, req.roll_bps.unwrap_or(10000),
+    );
     Json(serde_json::json!({ "id": id }))
 }
 
@@ -3755,7 +3762,7 @@ mod tests {
     #[test]
     fn tourney_result_needs_both_seats_to_agree() {
         let mut hub = TournamentHub::default();
-        let tid = hub.registry.create("Friday", "alice", false, 0, None);
+        let tid = hub.registry.create("Friday", "alice", false, 0, None, 10000);
         hub.registry.join(&tid, "alice".into()).unwrap();
         hub.registry.join(&tid, "bob".into()).unwrap();
         hub.registry.start(&tid, "alice").unwrap();
@@ -3782,7 +3789,7 @@ mod tests {
     #[test]
     fn tourney_result_conflict_leaves_match_unresolved() {
         let mut hub = TournamentHub::default();
-        let tid = hub.registry.create("Sat", "alice", false, 0, None);
+        let tid = hub.registry.create("Sat", "alice", false, 0, None, 10000);
         hub.registry.join(&tid, "alice".into()).unwrap();
         hub.registry.join(&tid, "bob".into()).unwrap();
         hub.registry.start(&tid, "alice").unwrap();
@@ -3800,7 +3807,7 @@ mod tests {
     #[test]
     fn tourney_result_rejects_outsiders() {
         let mut hub = TournamentHub::default();
-        let tid = hub.registry.create("Sun", "alice", false, 0, None);
+        let tid = hub.registry.create("Sun", "alice", false, 0, None, 10000);
         hub.registry.join(&tid, "alice".into()).unwrap();
         hub.registry.join(&tid, "bob".into()).unwrap();
         hub.registry.start(&tid, "alice").unwrap();
