@@ -128,6 +128,14 @@ export default function App() {
   const markStakedHandStarted = () => {
     try { localStorage.setItem(stakedStartKey(), '1') } catch {}
   }
+  // P0: the deposit "already sent" guard MUST survive a page reload. Otherwise refreshing while the
+  // first real-ZEC transaction is still unconfirmed re-enables "Send" and a player can deposit
+  // twice. Persist it per room and hydrate the in-memory guard from it (mirrors stakedStartKey).
+  const depositSentKey = () => `poker_deposit_sent:${currentRoom()}`
+  const markDepositSent = () => { try { localStorage.setItem(depositSentKey(), '1') } catch {} }
+  createEffect(() => {
+    try { if (currentRoom() && localStorage.getItem(depositSentKey())) setSendTriggered(true) } catch {}
+  })
   const [pendingRules, setPendingRules] = createSignal<{ buyin: number; smallBlind: number; bigBlind: number; turnTimeout: number; fromSelf: boolean } | null>(null)
   // both players have agreed on the stakes/rules — drives the "agree on stakes" step
   const [rulesAgreed, setRulesAgreed] = createSignal(false)
@@ -600,6 +608,7 @@ export default function App() {
         localStorage.removeItem('poker_last_session')
         localStorage.removeItem(`poker_dkg_fired:${roomCode()}`)
         localStorage.removeItem(`poker_staked_started:${roomCode()}`)
+        localStorage.removeItem(`poker_deposit_sent:${roomCode()}`)
         setLastSession(null)
         // schedule deletion of the multisig vault 24h from now — it's spent + useless
         void requestDeletePokerMultisig({
@@ -804,6 +813,7 @@ export default function App() {
         localStorage.removeItem('poker_last_session')
         localStorage.removeItem(`poker_dkg_fired:${roomCode()}`)
         localStorage.removeItem(`poker_staked_started:${roomCode()}`)
+        localStorage.removeItem(`poker_deposit_sent:${roomCode()}`)
         // drop the reconnect seat pin(s) for this room — leaving is intentional, so a future
         // visit should get a fresh role rather than reclaim this one.
         const seatPrefix = `poker_seat:${roomCode()}:`
@@ -1373,6 +1383,7 @@ export default function App() {
                               memo,
                             }, () => {})
                             setSendTriggered(true)
+                            markDepositSent() // persist so a reload can't re-arm Send before the tx confirms
                             // deposit-fault detector: a deposit confirms in ~1-2 blocks (~75s).
                             // if it's still uncredited after 4 min, the scan may have missed it
                             // (wrong address, missing memo, scanner lag) — exactly the failure

@@ -173,6 +173,15 @@ export default function Lobby(props: {
   const [chatMessages, setChatMessages] = createSignal<{text: string, cls: string}[]>([])
   const [players, setPlayers] = createSignal<{ name: string; ready: boolean }[]>([])
   const [chatInput, setChatInput] = createSignal('')
+  // desktop breakpoint — at ≥lg the lobby stops being a single-column mobile tab view and
+  // becomes a full-width hub with create / public-tables / chat all visible at once.
+  const [desktop, setDesktop] = createSignal(false)
+  onMount(() => {
+    const mq = window.matchMedia('(min-width: 1024px)')
+    const sync = () => setDesktop(mq.matches); sync()
+    mq.addEventListener('change', sync)
+    onCleanup(() => mq.removeEventListener('change', sync))
+  })
   // "looking to play" — flags me on everyone's board so opponents know to challenge me
   const [myReady, setMyReady] = createSignal(false)
   // an incoming challenge waiting for my Accept/Decline ({ from, table_code })
@@ -248,21 +257,30 @@ export default function Lobby(props: {
     addChat(`you are now ${nick}`, 'text-green-400')
   }
 
+  // a local-only chat line (command usage / errors) — never sent to the relay, just shown to me.
+  const localSys = (t: string) => setChatMessages(m => [...m, { text: t, cls: 'text-amber-400/80' }])
+
   function sendChat(text: string) {
     if (!lobbyWs || !text.trim()) return
     // parse commands
     if (text.startsWith('/nick ') || text.startsWith('/name ')) {
       setNick(text.slice(text.indexOf(' ') + 1))
     } else if (text.startsWith('/w ') || text.startsWith('/msg ')) {
-      const parts = text.slice(text.indexOf(' ') + 1).split(' ')
+      const parts = text.slice(text.indexOf(' ') + 1).trim().split(' ')
       const to = parts[0]
       const msg = parts.slice(1).join(' ')
-      if (text.startsWith('/w ') && to && msg) {
+      if (to && msg) {
         lobbyWs.send(JSON.stringify({ type: 'Whisper', to, text: msg }))
+      } else {
+        localSys('usage: /w <player> <message>'); return // keep their text so they can fix it
       }
     } else if (text.startsWith('/challenge ')) {
-      const to = text.slice(11).trim()
+      const to = text.slice(text.indexOf(' ') + 1).trim()
       if (to) lobbyWs.send(JSON.stringify({ type: 'Challenge', to }))
+      else { localSys('usage: /challenge <player>'); return }
+    } else if (text.startsWith('/')) {
+      // an unknown slash command — never broadcast a mistyped command to the whole lobby
+      localSys(`unknown command "${text.split(' ')[0]}" — try /w <player> <msg>, /nick <name>, /challenge <player>`); return
     } else {
       lobbyWs.send(JSON.stringify({ type: 'Chat', text }))
     }
@@ -347,8 +365,8 @@ export default function Lobby(props: {
   const liveStreams = () => liveTables().filter(t => t.live)
 
   return (
-    <div class="w-full m-auto flex flex-col items-center justify-center p-3">
-      <div class="w-full max-w-md lg:max-w-xl">
+    <div class="w-full m-auto flex flex-col items-center p-3 lg:p-4">
+      <div class="w-full max-w-md lg:max-w-none 2xl:max-w-[1720px]">
         {/* header */}
         <div class="text-center mb-5">
           <div class="flex items-center justify-center gap-2">
@@ -450,8 +468,8 @@ export default function Lobby(props: {
           </div>
         </Show>
 
-        {/* tabs */}
-        <div class="flex gap-0 mb-3 border-b border-white/10">
+        {/* tabs — mobile only; desktop shows every panel side-by-side in the hub grid below */}
+        <div class="flex gap-0 mb-3 border-b border-white/10 lg:hidden">
           {(['play', 'public', 'invite'] as const).map(t =>
             <button
               class={`flex-1 text-center py-2 text-11px uppercase tracking-wider transition-colors ${
@@ -466,8 +484,11 @@ export default function Lobby(props: {
           )}
         </div>
 
+        {/* ===== HUB GRID ===== single column on mobile (tab-switched); on ≥lg every panel is
+             visible at once across the full width — create · public tables · lobby/chat. */}
+        <div class="lg:grid lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_minmax(320px,380px)] lg:gap-4 lg:items-start">
         {/* ===== CREATE / JOIN TABLE ===== (visible to everyone; free play needs no wallet) */}
-        <Show when={tab() === 'play'}>
+        <Show when={desktop() || tab() === 'play'}>
           {/* mode toggle — real money vs practice-vs-bot, one clear choice.
               real money only appears when the escrow service is live. */}
           <div class="grid grid-cols-2 gap-1 p-1 mb-3 rounded-xl bg-black/30 border border-white/8">
@@ -518,7 +539,8 @@ export default function Lobby(props: {
         </Show>
 
         {/* ===== PUBLIC TABLES ===== (browsable by anyone — spectate or jump in on free play) */}
-        <Show when={tab() === 'public'}>
+        <Show when={desktop() || tab() === 'public'}>
+          <div class="hidden lg:block text-neutral-500 text-11px uppercase tracking-wider mb-2">public tables</div>
           <Show when={waitingTables().length > 0} fallback={
             <div class="text-center py-8">
               <div class="text-neutral-600 text-11px mb-2">no public tables waiting</div>
@@ -537,9 +559,6 @@ export default function Lobby(props: {
                       <div class="flex items-center gap-2">
                         <StakeBadge staked={table.staked} buyin_zat={table.buyin_zat} />
                         <span class="text-11px font-mono text-white/70">{table.code}</span>
-                        <Show when={table.bot_friendly}>
-                          <span class="text-9px text-sky-300 bg-sky-500/10 border border-sky-400/25 rounded px-1 uppercase tracking-wider" title="Bots are welcome to sit at this table.">bots ok</span>
-                        </Show>
                       </div>
                       <div class="text-11px text-neutral-500 mt-0.5">{table.blinds} blinds</div>
                     </div>
@@ -596,7 +615,7 @@ export default function Lobby(props: {
 
         {/* ===== INVITE FRIEND ===== */}
         {/* no-wallet fallback: contact invites need zafu, but sharing a table link doesn't */}
-        <Show when={tab() === 'invite' && !props.hasWallet}>
+        <Show when={tab() === 'invite' && !props.hasWallet && !desktop()}>
           <div class="p-5 text-center">
             <div class="text-white/70 text-13px mb-2">invite a friend — no wallet needed</div>
             <div class="text-white/45 text-12px leading-relaxed mb-4">
@@ -612,7 +631,7 @@ export default function Lobby(props: {
           </div>
         </Show>
 
-        <Show when={tab() === 'invite' && props.hasWallet}>
+        <Show when={tab() === 'invite' && props.hasWallet && !desktop()}>
           <div class="p-4">
             {/* invite from contacts */}
             <Show when={props.identity?.pickContacts}>
@@ -697,7 +716,7 @@ export default function Lobby(props: {
 
         {/* ===== COMMON LOBBY — who's here, who to play ===== */}
         {/* Un-gated: free-play visitors (no wallet) are exactly who we want mingling here. */}
-        <div class="mt-3 border border-white/10 rounded-lg overflow-hidden">
+        <div class="mt-3 lg:mt-0 border border-white/10 rounded-lg overflow-hidden">
           {/* header + "looking to play" toggle */}
           <div class="flex items-center justify-between px-2.5 py-1.5 bg-neutral-900/50 border-b border-white/10 gap-2">
             <div class="flex items-center gap-2 min-w-0">
@@ -750,7 +769,7 @@ export default function Lobby(props: {
           </div>
 
           {/* chat */}
-          <div ref={chatEl!} class="h-24 lg:h-36 overflow-y-auto px-2 py-1 font-mono text-11px bg-zec-surface/50 border-t border-white/10">
+          <div ref={chatEl!} class="h-24 lg:h-72 overflow-y-auto px-2 py-1 font-mono text-11px bg-zec-surface/50 border-t border-white/10">
             <For each={chatMessages()}>
               {m => <div class={`text-neutral-500 leading-relaxed ${m.cls}`}>{m.text}</div>}
             </For>
@@ -775,6 +794,7 @@ export default function Lobby(props: {
             <button type="submit" class="text-10px px-2 text-neutral-600 hover:text-neutral-400">↵</button>
           </form>
         </div>
+        </div>{/* ===== /HUB GRID ===== */}
 
         <div class="text-center text-10px text-neutral-700 mt-3 uppercase tracking-widest">
           heads-up nlhe · nested frost escrow · pallas

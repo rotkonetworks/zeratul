@@ -61,7 +61,7 @@ export function Settings(props: { connected: boolean; onClose: () => void }) {
         <div class="flex items-center gap-2 mb-4 text-10px">
           <span class={`w-2 h-2 rounded-full ${props.connected ? 'bg-green-500' : 'bg-amber-500/70'}`} />
           <span class="text-neutral-400">
-            {props.connected ? 'live connection to' : 'idle — connects when you sit at a table ·'} <span class="font-mono text-neutral-200">{currentOrigin()}</span>
+            {props.connected ? 'in-game connection to' : 'lobby connected · the game link opens when you sit at a table ·'} <span class="font-mono text-neutral-200">{currentOrigin()}</span>
           </span>
         </div>
 

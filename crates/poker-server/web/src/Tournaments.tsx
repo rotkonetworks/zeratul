@@ -95,16 +95,27 @@ function fmtZec(zats: number): string {
   return z.toFixed(4) + ' ZEC'
 }
 
+// Last server-supplied error message (e.g. "need at least 2 players", "already registered").
+// The server returns a specific {error} with a 4xx; we surface it verbatim instead of collapsing
+// every failure into a misleading "service offline". Empty string == a genuine network/offline
+// failure (no response body), which callers still render as offline.
+let lastApiError = ''
 async function api<T>(path: string, init?: RequestInit): Promise<T | null> {
   try {
     const resp = await fetch(path, {
       ...init,
       headers: { 'content-type': 'application/json', ...(init?.headers || {}) },
     })
-    if (!resp.ok) return null
+    if (!resp.ok) {
+      try { const b = await resp.json(); lastApiError = (b && b.error) ? String(b.error) : `error ${resp.status}` }
+      catch { lastApiError = `error ${resp.status}` }
+      return null
+    }
+    lastApiError = ''
     const text = await resp.text()
     return text ? (JSON.parse(text) as T) : ({} as T)
   } catch {
+    lastApiError = '' // network failure / offline — no server message
     return null
   }
 }
@@ -352,7 +363,9 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
     setBusy(true)
     const res = await api(`/tournaments/${props.id}/${path}`, { method: 'POST', body: JSON.stringify(body) })
     setBusy(false)
-    if (res === null) setErr('action failed — the service may be offline')
+    // show the server's specific reason (e.g. "need at least 2 players", "only the organizer can
+    // start", "already registered"); fall back to offline only when there was no response body.
+    if (res === null) setErr(lastApiError || 'action failed — the service may be offline')
     else setErr('')
     await load()
   }
