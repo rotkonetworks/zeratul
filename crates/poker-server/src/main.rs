@@ -6,6 +6,7 @@
 
 mod jury;
 mod escrow_client;
+mod tournament;
 
 use axum::{
     Router,
