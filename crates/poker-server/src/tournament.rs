@@ -7,6 +7,8 @@
 //!
 //! This module is pure logic (no I/O, no money) so it's exhaustively testable in isolation.
 
+use std::collections::HashMap;
+
 pub type PlayerId = String;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
@@ -55,6 +57,9 @@ impl Match {
 pub struct Tournament {
     pub id: String,
     pub name: String,
+    /// whoever created it — tournaments are permissionless, anyone can organize one. The organizer
+    /// may `start` it and attach a sponsor; they hold no funds and no special custody power.
+    pub organizer: PlayerId,
     /// true = paid (per-match P2P FROST escrow, roll-over); false = free chip-only.
     pub paid: bool,
     /// buy-in in zatoshi for paid tournaments (the round-1 stake; unused when `!paid`).
@@ -69,10 +74,17 @@ pub struct Tournament {
 }
 
 impl Tournament {
-    pub fn new(id: impl Into<String>, name: impl Into<String>, paid: bool, buyin_zat: u64) -> Self {
+    pub fn new(
+        id: impl Into<String>,
+        name: impl Into<String>,
+        organizer: impl Into<String>,
+        paid: bool,
+        buyin_zat: u64,
+    ) -> Self {
         Self {
             id: id.into(),
             name: name.into(),
+            organizer: organizer.into(),
             paid,
             buyin_zat,
             sponsor: None,
@@ -272,6 +284,90 @@ impl Tournament {
     }
 }
 
+/// In-memory registry of tournaments. **Permissionless**: anyone can `create`. **Non-custodial**:
+/// it holds tournament STATE (brackets, results, sponsor branding), never funds.
+#[derive(Default)]
+pub struct Registry {
+    tournaments: HashMap<String, Tournament>,
+    seq: u64,
+}
+
+impl Registry {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Create a tournament — open to any player. The registry assigns a monotonic id and records
+    /// the caller as organizer. Returns the new id.
+    pub fn create(
+        &mut self,
+        name: impl Into<String>,
+        organizer: impl Into<String>,
+        paid: bool,
+        buyin_zat: u64,
+    ) -> String {
+        self.seq += 1;
+        let id = format!("t{}", self.seq);
+        self.tournaments.insert(
+            id.clone(),
+            Tournament::new(id.clone(), name, organizer, paid, buyin_zat),
+        );
+        id
+    }
+
+    pub fn get(&self, id: &str) -> Option<&Tournament> {
+        self.tournaments.get(id)
+    }
+
+    /// All tournaments (lobby list). Caller sorts/filters (e.g. Registering first).
+    pub fn list(&self) -> Vec<&Tournament> {
+        self.tournaments.values().collect()
+    }
+
+    /// Register `player` into tournament `id` (anyone may join while it's Registering).
+    pub fn join(&mut self, id: &str, player: PlayerId) -> Result<(), String> {
+        self.with(id, |t| t.join(player))
+    }
+
+    pub fn leave(&mut self, id: &str, player: &str) -> Result<(), String> {
+        self.with(id, |t| t.leave(player))
+    }
+
+    /// Start — only the organizer may start their own tournament.
+    pub fn start(&mut self, id: &str, who: &str) -> Result<(), String> {
+        self.with(id, |t| {
+            if t.organizer != who {
+                return Err("only the organizer can start this tournament".into());
+            }
+            t.start()
+        })
+    }
+
+    /// Attach sponsor branding — organizer-gated.
+    pub fn set_sponsor(&mut self, id: &str, who: &str, s: Sponsor) -> Result<(), String> {
+        self.with(id, |t| {
+            if t.organizer != who {
+                return Err("only the organizer can set the sponsor".into());
+            }
+            t.set_sponsor(s);
+            Ok(())
+        })
+    }
+
+    /// Report a match winner and advance the bracket.
+    pub fn report_winner(&mut self, id: &str, match_id: u32, winner: &str) -> Result<(), String> {
+        self.with(id, |t| t.report_winner(match_id, winner))
+    }
+
+    fn with<T>(&mut self, id: &str, f: impl FnOnce(&mut Tournament) -> Result<T, String>) -> Result<T, String> {
+        let t = self
+            .tournaments
+            .get_mut(id)
+            .ok_or_else(|| "no such tournament".to_string())?;
+        f(t)
+    }
+}
+
 /// ceil(log2(n)) for n >= 1. ceil_log2(1)=0, (2)=1, (3)=2, (4)=2, (5)=3, (8)=3, (9)=4.
 fn ceil_log2(n: usize) -> usize {
     if n <= 1 {
@@ -302,7 +398,7 @@ mod tests {
 
     #[test]
     fn join_dedup_and_state_gate() {
-        let mut t = Tournament::new("T1", "Test", false, 0);
+        let mut t = Tournament::new("T1", "Test", "org", false, 0);
         assert!(t.join("a".into()).is_ok());
         assert!(t.join("a".into()).is_err(), "dup rejected");
         assert!(t.join("b".into()).is_ok());
@@ -312,7 +408,7 @@ mod tests {
 
     #[test]
     fn start_needs_two() {
-        let mut t = Tournament::new("T", "T", false, 0);
+        let mut t = Tournament::new("T", "T", "org", false, 0);
         assert!(t.start().is_err());
         t.join("a".into()).unwrap();
         assert!(t.start().is_err());
@@ -323,7 +419,7 @@ mod tests {
     /// A clean power-of-two bracket plays to exactly one champion.
     #[test]
     fn power_of_two_runs_to_champion() {
-        let mut t = Tournament::new("T", "T", false, 0);
+        let mut t = Tournament::new("T", "T", "org", false, 0);
         for p in ids(8) {
             t.join(p).unwrap();
         }
@@ -353,7 +449,7 @@ mod tests {
     #[test]
     fn odd_counts_with_byes_converge() {
         for n in [3usize, 5, 6, 7, 9, 11, 13] {
-            let mut t = Tournament::new("T", "T", false, 0);
+            let mut t = Tournament::new("T", "T", "org", false, 0);
             for p in ids(n) {
                 t.join(p).unwrap();
             }
@@ -379,7 +475,7 @@ mod tests {
 
     #[test]
     fn report_winner_validates() {
-        let mut t = Tournament::new("T", "T", false, 0);
+        let mut t = Tournament::new("T", "T", "org", false, 0);
         t.join("a".into()).unwrap();
         t.join("b".into()).unwrap();
         t.start().unwrap();
@@ -388,5 +484,30 @@ mod tests {
         assert!(t.report_winner(m, "a").is_ok());
         assert!(t.report_winner(m, "b").is_err(), "already decided");
         assert_eq!(t.champion().unwrap(), "a");
+    }
+
+    #[test]
+    fn registry_permissionless_create_organizer_gated_start() {
+        let mut reg = Registry::new();
+        // anyone can create a tournament
+        let id = reg.create("Friday Night", "alice", false, 0);
+        assert_eq!(reg.get(&id).unwrap().organizer, "alice");
+        reg.join(&id, "alice".into()).unwrap();
+        reg.join(&id, "bob".into()).unwrap();
+        // a non-organizer cannot start it…
+        assert!(reg.start(&id, "bob").is_err());
+        // …the organizer can
+        assert!(reg.start(&id, "alice").is_ok());
+        assert_eq!(reg.get(&id).unwrap().state, TournState::Running);
+        // sponsorship is organizer-gated too
+        let s = Sponsor {
+            name: "Zcash".into(),
+            logo_url: "https://z.cash/logo.png".into(),
+            url: "https://z.cash".into(),
+            added_prize_zat: 0,
+        };
+        assert!(reg.set_sponsor(&id, "bob", s.clone()).is_err());
+        assert!(reg.set_sponsor(&id, "alice", s).is_ok());
+        assert!(reg.get(&id).unwrap().sponsor.is_some());
     }
 }
