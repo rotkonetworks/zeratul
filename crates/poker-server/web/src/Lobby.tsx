@@ -82,6 +82,23 @@ export const TABLES: Table[] = [
   },
 ]
 
+// The RELAY is the source of truth for the offered stake tiers (GET /api/config → `stakes`).
+// `TABLES` above is only the fallback used until that fetch resolves (or if it fails), so the
+// lobby still renders offline. `tables()` is what the UI actually reads; the fetch in the Lobby
+// component's onMount swaps in the relay's ladder. Module-level so child components share it.
+const [tables, setTables] = createSignal<Table[]>(TABLES)
+export { tables }
+
+/** Accept the relay's stakes only if it's a well-formed ladder (defensive: never blank the lobby). */
+function applyRelayStakes(stakes: unknown) {
+  if (!Array.isArray(stakes) || stakes.length === 0) return
+  const ok = stakes.every((s: any) =>
+    s && typeof s.name === 'string' &&
+    Number.isFinite(s.sb) && Number.isFinite(s.bb) &&
+    Number.isFinite(s.buyin) && Number.isFinite(s.rakeBps) && Number.isFinite(s.rakeCap))
+  if (ok) setTables(stakes as Table[])
+}
+
 type LiveTable = {
   code: string
   players: number
@@ -146,6 +163,7 @@ export default function Lobby(props: {
     try {
       const cfg = await (await fetch('/api/config')).json()
       setEscrowEnabled(!!cfg.escrow_enabled)
+      applyRelayStakes(cfg.stakes) // relay-authoritative stake ladder (falls back to TABLES)
       // land on free-play unless the visitor already has zafu AND real money is live —
       // browsing + practice must never require the extension (funnel: hook first, install later).
       setPlayMode(cfg.escrow_enabled && props.hasWallet ? 'cash' : 'practice')
@@ -304,7 +322,7 @@ export default function Lobby(props: {
     if (!practice && !requireWalletForCash()) return
     setNotice('')
     const n = name().trim() || 'anon'
-    props.onJoin(TABLES[i], n, bot)
+    props.onJoin(tables()[i], n, bot)
   }
 
   function joinByCode() {
@@ -474,7 +492,7 @@ export default function Lobby(props: {
           </div>
 
           <div class="flex flex-col gap-2">
-              <For each={TABLES}>
+              <For each={tables()}>
                 {(table, i) => (
                   <button
                     class="w-full flex items-center justify-between p-4 bg-zec-surface border border-white/10 rounded-xl transition-all duration-150 hover:border-zec-yellow/50 hover:bg-zec-elevated active:scale-99 group text-left"
@@ -606,7 +624,7 @@ export default function Lobby(props: {
                     const contacts = await props.identity?.pickContacts?.({ purpose: 'Invite to poker table', max: 3 })
                     if (contacts?.length) {
                       const tableIdx = 0
-                      const table = TABLES[tableIdx]
+                      const table = tables()[tableIdx]
                       // send invites first — they contain the table info
                       const names = contacts.map(c => c.displayName).join(', ')
                       for (const c of contacts) {
@@ -639,7 +657,7 @@ export default function Lobby(props: {
             <div class="mb-4">
               <div class="text-neutral-500 text-11px uppercase tracking-wider mb-2">create private table</div>
               <div class="flex gap-2">
-                <For each={TABLES}>
+                <For each={tables()}>
                   {(table, i) => (
                     <button
                       class="flex-1 p-2 bg-zec-surface border border-white/10 rounded text-center active:border-zec-yellow"

@@ -2285,9 +2285,26 @@ async fn list_tables(State(state): State<AppState>) -> impl IntoResponse {
 
 /// client capability probe — drives which options the lobby offers.
 /// `escrow_enabled` gates real-money tables; when false the UI shows practice only.
+/// Canonical stake ladder — the RELAY is the source of truth for the tiers it offers, not the
+/// UI. All amounts are zatoshis (1 ZEC = 100_000_000). `rake_bps`/`rake_cap` are operator revenue
+/// and must be defined server-side so a client cannot propose its own rake. The UI renders
+/// whatever this returns and falls back to a built-in list only if the fetch fails.
+fn stake_ladder() -> serde_json::Value {
+    const ZEC: u64 = 100_000_000;
+    const MZEC: u64 = ZEC / 1000; // 0.001 ZEC
+    serde_json::json!([
+        { "id": 0, "name": "Nano",  "blinds": "50/100 zats",   "sb": 50,        "bb": 100,       "buyin": 10_000,      "maxBuyin": 25_000,      "speed": "normal", "timeout": 30, "color": "#1a3a2d", "rakeBps": 0,   "rakeCap": 0 },
+        { "id": 1, "name": "Micro", "blinds": "0.00005/0.0001", "sb": 5_000,     "bb": 10_000,    "buyin": MZEC,        "maxBuyin": 5*MZEC/2,    "speed": "normal", "timeout": 30, "color": "#2d5a3d", "rakeBps": 250, "rakeCap": 50_000 },
+        { "id": 2, "name": "Low",   "blinds": "0.0005/0.001",   "sb": 50_000,    "bb": 100_000,   "buyin": 10*MZEC,     "maxBuyin": 25*MZEC,     "speed": "normal", "timeout": 30, "color": "#3d5a2d", "rakeBps": 200, "rakeCap": 500_000 },
+        { "id": 3, "name": "Mid",   "blinds": "0.005/0.01",     "sb": 500_000,   "bb": 1_000_000, "buyin": ZEC/10,      "maxBuyin": ZEC/4,       "speed": "normal", "timeout": 30, "color": "#5a3d2d", "rakeBps": 150, "rakeCap": 5_000_000 },
+        { "id": 4, "name": "High",  "blinds": "0.05/0.1",       "sb": 5_000_000, "bb": ZEC/10,    "buyin": ZEC,         "maxBuyin": 5*ZEC/2,     "speed": "normal", "timeout": 45, "color": "#5a2d3d", "rakeBps": 100, "rakeCap": ZEC/10 }
+    ])
+}
+
 async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
     Json(serde_json::json!({
         "escrow_enabled": state.escrow_url.is_some(),
+        "stakes": stake_ladder(),
     }))
 }
 
