@@ -1445,6 +1445,22 @@ struct AppState {
     zid_peers: ZidPeers,
     /// room-keyed blind relay registry (Path B, room-code addressed)
     relay_rooms: RelayRooms,
+    /// non-custodial tournament matchmaker: bracket STATE only, never funds.
+    tournaments: Tournaments,
+}
+
+/// Shared tournament registry (bracket state) + the both-agree result-report ledger.
+type Tournaments = Arc<Mutex<TournamentHub>>;
+
+/// Wraps the pure `tournament::Registry` with the anti-cheat result ledger. For FREE tournaments
+/// we don't have an on-chain escrow to arbitrate a match, so we gate bracket advancement on BOTH
+/// seats independently reporting the SAME winner. `pending[match_id][reporter] = claimed_winner`.
+#[derive(Default)]
+struct TournamentHub {
+    registry: tournament::Registry,
+    /// per-tournament, per-match map of reporter -> the winner they claimed.
+    /// keyed `(tournament_id, match_id)`.
+    reports: HashMap<(String, u32), HashMap<String, String>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -2273,6 +2289,276 @@ async fn get_config(State(state): State<AppState>) -> impl IntoResponse {
     Json(serde_json::json!({
         "escrow_enabled": state.escrow_url.is_some(),
     }))
+}
+
+// ---------------------------------------------------------------------------
+// Tournament HTTP API (non-custodial matchmaker; free-play orchestration)
+//
+// The server holds bracket STATE only — never funds. A match's actual play happens in the
+// existing free-play relay room whose code is deterministic: `tourney-<tid>-m<match_id>`. Those
+// relay rooms auto-create on first join, so there's nothing to spawn here. Clients poll
+// GET /tournaments/{id}, find their current playable match + its room code, join that free-play
+// room to play heads-up, then each side reports the winner to POST /result. The bracket only
+// advances once BOTH seats report the SAME winner (lightweight anti-cheat for free games).
+// ---------------------------------------------------------------------------
+
+/// deterministic free-play room code for a tournament match.
+fn tourney_room_code(tid: &str, match_id: u32) -> String {
+    format!("tourney-{}-m{}", tid, match_id)
+}
+
+#[derive(Deserialize)]
+struct CreateTournamentReq {
+    name: String,
+    organizer: String,
+    #[serde(default)]
+    paid: bool,
+    #[serde(default)]
+    buyin_zat: u64,
+}
+
+async fn create_tournament(
+    State(state): State<AppState>,
+    Json(req): Json<CreateTournamentReq>,
+) -> impl IntoResponse {
+    let mut hub = state.tournaments.lock().await;
+    let id = hub.registry.create(req.name, req.organizer, req.paid, req.buyin_zat);
+    Json(serde_json::json!({ "id": id }))
+}
+
+async fn list_tournaments(State(state): State<AppState>) -> impl IntoResponse {
+    let hub = state.tournaments.lock().await;
+    let list: Vec<serde_json::Value> = hub
+        .registry
+        .list()
+        .into_iter()
+        .map(|t| {
+            serde_json::json!({
+                "id": t.id,
+                "name": t.name,
+                "organizer": t.organizer,
+                "paid": t.paid,
+                "buyin_zat": t.buyin_zat,
+                "state": t.state,
+                "player_count": t.players.len(),
+                "sponsor": t.sponsor,
+            })
+        })
+        .collect();
+    Json(list)
+}
+
+async fn get_tournament(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    let hub = state.tournaments.lock().await;
+    match hub.registry.get(&id) {
+        None => (
+            axum::http::StatusCode::NOT_FOUND,
+            Json(serde_json::json!({ "error": "no such tournament" })),
+        )
+            .into_response(),
+        Some(t) => {
+            // Serialize the full tournament, then annotate each pending (playable) match with the
+            // deterministic free-play room code so the client can join straight into the game.
+            let mut v = serde_json::to_value(t).unwrap_or(serde_json::json!({}));
+            let pending: Vec<serde_json::Value> = t
+                .pending_matches()
+                .into_iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "id": m.id,
+                        "round": m.round,
+                        "a": m.a,
+                        "b": m.b,
+                        "room": tourney_room_code(&t.id, m.id),
+                    })
+                })
+                .collect();
+            if let Some(obj) = v.as_object_mut() {
+                obj.insert("pending".into(), serde_json::json!(pending));
+            }
+            Json(v).into_response()
+        }
+    }
+}
+
+/// map a Result<(), String> to `{ok:true}` (200) or `{error}` (400).
+fn ok_or_400(r: Result<(), String>) -> axum::response::Response {
+    match r {
+        Ok(()) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Err(e) => (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct PlayerReq {
+    player: String,
+}
+
+async fn join_tournament(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<PlayerReq>,
+) -> impl IntoResponse {
+    let mut hub = state.tournaments.lock().await;
+    ok_or_400(hub.registry.join(&id, req.player))
+}
+
+async fn leave_tournament(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<PlayerReq>,
+) -> impl IntoResponse {
+    let mut hub = state.tournaments.lock().await;
+    ok_or_400(hub.registry.leave(&id, &req.player))
+}
+
+#[derive(Deserialize)]
+struct WhoReq {
+    who: String,
+}
+
+async fn start_tournament(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<WhoReq>,
+) -> impl IntoResponse {
+    let mut hub = state.tournaments.lock().await;
+    ok_or_400(hub.registry.start(&id, &req.who))
+}
+
+#[derive(Deserialize)]
+struct SponsorReq {
+    who: String,
+    name: String,
+    #[serde(default)]
+    logo_url: String,
+    #[serde(default)]
+    url: String,
+    #[serde(default)]
+    added_prize_zat: u64,
+}
+
+async fn sponsor_tournament(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<SponsorReq>,
+) -> impl IntoResponse {
+    let mut hub = state.tournaments.lock().await;
+    let sponsor = tournament::Sponsor {
+        name: req.name,
+        logo_url: req.logo_url,
+        url: req.url,
+        added_prize_zat: req.added_prize_zat,
+    };
+    ok_or_400(hub.registry.set_sponsor(&id, &req.who, sponsor))
+}
+
+#[derive(Deserialize)]
+struct ResultReq {
+    match_id: u32,
+    winner: String,
+    reporter: String,
+}
+
+/// Report a match result. FREE-tournament anti-cheat: a single report never advances the bracket.
+/// We record `reporter -> claimed winner`; only once BOTH seated players have reported and they
+/// AGREE do we call `report_winner` to advance. Disagreement records a conflict and leaves the
+/// match unresolved for a manual/organizer path to sort out later.
+async fn result_tournament(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<ResultReq>,
+) -> impl IntoResponse {
+    let mut hub = state.tournaments.lock().await;
+
+    // Validate the match exists, is playable, and that reporter + claimed winner are both seated.
+    let (seat_a, seat_b) = match hub.registry.get(&id) {
+        None => {
+            return (
+                axum::http::StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "no such tournament" })),
+            )
+                .into_response();
+        }
+        Some(t) => match t.matches.iter().find(|m| m.id == req.match_id) {
+            None => {
+                return (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": "no such match" })),
+                )
+                    .into_response();
+            }
+            Some(m) => {
+                if m.winner.is_some() {
+                    return (
+                        axum::http::StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({ "error": "match already decided" })),
+                    )
+                        .into_response();
+                }
+                (m.a.clone(), m.b.clone())
+            }
+        },
+    };
+
+    // reporter must be one of the two seated players
+    if Some(&req.reporter) != seat_a.as_ref() && Some(&req.reporter) != seat_b.as_ref() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "reporter is not a player in this match" })),
+        )
+            .into_response();
+    }
+    // claimed winner must also be one of the two seated players
+    if Some(&req.winner) != seat_a.as_ref() && Some(&req.winner) != seat_b.as_ref() {
+        return (
+            axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "winner is not a player in this match" })),
+        )
+            .into_response();
+    }
+
+    // record this reporter's claim
+    let entry = hub.reports.entry((id.clone(), req.match_id)).or_default();
+    entry.insert(req.reporter.clone(), req.winner.clone());
+
+    // do BOTH seats now agree?
+    let a = seat_a.as_ref().and_then(|p| entry.get(p)).cloned();
+    let b = seat_b.as_ref().and_then(|p| entry.get(p)).cloned();
+    match (a, b) {
+        (Some(wa), Some(wb)) if wa == wb => {
+            // both seats reported the same winner → advance the bracket
+            let winner = wa;
+            let res = hub.registry.report_winner(&id, req.match_id, &winner);
+            // clear the ledger for this match regardless (decided or errored-out)
+            hub.reports.remove(&(id.clone(), req.match_id));
+            match res {
+                Ok(()) => Json(serde_json::json!({ "ok": true, "advanced": true, "winner": winner }))
+                    .into_response(),
+                Err(e) => (
+                    axum::http::StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({ "error": e })),
+                )
+                    .into_response(),
+            }
+        }
+        (Some(_), Some(_)) => {
+            // both reported but they disagree → conflict, leave unresolved for manual resolution
+            Json(serde_json::json!({ "ok": true, "conflict": true })).into_response()
+        }
+        _ => {
+            // only one seat has reported so far → wait for the other
+            Json(serde_json::json!({ "ok": true, "advanced": false, "awaiting_opponent": true }))
+                .into_response()
+        }
+    }
 }
 
 /// create new room and redirect to it
@@ -3238,6 +3524,7 @@ async fn main() {
         escrow_url: escrow_url.clone(),
         zid_peers: Arc::new(Mutex::new(ZidRelay::default())),
         relay_rooms: Arc::new(Mutex::new(HashMap::new())),
+        tournaments: Arc::new(Mutex::new(TournamentHub::default())),
     };
 
     tracing::info!("serving static files from {}", static_dir);
@@ -3262,6 +3549,17 @@ async fn main() {
         .route("/ws/zid", axum::routing::get(zid_relay_handler))
         .route("/api/tables", axum::routing::get(list_tables))
         .route("/api/config", axum::routing::get(get_config))
+        // non-custodial tournament matchmaker (bracket state only; free-play orchestration)
+        .route(
+            "/tournaments",
+            axum::routing::post(create_tournament).get(list_tournaments),
+        )
+        .route("/tournaments/{id}", axum::routing::get(get_tournament))
+        .route("/tournaments/{id}/join", axum::routing::post(join_tournament))
+        .route("/tournaments/{id}/leave", axum::routing::post(leave_tournament))
+        .route("/tournaments/{id}/start", axum::routing::post(start_tournament))
+        .route("/tournaments/{id}/sponsor", axum::routing::post(sponsor_tournament))
+        .route("/tournaments/{id}/result", axum::routing::post(result_tournament))
         .route("/new", axum::routing::get(create_room))
         .route("/{code}/ws", axum::routing::get(ws_handler))
         .route("/{code}/spectate", axum::routing::get(spectate_handler))
@@ -3289,6 +3587,109 @@ mod tests {
             tx,
             disconnected_at: disconnected.then(tokio::time::Instant::now),
         }
+    }
+
+    // ---- tournament orchestration: both-agree result gate ----
+
+    /// Drive the `/result` both-agree logic directly against a TournamentHub (mirrors the handler
+    /// without the axum plumbing) to prove a single report never advances the bracket.
+    fn report(
+        hub: &mut TournamentHub,
+        tid: &str,
+        match_id: u32,
+        reporter: &str,
+        winner: &str,
+    ) -> Result<bool, String> {
+        // returns Ok(true) if advanced, Ok(false) if awaiting/conflict, Err on validation fail
+        let (a, b) = {
+            let t = hub.registry.get(tid).ok_or("no tournament")?;
+            let m = t.matches.iter().find(|m| m.id == match_id).ok_or("no match")?;
+            if m.winner.is_some() {
+                return Err("already decided".into());
+            }
+            (m.a.clone(), m.b.clone())
+        };
+        if Some(&reporter.to_string()) != a.as_ref() && Some(&reporter.to_string()) != b.as_ref() {
+            return Err("reporter not seated".into());
+        }
+        if Some(&winner.to_string()) != a.as_ref() && Some(&winner.to_string()) != b.as_ref() {
+            return Err("winner not seated".into());
+        }
+        let entry = hub.reports.entry((tid.to_string(), match_id)).or_default();
+        entry.insert(reporter.to_string(), winner.to_string());
+        let wa = a.as_ref().and_then(|p| entry.get(p)).cloned();
+        let wb = b.as_ref().and_then(|p| entry.get(p)).cloned();
+        match (wa, wb) {
+            (Some(x), Some(y)) if x == y => {
+                hub.registry.report_winner(tid, match_id, &x)?;
+                hub.reports.remove(&(tid.to_string(), match_id));
+                Ok(true)
+            }
+            (Some(_), Some(_)) => Ok(false), // conflict
+            _ => Ok(false),                  // awaiting opponent
+        }
+    }
+
+    #[test]
+    fn tourney_result_needs_both_seats_to_agree() {
+        let mut hub = TournamentHub::default();
+        let tid = hub.registry.create("Friday", "alice", false, 0);
+        hub.registry.join(&tid, "alice".into()).unwrap();
+        hub.registry.join(&tid, "bob".into()).unwrap();
+        hub.registry.start(&tid, "alice").unwrap();
+        let mid = hub.registry.get(&tid).unwrap().pending_matches()[0].id;
+
+        // one report alone does NOT advance
+        assert_eq!(report(&mut hub, &tid, mid, "alice", "alice"), Ok(false));
+        assert!(
+            hub.registry.get(&tid).unwrap().matches.iter().find(|m| m.id == mid).unwrap().winner.is_none(),
+            "single report must not decide the match"
+        );
+
+        // second seat agrees → advances (and this is a 2-player bracket, so champion)
+        assert_eq!(report(&mut hub, &tid, mid, "bob", "alice"), Ok(true));
+        assert_eq!(
+            hub.registry.get(&tid).unwrap().matches.iter().find(|m| m.id == mid).unwrap().winner.as_deref(),
+            Some("alice")
+        );
+        assert_eq!(hub.registry.get(&tid).unwrap().champion().map(|s| s.as_str()), Some("alice"));
+        // ledger cleared after advancing
+        assert!(hub.reports.get(&(tid.clone(), mid)).is_none());
+    }
+
+    #[test]
+    fn tourney_result_conflict_leaves_match_unresolved() {
+        let mut hub = TournamentHub::default();
+        let tid = hub.registry.create("Sat", "alice", false, 0);
+        hub.registry.join(&tid, "alice".into()).unwrap();
+        hub.registry.join(&tid, "bob".into()).unwrap();
+        hub.registry.start(&tid, "alice").unwrap();
+        let mid = hub.registry.get(&tid).unwrap().pending_matches()[0].id;
+
+        assert_eq!(report(&mut hub, &tid, mid, "alice", "alice"), Ok(false));
+        // bob claims himself → disagreement → conflict, NOT advanced
+        assert_eq!(report(&mut hub, &tid, mid, "bob", "bob"), Ok(false));
+        assert!(
+            hub.registry.get(&tid).unwrap().matches.iter().find(|m| m.id == mid).unwrap().winner.is_none(),
+            "conflicting reports must leave the match undecided"
+        );
+    }
+
+    #[test]
+    fn tourney_result_rejects_outsiders() {
+        let mut hub = TournamentHub::default();
+        let tid = hub.registry.create("Sun", "alice", false, 0);
+        hub.registry.join(&tid, "alice".into()).unwrap();
+        hub.registry.join(&tid, "bob".into()).unwrap();
+        hub.registry.start(&tid, "alice").unwrap();
+        let mid = hub.registry.get(&tid).unwrap().pending_matches()[0].id;
+        assert!(report(&mut hub, &tid, mid, "carol", "alice").is_err(), "non-seated reporter rejected");
+        assert!(report(&mut hub, &tid, mid, "alice", "carol").is_err(), "non-seated winner rejected");
+    }
+
+    #[test]
+    fn tourney_room_code_is_deterministic() {
+        assert_eq!(tourney_room_code("t3", 7), "tourney-t3-m7");
     }
 
     #[test]

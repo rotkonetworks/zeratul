@@ -3,6 +3,7 @@ import { createSocket } from './ws'
 import { Card } from './Card'
 import Lobby, { type Table } from './Lobby'
 import { Settings } from './Settings'
+import Tournaments, { reportTournamentResult } from './Tournaments'
 import { detectZafu } from './zid/provider'
 import { getPositionShort } from './positions'
 import { requestPokerDkg, requestDeletePokerMultisig, requestPokerSign } from './dkg'
@@ -542,6 +543,17 @@ export default function App() {
         setActions([])
         setActing(-1)
         setSettleReason(msg.reason)
+        // Free tournament auto-report: report the WINNING handle so the bracket advances. Both
+        // players report; the backend only advances when they agree. Winner = seat with the
+        // largest payout; opponent name is stored formatted ("name (mode)") so strip the suffix.
+        try {
+          if (Array.isArray(msg.payouts) && msg.payouts.length) {
+            const winSeat = msg.payouts.reduce((b: any, p: any) => (p[1] > b[1] ? p : b), msg.payouts[0])[0]
+            const rawOpp = (playerNames()[winSeat] || '').replace(/\s*\([^)]*\)\s*$/, '')
+            const winnerName = winSeat === mySeat() ? (localStorage.getItem('poker_nickname') || rawOpp) : rawOpp
+            if (winnerName) reportTournamentResult(winnerName)
+          }
+        } catch { /* best-effort; non-tournament games have no stashed match */ }
         // real tables: flip to settlement immediately with a 'preparing' spinner. PCZT build
         // + relay-room provisioning takes ~3-5s so GameOver lands well before PayoutSigningRequest.
         // Pre-populate the plan from GameOver.payouts so the user sees per-seat amounts right away;
@@ -1033,6 +1045,8 @@ export default function App() {
 
   return (
     <div class="h-[100dvh] flex flex-col bg-zec-dark font-sans text-white">
+          {/* free chip-only tournaments — self-contained overlay, opens on #/tournaments */}
+          <Tournaments />
           {/* titlebar \u2014 full-width top bar */}
           <div class="titlebar shrink-0">
             <span class="text-zec-yellow text-14px">{'\u2666'}</span>
@@ -1048,7 +1062,12 @@ export default function App() {
             </Show>
             <span class={`w-2 h-2 rounded-full ${connected() ? 'bg-green-500' : 'bg-neutral-600'}`} />
             <button
-              class="ml-2 text-11px text-neutral-500 hover:text-zec-yellow leading-none"
+              class="ml-2 text-11px text-neutral-500 hover:text-zec-yellow leading-none flex items-center"
+              title="tournaments"
+              onClick={() => { window.location.hash = '#/tournaments' }}
+            ><span class="i-lucide-trophy w-3.5 h-3.5" /></button>
+            <button
+              class="ml-1 text-11px text-neutral-500 hover:text-zec-yellow leading-none"
               title="relay settings"
               onClick={() => setShowSettings(true)}
             >{'⚙'}</button>
