@@ -272,6 +272,13 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
   const [t, setT] = createSignal<Tournament | null>(null)
   const [err, setErr] = createSignal('')
   const [busy, setBusy] = createSignal(false)
+  // sponsor form (organizer sets branding + a *pledged* prize — no money is held; the sponsor
+  // pays the champion directly, so this is pure display + a pledge, zero custody).
+  const [showSponsor, setShowSponsor] = createSignal(false)
+  const [spName, setSpName] = createSignal('')
+  const [spLogo, setSpLogo] = createSignal('')
+  const [spUrl, setSpUrl] = createSignal('')
+  const [spPrize, setSpPrize] = createSignal('') // ZEC (decimal), optional
 
   const load = async () => {
     const res = await api<Tournament>(`/tournaments/${props.id}`)
@@ -391,6 +398,43 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
                   title={(cur().player_count ?? cur().players.length) < 2 ? 'need at least 2 players' : 'start the tournament'}
                   onClick={start}
                 >start tournament</button>
+              </Show>
+            </div>
+          </Show>
+
+          {/* organizer: attach sponsor branding + a PLEDGED prize. Non-custodial — no ZEC is held
+              anywhere; the amount is a pledge the sponsor pays the champion directly. */}
+          <Show when={isOrganizer()}>
+            <div class="mb-4">
+              <button
+                class="text-11px text-zec-yellow/80 hover:text-zec-yellow underline decoration-dotted"
+                onClick={() => setShowSponsor(v => !v)}
+              >{cur().sponsor ? 'edit sponsor' : '+ add a sponsor'}</button>
+              <Show when={showSponsor()}>
+                <div class="mt-2 p-3 rounded-lg border border-white/10 bg-zec-surface grid gap-2">
+                  <div class="text-9px text-neutral-500 uppercase tracking-widest leading-relaxed">
+                    sponsor — branding + optional pledged prize. No funds are held; the sponsor pays
+                    the champion directly (pledge, not escrow).
+                  </div>
+                  <input class="input-field text-11px" placeholder="sponsor name"
+                    value={spName()} onInput={e => setSpName(e.currentTarget.value)} />
+                  <input class="input-field text-11px" placeholder="logo image URL (https://…)"
+                    value={spLogo()} onInput={e => setSpLogo(e.currentTarget.value)} />
+                  <input class="input-field text-11px" placeholder="website URL (https://…)"
+                    value={spUrl()} onInput={e => setSpUrl(e.currentTarget.value)} />
+                  <input class="input-field text-11px" placeholder="pledged prize in ZEC (optional, e.g. 0.5)"
+                    value={spPrize()} onInput={e => setSpPrize(e.currentTarget.value)} />
+                  <button class="btn btn-primary text-11px px-3" disabled={busy() || !spName().trim()}
+                    onClick={async () => {
+                      const zat = Math.max(0, Math.round((parseFloat(spPrize()) || 0) * 1e8))
+                      await act('sponsor', {
+                        who: props.me, name: spName().trim(),
+                        logo_url: spLogo().trim(), url: spUrl().trim(), added_prize_zat: zat,
+                      })
+                      setShowSponsor(false)
+                    }}
+                  >save sponsor</button>
+                </div>
               </Show>
             </div>
           </Show>
