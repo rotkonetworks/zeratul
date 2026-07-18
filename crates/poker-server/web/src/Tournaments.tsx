@@ -50,6 +50,9 @@ type Match = {
   b: string | null
   winner: string | null
   room?: string | null
+  // present on `pending` matches: paid = route into a STAKED escrow room; stake_zat = deposit each.
+  paid?: boolean
+  stake_zat?: number
 }
 
 type Tournament = {
@@ -63,6 +66,9 @@ type Tournament = {
   sponsor?: Sponsor
   players: string[]
   matches: Match[]
+  // playable matches, annotated by the server with `room`/`paid`/`stake_zat`. Only these carry a
+  // room code — the raw `matches` never do. Route play from here.
+  pending?: Match[]
   // some backends echo the summary field on the detail object too — optional.
   player_count?: number
 }
@@ -103,17 +109,28 @@ async function api<T>(path: string, init?: RequestInit): Promise<T | null> {
   }
 }
 
-// key under which App's normal room-join reload path is triggered: we simply set the
-// nickname (so the room lobby prefills it) and navigate to /{room}.
-function enterRoom(room: string, matchId: string, tournamentId: string) {
-  // remember which tournament match this room belongs to so that, when the free-play
-  // game ends, the client can report the result. Read back by the report hook.
+// Route into a tournament match. For FREE matches the room code is joined directly (App creates a
+// chip-only room on the fly). For PAID matches we FIRST ask the server to get-or-create the STAKED
+// escrow room (server-authoritative stake) — only then navigate, so a paid match can never land in
+// a free-play room. Returns an error string on failure (shown by the caller).
+async function enterMatch(m: Match, tournamentId: string): Promise<string | null> {
+  let room = m.room!
+  if (m.paid) {
+    const res = await api<{ room: string }>(
+      `/tournaments/${tournamentId}/match/${m.id}/room`,
+      { method: 'POST', body: JSON.stringify({ who: playerHandle() }) },
+    )
+    if (!res || !res.room) return 'could not open the staked match room (escrow may be offline)'
+    room = res.room
+  }
+  // remember which tournament match this room belongs to so the result hook can report the winner.
   try {
-    localStorage.setItem('poker_tourney_match', JSON.stringify({ tournamentId, matchId, room }))
+    localStorage.setItem('poker_tourney_match', JSON.stringify({ tournamentId, matchId: m.id, room }))
   } catch { /* ignore */ }
-  // reuse the app's pathname-based join: App reads location.pathname on load and drops
-  // the player into the room's "sit down" lobby with their saved nickname.
+  // reuse the app's pathname-based join: App reads location.pathname on load and drops the player
+  // into the room's "sit down" lobby with their saved nickname.
   window.location.assign('/' + room.replace(/^\/+/, ''))
+  return null
 }
 
 // ── sponsor banner ─────────────────────────────────────────────────────────
@@ -219,14 +236,18 @@ function CreateForm(props: { onCreated: (id: string) => void }) {
   const [name, setName] = createSignal('')
   const [busy, setBusy] = createSignal(false)
   const [err, setErr] = createSignal('')
+  const [paid, setPaid] = createSignal(false)
+  const [buyin, setBuyin] = createSignal('') // ZEC (decimal) buy-in for round 1
   const create = async () => {
     const n = name().trim()
     if (!n) { setErr('name your tournament'); return }
+    const buyinZat = Math.max(0, Math.round((parseFloat(buyin()) || 0) * 1e8))
+    if (paid() && buyinZat <= 0) { setErr('paid tournaments need a buy-in'); return }
     setBusy(true)
     setErr('')
     const res = await api<{ id: string }>('/tournaments', {
       method: 'POST',
-      body: JSON.stringify({ name: n, organizer: playerHandle(), paid: false, buyin_zat: 0 }),
+      body: JSON.stringify({ name: n, organizer: playerHandle(), paid: paid(), buyin_zat: buyinZat }),
     })
     setBusy(false)
     if (res && res.id) {
@@ -252,14 +273,32 @@ function CreateForm(props: { onCreated: (id: string) => void }) {
           {busy() ? 'creating…' : 'create'}
         </button>
       </div>
-      <div class="flex items-center gap-3 mt-3">
-        <span class="text-10px text-white/40 uppercase tracking-wider">format</span>
-        <span class="text-10px px-2 py-0.5 rounded-full bg-white/8 text-white/60 border border-white/15">free · chip-only</span>
-        <span
-          class="text-10px px-2 py-0.5 rounded-full bg-white/5 text-neutral-600 border border-white/10 cursor-not-allowed"
-          title="paid buy-in tournaments are coming soon"
-        >paid · soon</span>
+      <div class="flex items-center gap-2 mt-3">
+        <span class="text-10px text-white/40 uppercase tracking-wider mr-1">format</span>
+        <button
+          class={`text-10px px-2 py-0.5 rounded-full border ${!paid() ? 'bg-white/12 text-white/80 border-white/25' : 'bg-white/5 text-white/45 border-white/10'}`}
+          onClick={() => setPaid(false)}
+        >free · chip-only</button>
+        <button
+          class={`text-10px px-2 py-0.5 rounded-full border ${paid() ? 'bg-zec-yellow/15 text-zec-yellow border-zec-yellow/40' : 'bg-white/5 text-white/45 border-white/10'}`}
+          onClick={() => setPaid(true)}
+        >paid · real ZEC</button>
       </div>
+      <Show when={paid()}>
+        <div class="mt-3 grid gap-2">
+          <label class="flex items-center gap-2">
+            <span class="text-10px text-white/50 w-24 shrink-0">round-1 buy-in</span>
+            <input class="input-field text-12px flex-1 min-w-32" placeholder="ZEC per player, e.g. 0.01"
+              value={buyin()} onInput={e => setBuyin(e.currentTarget.value)} />
+          </label>
+          <div class="text-9px text-neutral-500 leading-relaxed">
+            Peer-to-peer &amp; non-custodial — no house holds the pot. Each match is its own 2-of-3
+            FROST escrow between the two players; the winner is paid to their own wallet and
+            re-deposits (double the stake) for the next round. Field must be a power of two
+            (2/4/8/16) so stacks stay equal. A network fee applies per round.
+          </div>
+        </div>
+      </Show>
       <Show when={err()}>
         <div class="mt-2 text-11px text-red-400">{err()}</div>
       </Show>
@@ -292,12 +331,12 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
 
   const joined = () => !!t()?.players.includes(props.me)
   const isOrganizer = () => t()?.organizer === props.me
-  // a playable match: this player is a or b, both seats filled, no winner yet, has a room
+  // a playable match: read the server's `pending` list (the only matches carrying room/stake).
   const myMatch = (): Match | null => {
     const cur = t()
     if (!cur || cur.state !== 'running') return null
-    return cur.matches.find(m =>
-      (m.a === props.me || m.b === props.me) && m.a && m.b && !m.winner && m.room,
+    return (cur.pending ?? []).find(m =>
+      (m.a === props.me || m.b === props.me) && m.room,
     ) || null
   }
   const champion = (): string | null => {
@@ -350,8 +389,26 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
                 }>{cur().state}</span>
               </div>
             </div>
-            <span class="text-9px font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/8 text-white/50 border border-white/15 shrink-0">free</span>
+            <Show when={cur().paid} fallback={
+              <span class="text-9px font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-white/8 text-white/50 border border-white/15 shrink-0">free</span>
+            }>
+              <span class="text-9px font-semibold uppercase tracking-wider px-1.5 py-0.5 rounded bg-zec-yellow/15 text-zec-yellow border border-zec-yellow/40 shrink-0" title="peer-to-peer buy-in, non-custodial">
+                paid · {fmtZec(cur().buyin_zat)}
+              </span>
+            </Show>
           </div>
+
+          {/* paid tournament: prize/stake summary (winner-take-all, doubling stakes per round) */}
+          <Show when={cur().paid && cur().rounds > 0}>
+            <div class="mb-4 p-3 rounded-lg border border-zec-yellow/20 bg-zec-yellow/5 text-11px text-white/70 leading-relaxed">
+              <span class="text-zec-yellow font-semibold">winner-take-all.</span>{' '}
+              Buy-in {fmtZec(cur().buyin_zat)}; the stake doubles each round as the winner rolls it
+              forward. A champion of {cur().rounds} round{cur().rounds === 1 ? '' : 's'} ends with{' '}
+              <span class="font-mono text-zec-yellow">{fmtZec(cur().buyin_zat * (1 << cur().rounds))}</span>{' '}
+              in their own wallet (minus per-round network fees). Non-custodial: each match is its own
+              player-to-player escrow — no house ever holds the pot.
+            </div>
+          </Show>
 
           {/* champion screen */}
           <Show when={champion()}>
@@ -373,12 +430,21 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
                   <div class="text-13px text-white/90 font-semibold">Your match is ready</div>
                   <div class="text-11px text-white/50">
                     vs <span class="font-mono">{m().a === props.me ? m().b : m().a}</span>
+                    <Show when={m().paid && m().stake_zat}>
+                      {' · '}<span class="text-zec-yellow">deposit {fmtZec(m().stake_zat!)}</span> to your match escrow
+                    </Show>
                   </div>
                 </div>
                 <button
                   class="btn btn-primary text-13px px-5 py-2 shrink-0"
-                  onClick={() => enterRoom(m().room!, m().id, props.id)}
-                >Play →</button>
+                  disabled={busy()}
+                  onClick={async () => {
+                    setBusy(true)
+                    const e = await enterMatch(m(), props.id)
+                    setBusy(false)
+                    if (e) setErr(e)
+                  }}
+                >{m().paid ? 'Deposit & play →' : 'Play →'}</button>
               </div>
             )}
           </Show>

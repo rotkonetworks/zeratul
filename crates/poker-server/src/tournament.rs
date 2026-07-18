@@ -44,6 +44,12 @@ pub struct Match {
     pub a: Option<PlayerId>,
     pub b: Option<PlayerId>,
     pub winner: Option<PlayerId>,
+    /// Stake EACH player must deposit into this match's own P2P escrow (zatoshi). Doubles per round
+    /// (winner rolls both stakes forward), so round r stake = buyin × 2^(r-1). 0 for free play.
+    /// The escrow is per-match and settles to the winner's own wallet — nothing is held between
+    /// rounds, so there is no custody: the winner re-deposits the (larger) stake for the next match.
+    #[serde(default)]
+    pub stake_zat: u64,
 }
 
 impl Match {
@@ -102,6 +108,16 @@ impl Tournament {
         self.sponsor = Some(s);
     }
 
+    /// Stake each player deposits in a given round (zatoshi). Doubles per round because the winner
+    /// carries both stakes forward: round 1 = buyin, round 2 = 2×buyin, … Saturates rather than
+    /// overflowing on absurd fields. Always 0 for free tournaments.
+    pub fn stake_for_round(&self, round: u32) -> u64 {
+        if !self.paid || round == 0 {
+            return 0;
+        }
+        self.buyin_zat.checked_shl(round - 1).unwrap_or(u64::MAX)
+    }
+
     /// One-line disclosure shown to players BEFORE they join a PAID tournament: for the P2P /
     /// no-custody design, each round is its own on-chain settlement, so a small network fee is
     /// deducted per round — players accept this up front (the org takes no rake / holds nothing).
@@ -152,6 +168,21 @@ impl Tournament {
         if n < 2 {
             return Err("need at least 2 players".into());
         }
+        // PAID tournaments must have a power-of-two field (2/4/8/16/…). Byes would let a player
+        // advance a round without staking, leaving unequal stacks that break the doubling roll-over
+        // (and hand a free pass in a money game). Free tournaments allow any N — byes are harmless
+        // when no money rides on them.
+        if self.paid {
+            if self.buyin_zat == 0 {
+                return Err("paid tournament needs a non-zero buy-in".into());
+            }
+            if !n.is_power_of_two() {
+                return Err(format!(
+                    "paid tournaments need a power-of-two field (2, 4, 8, 16…); have {} players",
+                    n
+                ));
+            }
+        }
         // rounds = ceil(log2(n)); size = 2^rounds
         let rounds = ceil_log2(n);
         let size = 1usize << rounds;
@@ -164,11 +195,12 @@ impl Tournament {
         let mut matches: Vec<Match> = Vec::new();
         let mut next_id = 0u32;
         let mut pi = 0usize;
+        let r1_stake = self.stake_for_round(1);
         // round-1 byes: a real player advances automatically
         for _ in 0..byes {
             let a = self.players[pi].clone();
             pi += 1;
-            matches.push(Match { id: next_id, round: 1, a: Some(a.clone()), b: None, winner: Some(a) });
+            matches.push(Match { id: next_id, round: 1, a: Some(a.clone()), b: None, winner: Some(a), stake_zat: r1_stake });
             next_id += 1;
         }
         // round-1 real matches
@@ -176,7 +208,7 @@ impl Tournament {
             let a = self.players[pi].clone();
             let b = self.players[pi + 1].clone();
             pi += 2;
-            matches.push(Match { id: next_id, round: 1, a: Some(a), b: Some(b), winner: None });
+            matches.push(Match { id: next_id, round: 1, a: Some(a), b: Some(b), winner: None, stake_zat: r1_stake });
             next_id += 1;
         }
 
@@ -184,8 +216,9 @@ impl Tournament {
         let mut prev = matches.len();
         for r in 2..=rounds {
             let count = prev / 2;
+            let stake = self.stake_for_round(r as u32);
             for _ in 0..count {
-                matches.push(Match { id: next_id, round: r as u32, a: None, b: None, winner: None });
+                matches.push(Match { id: next_id, round: r as u32, a: None, b: None, winner: None, stake_zat: stake });
                 next_id += 1;
             }
             prev = count;
@@ -484,6 +517,49 @@ mod tests {
         assert!(t.report_winner(m, "a").is_ok());
         assert!(t.report_winner(m, "b").is_err(), "already decided");
         assert_eq!(t.champion().unwrap(), "a");
+    }
+
+    #[test]
+    fn paid_requires_power_of_two_and_buyin() {
+        // non-power-of-two field is rejected for paid
+        let mut t = Tournament::new("T", "T", "org", true, 100_000);
+        for p in ids(3) {
+            t.join(p).unwrap();
+        }
+        assert!(t.start().is_err(), "3 players rejected for paid");
+
+        // zero buy-in rejected
+        let mut z = Tournament::new("T", "T", "org", true, 0);
+        z.join("a".into()).unwrap();
+        z.join("b".into()).unwrap();
+        assert!(z.start().is_err(), "zero buy-in rejected");
+
+        // clean power-of-two paid field starts and stamps doubling stakes per round
+        let mut ok = Tournament::new("T", "T", "org", true, 100_000);
+        for p in ids(4) {
+            ok.join(p).unwrap();
+        }
+        ok.start().unwrap();
+        assert_eq!(ok.rounds, 2);
+        // round 1 = buyin, round 2 (final) = 2× buyin
+        for m in &ok.matches {
+            let want = if m.round == 1 { 100_000 } else { 200_000 };
+            assert_eq!(m.stake_zat, want, "round {} stake", m.round);
+        }
+        assert_eq!(ok.stake_for_round(1), 100_000);
+        assert_eq!(ok.stake_for_round(2), 200_000);
+        assert_eq!(ok.stake_for_round(3), 400_000);
+    }
+
+    #[test]
+    fn free_tournament_has_zero_stakes() {
+        let mut t = Tournament::new("T", "T", "org", false, 0);
+        for p in ids(4) {
+            t.join(p).unwrap();
+        }
+        t.start().unwrap();
+        assert!(t.matches.iter().all(|m| m.stake_zat == 0));
+        assert_eq!(t.stake_for_round(1), 0);
     }
 
     #[test]

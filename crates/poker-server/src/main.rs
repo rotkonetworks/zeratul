@@ -2343,6 +2343,82 @@ async fn create_tournament(
     Json(serde_json::json!({ "id": id }))
 }
 
+#[derive(Deserialize)]
+struct MatchRoomReq {
+    /// the caller's player handle — must be one of the two seated players in this match.
+    who: String,
+}
+
+/// Get-or-create the STAKED escrow room for a PAID tournament match. This is the one place a paid
+/// match turns into a real-money table, so everything money-relevant is decided SERVER-SIDE:
+///   * the stake comes from the match (`stake_zat`), never the client — a player can't understate it;
+///   * only a seated player (a or b) of a *playable* match may provision it;
+///   * the room code is deterministic so both players land in the SAME escrow;
+///   * provisioning is idempotent — the first caller creates + DKG-provisions, the second reuses it.
+/// The whole get-or-create runs under the tournaments lock so two players racing can't double-provision
+/// (which would spin up two DKGs for one match). Reuses the exact cash-table escrow path.
+async fn tournament_match_room(
+    State(state): State<AppState>,
+    Path((id, match_id)): Path<(String, u32)>,
+    Json(req): Json<MatchRoomReq>,
+) -> impl IntoResponse {
+    // hold the tournaments lock for the full get-or-create to serialize provisioning per match.
+    let hub = state.tournaments.lock().await;
+    let Some(t) = hub.registry.get(&id) else {
+        return (axum::http::StatusCode::NOT_FOUND, "no such tournament").into_response();
+    };
+    if !t.paid {
+        return (axum::http::StatusCode::BAD_REQUEST, "not a paid tournament").into_response();
+    }
+    let Some(m) = t.matches.iter().find(|m| m.id == match_id) else {
+        return (axum::http::StatusCode::NOT_FOUND, "no such match").into_response();
+    };
+    // server-authoritative: caller must be a seated player of a match that's ready to play.
+    if m.a.as_deref() != Some(req.who.as_str()) && m.b.as_deref() != Some(req.who.as_str()) {
+        return (axum::http::StatusCode::FORBIDDEN, "not a player in this match").into_response();
+    }
+    if !m.is_playable() {
+        return (axum::http::StatusCode::BAD_REQUEST, "match is not ready to play").into_response();
+    }
+    let stake = m.stake_zat;
+    if stake == 0 {
+        return (axum::http::StatusCode::BAD_REQUEST, "match has no stake").into_response();
+    }
+    let code = tourney_room_code(&id, match_id);
+
+    // already provisioned? reuse it (idempotent for the second player + retries).
+    if state.rooms.lock().await.contains_key(&code) {
+        return Json(serde_json::json!({ "room": code, "stake_zat": stake })).into_response();
+    }
+    // real-money room needs the escrow service; refuse rather than silently create a free room.
+    if state.escrow_url.is_none() {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "real-money tournaments are unavailable (escrow offline)",
+        ).into_response();
+    }
+    // heads-up blinds scaled to the stake (~100bb stack): bb = stake/100, sb = bb/2, min 1.
+    let bb = (stake / 100).max(1);
+    let sb = (bb / 2).max(1);
+    // provision the per-match 2-of-3 FROST escrow (same path as a cash table). rake_bps = 0:
+    // the org takes nothing — winner gets the pot minus only the network fee.
+    let escrow = remote_escrow_for(&state.escrow_url, &code, stake, 0).await;
+    if !escrow.is_staked() {
+        return (
+            axum::http::StatusCode::SERVICE_UNAVAILABLE,
+            "could not provision match escrow (escrow service unreachable)",
+        ).into_response();
+    }
+    let room = Arc::new(Mutex::new(Room::with_settings(
+        code.clone(), sb, bb, stake, 30, 2, TableAccess::Private, false, escrow,
+    )));
+    state.rooms.lock().await.insert(code.clone(), room);
+    spawn_deposit_poller(state.rooms.clone(), state.escrow_url.clone(), code.clone());
+    notify_lobby_tables(&state.rooms, &state.lobby_users).await;
+    tracing::info!("tournament {} match {} -> staked room {} (stake {} zat)", id, match_id, code, stake);
+    Json(serde_json::json!({ "room": code, "stake_zat": stake })).into_response()
+}
+
 async fn list_tournaments(State(state): State<AppState>) -> impl IntoResponse {
     let hub = state.tournaments.lock().await;
     let list: Vec<serde_json::Value> = hub
@@ -2390,6 +2466,10 @@ async fn get_tournament(
                         "a": m.a,
                         "b": m.b,
                         "room": tourney_room_code(&t.id, m.id),
+                        // paid matches route into a STAKED room; each player deposits stake_zat into
+                        // that match's own P2P escrow. 0/false for free tournaments.
+                        "paid": t.paid,
+                        "stake_zat": m.stake_zat,
                     })
                 })
                 .collect();
@@ -3577,6 +3657,7 @@ async fn main() {
         .route("/tournaments/{id}/start", axum::routing::post(start_tournament))
         .route("/tournaments/{id}/sponsor", axum::routing::post(sponsor_tournament))
         .route("/tournaments/{id}/result", axum::routing::post(result_tournament))
+        .route("/tournaments/{id}/match/{mid}/room", axum::routing::post(tournament_match_room))
         .route("/new", axum::routing::get(create_room))
         .route("/{code}/ws", axum::routing::get(ws_handler))
         .route("/{code}/spectate", axum::routing::get(spectate_handler))
