@@ -20,6 +20,9 @@ pub enum TournState {
     Running,
     /// champion decided
     Finished,
+    /// scheduled start time passed with fewer than 2 players (or a bracket that couldn't be
+    /// built) — auto-cancelled. No custody, so nothing to refund.
+    Cancelled,
 }
 
 /// A tournament sponsor — branding shown to every participant (logo + click-through URL). The
@@ -77,6 +80,10 @@ pub struct Tournament {
     pub matches: Vec<Match>,
     /// total rounds = ceil(log2(N)). 0 until started.
     pub rounds: u32,
+    /// unix seconds when the tournament auto-starts (None = organizer starts it manually). At this
+    /// time the relay ticker starts the bracket if ≥2 players are registered, else cancels it.
+    #[serde(default)]
+    pub scheduled_start: Option<u64>,
 }
 
 impl Tournament {
@@ -98,6 +105,7 @@ impl Tournament {
             players: Vec::new(),
             matches: Vec::new(),
             rounds: 0,
+            scheduled_start: None,
         }
     }
 
@@ -338,14 +346,39 @@ impl Registry {
         organizer: impl Into<String>,
         paid: bool,
         buyin_zat: u64,
+        scheduled_start: Option<u64>,
     ) -> String {
         self.seq += 1;
         let id = format!("t{}", self.seq);
-        self.tournaments.insert(
-            id.clone(),
-            Tournament::new(id.clone(), name, organizer, paid, buyin_zat),
-        );
+        let mut t = Tournament::new(id.clone(), name, organizer, paid, buyin_zat);
+        t.scheduled_start = scheduled_start;
+        self.tournaments.insert(id.clone(), t);
         id
+    }
+
+    /// Relay ticker hook — auto-start / auto-cancel any tournament whose scheduled start time has
+    /// passed. `now` is unix seconds. The schedule IS the authorization, so this bypasses the
+    /// organizer gate: ≥2 registered players → start the bracket; otherwise (or if the bracket
+    /// can't be built, e.g. a paid non-power-of-two field) → cancel. Returns (id, outcome) to log.
+    pub fn tick(&mut self, now: u64) -> Vec<(String, &'static str)> {
+        let mut out = Vec::new();
+        for (id, t) in self.tournaments.iter_mut() {
+            if t.state != TournState::Registering { continue; }
+            match t.scheduled_start {
+                Some(ts) if now >= ts => {}
+                _ => continue,
+            }
+            if t.players.len() < 2 {
+                t.state = TournState::Cancelled;
+                out.push((id.clone(), "cancelled (too few players)"));
+            } else if t.start().is_ok() {
+                out.push((id.clone(), "started"));
+            } else {
+                t.state = TournState::Cancelled;
+                out.push((id.clone(), "cancelled (bracket unbuildable)"));
+            }
+        }
+        out
     }
 
     pub fn get(&self, id: &str) -> Option<&Tournament> {

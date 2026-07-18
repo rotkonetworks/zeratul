@@ -2332,6 +2332,9 @@ struct CreateTournamentReq {
     paid: bool,
     #[serde(default)]
     buyin_zat: u64,
+    /// unix seconds for a scheduled auto-start; omitted/null = organizer starts it manually.
+    #[serde(default)]
+    scheduled_start: Option<u64>,
 }
 
 async fn create_tournament(
@@ -2339,7 +2342,7 @@ async fn create_tournament(
     Json(req): Json<CreateTournamentReq>,
 ) -> impl IntoResponse {
     let mut hub = state.tournaments.lock().await;
-    let id = hub.registry.create(req.name, req.organizer, req.paid, req.buyin_zat);
+    let id = hub.registry.create(req.name, req.organizer, req.paid, req.buyin_zat, req.scheduled_start);
     Json(serde_json::json!({ "id": id }))
 }
 
@@ -3624,6 +3627,27 @@ async fn main() {
         tournaments: Arc::new(Mutex::new(TournamentHub::default())),
     };
 
+    // scheduled-tournament ticker: every 5s, auto-start any tournament whose scheduled start time
+    // has passed (≥2 players) or auto-cancel it (too few). The schedule is the authorization, so no
+    // organizer needs to be present. Cheap: a no-op unless a tournament is actually due.
+    {
+        let tourneys = state.tournaments.clone();
+        tokio::spawn(async move {
+            let mut ticker = tokio::time::interval(std::time::Duration::from_secs(5));
+            loop {
+                ticker.tick().await;
+                let now = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0);
+                let mut hub = tourneys.lock().await;
+                for (id, outcome) in hub.registry.tick(now) {
+                    tracing::info!("tournament {} auto-{}", id, outcome);
+                }
+            }
+        });
+    }
+
     tracing::info!("serving static files from {}", static_dir);
     tracing::info!("jury config: {}-of-{} frostito nested FROST (pallas)", JURY_T, JURY_N);
     match &escrow_url {
@@ -3731,7 +3755,7 @@ mod tests {
     #[test]
     fn tourney_result_needs_both_seats_to_agree() {
         let mut hub = TournamentHub::default();
-        let tid = hub.registry.create("Friday", "alice", false, 0);
+        let tid = hub.registry.create("Friday", "alice", false, 0, None);
         hub.registry.join(&tid, "alice".into()).unwrap();
         hub.registry.join(&tid, "bob".into()).unwrap();
         hub.registry.start(&tid, "alice").unwrap();
@@ -3758,7 +3782,7 @@ mod tests {
     #[test]
     fn tourney_result_conflict_leaves_match_unresolved() {
         let mut hub = TournamentHub::default();
-        let tid = hub.registry.create("Sat", "alice", false, 0);
+        let tid = hub.registry.create("Sat", "alice", false, 0, None);
         hub.registry.join(&tid, "alice".into()).unwrap();
         hub.registry.join(&tid, "bob".into()).unwrap();
         hub.registry.start(&tid, "alice").unwrap();
@@ -3776,7 +3800,7 @@ mod tests {
     #[test]
     fn tourney_result_rejects_outsiders() {
         let mut hub = TournamentHub::default();
-        let tid = hub.registry.create("Sun", "alice", false, 0);
+        let tid = hub.registry.create("Sun", "alice", false, 0, None);
         hub.registry.join(&tid, "alice".into()).unwrap();
         hub.registry.join(&tid, "bob".into()).unwrap();
         hub.registry.start(&tid, "alice").unwrap();

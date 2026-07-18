@@ -38,9 +38,10 @@ type TournamentSummary = {
   organizer: string
   paid: boolean
   buyin_zat: number
-  state: 'registering' | 'running' | 'finished'
+  state: 'registering' | 'running' | 'finished' | 'cancelled'
   player_count: number
   sponsor?: Sponsor
+  scheduled_start?: number | null // unix seconds; auto-starts at this time
 }
 
 type Match = {
@@ -61,9 +62,10 @@ type Tournament = {
   organizer: string
   paid: boolean
   buyin_zat: number
-  state: 'registering' | 'running' | 'finished'
+  state: 'registering' | 'running' | 'finished' | 'cancelled'
   rounds: number
   sponsor?: Sponsor
+  scheduled_start?: number | null // unix seconds; auto-starts at this time (else manual)
   players: string[]
   matches: Match[]
   // playable matches, annotated by the server with `room`/`paid`/`stake_zat`. Only these carry a
@@ -93,6 +95,16 @@ function fmtZec(zats: number): string {
   if (z >= 1) return z.toFixed(1) + ' ZEC'
   if (z >= 0.01) return z.toFixed(2) + ' ZEC'
   return z.toFixed(4) + ' ZEC'
+}
+
+// Human countdown for a scheduled auto-start (unix seconds). '' when unscheduled.
+function startsLabel(ts?: number | null): string {
+  if (!ts) return ''
+  const secs = ts - Math.floor(Date.now() / 1000)
+  if (secs <= 0) return 'starting…'
+  if (secs < 3600) return `starts in ${Math.ceil(secs / 60)}m`
+  if (secs < 86400) return `starts in ${Math.floor(secs / 3600)}h ${Math.ceil((secs % 3600) / 60)}m`
+  return 'starts ' + new Date(ts * 1000).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })
 }
 
 // Last server-supplied error message (e.g. "need at least 2 players", "already registered").
@@ -249,16 +261,25 @@ function CreateForm(props: { onCreated: (id: string) => void }) {
   const [err, setErr] = createSignal('')
   const [paid, setPaid] = createSignal(false)
   const [buyin, setBuyin] = createSignal('') // ZEC (decimal) buy-in for round 1
+  const [startAt, setStartAt] = createSignal('') // <input datetime-local> value; empty = manual start
   const create = async () => {
     const n = name().trim()
     if (!n) { setErr('name your tournament'); return }
     const buyinZat = Math.max(0, Math.round((parseFloat(buyin()) || 0) * 1e8))
     if (paid() && buyinZat <= 0) { setErr('paid tournaments need a buy-in'); return }
+    // optional scheduled auto-start — datetime-local is local time; convert to unix seconds.
+    let scheduledStart: number | undefined
+    if (startAt()) {
+      const ms = new Date(startAt()).getTime()
+      if (!Number.isFinite(ms)) { setErr('invalid start time'); return }
+      if (ms < Date.now() + 30_000) { setErr('start time must be at least a minute out'); return }
+      scheduledStart = Math.floor(ms / 1000)
+    }
     setBusy(true)
     setErr('')
     const res = await api<{ id: string }>('/tournaments', {
       method: 'POST',
-      body: JSON.stringify({ name: n, organizer: playerHandle(), paid: paid(), buyin_zat: buyinZat }),
+      body: JSON.stringify({ name: n, organizer: playerHandle(), paid: paid(), buyin_zat: buyinZat, scheduled_start: scheduledStart }),
     })
     setBusy(false)
     if (res && res.id) {
@@ -294,6 +315,16 @@ function CreateForm(props: { onCreated: (id: string) => void }) {
           class={`text-10px px-2 py-0.5 rounded-full border ${paid() ? 'bg-zec-yellow/15 text-zec-yellow border-zec-yellow/40' : 'bg-white/5 text-white/45 border-white/10'}`}
           onClick={() => setPaid(true)}
         >paid · real ZEC</button>
+      </div>
+      {/* scheduled auto-start — optional. empty = organizer starts manually. */}
+      <div class="flex items-center gap-2 mt-3 flex-wrap">
+        <span class="text-10px text-white/40 uppercase tracking-wider mr-1">start</span>
+        <input type="datetime-local" class="input-field text-12px"
+          value={startAt()} onInput={e => setStartAt(e.currentTarget.value)} />
+        <Show when={startAt()} fallback={<span class="text-9px text-neutral-500">leave empty to start manually</span>}>
+          <span class="text-9px text-zec-yellow/80">auto-starts then with whoever's registered (≥2, else cancels)</span>
+          <button class="text-9px text-neutral-500 underline" onClick={() => setStartAt('')}>clear</button>
+        </Show>
       </div>
       <Show when={paid()}>
         <div class="mt-3 grid gap-2">
@@ -398,8 +429,12 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
                 <span class={
                   cur().state === 'running' ? 'text-green-400'
                   : cur().state === 'finished' ? 'text-zec-yellow'
+                  : cur().state === 'cancelled' ? 'text-red-400/80'
                   : 'text-white/50'
                 }>{cur().state}</span>
+                <Show when={cur().state === 'registering' && cur().scheduled_start}>
+                  {' · '}<span class="text-zec-yellow/80">{startsLabel(cur().scheduled_start)}</span>
+                </Show>
               </div>
             </div>
             <Show when={cur().paid} fallback={
@@ -583,6 +618,9 @@ function ListView(props: { me: string; onOpen: (id: string) => void }) {
           <div class="text-13px font-semibold text-white/87 truncate">{props2.t.name}</div>
           <div class="text-10px text-neutral-500 truncate">
             by <span class="font-mono">{props2.t.organizer}</span> · {props2.t.player_count} players
+            <Show when={props2.t.state === 'registering' && props2.t.scheduled_start}>
+              {' · '}<span class="text-zec-yellow/80">{startsLabel(props2.t.scheduled_start)}</span>
+            </Show>
             <Show when={props2.t.sponsor?.name}>{' · '}<span class="text-zec-text">{props2.t.sponsor!.name}</span></Show>
           </div>
         </div>
