@@ -103,6 +103,20 @@ function fmtZec(zats: number): string {
   return z.toFixed(4) + ' ZEC'
 }
 
+// Format a Date as a <input type="datetime-local"> value (YYYY-MM-DDTHH:MM) in LOCAL time.
+function toLocalInput(d: Date): string {
+  const p = (n: number) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}T${p(d.getHours())}:${p(d.getMinutes())}`
+}
+// The user's timezone, spelled out so a scheduled time is never ambiguous, e.g. "Asia/Bangkok · UTC+7".
+function tzLabel(): string {
+  const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'local'
+  const off = -new Date().getTimezoneOffset() / 60
+  return `${tz} · UTC${off >= 0 ? '+' : '−'}${Math.abs(off)}`
+}
+// default scheduled start: current time + 60 minutes, as a datetime-local value.
+const defaultStart = () => toLocalInput(new Date(Date.now() + 60 * 60_000))
+
 // Human countdown for a scheduled auto-start (unix seconds). '' when unscheduled.
 function startsLabel(ts?: number | null): string {
   if (!ts) return ''
@@ -311,7 +325,7 @@ function CreateForm(props: { onCreated: (id: string) => void }) {
   const [err, setErr] = createSignal('')
   const [paid, setPaid] = createSignal(false)
   const [buyin, setBuyin] = createSignal('') // ZEC (decimal) buy-in for round 1
-  const [startAt, setStartAt] = createSignal('') // <input datetime-local> value; empty = manual start
+  const [startAt, setStartAt] = createSignal(defaultStart()) // datetime-local value; default now+60min, empty = manual
   const [rollBps, setRollBps] = createSignal(10000) // winner's per-round roll-forward (paid only)
   const create = async () => {
     const n = name().trim()
@@ -367,15 +381,26 @@ function CreateForm(props: { onCreated: (id: string) => void }) {
           onClick={() => setPaid(true)}
         >paid · real ZEC</button>
       </div>
-      {/* scheduled auto-start — optional. empty = organizer starts manually. */}
-      <div class="flex items-center gap-2 mt-3 flex-wrap">
-        <span class="text-10px text-white/40 uppercase tracking-wider mr-1">start</span>
-        <input type="datetime-local" class="input-field text-12px"
-          value={startAt()} onInput={e => setStartAt(e.currentTarget.value)} />
-        <Show when={startAt()} fallback={<span class="text-9px text-neutral-500">leave empty to start manually</span>}>
-          <span class="text-9px text-zec-yellow/80">auto-starts then with whoever's registered (≥2, else cancels)</span>
-          <button class="text-9px text-neutral-500 underline" onClick={() => setStartAt('')}>clear</button>
-        </Show>
+      {/* scheduled auto-start — defaults to now+60min; clear it for a manual start. On mobile the
+          datetime-local input opens the native Android/iOS calendar+clock picker. */}
+      <div class="mt-3">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-10px text-white/40 uppercase tracking-wider mr-1">starts</span>
+          <Show when={startAt()} fallback={
+            <button class="text-11px text-zec-yellow/90 underline decoration-dotted"
+              onClick={() => setStartAt(defaultStart())}>set a start time</button>
+          }>
+            <input type="datetime-local" class="input-field text-12px"
+              min={toLocalInput(new Date(Date.now() + 60_000))}
+              value={startAt()} onInput={e => setStartAt(e.currentTarget.value)} />
+            <button class="text-9px text-neutral-500 underline" onClick={() => setStartAt('')}>manual start</button>
+          </Show>
+        </div>
+        <div class="text-9px text-neutral-500 mt-1">
+          <Show when={startAt()} fallback="no schedule — you start it manually.">
+            times in <span class="text-white/60">{tzLabel()}</span> · auto-starts with whoever's registered (≥2, else cancels)
+          </Show>
+        </div>
       </div>
       <Show when={paid()}>
         <div class="mt-3 grid gap-2">
@@ -477,6 +502,7 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
   const join = () => act('join', { player: props.me })
   const leave = () => act('leave', { player: props.me })
   const start = () => act('start', { who: props.me })
+  const cancel = () => { if (confirm('Cancel this tournament? This cannot be undone.')) act('cancel', { who: props.me }) }
 
   return (
     <Show when={t()} fallback={
@@ -585,7 +611,17 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
                   title={(cur().player_count ?? cur().players.length) < 2 ? 'need at least 2 players' : 'start the tournament'}
                   onClick={start}
                 >start tournament</button>
+                <button class="text-11px text-red-400/80 hover:text-red-400 underline ml-auto" disabled={busy()}
+                  onClick={cancel}>cancel tournament</button>
               </Show>
+            </div>
+          </Show>
+
+          {/* organizer can also cancel a running tournament */}
+          <Show when={cur().state === 'running' && isOrganizer()}>
+            <div class="mb-4">
+              <button class="text-11px text-red-400/80 hover:text-red-400 underline" disabled={busy()}
+                onClick={cancel}>cancel tournament</button>
             </div>
           </Show>
 

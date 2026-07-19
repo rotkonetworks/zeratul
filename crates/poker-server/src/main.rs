@@ -2542,6 +2542,15 @@ async fn start_tournament(
     ok_or_400(hub.registry.start(&id, &req.who))
 }
 
+async fn cancel_tournament(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<WhoReq>,
+) -> impl IntoResponse {
+    let mut hub = state.tournaments.lock().await;
+    ok_or_400(hub.registry.cancel(&id, &req.who))
+}
+
 #[derive(Deserialize)]
 struct SponsorReq {
     who: String,
@@ -3717,6 +3726,7 @@ async fn main() {
         .route("/tournaments/{id}/join", axum::routing::post(join_tournament))
         .route("/tournaments/{id}/leave", axum::routing::post(leave_tournament))
         .route("/tournaments/{id}/start", axum::routing::post(start_tournament))
+        .route("/tournaments/{id}/cancel", axum::routing::post(cancel_tournament))
         .route("/tournaments/{id}/sponsor", axum::routing::post(sponsor_tournament))
         .route("/tournaments/{id}/sponsor/remove", axum::routing::post(remove_sponsor_tournament))
         .route("/tournaments/{id}/result", axum::routing::post(result_tournament))

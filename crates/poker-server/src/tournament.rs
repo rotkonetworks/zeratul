@@ -197,6 +197,17 @@ impl Tournament {
             .fold(0u64, |acc, s| acc.saturating_add(s.added_prize_zat))
     }
 
+    /// Cancel the tournament (organizer action). Allowed while registering or running; a finished
+    /// one can't be undone. Non-custodial, so nothing to refund for free play; platinum sponsor
+    /// vaults (Phase B) route to their own refund on cancel.
+    pub fn cancel(&mut self) -> Result<(), String> {
+        match self.state {
+            TournState::Finished => Err("tournament already finished".into()),
+            TournState::Cancelled => Ok(()), // idempotent
+            _ => { self.state = TournState::Cancelled; Ok(()) }
+        }
+    }
+
     /// Stake each player deposits in a given round (zatoshi). Doubles per round because the winner
     /// carries both stakes forward: round 1 = buyin, round 2 = 2×buyin, … Saturates rather than
     /// overflowing on absurd fields. Always 0 for free tournaments.
@@ -514,6 +525,16 @@ impl Registry {
     /// Escrow-watcher hook (Phase B): flip a platinum sponsor to funded + record its vault room.
     pub fn mark_sponsor_funded(&mut self, id: &str, target_by: &str, escrow_room: String) -> Result<(), String> {
         self.with(id, |t| t.mark_sponsor_funded(target_by, escrow_room))
+    }
+
+    /// Cancel a tournament — organizer only.
+    pub fn cancel(&mut self, id: &str, who: &str) -> Result<(), String> {
+        self.with(id, |t| {
+            if t.organizer != who {
+                return Err("only the organizer can cancel this tournament".into());
+            }
+            t.cancel()
+        })
     }
 
     /// Report a match winner and advance the bracket.
