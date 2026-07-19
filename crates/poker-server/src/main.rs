@@ -2901,7 +2901,8 @@ async fn tournament_page(
             } else {
                 "free entry · ".to_string()
             };
-            (og_escape(&t.name), format!("{}{} players · {} · heads-up single elimination", money, n, status))
+            // return RAW strings; og_escape is applied once at emit time below (double-escaping bug).
+            (t.name.clone(), format!("{}{} players · {} · heads-up single elimination", money, n, status))
         })
     };
     let host = headers.get(axum::http::header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("zkbtc.org");
