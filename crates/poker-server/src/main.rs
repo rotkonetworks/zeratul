@@ -1,4 +1,4 @@
-//! poker-server: websocket game server with nested FROST jury
+//! poker-server: websocket game server with FROST jury
 //!
 //! jury signing has two modes (selected by NARSIL_ENDPOINT env var):
 //! - local: all jury shares in-process (demo/testing)
@@ -214,7 +214,7 @@ struct ValidActionJson { kind: String, min_amount: u64, max_amount: u64 }
 struct PotJson { amount: u64, eligible: Vec<u8> }
 
 // ---------------------------------------------------------------------------
-// frostito jury (3-of-5 nested FROST, OSST-gated)
+// frostito jury (3-of-5 FROST, OSST-gated)
 // ---------------------------------------------------------------------------
 
 const JURY_N: u32 = 5;
@@ -445,7 +445,7 @@ impl Room {
         };
         let engine = GameEngine::new(rules, seats as u8).unwrap();
 
-        // frostito: 2-of-3 nested escrow (player A + player B + jury)
+        // frostito: 2-of-3 escrow (player A + player B + jury)
         // jury's share s₃ born distributed via interleaved DKG — never materialized
         let mut rng = rand::thread_rng();
         let (player_a_share, player_b_share, jury_network, group_pubkey) =
@@ -3687,7 +3687,7 @@ async fn main() {
     }
 
     tracing::info!("serving static files from {}", static_dir);
-    tracing::info!("jury config: {}-of-{} frostito nested FROST (pallas)", JURY_T, JURY_N);
+    tracing::info!("jury config: {}-of-{} frostito FROST (pallas)", JURY_T, JURY_N);
     match &escrow_url {
         Some(u) => tracing::info!("escrow service: {}", u),
         None => tracing::info!("escrow service: disabled (set ESCROW_URL to enable)"),

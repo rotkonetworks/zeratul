@@ -797,7 +797,7 @@ export default function Lobby(props: {
         </div>{/* ===== /HUB GRID ===== */}
 
         <div class="text-center text-10px text-neutral-700 mt-3 uppercase tracking-widest">
-          heads-up nlhe · nested frost escrow · pallas
+          heads-up nlhe · 2-of-3 frost escrow · pallas
         </div>
       </div>
     </div>

@@ -1962,10 +1962,11 @@ export default function App() {
                 input.value = ''
                 // slash commands
                 if (msg.startsWith('/nick ')) {
-                  const newName = msg.slice(6).trim()
+                  const newName = msg.slice(6).trim().slice(0, 20)
                   if (newName) {
                     setName(newName)
                     localStorage.setItem('poker_nickname', newName)
+                    send({ type: 'Rename', name: newName }) // ← propagate to the opponent (was local-only)
                     log(`nickname set to ${newName}`, 'text-neutral-400')
                   }
                   return

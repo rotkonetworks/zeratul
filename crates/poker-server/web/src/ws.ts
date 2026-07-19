@@ -331,6 +331,10 @@ export function createSocket(onMsg: (msg: ServerMsg) => void) {
       if (isStaked) transport?.sendServer({ type: 'EscrowFault', phase: data['phase'], detail: data['detail'] })
     } else if (data['type'] === 'Chat') {
       transport?.send({ t: 'chat', d: { text: data['text'] } })
+    } else if (data['type'] === 'Rename') {
+      // propagate an in-game nick change to the peer. A dedicated `rename` frame (NOT a re-`seated`,
+      // which would trigger the reconnect resync) — the peer just updates the displayed opponent name.
+      transport?.send({ t: 'rename', d: { name: data['name'] } })
     } else if (data['type'] === 'Leave') {
       // staked table: tell the server coordinator to settle (co-signed game-over
       // → deposit refund / payout) over the `srv` channel, then stay connected to

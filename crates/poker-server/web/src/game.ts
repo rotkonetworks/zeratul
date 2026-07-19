@@ -689,6 +689,15 @@ export function createGame(
         break
       }
 
+      case 'rename': {
+        // peer changed their nick mid-game — update only the displayed opponent name. No engine
+        // or resync side effects (that's why it's a dedicated frame, not a re-`seated`).
+        const d = msg.d as any
+        const nm = ((typeof d === 'string' ? d : d?.name) || 'anon').toString().slice(0, 20)
+        cb.onMsg({ type: 'OpponentJoined', seat: oppSeat, name: nm })
+        break
+      }
+
       case 'deal': {
         // plaintext fallback: guest receives cards from host.
         // On a ZK table cards come ONLY from the shuffle ceremony (onDeal) — a
