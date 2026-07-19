@@ -29,13 +29,43 @@ pub enum TournState {
 /// sponsor NEVER holds player funds; sponsorship is advertising, not custody, so it adds no
 /// regulatory surface. A sponsor MAY pledge an `added_prize` they pay the champion DIRECTLY
 /// (peer-to-peer), announced up front — the org still touches nothing.
+/// Sponsor tier. GOLD = the tournament creator's own unescrowed pledge (a trusted promise; the org
+/// touches no funds). PLATINUM = a permissionless third-party sponsor whose prize is only real once
+/// a 2-of-3 FROST {sponsor, creator, bot} escrow has landed the funds (Phase B). Until then a
+/// platinum entry is `funded: false` and is shown as "pending," never counted toward the prize.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SponsorTier {
+    Gold,
+    Platinum,
+}
+
 #[derive(Clone, Debug, serde::Serialize)]
 pub struct Sponsor {
     pub name: String,
     pub logo_url: String,
     pub url: String,
-    /// optional sponsor-pledged prize (zatoshi), paid sponsor→champion directly. 0 = branding only.
+    /// pledged (gold) or escrowed (platinum) prize (zatoshi), paid to the champion. 0 = branding only.
     pub added_prize_zat: u64,
+    /// handle that added this entry — owner-gates edit/remove (the sponsor themself, or the organizer).
+    pub by: PlayerId,
+    /// GOLD (organizer, unescrowed pledge) vs PLATINUM (third-party, escrow-backed).
+    pub tier: SponsorTier,
+    /// PLATINUM only: has the 2-of-3 escrow actually landed the funds? Gold is always effectively
+    /// funded (a trusted promise). The escrow watcher flips this true; the add-path never can.
+    #[serde(default)]
+    pub funded: bool,
+    /// PLATINUM escrow/vault room id, set by the escrow flow. None until a vault is opened.
+    #[serde(default)]
+    pub escrow_room: Option<String>,
+}
+
+impl Sponsor {
+    /// Does this entry's prize count toward the champion prize? Gold (organizer pledge) always
+    /// counts; platinum counts ONLY once its escrow is funded.
+    pub fn counts(&self) -> bool {
+        matches!(self.tier, SponsorTier::Gold) || self.funded
+    }
 }
 
 /// One bracket slot. `a`/`b` are `None` until the feeding match resolves (or `None` = a bye).
@@ -73,8 +103,9 @@ pub struct Tournament {
     pub paid: bool,
     /// buy-in in zatoshi for paid tournaments (the round-1 stake; unused when `!paid`).
     pub buyin_zat: u64,
-    /// optional sponsor branding (logo + URL shown to all participants).
-    pub sponsor: Option<Sponsor>,
+    /// sponsors shown to all participants (add-order). Gold = organizer pledge; platinum =
+    /// permissionless, escrow-gated. See `add_sponsor` / `remove_sponsor` / `total_prize`.
+    pub sponsors: Vec<Sponsor>,
     pub state: TournState,
     pub players: Vec<PlayerId>,
     pub matches: Vec<Match>,
@@ -104,7 +135,7 @@ impl Tournament {
             organizer: organizer.into(),
             paid,
             buyin_zat,
-            sponsor: None,
+            sponsors: Vec::new(),
             state: TournState::Registering,
             players: Vec::new(),
             matches: Vec::new(),
@@ -117,8 +148,53 @@ impl Tournament {
     /// Attach (or replace) sponsor branding. Allowed any time — a sponsor can back an already-open
     /// tournament. Non-custodial: sponsorship is advertising; any pledged prize is paid by the
     /// sponsor directly to the champion, never held by the org.
-    pub fn set_sponsor(&mut self, s: Sponsor) {
-        self.sponsor = Some(s);
+    /// Permissionless append. The organizer's own entry is GOLD (trusted pledge, counts
+    /// immediately); anyone else is PLATINUM and starts `funded=false` — shown as "pending" and
+    /// NOT counted until the escrow watcher flips `funded`. `who` is the authenticated caller;
+    /// `by`/`tier`/`funded` are stamped HERE, ignoring whatever the caller put in `s`.
+    pub fn add_sponsor(&mut self, who: PlayerId, mut s: Sponsor) {
+        if who == self.organizer {
+            s.tier = SponsorTier::Gold;
+            s.funded = true; // an unescrowed trusted promise → always counts
+        } else {
+            s.tier = SponsorTier::Platinum;
+            s.funded = false; // not counted / not "verified" until the 2-of-3 escrow lands
+        }
+        s.escrow_room = None;
+        s.by = who;
+        self.sponsors.push(s);
+    }
+
+    /// Remove the sponsor entry added by `target_by`. Allowed if `who` is that sponsor
+    /// (self-remove) or the organizer (moderation). Err if no such entry or not permitted.
+    pub fn remove_sponsor(&mut self, who: &str, target_by: &str) -> Result<(), String> {
+        let idx = self.sponsors.iter().position(|s| s.by == target_by)
+            .ok_or_else(|| "no such sponsor".to_string())?;
+        if who != target_by && who != self.organizer {
+            return Err("only the sponsor or the organizer can remove this sponsor".into());
+        }
+        self.sponsors.remove(idx);
+        Ok(())
+    }
+
+    /// Escrow-watcher hook (Phase B): mark a platinum sponsor funded once its 2-of-3 vault
+    /// confirms, recording the vault room id. No player gating — called from the escrow poller.
+    pub fn mark_sponsor_funded(&mut self, target_by: &str, escrow_room: String) -> Result<(), String> {
+        let s = self.sponsors.iter_mut().find(|s| s.by == target_by)
+            .ok_or_else(|| "no such sponsor".to_string())?;
+        if !matches!(s.tier, SponsorTier::Platinum) {
+            return Err("only platinum sponsors are escrow-funded".into());
+        }
+        s.funded = true;
+        s.escrow_room = Some(escrow_room);
+        Ok(())
+    }
+
+    /// Sum of prizes that COUNT: gold always, platinum only when funded. Unfunded platinum is
+    /// excluded (renders as "pending"). Saturating to avoid overflow on absurd fields.
+    pub fn total_prize(&self) -> u64 {
+        self.sponsors.iter().filter(|s| s.counts())
+            .fold(0u64, |acc, s| acc.saturating_add(s.added_prize_zat))
     }
 
     /// Stake each player deposits in a given round (zatoshi). Doubles per round because the winner
@@ -424,15 +500,20 @@ impl Registry {
         })
     }
 
-    /// Attach sponsor branding — organizer-gated.
-    pub fn set_sponsor(&mut self, id: &str, who: &str, s: Sponsor) -> Result<(), String> {
-        self.with(id, |t| {
-            if t.organizer != who {
-                return Err("only the organizer can set the sponsor".into());
-            }
-            t.set_sponsor(s);
-            Ok(())
-        })
+    /// Add a sponsor — PERMISSIONLESS. Organizer's entry becomes gold; anyone else platinum
+    /// (unfunded until the escrow lands). `who` is the authenticated caller.
+    pub fn add_sponsor(&mut self, id: &str, who: &str, s: Sponsor) -> Result<(), String> {
+        self.with(id, |t| { t.add_sponsor(who.to_string(), s); Ok(()) })
+    }
+
+    /// Remove a sponsor entry (by its `by` handle). Sponsor-self or organizer only.
+    pub fn remove_sponsor(&mut self, id: &str, who: &str, target_by: &str) -> Result<(), String> {
+        self.with(id, |t| t.remove_sponsor(who, target_by))
+    }
+
+    /// Escrow-watcher hook (Phase B): flip a platinum sponsor to funded + record its vault room.
+    pub fn mark_sponsor_funded(&mut self, id: &str, target_by: &str, escrow_room: String) -> Result<(), String> {
+        self.with(id, |t| t.mark_sponsor_funded(target_by, escrow_room))
     }
 
     /// Report a match winner and advance the bracket.
@@ -614,7 +695,7 @@ mod tests {
     fn registry_permissionless_create_organizer_gated_start() {
         let mut reg = Registry::new();
         // anyone can create a tournament
-        let id = reg.create("Friday Night", "alice", false, 0);
+        let id = reg.create("Friday Night", "alice", false, 0, None, 10000);
         assert_eq!(reg.get(&id).unwrap().organizer, "alice");
         reg.join(&id, "alice".into()).unwrap();
         reg.join(&id, "bob".into()).unwrap();
@@ -623,15 +704,35 @@ mod tests {
         // …the organizer can
         assert!(reg.start(&id, "alice").is_ok());
         assert_eq!(reg.get(&id).unwrap().state, TournState::Running);
-        // sponsorship is organizer-gated too
-        let s = Sponsor {
-            name: "Zcash".into(),
-            logo_url: "https://z.cash/logo.png".into(),
-            url: "https://z.cash".into(),
-            added_prize_zat: 0,
+    }
+
+    #[test]
+    fn sponsors_permissionless_tiers_and_prize() {
+        let mut reg = Registry::new();
+        let id = reg.create("Cup", "alice", false, 0, None, 10000);
+        let mk = |prize: u64| Sponsor {
+            name: "Zcash".into(), logo_url: "https://z.cash/logo.png".into(), url: "https://z.cash".into(),
+            added_prize_zat: prize, by: String::new(), tier: SponsorTier::Platinum, funded: false, escrow_room: None,
         };
-        assert!(reg.set_sponsor(&id, "bob", s.clone()).is_err());
-        assert!(reg.set_sponsor(&id, "alice", s).is_ok());
-        assert!(reg.get(&id).unwrap().sponsor.is_some());
+        // permissionless: a non-organizer CAN add — lands as platinum, unfunded, not counted.
+        assert!(reg.add_sponsor(&id, "bob", mk(500)).is_ok());
+        {
+            let t = reg.get(&id).unwrap();
+            assert_eq!(t.sponsors.len(), 1);
+            assert_eq!(t.sponsors[0].tier, SponsorTier::Platinum);
+            assert!(!t.sponsors[0].funded);
+            assert_eq!(t.total_prize(), 0); // unfunded platinum doesn't count
+        }
+        // organizer's entry is gold and counts immediately.
+        reg.add_sponsor(&id, "alice", mk(1000)).unwrap();
+        assert_eq!(reg.get(&id).unwrap().total_prize(), 1000);
+        // escrow watcher funds bob's platinum → now it counts.
+        reg.mark_sponsor_funded(&id, "bob", "vault-1".into()).unwrap();
+        assert_eq!(reg.get(&id).unwrap().total_prize(), 1500);
+        // remove gating: a stranger can't; the sponsor or organizer can.
+        assert!(reg.remove_sponsor(&id, "carol", "bob").is_err());
+        assert!(reg.remove_sponsor(&id, "bob", "bob").is_ok());
+        assert!(reg.remove_sponsor(&id, "alice", "alice").is_ok()); // organizer moderates own gold
+        assert_eq!(reg.get(&id).unwrap().sponsors.len(), 0);
     }
 }

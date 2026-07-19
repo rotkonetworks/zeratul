@@ -30,7 +30,10 @@ type Sponsor = {
   logo_url?: string
   url?: string
   added_prize_zat?: number
-} | null
+  by?: string
+  tier?: 'gold' | 'platinum'
+  funded?: boolean          // platinum: escrow landed. gold is always effectively funded.
+}
 
 type TournamentSummary = {
   id: string
@@ -40,7 +43,8 @@ type TournamentSummary = {
   buyin_zat: number
   state: 'registering' | 'running' | 'finished' | 'cancelled'
   player_count: number
-  sponsor?: Sponsor
+  sponsors?: Sponsor[]
+  total_prize_zat?: number
   scheduled_start?: number | null // unix seconds; auto-starts at this time
 }
 
@@ -64,7 +68,8 @@ type Tournament = {
   buyin_zat: number
   state: 'registering' | 'running' | 'finished' | 'cancelled'
   rounds: number
-  sponsor?: Sponsor
+  sponsors?: Sponsor[]
+  total_prize_zat?: number
   scheduled_start?: number | null // unix seconds; auto-starts at this time (else manual)
   roll_bps?: number // winner's per-round roll-forward (10000=100% doubling, 7500=×1.5, 5000=flat)
   players: string[]
@@ -168,30 +173,64 @@ async function enterMatch(m: Match, tournamentId: string): Promise<string | null
 }
 
 // ── sponsor banner ─────────────────────────────────────────────────────────
-function SponsorBanner(props: { sponsor: Sponsor }) {
-  const s = () => props.sponsor
+/** One sponsor chip — honest tiering: 🥇 gold = "pledged" (a promise); 💎 platinum = "verified"
+ *  only once its escrow is funded, else "funding…". A platinum that isn't funded is shown muted. */
+function SponsorChip(props: { s: Sponsor; tid: string; me: string; organizer?: string; onChanged: () => void }) {
+  const s = () => props.s
+  const platinum = () => s().tier === 'platinum'
+  const funded = () => !platinum() || !!s().funded
+  const canRemove = () => s().by && (s().by === props.me || props.organizer === props.me)
+  const remove = async () => {
+    await api(`/tournaments/${props.tid}/sponsor/remove`, {
+      method: 'POST', body: JSON.stringify({ who: props.me, target: s().by }),
+    })
+    props.onChanged()
+  }
   return (
-    <Show when={s() && (s()!.name || s()!.logo_url)}>
-      <a
-        href={s()!.url || '#'}
-        target={s()!.url ? '_blank' : undefined}
-        rel="noopener"
-        class="flex items-center justify-center gap-3 p-3 mb-4 rounded-xl bg-zec-yellow/5 border border-zec-yellow/25 no-underline hover:border-zec-yellow/50 transition-colors"
-        title={s()!.url || undefined}
-      >
-        <span class="text-9px text-white/40 uppercase tracking-widest shrink-0">sponsored by</span>
-        <Show when={s()!.logo_url}>
-          <img src={s()!.logo_url!} alt={s()!.name || 'sponsor'} class="h-7 max-w-32 object-contain" />
-        </Show>
-        <Show when={s()!.name}>
-          <span class="text-13px font-semibold text-zec-text">{s()!.name}</span>
-        </Show>
-        <Show when={(s()!.added_prize_zat ?? 0) > 0}>
-          <span class="text-10px px-1.5 py-0.5 rounded bg-zec-yellow/15 text-zec-yellow border border-zec-yellow/40">
-            +{fmtZec(s()!.added_prize_zat!)} prize
-          </span>
-        </Show>
+    <div class={`flex items-center gap-2 p-2 rounded-lg border ${
+      platinum() && funded() ? 'bg-zec-yellow/10 border-zec-yellow/50'
+      : platinum() ? 'bg-white/5 border-white/15 opacity-70'
+      : 'bg-zec-yellow/5 border-zec-yellow/25'}`}>
+      <span class="text-11px shrink-0" title={platinum() ? 'escrowed 2-of-3 prize' : 'organizer pledge'}>{platinum() ? '💎' : '🥇'}</span>
+      <a href={s().url || '#'} target={s().url ? '_blank' : undefined} rel="noopener noreferrer"
+        class="flex items-center gap-2 min-w-0 no-underline flex-1">
+        <Show when={s().logo_url}><img src={s().logo_url!} alt={s().name || ''} class="h-6 max-w-24 object-contain shrink-0" /></Show>
+        <Show when={s().name}><span class="text-12px font-semibold text-zec-text truncate">{s().name}</span></Show>
       </a>
+      <Show when={(s().added_prize_zat ?? 0) > 0}>
+        <span class={`text-10px px-1.5 py-0.5 rounded shrink-0 ${
+          platinum() && funded() ? 'bg-zec-yellow text-black font-semibold'
+          : platinum() ? 'text-white/50 border border-white/15'
+          : 'bg-zec-yellow/15 text-zec-yellow border border-zec-yellow/40'}`}>
+          {platinum() && !funded() ? 'funding…' : (platinum() ? 'verified ' : 'pledged ') + fmtZec(s().added_prize_zat!)}
+        </span>
+      </Show>
+      <Show when={canRemove()}>
+        <button class="text-10px text-neutral-500 hover:text-red-400 shrink-0"
+          onClick={remove} title="remove this sponsor">✕</button>
+      </Show>
+    </div>
+  )
+}
+
+function SponsorList(props: { sponsors: Sponsor[]; tid: string; totalZat?: number; me: string; organizer?: string; onChanged: () => void }) {
+  // public surfaces only show gold + FUNDED platinum; a not-yet-funded platinum is shown to its
+  // own owner (so they can manage it) but not advertised to everyone.
+  const visible = () => props.sponsors.filter(s =>
+    s.tier !== 'platinum' || s.funded || s.by === props.me || props.organizer === props.me)
+  return (
+    <Show when={visible().length > 0 || (props.totalZat ?? 0) > 0}>
+      <div class="mb-4">
+        <div class="flex items-center justify-between mb-2">
+          <span class="text-9px text-white/40 uppercase tracking-widest">sponsors</span>
+          <Show when={(props.totalZat ?? 0) > 0}>
+            <span class="text-10px text-zec-yellow">prize pool {fmtZec(props.totalZat!)}</span>
+          </Show>
+        </div>
+        <div class="flex flex-col gap-1.5">
+          <For each={visible()}>{s => <SponsorChip s={s} tid={props.tid} me={props.me} organizer={props.organizer} onChanged={props.onChanged} />}</For>
+        </div>
+      </div>
     </Show>
   )
 }
@@ -450,7 +489,7 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
         <div>
           <button class="text-11px text-neutral-500 hover:text-zec-yellow mb-3" onClick={props.onBack}>← all tournaments</button>
 
-          <SponsorBanner sponsor={cur().sponsor ?? null} />
+          <SponsorList sponsors={cur().sponsors ?? []} tid={props.id} totalZat={cur().total_prize_zat} me={props.me} organizer={cur().organizer} onChanged={load} />
 
           {/* header */}
           <div class="flex items-start justify-between gap-3 mb-4">
@@ -550,19 +589,21 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
             </div>
           </Show>
 
-          {/* organizer: attach sponsor branding + a PLEDGED prize. Non-custodial — no ZEC is held
-              anywhere; the amount is a pledge the sponsor pays the champion directly. */}
-          <Show when={isOrganizer()}>
+          {/* PERMISSIONLESS sponsorship. The creator's entry is a GOLD pledge (unescrowed promise);
+              anyone else is PLATINUM — their prize will be escrowed in a 2-of-3 vault (funding flow
+              coming) and shows as "pending" until funded. */}
+          <Show when={cur().state === 'registering' || cur().state === 'running'}>
             <div class="mb-4">
               <button
                 class="text-11px text-zec-yellow/80 hover:text-zec-yellow underline decoration-dotted"
                 onClick={() => setShowSponsor(v => !v)}
-              >{cur().sponsor ? 'edit sponsor' : '+ add a sponsor'}</button>
+              >+ become a sponsor</button>
               <Show when={showSponsor()}>
                 <div class="mt-2 p-3 rounded-lg border border-white/10 bg-zec-surface grid gap-2">
                   <div class="text-9px text-neutral-500 uppercase tracking-widest leading-relaxed">
-                    sponsor — branding + optional pledged prize. No funds are held; the sponsor pays
-                    the champion directly (pledge, not escrow).
+                    {isOrganizer()
+                      ? '🥇 gold pledge — a promise you pay the champion directly. No funds held.'
+                      : '💎 platinum — your prize will be escrowed in a 2-of-3 vault (funding coming soon); shown as pending until funded.'}
                   </div>
                   <input class="input-field text-11px" placeholder="sponsor name"
                     value={spName()} onInput={e => setSpName(e.currentTarget.value)} />
@@ -645,9 +686,10 @@ function ListView(props: { me: string; onOpen: (id: string) => void }) {
       onClick={() => props.onOpen(props2.t.id)}
     >
       <div class="flex items-center gap-2 min-w-0">
-        <Show when={props2.t.sponsor?.logo_url}>
-          <img src={props2.t.sponsor!.logo_url!} alt="" class="h-6 w-6 rounded object-contain shrink-0" />
-        </Show>
+        {/* first shown sponsor's logo (gold or funded platinum) */}
+        {(() => { const s = (props2.t.sponsors ?? []).find(x => x.tier !== 'platinum' || x.funded); return (
+          <Show when={s?.logo_url}><img src={s!.logo_url!} alt="" class="h-6 w-6 rounded object-contain shrink-0" /></Show>
+        ) })()}
         <div class="min-w-0">
           <div class="text-13px font-semibold text-white/87 truncate">{props2.t.name}</div>
           <div class="text-10px text-neutral-500 truncate">
@@ -655,7 +697,7 @@ function ListView(props: { me: string; onOpen: (id: string) => void }) {
             <Show when={props2.t.state === 'registering' && props2.t.scheduled_start}>
               {' · '}<span class="text-zec-yellow/80">{startsLabel(props2.t.scheduled_start)}</span>
             </Show>
-            <Show when={props2.t.sponsor?.name}>{' · '}<span class="text-zec-text">{props2.t.sponsor!.name}</span></Show>
+            <Show when={(props2.t.total_prize_zat ?? 0) > 0}>{' · '}<span class="text-zec-yellow">{fmtZec(props2.t.total_prize_zat!)} prize</span></Show>
           </div>
         </div>
       </div>

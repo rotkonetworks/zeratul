@@ -2444,7 +2444,8 @@ async fn list_tournaments(State(state): State<AppState>) -> impl IntoResponse {
                 "buyin_zat": t.buyin_zat,
                 "state": t.state,
                 "player_count": t.players.len(),
-                "sponsor": t.sponsor,
+                "sponsors": t.sponsors,
+                "total_prize_zat": t.total_prize(),
             })
         })
         .collect();
@@ -2485,6 +2486,7 @@ async fn get_tournament(
                 .collect();
             if let Some(obj) = v.as_object_mut() {
                 obj.insert("pending".into(), serde_json::json!(pending));
+                obj.insert("total_prize_zat".into(), serde_json::json!(t.total_prize()));
             }
             Json(v).into_response()
         }
@@ -2552,19 +2554,48 @@ struct SponsorReq {
     added_prize_zat: u64,
 }
 
+/// https-only allowlist for sponsor-supplied URLs — a permissionless (platinum) sponsor must not
+/// be able to inject `javascript:`/`data:`/relative URLs into every participant's page (stored XSS
+/// / malicious click-through). Anything not plain https is dropped to empty (= no link/logo).
+fn safe_https(u: &str) -> String {
+    let t = u.trim();
+    if t.starts_with("https://") && !t.contains(['\n', '\r', '"', '<', '>', ' ']) { t.to_string() } else { String::new() }
+}
+
 async fn sponsor_tournament(
     State(state): State<AppState>,
     Path(id): Path<String>,
     Json(req): Json<SponsorReq>,
 ) -> impl IntoResponse {
     let mut hub = state.tournaments.lock().await;
+    // tier/funded/escrow_room/by are stamped by add_sponsor from `who`; placeholders here.
     let sponsor = tournament::Sponsor {
-        name: req.name,
-        logo_url: req.logo_url,
-        url: req.url,
+        name: req.name.chars().take(60).collect(),
+        logo_url: safe_https(&req.logo_url),
+        url: safe_https(&req.url),
         added_prize_zat: req.added_prize_zat,
+        by: req.who.clone(),
+        tier: tournament::SponsorTier::Platinum, // overwritten by add_sponsor
+        funded: false,
+        escrow_room: None,
     };
-    ok_or_400(hub.registry.set_sponsor(&id, &req.who, sponsor))
+    ok_or_400(hub.registry.add_sponsor(&id, &req.who, sponsor))
+}
+
+#[derive(Deserialize)]
+struct RemoveSponsorReq {
+    who: String,
+    /// the `by` handle of the sponsor entry to remove
+    target: String,
+}
+
+async fn remove_sponsor_tournament(
+    State(state): State<AppState>,
+    Path(id): Path<String>,
+    Json(req): Json<RemoveSponsorReq>,
+) -> impl IntoResponse {
+    let mut hub = state.tournaments.lock().await;
+    ok_or_400(hub.registry.remove_sponsor(&id, &req.who, &req.target))
 }
 
 #[derive(Deserialize)]
@@ -3687,6 +3718,7 @@ async fn main() {
         .route("/tournaments/{id}/leave", axum::routing::post(leave_tournament))
         .route("/tournaments/{id}/start", axum::routing::post(start_tournament))
         .route("/tournaments/{id}/sponsor", axum::routing::post(sponsor_tournament))
+        .route("/tournaments/{id}/sponsor/remove", axum::routing::post(remove_sponsor_tournament))
         .route("/tournaments/{id}/result", axum::routing::post(result_tournament))
         .route("/tournaments/{id}/match/{mid}/room", axum::routing::post(tournament_match_room))
         .route("/new", axum::routing::get(create_room))
