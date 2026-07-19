@@ -97,6 +97,8 @@ export default function App() {
   const [mySeat, setMySeat] = createSignal(-1)
   const [maxSeats, setMaxSeats] = createSignal(2)
   const [oppName, setOppName] = createSignal('\u2014')
+  const [oppPubkey, setOppPubkey] = createSignal<string | undefined>(undefined) // peer's persistent zafu identity key
+  const [oppVerified, setOppVerified] = createSignal<boolean | undefined>(undefined) // delegation checked out?
   const [playerNames, setPlayerNames] = createSignal<Record<number, string>>({})
   const [stacks, setStacks] = createSignal([0, 0])
   const [bets, setBets] = createSignal([0, 0])
@@ -231,6 +233,8 @@ export default function App() {
       case 'OpponentJoined':
         setOppName(msg.name)
         setPlayerNames(p => ({ ...p, [msg.seat]: msg.name }))
+        if (msg.pubkey !== undefined) setOppPubkey(msg.pubkey)
+        if (msg.verified !== undefined) setOppVerified(msg.verified)
         break
       case 'RulesProposed':
         setPendingRules({ buyin: msg.buyin, smallBlind: msg.smallBlind, bigBlind: msg.bigBlind, turnTimeout: (msg as any).turnTimeout ?? 30, fromSelf: msg.fromSelf })
@@ -250,6 +254,8 @@ export default function App() {
         setOppDisconnected(false)
         setReconnectCountdown(0)
         setOppName('\u2014')
+        setOppPubkey(undefined)
+        setOppVerified(undefined)
         setRulesAgreed(false)
         setPendingRules(null)
         setActions([])
@@ -1563,8 +1569,16 @@ export default function App() {
                       </Show>
                     </div>
                     <div class={`inline-block px-4 py-1.5 min-w-28 pod ${acting() === opp() ? 'seat-acting' : ''} ${oppDisconnected() ? 'border-red-900! opacity-70' : ''}`}>
-                      <div class={`text-12px font-medium ${acting() === opp() ? 'text-zec-text' : oppDisconnected() ? 'text-red-400' : 'text-white/60'}`}>
-                        {oppName()} <span class="text-white/38 text-10px uppercase">{getPositionShort(opp(), button(), maxSeats())}</span> {oppDisconnected() ? '(dc)' : ''}
+                      <div class={`text-12px font-medium ${acting() === opp() ? 'text-zec-text' : oppDisconnected() ? 'text-red-400' : 'text-white/60'}`}
+                        title={oppPubkey()
+                          ? `identity: ${oppPubkey()}\n${oppVerified() ? 'verified ✓ — delegation binds this key to the encrypted session' : oppVerified() === false ? 'UNVERIFIED — delegation did not check out' : 'verifying…'}`
+                          : 'anonymous session — opponent has no wallet identity'}>
+                        {oppName()} <span class="text-white/38 text-10px uppercase">{getPositionShort(opp(), button(), maxSeats())}</span>
+                        <Show when={oppPubkey()}>
+                          <span class={`ml-0.5 text-10px cursor-help ${oppVerified() ? 'text-green-400' : oppVerified() === false ? 'text-red-400' : 'text-white/40'}`}
+                            title={`identity ${oppPubkey()}`}>{oppVerified() ? '✓' : oppVerified() === false ? '⚠' : '…'}</span>
+                        </Show>
+                        {oppDisconnected() ? ' (dc)' : ''}
                       </div>
                       <div class="font-mono tabular-nums text-16px lg:text-18px font-600 text-white/87">{oppStack()}</div>
                       <Show when={acting() === opp()}>

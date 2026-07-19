@@ -20,7 +20,7 @@ import type { ServerMsg, CardJson } from './types'
 import type { WireMsg, TransportProvider } from './transport'
 import { getRoomFromUrl } from './transport'
 import type { SessionIdentity } from './identity'
-import { signAction } from './identity'
+import { signAction, verifyEd25519 } from './identity'
 import { createNegotiation } from './negotiate'
 import type { NegotiateApi } from './negotiate'
 import { createShuffle } from './shuffle-filter'
@@ -634,7 +634,19 @@ export function createGame(
         const d = msg.d as any
         const oppName = (typeof d === 'string' ? d : d?.name) || 'anon'
         const oppMode = (typeof d === 'object' ? d?.mode : undefined) || 'anon'
-        cb.onMsg({ type: 'OpponentJoined', seat: oppSeat, name: `${oppName} (${oppMode})` })
+        const oppPub = (typeof d === 'object' ? d?.zafuPub : undefined) as string | undefined
+        // show the peer's persistent identity pubkey immediately (unverified); then verify their
+        // delegation ("delegate:{sessionPub}:{room}") binds that identity to the session key and
+        // push a verified update. Anon peers have no zafuPub → nothing to show/verify.
+        cb.onMsg({ type: 'OpponentJoined', seat: oppSeat, name: `${oppName} (${oppMode})`, pubkey: oppPub })
+        if (oppPub && d?.delegation && d?.sessionPub) {
+          const room = getRoomFromUrl()
+          void (async () => {
+            const ok = await verifyEd25519(`delegate:${d.sessionPub}:${room}`, d.delegation, oppPub)
+              || await verifyEd25519(`delegate:${d.sessionPub}:new`, d.delegation, oppPub)
+            cb.onMsg({ type: 'OpponentJoined', seat: oppSeat, name: `${oppName} (${oppMode})`, pubkey: oppPub, verified: ok })
+          })()
+        }
         if (isHost) negotiation.proposeRules(negotiation.rules())
         // Bidirectional reconnect resync (free play). A peer that (re)announces `seated` AFTER
         // we've already dealt a hand (handNum > 0) has rebuilt a FRESH game — a page reload

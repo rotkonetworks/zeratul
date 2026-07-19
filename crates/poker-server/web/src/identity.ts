@@ -57,6 +57,16 @@ async function generateSessionKey(): Promise<{
   }
 }
 
+/** Standalone Ed25519 verify over a UTF-8 string. Used to check a PEER's delegation — proof that
+ *  their zafu identity ("delegate:{sessionPub}:{room}") actually authorized their session key, so a
+ *  displayed identity pubkey is bound to the encrypted channel, not just claimed. */
+export async function verifyEd25519(message: string, sigHex: string, pubkeyHex: string): Promise<boolean> {
+  try {
+    const importedKey = await crypto.subtle.importKey('raw', hexToBytes(pubkeyHex), 'Ed25519', false, ['verify'])
+    return await crypto.subtle.verify('Ed25519', importedKey, hexToBytes(sigHex), new TextEncoder().encode(message))
+  } catch { return false }
+}
+
 /** detect zafu extension and request delegation signature */
 async function zafuDelegate(sessionPubHex: string, room: string): Promise<{
   zafuPubKey: string

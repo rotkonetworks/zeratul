@@ -5,7 +5,7 @@ export type PotJson = { amount: number; eligible: number[] }
 export type ServerMsg =
   | { type: 'Seated'; seat: number; name: string }
   | { type: 'Waiting' }
-  | { type: 'OpponentJoined'; seat: number; name: string }
+  | { type: 'OpponentJoined'; seat: number; name: string; pubkey?: string; verified?: boolean }
   | { type: 'OpponentLeft'; seat: number }
   | { type: 'OpponentDisconnected'; seat: number; reconnect_secs: number }
   | { type: 'OpponentReconnected'; seat: number }
