@@ -1447,6 +1447,10 @@ struct AppState {
     relay_rooms: RelayRooms,
     /// non-custodial tournament matchmaker: bracket STATE only, never funds.
     tournaments: Tournaments,
+    /// serializes PAID-match escrow provisioning so two players racing on the same match can't
+    /// spin up two DKGs. Dedicated (not the tournaments hub lock) so provisioning — which awaits a
+    /// network round-trip / DKG — never blocks bracket reads, joins, result reports, or the ticker.
+    match_provision_lock: Arc<Mutex<()>>,
 }
 
 /// Shared tournament registry (bracket state) + the both-agree result-report ledger.
@@ -2365,38 +2369,42 @@ struct MatchRoomReq {
 ///   * only a seated player (a or b) of a *playable* match may provision it;
 ///   * the room code is deterministic so both players land in the SAME escrow;
 ///   * provisioning is idempotent — the first caller creates + DKG-provisions, the second reuses it.
-/// The whole get-or-create runs under the tournaments lock so two players racing can't double-provision
-/// (which would spin up two DKGs for one match). Reuses the exact cash-table escrow path.
+/// Concurrency: validation reads the tournaments hub only briefly and drops it; the escrow provision
+/// (a network round-trip / DKG) then runs under a DEDICATED `match_provision_lock`, so racing players
+/// can't double-provision a match yet bracket reads / joins / result reports / the ticker are never
+/// blocked on escrow I/O. Reuses the exact cash-table escrow path.
 async fn tournament_match_room(
     State(state): State<AppState>,
     Path((id, match_id)): Path<(String, u32)>,
     Json(req): Json<MatchRoomReq>,
 ) -> impl IntoResponse {
-    // hold the tournaments lock for the full get-or-create to serialize provisioning per match.
-    let hub = state.tournaments.lock().await;
-    let Some(t) = hub.registry.get(&id) else {
-        return (axum::http::StatusCode::NOT_FOUND, "no such tournament").into_response();
-    };
-    if !t.paid {
-        return (axum::http::StatusCode::BAD_REQUEST, "not a paid tournament").into_response();
-    }
-    let Some(m) = t.matches.iter().find(|m| m.id == match_id) else {
-        return (axum::http::StatusCode::NOT_FOUND, "no such match").into_response();
-    };
-    // server-authoritative: caller must be a seated player of a match that's ready to play.
-    if m.a.as_deref() != Some(req.who.as_str()) && m.b.as_deref() != Some(req.who.as_str()) {
-        return (axum::http::StatusCode::FORBIDDEN, "not a player in this match").into_response();
-    }
-    if !m.is_playable() {
-        return (axum::http::StatusCode::BAD_REQUEST, "match is not ready to play").into_response();
-    }
-    let stake = m.stake_zat;
-    if stake == 0 {
-        return (axum::http::StatusCode::BAD_REQUEST, "match has no stake").into_response();
-    }
-    let code = tourney_room_code(&id, match_id);
+    // ── validate under the tournaments lock, then release it before any escrow I/O ──
+    let (stake, code) = {
+        let hub = state.tournaments.lock().await;
+        let Some(t) = hub.registry.get(&id) else {
+            return (axum::http::StatusCode::NOT_FOUND, "no such tournament").into_response();
+        };
+        if !t.paid {
+            return (axum::http::StatusCode::BAD_REQUEST, "not a paid tournament").into_response();
+        }
+        let Some(m) = t.matches.iter().find(|m| m.id == match_id) else {
+            return (axum::http::StatusCode::NOT_FOUND, "no such match").into_response();
+        };
+        // server-authoritative: caller must be a seated player of a match that's ready to play.
+        if m.a.as_deref() != Some(req.who.as_str()) && m.b.as_deref() != Some(req.who.as_str()) {
+            return (axum::http::StatusCode::FORBIDDEN, "not a player in this match").into_response();
+        }
+        if !m.is_playable() {
+            return (axum::http::StatusCode::BAD_REQUEST, "match is not ready to play").into_response();
+        }
+        if m.stake_zat == 0 {
+            return (axum::http::StatusCode::BAD_REQUEST, "match has no stake").into_response();
+        }
+        (m.stake_zat, tourney_room_code(&id, match_id))
+    }; // tournaments hub lock released here — escrow provisioning below never holds it.
 
-    // already provisioned? reuse it (idempotent for the second player + retries).
+    // already provisioned? reuse it (idempotent for the second player + retries). Cheap fast path
+    // that avoids taking the provision lock at all once the room exists.
     if state.rooms.lock().await.contains_key(&code) {
         return Json(serde_json::json!({ "room": code, "stake_zat": stake })).into_response();
     }
@@ -2406,6 +2414,13 @@ async fn tournament_match_room(
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
             "real-money tournaments are unavailable (escrow offline)",
         ).into_response();
+    }
+
+    // ── serialize provisioning on the DEDICATED lock (not the tournaments hub) ──
+    let _guard = state.match_provision_lock.lock().await;
+    // re-check under the guard: another racer may have provisioned while we waited for the lock.
+    if state.rooms.lock().await.contains_key(&code) {
+        return Json(serde_json::json!({ "room": code, "stake_zat": stake })).into_response();
     }
     // heads-up blinds scaled to the stake (~100bb stack): bb = stake/100, sb = bb/2, min 1.
     let bb = (stake / 100).max(1);
@@ -3741,6 +3756,7 @@ async fn main() {
         zid_peers: Arc::new(Mutex::new(ZidRelay::default())),
         relay_rooms: Arc::new(Mutex::new(HashMap::new())),
         tournaments: Arc::new(Mutex::new(TournamentHub::default())),
+        match_provision_lock: Arc::new(Mutex::new(())),
     };
 
     // scheduled-tournament ticker: every 5s, auto-start any tournament whose scheduled start time
