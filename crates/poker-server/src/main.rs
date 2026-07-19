@@ -2867,6 +2867,63 @@ async fn serve_spa(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// HTML-attribute escape — tournament names + handles are user-controlled, so every interpolated
+/// value MUST be escaped before it goes into a `<meta content="…">` (injection / broken-tag guard).
+fn og_escape(s: &str) -> String {
+    s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&#39;")
+}
+
+/// Serve the SPA shell for `/t/<id>` with per-tournament Open Graph tags spliced into `<head>`, so a
+/// pasted tournament link previews its name + prize + registration in Discord/Twitter/Telegram
+/// (crawlers don't run the SPA, so the meta must be server-rendered). Read-only — never mutates the
+/// tournament. Falls back to the plain shell if the tournament is unknown.
+async fn tournament_page(
+    Path(id): Path<String>,
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> impl IntoResponse {
+    let meta = {
+        let hub = state.tournaments.lock().await;
+        hub.registry.get(&id).map(|t| {
+            use tournament::TournState::*;
+            let n = t.players.len();
+            let status = match t.state {
+                Registering => "registering",
+                Running => "in progress",
+                Finished => "finished",
+                Cancelled => "cancelled",
+            };
+            let prize = t.total_prize();
+            let money = if prize > 0 {
+                format!("{:.4} ZEC prize pool · ", prize as f64 / 1e8)
+            } else if t.paid {
+                format!("{:.4} ZEC buy-in · ", t.buyin_zat as f64 / 1e8)
+            } else {
+                "free entry · ".to_string()
+            };
+            (og_escape(&t.name), format!("{}{} players · {} · heads-up single elimination", money, n, status))
+        })
+    };
+    let host = headers.get(axum::http::header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("zkbtc.org");
+    let (title, desc) = match meta {
+        Some((name, d)) => (format!("{} — zk.poker tournament", name), d),
+        None => ("zk.poker tournament".to_string(), "trustless heads-up hold'em on Zcash".to_string()),
+    };
+    let og = format!(
+        "<meta property=\"og:title\" content=\"{t}\"><meta property=\"og:description\" content=\"{d}\">\
+         <meta property=\"og:type\" content=\"website\"><meta property=\"og:site_name\" content=\"zk.poker\">\
+         <meta property=\"og:url\" content=\"https://{h}/t/{i}\">\
+         <meta name=\"twitter:card\" content=\"summary\"><meta name=\"twitter:title\" content=\"{t}\">\
+         <meta name=\"twitter:description\" content=\"{d}\">",
+        t = og_escape(&title), d = og_escape(&desc), h = og_escape(host), i = og_escape(&id),
+    );
+    let index = std::path::PathBuf::from(&state.static_dir).join("index.html");
+    match tokio::fs::read_to_string(&index).await {
+        Ok(html) => axum::response::Html(html.replacen("<head>", &format!("<head>{}", og), 1)).into_response(),
+        Err(_) => (axum::http::StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
 /// websocket handler for a specific room
 /// spectator WebSocket — read-only, receives broadcast events from players
 async fn spectate_handler(
@@ -3748,7 +3805,7 @@ async fn main() {
         // finite explicit set — NOT a catch-all — so a missing asset still 404s (never mask a
         // broken build with index.html).
         .route("/t", axum::routing::get(serve_spa))
-        .route("/t/{id}", axum::routing::get(serve_spa))
+        .route("/t/{id}", axum::routing::get(tournament_page))
         .route("/t/{id}/m/{mid}", axum::routing::get(serve_spa))
         .route("/play/{code}", axum::routing::get(serve_spa))
         .route("/watch/{code}", axum::routing::get(serve_spa))
