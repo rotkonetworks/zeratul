@@ -8,7 +8,20 @@ import { RELAY_PRESETS, relayBase, relayOverride, isDefaultRelay, setRelayBase }
  * bundle at any relay and persists the choice. Applying reloads the page so every WebSocket
  * re-establishes against the new origin — same approach Polkadot-JS uses on a network switch.
  */
-export function Settings(props: { connected: boolean; onClose: () => void }) {
+export function Settings(props: { connected: boolean; onClose: () => void; onRename?: (name: string) => void }) {
+  // display name (nickname) — a proper UI rename instead of the /nick chat command.
+  let savedName = ''
+  try { savedName = localStorage.getItem('poker_nickname') || '' } catch { /* ignore */ }
+  const [dispName, setDispName] = createSignal(savedName)
+  const [nameSaved, setNameSaved] = createSignal(false)
+  function saveName() {
+    const n = dispName().trim().replace(/\s+/g, '_').slice(0, 20)
+    if (!n) return
+    try { localStorage.setItem('poker_nickname', n) } catch { /* ignore */ }
+    props.onRename?.(n)          // updates the app name + propagates to lobby / opponent
+    setDispName(n); setNameSaved(true); setTimeout(() => setNameSaved(false), 1500)
+  }
+
   // "" is the sentinel for the same-origin default (the host that served the bundle).
   const initial = isDefaultRelay() ? '' : relayOverride()
   const presetMatch = RELAY_PRESETS.find(p => p.url === initial)
@@ -50,13 +63,30 @@ export function Settings(props: { connected: boolean; onClose: () => void }) {
         onClick={(e) => e.stopPropagation()}
       >
         <div class="flex items-center justify-between mb-1">
-          <h2 class="text-14px text-zec-yellow tracking-wide">settings · relay</h2>
+          <h2 class="text-14px text-zec-yellow tracking-wide">settings</h2>
           <button class="text-neutral-500 hover:text-white text-16px leading-none" onClick={props.onClose}>×</button>
         </div>
         <p class="text-10px text-neutral-500 mb-4 leading-relaxed">
           zk.poker is a static client — its only network link is a blind relay for matchmaking and
           encrypted peer messages. Point it at any relay; your choice is saved on this device.
         </p>
+
+        {/* display name — a proper UI rename (no /nick command needed) */}
+        <label class="text-11px text-zec-text font-semibold uppercase tracking-wider block mb-1.5">display name</label>
+        <div class="flex gap-2 mb-1.5">
+          <input
+            class="input-field flex-1 text-12px"
+            placeholder="your nickname"
+            maxLength={20}
+            value={dispName()}
+            onInput={e => setDispName(e.currentTarget.value)}
+            onKeyDown={e => { if (e.key === 'Enter') saveName() }}
+          />
+          <button class="btn btn-primary text-11px px-4" disabled={!dispName().trim()} onClick={saveName}>
+            {nameSaved() ? 'saved ✓' : 'save'}
+          </button>
+        </div>
+        <p class="text-10px text-neutral-500 mb-4">shown to opponents and in the lobby — updates live in your current game.</p>
 
         <div class="flex items-center gap-2 mb-4 text-10px">
           <span class={`w-2 h-2 rounded-full ${props.connected ? 'bg-green-500' : 'bg-amber-500/70'}`} />

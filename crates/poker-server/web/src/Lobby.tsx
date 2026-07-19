@@ -199,6 +199,7 @@ export default function Lobby(props: {
   // the exact handle we Joined the lobby with (incl. a generated anon name) — used to
   // hide myself on the board and to keep the same identity when I sit at a table.
   const [myLobbyName, setMyLobbyName] = createSignal('')
+  const [editingName, setEditingName] = createSignal(false) // inline click-to-edit nick (no /nick needed)
   const myHandle = () => myLobbyName() || name().trim() || props.pubkey?.slice(0, 8) || ''
 
   onMount(() => {
@@ -721,11 +722,24 @@ export default function Lobby(props: {
           <div class="flex items-center justify-between px-2.5 py-1.5 bg-neutral-900/50 border-b border-white/10 gap-2">
             <div class="flex items-center gap-2 min-w-0">
               <span class="text-10px text-neutral-400 uppercase tracking-wider shrink-0">lobby · {players().length} online</span>
-              <button
-                class="text-10px text-neutral-500 hover:text-zec-yellow font-mono truncate"
-                title="click to change your name"
-                onClick={() => setChatInput('/nick ')}
-              >you: {myHandle()} ✎</button>
+              <Show when={editingName()} fallback={
+                <button
+                  class="text-10px text-neutral-500 hover:text-zec-yellow font-mono truncate"
+                  title="click to change your name"
+                  onClick={() => setEditingName(true)}
+                >you: {myHandle()} ✎</button>
+              }>
+                <input
+                  class="text-10px font-mono bg-black/40 border border-zec-yellow/40 rounded px-1.5 py-0.5 text-zec-text w-28 outline-none"
+                  ref={el => setTimeout(() => { el.focus(); el.select() }, 0)}
+                  value={myHandle()}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') { setNick(e.currentTarget.value); setEditingName(false) }
+                    else if (e.key === 'Escape') setEditingName(false)
+                  }}
+                  onBlur={e => { setNick(e.currentTarget.value); setEditingName(false) }}
+                />
+              </Show>
             </div>
             <button
               class={`text-10px px-2 py-0.5 rounded-full border transition-colors ${

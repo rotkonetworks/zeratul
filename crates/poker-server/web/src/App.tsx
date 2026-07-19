@@ -1084,7 +1084,8 @@ export default function App() {
           </div>
 
           <Show when={showSettings()}>
-            <Settings connected={connected()} onClose={() => setShowSettings(false)} />
+            <Settings connected={connected()} onClose={() => setShowSettings(false)}
+              onRename={(n) => { setName(n); send({ type: 'Rename', name: n }) }} />
           </Show>
 
           {/* main content — fills the viewport, centers non-game views */}
