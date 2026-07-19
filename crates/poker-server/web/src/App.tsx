@@ -1091,7 +1091,9 @@ export default function App() {
 
           <Show when={showSettings()}>
             <Settings connected={connected()} onClose={() => setShowSettings(false)}
-              onRename={(n) => { setName(n); send({ type: 'Rename', name: n }) }} />
+              onRename={(n) => { setName(n); send({ type: 'Rename', name: n }) }}
+              pubkey={identity()?.zafuPubKey || identity()?.sessionPubKey}
+              mode={identity()?.mode} />
           </Show>
 
           {/* main content — fills the viewport, centers non-game views */}

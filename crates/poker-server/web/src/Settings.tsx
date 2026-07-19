@@ -8,7 +8,9 @@ import { RELAY_PRESETS, relayBase, relayOverride, isDefaultRelay, setRelayBase }
  * bundle at any relay and persists the choice. Applying reloads the page so every WebSocket
  * re-establishes against the new origin — same approach Polkadot-JS uses on a network switch.
  */
-export function Settings(props: { connected: boolean; onClose: () => void; onRename?: (name: string) => void }) {
+export function Settings(props: { connected: boolean; onClose: () => void; onRename?: (name: string) => void; pubkey?: string; mode?: string }) {
+  const [copied, setCopied] = createSignal(false)
+  const copyId = () => { if (props.pubkey) { navigator.clipboard?.writeText(props.pubkey); setCopied(true); setTimeout(() => setCopied(false), 1200) } }
   // display name (nickname) — a proper UI rename instead of the /nick chat command.
   let savedName = ''
   try { savedName = localStorage.getItem('poker_nickname') || '' } catch { /* ignore */ }
@@ -87,6 +89,25 @@ export function Settings(props: { connected: boolean; onClose: () => void; onRen
           </button>
         </div>
         <p class="text-10px text-neutral-500 mb-4">shown to opponents and in the lobby — updates live in your current game.</p>
+
+        {/* your identity — what opponents can verify about you */}
+        <Show when={props.pubkey}>
+          <label class="text-11px text-zec-text font-semibold uppercase tracking-wider block mb-1.5">your identity</label>
+          <button
+            class="w-full flex items-center gap-2 p-2 rounded bg-black/40 border border-white/12 hover:border-zec-yellow/40 text-left"
+            onClick={copyId} title="click to copy">
+            <span class={`text-9px px-1.5 py-0.5 rounded shrink-0 ${props.mode === 'zafu' ? 'bg-zec-yellow/15 text-zec-yellow border border-zec-yellow/40' : 'bg-white/8 text-neutral-400 border border-white/15'}`}>
+              {props.mode === 'zafu' ? '💎 wallet' : 'anon'}
+            </span>
+            <span class="font-mono text-10px text-neutral-300 truncate flex-1">{props.pubkey}</span>
+            <span class="text-9px text-neutral-500 shrink-0">{copied() ? 'copied ✓' : 'copy'}</span>
+          </button>
+          <p class="text-10px text-neutral-500 mt-1.5 mb-4">
+            {props.mode === 'zafu'
+              ? 'your persistent wallet identity — opponents see this verified (✓) next to your name. Rotating it is done in zafu.'
+              : 'an anonymous, per-session key (rotates each visit) — opponents can’t verify it. Connect a wallet for a persistent verified identity.'}
+          </p>
+        </Show>
 
         <div class="flex items-center gap-2 mb-4 text-10px">
           <span class={`w-2 h-2 rounded-full ${props.connected ? 'bg-green-500' : 'bg-amber-500/70'}`} />
