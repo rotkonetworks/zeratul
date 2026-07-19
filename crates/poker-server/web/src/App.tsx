@@ -11,7 +11,9 @@ import type { ServerMsg, CardJson, ValidAction } from './types'
 
 export default function App() {
   const [view, setView] = createSignal<'casino' | 'lobby' | 'waiting' | 'deposit' | 'game' | 'settlement'>(
-    location.pathname.length > 1 ? 'lobby' : 'casino'
+    // a tournament deep-link (/t, /t/<id>) shows the hub underneath the overlay — NOT a table
+    // lobby for a room called "t". A bare /<code> still lands in the table lobby.
+    (() => { const p = location.pathname.replace(/^\/+|\/+$/g, ''); return (!p || p === 't' || p.startsWith('t/')) ? 'casino' : 'lobby' })()
   )
   // settlement state: starts at 'preparing' on GameOver while escrow builds the PCZT,
   // transitions on PayoutSigningRequest → 'pending' → user signs → 'complete' / 'failed'.
@@ -1080,7 +1082,7 @@ export default function App() {
             <button
               class="ml-2 text-11px text-neutral-500 hover:text-zec-yellow leading-none flex items-center"
               title="tournaments"
-              onClick={() => { window.location.hash = '#/tournaments' }}
+              onClick={() => { history.pushState(null, '', '/t'); window.dispatchEvent(new PopStateEvent('popstate')) }}
             ><span class="i-lucide-trophy w-3.5 h-3.5" /></button>
             <button
               class="ml-1 text-11px text-neutral-500 hover:text-zec-yellow leading-none"

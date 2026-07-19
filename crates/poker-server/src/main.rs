@@ -2856,6 +2856,17 @@ async fn room_page(
     }
 }
 
+/// Serve the SPA shell for a CLIENT-SIDE route (`/t/…`, `/play/…`, `/watch/…`). Unlike `room_page`
+/// this creates NO room and has no side effects — the room is provisioned only when a player
+/// actually connects over WS — so a crawler or a deep-link preview can never mint a table.
+async fn serve_spa(State(state): State<AppState>) -> impl IntoResponse {
+    let index = std::path::PathBuf::from(&state.static_dir).join("index.html");
+    match tokio::fs::read_to_string(&index).await {
+        Ok(html) => axum::response::Html(html).into_response(),
+        Err(_) => (axum::http::StatusCode::NOT_FOUND, "not found").into_response(),
+    }
+}
+
 /// websocket handler for a specific room
 /// spectator WebSocket — read-only, receives broadcast events from players
 async fn spectate_handler(
@@ -3732,6 +3743,15 @@ async fn main() {
         .route("/tournaments/{id}/result", axum::routing::post(result_tournament))
         .route("/tournaments/{id}/match/{mid}/room", axum::routing::post(tournament_match_room))
         .route("/new", axum::routing::get(create_room))
+        // explicit SPA deep-link routes (serve the shell so a hard reload / pasted link boots the
+        // app). Registered BEFORE `/{code}` so `/t` etc. don't get parsed as room codes. Kept as a
+        // finite explicit set — NOT a catch-all — so a missing asset still 404s (never mask a
+        // broken build with index.html).
+        .route("/t", axum::routing::get(serve_spa))
+        .route("/t/{id}", axum::routing::get(serve_spa))
+        .route("/t/{id}/m/{mid}", axum::routing::get(serve_spa))
+        .route("/play/{code}", axum::routing::get(serve_spa))
+        .route("/watch/{code}", axum::routing::get(serve_spa))
         .route("/{code}/ws", axum::routing::get(ws_handler))
         .route("/{code}/spectate", axum::routing::get(spectate_handler))
         .route("/{code}", axum::routing::get(room_page))

@@ -796,25 +796,28 @@ function ListView(props: { me: string; onOpen: (id: string) => void }) {
  * and lets the feature be reached from any view via a hash link/button.
  */
 export default function Tournaments() {
-  const parseHash = () => {
+  const parsePath = () => {
+    // one-time migration: translate a legacy `#/tournaments[/<id>]` link to the new `/t` path.
     const h = window.location.hash.replace(/^#/, '')
-    if (!h.startsWith('/tournaments')) return { open: false, id: null as string | null }
-    const rest = h.slice('/tournaments'.length).replace(/^\/+/, '')
-    return { open: true, id: rest || null }
+    if (h.startsWith('/tournaments')) {
+      const rest = h.slice('/tournaments'.length).replace(/^\/+/, '')
+      history.replaceState(null, '', '/t' + (rest ? '/' + rest : ''))
+    }
+    const segs = window.location.pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean)
+    if (segs[0] !== 't') return { open: false, id: null as string | null }
+    return { open: true, id: segs[1] || null }
   }
-  const [route, setRoute] = createSignal(parseHash())
-  const onHash = () => setRoute(parseHash())
-  onMount(() => window.addEventListener('hashchange', onHash))
-  onCleanup(() => window.removeEventListener('hashchange', onHash))
+  const [route, setRoute] = createSignal(parsePath())
+  // Back/Forward (and the mobile back gesture) drive the overlay via popstate — real URLs, so a
+  // tournament/bracket is a shareable `/t/<id>` link, not a hidden hash.
+  const onNav = () => setRoute(parsePath())
+  onMount(() => window.addEventListener('popstate', onNav))
+  onCleanup(() => window.removeEventListener('popstate', onNav))
 
   const me = playerHandle()
-  const open = (id: string) => { window.location.hash = '#/tournaments/' + id }
-  const back = () => { window.location.hash = '#/tournaments' }
-  const close = () => {
-    // clear the hash without leaving a dangling '#'
-    history.replaceState(null, '', window.location.pathname + window.location.search)
-    setRoute({ open: false, id: null })
-  }
+  const open = (id: string) => { history.pushState(null, '', '/t/' + id); setRoute(parsePath()) }
+  const back = () => { history.pushState(null, '', '/t'); setRoute(parsePath()) }
+  const close = () => { history.pushState(null, '', '/'); setRoute({ open: false, id: null }) }
 
   createEffect(() => {
     // lock body scroll while the overlay is open (mirrors app modal behavior)

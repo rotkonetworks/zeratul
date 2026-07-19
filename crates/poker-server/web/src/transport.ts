@@ -880,11 +880,18 @@ export function createRelayTransport(
   return { connect, send, sendServer, disconnect, connected, encrypted, onDesync, onFatal }
 }
 
-/** get room code from URL path (empty = create new) */
+/** reserved first-path-segments that are app routes, never room codes. */
+const RESERVED_SEGMENTS = new Set(['new', 't', 'tournaments', 'watch', 'lobby', 'settings', 'play'])
+
+/** get the room code from the URL path ('' = create new / not a room). Parses the FIRST segment
+ *  only, so `/CODE/spectate` yields `CODE` (not the old garbage `CODE/spectate`), and reserved app
+ *  routes (`/t/…`, `/watch/…`) are not mistaken for rooms. `/play/<code>` unwraps to `<code>`. */
 export function getRoomFromUrl(): string {
-  const path = location.pathname.replace(/^\/+|\/+$/g, '')
-  if (!path || path === 'new') return ''
-  return path
+  const segs = location.pathname.replace(/^\/+|\/+$/g, '').split('/').filter(Boolean)
+  if (segs.length === 0) return ''
+  if (segs[0] === 'play' || segs[0] === 'watch') return segs[1] || '' // /play/<code>, /watch/<code>
+  if (RESERVED_SEGMENTS.has(segs[0])) return ''                       // /t, /new, /settings, …
+  return segs[0]                                                       // bare /<code> (+ ignore any suffix)
 }
 
 /** update URL to show room code */
