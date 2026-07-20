@@ -117,6 +117,24 @@ function tzLabel(): string {
 // default scheduled start: current time + 60 minutes, as a datetime-local value.
 const defaultStart = () => toLocalInput(new Date(Date.now() + 60 * 60_000))
 
+// The champion's total winnings (zat), honoring the winner's roll-forward %. Each round the winner
+// takes the pot (2× the round stake); on a non-final round they re-risk `rollBps` of that pot into
+// the next round and BANK the remainder. So rollBps=10000 → pure doubling (bank nothing until the
+// final), 5000 → flat stakes (bank half each round). Mirrors the server's stake_for_round ladder.
+function championPrize(buyinZat: number, rounds: number, rollBps: number): number {
+  const roll = Math.max(1, Math.min(10000, rollBps || 10000))
+  let stake = buyinZat
+  let take = 0
+  for (let r = 1; r <= rounds; r++) {
+    const pot = 2 * stake
+    if (r === rounds) { take += pot; break }   // final round: keep the whole pot
+    const next = Math.floor((pot * roll) / 10000)
+    take += pot - next                          // bank the un-re-risked remainder
+    stake = next
+  }
+  return take
+}
+
 // Human countdown for a scheduled auto-start (unix seconds). '' when unscheduled.
 function startsLabel(ts?: number | null): string {
   if (!ts) return ''
@@ -545,16 +563,25 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
             </Show>
           </div>
 
-          {/* paid tournament: prize/stake summary (winner-take-all, doubling stakes per round) */}
+          {/* paid tournament: prize/stake summary — honors the winner's roll-forward % (roll_bps). */}
           <Show when={cur().paid && cur().rounds > 0}>
-            <div class="mb-4 p-3 rounded-lg border border-zec-yellow/20 bg-zec-yellow/5 text-11px text-white/70 leading-relaxed">
-              <span class="text-zec-yellow font-semibold">winner-take-all.</span>{' '}
-              Buy-in {fmtZec(cur().buyin_zat)}; the stake doubles each round as the winner rolls it
-              forward. A champion of {cur().rounds} round{cur().rounds === 1 ? '' : 's'} ends with{' '}
-              <span class="font-mono text-zec-yellow">{fmtZec(cur().buyin_zat * (1 << cur().rounds))}</span>{' '}
-              in their own wallet (minus per-round network fees). Non-custodial: each match is its own
-              player-to-player escrow — no house ever holds the pot.
-            </div>
+            {(() => {
+              const roll = cur().roll_bps ?? 10000
+              const mode = roll >= 10000
+                ? 'Winner-take-all — the stake doubles each round.'
+                : roll <= 5000
+                  ? `Flat stakes — the winner banks part of every pot (rolls ${(roll / 100).toFixed(0)}% forward).`
+                  : `The winner rolls ${(roll / 100).toFixed(0)}% of each pot forward and banks the rest.`
+              return (
+                <div class="mb-4 p-3 rounded-lg border border-zec-yellow/20 bg-zec-yellow/5 text-11px text-white/70 leading-relaxed">
+                  <span class="text-zec-yellow font-semibold">{mode}</span>{' '}
+                  Buy-in {fmtZec(cur().buyin_zat)}. A champion of {cur().rounds} round{cur().rounds === 1 ? '' : 's'} ends with about{' '}
+                  <span class="font-mono text-zec-yellow">{fmtZec(championPrize(cur().buyin_zat, cur().rounds, roll))}</span>{' '}
+                  in their own wallet (minus per-round network fees). Non-custodial: each match is its own
+                  player-to-player escrow — no house ever holds the pot.
+                </div>
+              )
+            })()}
           </Show>
 
           {/* champion screen */}
@@ -578,7 +605,7 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
                   <div class="text-11px text-white/50">
                     vs <span class="font-mono">{m().a === props.me ? m().b : m().a}</span>
                     <Show when={m().paid && m().stake_zat}>
-                      {' · '}<span class="text-zec-yellow">deposit {fmtZec(m().stake_zat!)}</span> to your match escrow
+                      {' · '}<span class="text-zec-yellow">stake {fmtZec(m().stake_zat!)} + network fee</span> to your match escrow (exact amount shown at the table)
                     </Show>
                   </div>
                 </div>

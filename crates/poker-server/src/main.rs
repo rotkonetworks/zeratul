@@ -2369,8 +2369,11 @@ async fn create_tournament(
     Json(req): Json<CreateTournamentReq>,
 ) -> impl IntoResponse {
     let mut hub = state.tournaments.lock().await;
+    // bound + sanitize the broadcast name server-side (don't trust the client's 40-char cap).
+    let name = safe_text(&req.name, 60);
+    let organizer = safe_text(&req.organizer, 40);
     let id = hub.registry.create(
-        req.name, req.organizer, req.paid, req.buyin_zat,
+        name, organizer, req.paid, req.buyin_zat,
         req.scheduled_start, req.roll_bps.unwrap_or(10000),
     );
     Json(serde_json::json!({ "id": id }))
@@ -2605,6 +2608,19 @@ fn safe_https(u: &str) -> String {
     if t.starts_with("https://") && !t.contains(['\n', '\r', '"', '<', '>', ' ']) { t.to_string() } else { String::new() }
 }
 
+/// Sanitize free text the server stores and advertises to every participant. Strips control chars
+/// and the HTML tag delimiters `<`/`>`. SolidJS escapes text interpolation today, but we do NOT
+/// rely on the client framework for a broadcast field (defense-in-depth against any future
+/// innerHTML / OG-meta / native consumer). Keeps ordinary punctuation (& ' ") readable.
+fn safe_text(s: &str, max: usize) -> String {
+    s.chars()
+        .filter(|c| !c.is_control() && *c != '<' && *c != '>')
+        .take(max)
+        .collect::<String>()
+        .trim()
+        .to_string()
+}
+
 async fn sponsor_tournament(
     State(state): State<AppState>,
     Path(id): Path<String>,
@@ -2613,7 +2629,7 @@ async fn sponsor_tournament(
     let mut hub = state.tournaments.lock().await;
     // tier/funded/escrow_room/by are stamped by add_sponsor from `who`; placeholders here.
     let sponsor = tournament::Sponsor {
-        name: req.name.chars().take(60).collect(),
+        name: safe_text(&req.name, 60),
         logo_url: safe_https(&req.logo_url),
         url: safe_https(&req.url),
         added_prize_zat: req.added_prize_zat,
