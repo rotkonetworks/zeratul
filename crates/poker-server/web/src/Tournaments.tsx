@@ -180,6 +180,27 @@ async function api<T>(path: string, init?: RequestInit): Promise<T | null> {
   }
 }
 
+// ── action auth ─────────────────────────────────────────────────────────────
+// Every tournament MUTATION is signed by the same persisted Ed25519 session key that co-signs
+// settlements (zid provider). The server binds each handle to the key that first claims it, so a
+// caller can only ever act AS ITSELF — no forging an opponent's result, spoofing the organizer, or
+// kicking another registrant. This makes the previously self-declared handle strings authenticated.
+let _session: Awaited<ReturnType<typeof import('./zid/provider').createSessionKey>> | null = null
+async function sessionKey() {
+  if (!_session) {
+    const { createSessionKey } = await import('./zid/provider')
+    _session = await createSessionKey()
+  }
+  return _session
+}
+/** Sign a canonical action message; returns the `{pubkey, sig}` fields to merge into the body. */
+async function authFields(msg: string): Promise<{ pubkey: string; sig: string }> {
+  const s = await sessionKey()
+  const sig = await s.sign(new TextEncoder().encode(msg))
+  return { pubkey: s.pubkey, sig }
+}
+const A = 'zk.poker/tourney/v1' // canonical message prefix (must match the server verbatim)
+
 // Route into a tournament match. For FREE matches the room code is joined directly (App creates a
 // chip-only room on the fly). For PAID matches we FIRST ask the server to get-or-create the STAKED
 // escrow room (server-authoritative stake) — only then navigate, so a paid match can never land in
@@ -187,9 +208,10 @@ async function api<T>(path: string, init?: RequestInit): Promise<T | null> {
 async function enterMatch(m: Match, tournamentId: string): Promise<string | null> {
   let room = m.room!
   if (m.paid) {
+    const auth = await authFields(`${A}/matchroom:${tournamentId}:${m.id}`)
     const res = await api<{ room: string }>(
       `/tournaments/${tournamentId}/match/${m.id}/room`,
-      { method: 'POST', body: JSON.stringify({ who: playerHandle() }) },
+      { method: 'POST', body: JSON.stringify({ who: playerHandle(), ...auth }) },
     )
     if (!res || !res.room) return 'could not open the staked match room (escrow may be offline)'
     room = res.room
@@ -213,8 +235,9 @@ function SponsorChip(props: { s: Sponsor; tid: string; me: string; organizer?: s
   const funded = () => !platinum() || !!s().funded
   const canRemove = () => s().by && (s().by === props.me || props.organizer === props.me)
   const remove = async () => {
+    const auth = await authFields(`${A}/sponsor_remove:${props.tid}:${s().by}`)
     await api(`/tournaments/${props.tid}/sponsor/remove`, {
-      method: 'POST', body: JSON.stringify({ who: props.me, target: s().by }),
+      method: 'POST', body: JSON.stringify({ who: props.me, target: s().by, ...auth }),
     })
     props.onChanged()
   }
@@ -360,9 +383,11 @@ function CreateForm(props: { onCreated: (id: string) => void }) {
     }
     setBusy(true)
     setErr('')
+    const organizer = playerHandle()
+    const auth = await authFields(`${A}/create:${organizer}`)
     const res = await api<{ id: string }>('/tournaments', {
       method: 'POST',
-      body: JSON.stringify({ name: n, organizer: playerHandle(), paid: paid(), buyin_zat: buyinZat, scheduled_start: scheduledStart, roll_bps: paid() ? rollBps() : undefined }),
+      body: JSON.stringify({ name: n, organizer, paid: paid(), buyin_zat: buyinZat, scheduled_start: scheduledStart, roll_bps: paid() ? rollBps() : undefined, ...auth }),
     })
     setBusy(false)
     if (res && res.id) {
@@ -506,9 +531,12 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
     return final?.winner || null
   }
 
-  const act = async (path: string, body: Record<string, unknown>) => {
+  // `msg` is the canonical action string to sign (must match the server); `body` is merged with the
+  // resulting {pubkey, sig}. All mutating tournament calls go through here so every one is signed.
+  const act = async (path: string, msg: string, body: Record<string, unknown>) => {
     setBusy(true)
-    const res = await api(`/tournaments/${props.id}/${path}`, { method: 'POST', body: JSON.stringify(body) })
+    const auth = await authFields(msg)
+    const res = await api(`/tournaments/${props.id}/${path}`, { method: 'POST', body: JSON.stringify({ ...body, ...auth }) })
     setBusy(false)
     // show the server's specific reason (e.g. "need at least 2 players", "only the organizer can
     // start", "already registered"); fall back to offline only when there was no response body.
@@ -517,10 +545,10 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
     await load()
   }
 
-  const join = () => act('join', { player: props.me })
-  const leave = () => act('leave', { player: props.me })
-  const start = () => act('start', { who: props.me })
-  const cancel = () => { if (confirm('Cancel this tournament? This cannot be undone.')) act('cancel', { who: props.me }) }
+  const join = () => act('join', `${A}/join:${props.id}:${props.me}`, { player: props.me })
+  const leave = () => act('leave', `${A}/leave:${props.id}:${props.me}`, { player: props.me })
+  const start = () => act('start', `${A}/start:${props.id}`, { who: props.me })
+  const cancel = () => { if (confirm('Cancel this tournament? This cannot be undone.')) act('cancel', `${A}/cancel:${props.id}`, { who: props.me }) }
 
   return (
     <Show when={t()} fallback={
@@ -679,7 +707,7 @@ function Detail(props: { id: string; me: string; onBack: () => void }) {
                   <button class="btn btn-primary text-11px px-3" disabled={busy() || !spName().trim()}
                     onClick={async () => {
                       const zat = Math.max(0, Math.round((parseFloat(spPrize()) || 0) * 1e8))
-                      await act('sponsor', {
+                      await act('sponsor', `${A}/sponsor:${props.id}`, {
                         who: props.me, name: spName().trim(),
                         logo_url: spLogo().trim(), url: spUrl().trim(), added_prize_zat: zat,
                       })
@@ -899,9 +927,10 @@ export async function reportTournamentResult(winner: string): Promise<void> {
   const room = window.location.pathname.replace(/^\/+|\/+$/g, '')
   if (room && saved.room && room !== saved.room) return
   const reporter = playerHandle()
+  const auth = await authFields(`${A}/result:${saved.tournamentId}:${saved.matchId}:${winner}`)
   await api(`/tournaments/${saved.tournamentId}/result`, {
     method: 'POST',
-    body: JSON.stringify({ match_id: saved.matchId, winner, reporter }),
+    body: JSON.stringify({ match_id: saved.matchId, winner, reporter, ...auth }),
   })
   try { localStorage.removeItem('poker_tourney_match') } catch { /* ignore */ }
 }

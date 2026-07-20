@@ -1465,6 +1465,56 @@ struct TournamentHub {
     /// per-tournament, per-match map of reporter -> the winner they claimed.
     /// keyed `(tournament_id, match_id)`.
     reports: HashMap<(String, u32), HashMap<String, String>>,
+    /// AUTH binding: `(tournament_id, handle) -> session pubkey (hex)`. A handle is claimed by the
+    /// first identity that creates/joins under it (first-writer-wins); afterwards every action taken
+    /// "as" that handle must be signed by the bound key. This turns the tournament API's previously
+    /// self-declared handle strings into authenticated identities — closing scoreboard-forging,
+    /// organizer-spoofing, and roster-kick (the money stays co-sign-gated regardless).
+    identities: HashMap<(String, String), String>,
+}
+
+impl TournamentHub {
+    /// Authorize `pubkey` to act as `handle` in `tid`, BINDING the pair on first use
+    /// (first-writer-wins). Ok if unbound (now bound) or already bound to this same pubkey; Err if
+    /// the handle is bound to a different identity. Used by create/join, which establish identity.
+    fn bind_or_check(&mut self, tid: &str, handle: &str, pubkey: &str) -> Result<(), String> {
+        match self.identities.get(&(tid.to_string(), handle.to_string())) {
+            Some(existing) if existing == pubkey => Ok(()),
+            Some(_) => Err("handle is already taken by another identity".into()),
+            None => {
+                self.identities.insert((tid.to_string(), handle.to_string()), pubkey.to_string());
+                Ok(())
+            }
+        }
+    }
+
+    /// Strict check: `pubkey` MUST already be bound to `(tid, handle)`. No auto-bind. Used by every
+    /// action AFTER registration (leave/start/cancel/sponsor/result/provision) so a caller can only
+    /// act as an identity it previously proved it holds.
+    fn check_bound(&self, tid: &str, handle: &str, pubkey: &str) -> Result<(), String> {
+        match self.identities.get(&(tid.to_string(), handle.to_string())) {
+            Some(existing) if existing == pubkey => Ok(()),
+            _ => Err("not authorized to act as this identity".into()),
+        }
+    }
+}
+
+/// Verify a hex Ed25519 signature by `pubkey_hex` over `msg` (RFC8032, as produced by the client's
+/// WebCrypto 'Ed25519' session key). False on any decode/length/verify failure. Mirrors the escrow's
+/// `verify_settlement_sig` so tournament auth uses the very same session identity as settlement.
+fn verify_ed25519(pubkey_hex: &str, msg: &str, sig_hex: &str) -> bool {
+    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
+    let Ok(pk_bytes) = hex::decode(pubkey_hex.trim()) else { return false };
+    let Ok(pk_arr) = <[u8; 32]>::try_from(pk_bytes.as_slice()) else { return false };
+    let Ok(vk) = VerifyingKey::from_bytes(&pk_arr) else { return false };
+    let Ok(sig_bytes) = hex::decode(sig_hex.trim()) else { return false };
+    let Ok(sig_arr) = <[u8; 64]>::try_from(sig_bytes.as_slice()) else { return false };
+    vk.verify(msg.as_bytes(), &Signature::from_bytes(&sig_arr)).is_ok()
+}
+
+/// 401-style rejection for a failed tournament auth check (bad signature or wrong identity).
+fn auth_reject(msg: &str) -> axum::response::Response {
+    (axum::http::StatusCode::UNAUTHORIZED, Json(serde_json::json!({ "error": msg }))).into_response()
 }
 
 // ---------------------------------------------------------------------------
@@ -2362,27 +2412,50 @@ struct CreateTournamentReq {
     /// 5000 = flat, winner banks half the pot each round). Paid tournaments only. Default 10000.
     #[serde(default)]
     roll_bps: Option<u16>,
+    #[serde(default)]
+    pubkey: String,
+    #[serde(default)]
+    sig: String,
 }
 
 async fn create_tournament(
     State(state): State<AppState>,
     Json(req): Json<CreateTournamentReq>,
 ) -> impl IntoResponse {
-    let mut hub = state.tournaments.lock().await;
-    // bound + sanitize the broadcast name server-side (don't trust the client's 40-char cap).
+    // sanitize the free-form broadcast NAME (don't trust the client cap). The organizer HANDLE is an
+    // identity, so it must stay byte-identical to what the client signed — we reject a bad handle
+    // rather than transform it (which would break the signature). Handles render via SolidJS text
+    // (escaped), same as player handles in the bracket.
     let name = safe_text(&req.name, 60);
-    let organizer = safe_text(&req.organizer, 40);
+    let organizer = req.organizer.clone();
+    if organizer.is_empty() || organizer.chars().count() > 40 || organizer.contains(['<', '>']) {
+        return (axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "invalid organizer handle" }))).into_response();
+    }
+    // the creator must sign the EXACT handle they submit; their key is bound to it so only they can
+    // later start/cancel/sponsor this tournament.
+    let msg = format!("zk.poker/tourney/v1/create:{}", organizer);
+    if !verify_ed25519(&req.pubkey, &msg, &req.sig) {
+        return auth_reject("bad signature");
+    }
+    let mut hub = state.tournaments.lock().await;
     let id = hub.registry.create(
-        name, organizer, req.paid, req.buyin_zat,
+        name, organizer.clone(), req.paid, req.buyin_zat,
         req.scheduled_start, req.roll_bps.unwrap_or(10000),
     );
-    Json(serde_json::json!({ "id": id }))
+    // bind organizer handle -> creator pubkey (cannot fail; the id is brand-new).
+    let _ = hub.bind_or_check(&id, &organizer, &req.pubkey);
+    Json(serde_json::json!({ "id": id })).into_response()
 }
 
 #[derive(Deserialize)]
 struct MatchRoomReq {
     /// the caller's player handle — must be one of the two seated players in this match.
     who: String,
+    #[serde(default)]
+    pubkey: String,
+    #[serde(default)]
+    sig: String,
 }
 
 /// Get-or-create the STAKED escrow room for a PAID tournament match. This is the one place a paid
@@ -2400,9 +2473,19 @@ async fn tournament_match_room(
     Path((id, match_id)): Path<(String, u32)>,
     Json(req): Json<MatchRoomReq>,
 ) -> impl IntoResponse {
+    // AUTH: the caller must sign as `who` with the identity bound to that handle — so only the real
+    // seated player can trigger this room's escrow provisioning (closes the unauthenticated
+    // escrow-amplification vector).
+    let auth_msg = format!("zk.poker/tourney/v1/matchroom:{}:{}", id, match_id);
+    if !verify_ed25519(&req.pubkey, &auth_msg, &req.sig) {
+        return auth_reject("bad signature");
+    }
     // ── validate under the tournaments lock, then release it before any escrow I/O ──
     let (stake, code) = {
         let hub = state.tournaments.lock().await;
+        if hub.check_bound(&id, &req.who, &req.pubkey).is_err() {
+            return auth_reject("not authorized to act as this identity");
+        }
         let Some(t) = hub.registry.get(&id) else {
             return (axum::http::StatusCode::NOT_FOUND, "no such tournament").into_response();
         };
@@ -2545,6 +2628,10 @@ fn ok_or_400(r: Result<(), String>) -> axum::response::Response {
 #[derive(Deserialize)]
 struct PlayerReq {
     player: String,
+    #[serde(default)]
+    pubkey: String,
+    #[serde(default)]
+    sig: String,
 }
 
 async fn join_tournament(
@@ -2552,7 +2639,15 @@ async fn join_tournament(
     Path(id): Path<String>,
     Json(req): Json<PlayerReq>,
 ) -> impl IntoResponse {
+    // signed by the session key; join CLAIMS the handle (first-writer-wins), binding it to this key.
+    let msg = format!("zk.poker/tourney/v1/join:{}:{}", id, req.player);
+    if !verify_ed25519(&req.pubkey, &msg, &req.sig) {
+        return auth_reject("bad signature");
+    }
     let mut hub = state.tournaments.lock().await;
+    if let Err(e) = hub.bind_or_check(&id, &req.player, &req.pubkey) {
+        return auth_reject(&e);
+    }
     ok_or_400(hub.registry.join(&id, req.player))
 }
 
@@ -2561,13 +2656,45 @@ async fn leave_tournament(
     Path(id): Path<String>,
     Json(req): Json<PlayerReq>,
 ) -> impl IntoResponse {
+    let msg = format!("zk.poker/tourney/v1/leave:{}:{}", id, req.player);
+    if !verify_ed25519(&req.pubkey, &msg, &req.sig) {
+        return auth_reject("bad signature");
+    }
     let mut hub = state.tournaments.lock().await;
+    // only the identity that registered this handle may drop it (no kicking other players).
+    if let Err(e) = hub.check_bound(&id, &req.player, &req.pubkey) {
+        return auth_reject(&e);
+    }
     ok_or_400(hub.registry.leave(&id, &req.player))
 }
 
 #[derive(Deserialize)]
 struct WhoReq {
     who: String,
+    #[serde(default)]
+    pubkey: String,
+    #[serde(default)]
+    sig: String,
+}
+
+/// Shared organizer-gate for start/cancel/sponsor: verify the sig over `msg`, then require the
+/// caller's pubkey to be the one bound to the tournament's ORGANIZER handle. Returns the response to
+/// send on failure, or None when authorized.
+async fn require_organizer(
+    hub: &TournamentHub, id: &str, pubkey: &str, sig: &str, msg: &str,
+) -> Option<axum::response::Response> {
+    if !verify_ed25519(pubkey, msg, sig) {
+        return Some(auth_reject("bad signature"));
+    }
+    let organizer = match hub.registry.get(id) {
+        Some(t) => t.organizer.clone(),
+        None => return Some((axum::http::StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "no such tournament" }))).into_response()),
+    };
+    if hub.check_bound(id, &organizer, pubkey).is_err() {
+        return Some(auth_reject("only the organizer's identity may do this"));
+    }
+    None
 }
 
 async fn start_tournament(
@@ -2576,6 +2703,10 @@ async fn start_tournament(
     Json(req): Json<WhoReq>,
 ) -> impl IntoResponse {
     let mut hub = state.tournaments.lock().await;
+    let msg = format!("zk.poker/tourney/v1/start:{}", id);
+    if let Some(resp) = require_organizer(&hub, &id, &req.pubkey, &req.sig, &msg).await {
+        return resp;
+    }
     ok_or_400(hub.registry.start(&id, &req.who))
 }
 
@@ -2585,6 +2716,10 @@ async fn cancel_tournament(
     Json(req): Json<WhoReq>,
 ) -> impl IntoResponse {
     let mut hub = state.tournaments.lock().await;
+    let msg = format!("zk.poker/tourney/v1/cancel:{}", id);
+    if let Some(resp) = require_organizer(&hub, &id, &req.pubkey, &req.sig, &msg).await {
+        return resp;
+    }
     ok_or_400(hub.registry.cancel(&id, &req.who))
 }
 
@@ -2598,6 +2733,10 @@ struct SponsorReq {
     url: String,
     #[serde(default)]
     added_prize_zat: u64,
+    #[serde(default)]
+    pubkey: String,
+    #[serde(default)]
+    sig: String,
 }
 
 /// https-only allowlist for sponsor-supplied URLs — a permissionless (platinum) sponsor must not
@@ -2627,6 +2766,10 @@ async fn sponsor_tournament(
     Json(req): Json<SponsorReq>,
 ) -> impl IntoResponse {
     let mut hub = state.tournaments.lock().await;
+    let msg = format!("zk.poker/tourney/v1/sponsor:{}", id);
+    if let Some(resp) = require_organizer(&hub, &id, &req.pubkey, &req.sig, &msg).await {
+        return resp;
+    }
     // tier/funded/escrow_room/by are stamped by add_sponsor from `who`; placeholders here.
     let sponsor = tournament::Sponsor {
         name: safe_text(&req.name, 60),
@@ -2646,6 +2789,10 @@ struct RemoveSponsorReq {
     who: String,
     /// the `by` handle of the sponsor entry to remove
     target: String,
+    #[serde(default)]
+    pubkey: String,
+    #[serde(default)]
+    sig: String,
 }
 
 async fn remove_sponsor_tournament(
@@ -2653,7 +2800,15 @@ async fn remove_sponsor_tournament(
     Path(id): Path<String>,
     Json(req): Json<RemoveSponsorReq>,
 ) -> impl IntoResponse {
+    // signed as `who` (the registry then checks who is the organizer or the sponsor itself).
+    let msg = format!("zk.poker/tourney/v1/sponsor_remove:{}:{}", id, req.target);
+    if !verify_ed25519(&req.pubkey, &msg, &req.sig) {
+        return auth_reject("bad signature");
+    }
     let mut hub = state.tournaments.lock().await;
+    if let Err(e) = hub.check_bound(&id, &req.who, &req.pubkey) {
+        return auth_reject(&e);
+    }
     ok_or_400(hub.registry.remove_sponsor(&id, &req.who, &req.target))
 }
 
@@ -2662,6 +2817,10 @@ struct ResultReq {
     match_id: u32,
     winner: String,
     reporter: String,
+    #[serde(default)]
+    pubkey: String,
+    #[serde(default)]
+    sig: String,
 }
 
 /// Report a match result. FREE-tournament anti-cheat: a single report never advances the bracket.
@@ -2673,7 +2832,18 @@ async fn result_tournament(
     Path(id): Path<String>,
     Json(req): Json<ResultReq>,
 ) -> impl IntoResponse {
+    // AUTH (closes the self-crown vuln): the report must be signed by the identity bound to the
+    // REPORTER handle. So a caller can only ever report AS THEMSELVES — they cannot forge the
+    // opponent's report to fake a both-agree and advance a false winner. The both-agree gate then
+    // requires the OTHER seat's real key to also report before the bracket moves.
+    let msg = format!("zk.poker/tourney/v1/result:{}:{}:{}", id, req.match_id, req.winner);
+    if !verify_ed25519(&req.pubkey, &msg, &req.sig) {
+        return auth_reject("bad signature");
+    }
     let mut hub = state.tournaments.lock().await;
+    if let Err(e) = hub.check_bound(&id, &req.reporter, &req.pubkey) {
+        return auth_reject(&e);
+    }
 
     // Validate the match exists, is playable, and that reporter + claimed winner are both seated.
     let (seat_a, seat_b) = match hub.registry.get(&id) {
@@ -3876,6 +4046,35 @@ async fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tourney_auth_verify_and_binding() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pk = hex::encode(sk.verifying_key().to_bytes());
+        let msg = "zk.poker/tourney/v1/join:t1:alice";
+        let sig = hex::encode(sk.sign(msg.as_bytes()).to_bytes());
+        // valid sig verifies; a tampered message or wrong key does not.
+        assert!(verify_ed25519(&pk, msg, &sig));
+        assert!(!verify_ed25519(&pk, "zk.poker/tourney/v1/join:t1:mallory", &sig));
+        let other = SigningKey::from_bytes(&[9u8; 32]);
+        assert!(!verify_ed25519(&hex::encode(other.verifying_key().to_bytes()), msg, &sig));
+        assert!(!verify_ed25519("not-hex", msg, &sig));
+
+        // handle binding: first-writer-wins; a different key can't hijack a claimed handle.
+        let mut hub = TournamentHub::default();
+        assert!(hub.bind_or_check("t1", "alice", "PKA").is_ok(), "first claim binds");
+        assert!(hub.bind_or_check("t1", "alice", "PKA").is_ok(), "same key re-ok");
+        assert!(hub.bind_or_check("t1", "alice", "PKB").is_err(), "different key rejected");
+        assert!(hub.check_bound("t1", "alice", "PKA").is_ok());
+        assert!(hub.check_bound("t1", "alice", "PKB").is_err(), "wrong key can't act as alice");
+        assert!(hub.check_bound("t1", "bob", "PKA").is_err(), "unbound handle can't act");
+        // THE self-crown defense: to report AS the opponent seat you'd need that seat's bound key.
+        // Holding only your own key, check_bound for the opponent handle fails — so you cannot forge
+        // the second report that the both-agree gate requires.
+        hub.bind_or_check("t1", "bob", "PKB").unwrap();
+        assert!(hub.check_bound("t1", "bob", "PKA").is_err(), "alice's key cannot report as bob");
+    }
 
     fn test_player(name: &str, pubkey: Option<&str>, disconnected: bool) -> Player {
         let (tx, _rx) = mpsc::unbounded_channel();

@@ -2839,6 +2839,7 @@ dependencies = [
  "axum",
  "clap",
  "dotenvy",
+ "ed25519-dalek 2.2.0",
  "futures",
  "hex",
  "osst",
