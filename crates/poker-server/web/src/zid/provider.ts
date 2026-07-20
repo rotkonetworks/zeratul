@@ -4,9 +4,28 @@
 
 import type { ZidOptions } from './types'
 
-/** ed25519 session keypair via Web Crypto */
+/** localStorage slot for the persisted session keypair (JWK). */
+const SESSION_KEY_STORE = 'zid_session_ed25519_v1'
+
+/** ed25519 session keypair via Web Crypto — PERSISTED across reloads.
+ *
+ * The session pubkey is pinned on-chain in the escrow deposit memo (`;id:<pubkey>`), and the
+ * settlement co-sign must verify against that exact pinned key. A staked match spans the
+ * deposit-confirm wait PLUS a full multi-hand bust, so a page reload / reconnect mid-match used to
+ * mint a NEW key — breaking the co-sign and forcing the pot into the refund/arbitration fallback
+ * (the mechanism that killed the only match that ever cleared DKG). Persisting the key lets a
+ * reload restore the same identity so `/settle` can actually finalize.
+ *
+ * The stored value is a session signing key, NOT a wallet spend key: its only authority is signing
+ * game actions and co-signing settlements for rooms where its pubkey is already pinned. Persisting
+ * it does not widen the XSS blast radius (a live-page XSS can already sign with the in-memory key).
+ */
 export async function createSessionKey() {
-  const keyPair = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify'])
+  let keyPair = await restorePersistedSessionKey()
+  if (!keyPair) {
+    keyPair = await crypto.subtle.generateKey('Ed25519', true, ['sign', 'verify'])
+    await persistSessionKey(keyPair)
+  }
   const pubRaw = new Uint8Array(await crypto.subtle.exportKey('raw', keyPair.publicKey))
   const pubkey = hex(pubRaw)
 
@@ -23,6 +42,35 @@ export async function createSessionKey() {
       const key = await crypto.subtle.importKey('raw', pubBytes, 'Ed25519', false, ['verify'])
       return crypto.subtle.verify('Ed25519', key, sigBytes, data)
     },
+  }
+}
+
+/** Restore the persisted session keypair from localStorage, or null if none/invalid/unavailable. */
+async function restorePersistedSessionKey(): Promise<CryptoKeyPair | null> {
+  try {
+    const raw = localStorage.getItem(SESSION_KEY_STORE)
+    if (!raw) return null
+    const jwk = JSON.parse(raw)
+    if (!jwk || jwk.kty !== 'OKP' || jwk.crv !== 'Ed25519' || !jwk.d || !jwk.x) return null
+    const privateKey = await crypto.subtle.importKey('jwk', jwk, 'Ed25519', true, ['sign'])
+    // public half from the same JWK (drop the private scalar `d`)
+    const publicKey = await crypto.subtle.importKey(
+      'jwk', { kty: jwk.kty, crv: jwk.crv, x: jwk.x }, 'Ed25519', true, ['verify'],
+    )
+    return { privateKey, publicKey }
+  } catch {
+    return null // corrupt entry / storage disabled → caller mints a fresh key
+  }
+}
+
+/** Persist the session keypair (as a JWK) so a reload restores the same on-chain-pinned identity. */
+async function persistSessionKey(keyPair: CryptoKeyPair): Promise<void> {
+  try {
+    const jwk = await crypto.subtle.exportKey('jwk', keyPair.privateKey)
+    localStorage.setItem(SESSION_KEY_STORE, JSON.stringify(jwk))
+  } catch {
+    // private-browsing / storage disabled → fall back to pre-fix ephemeral behavior (reload-unsafe,
+    // but no worse than before). Nothing else to do.
   }
 }
 

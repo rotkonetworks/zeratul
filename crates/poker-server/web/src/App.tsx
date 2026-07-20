@@ -1395,18 +1395,19 @@ export default function App() {
                             }, () => {})
                             setSendTriggered(true)
                             markDepositSent() // persist so a reload can't re-arm Send before the tx confirms
-                            // deposit-fault detector: a deposit confirms in ~1-2 blocks (~75s).
-                            // if it's still uncredited after 4 min, the scan may have missed it
-                            // (wrong address, missing memo, scanner lag) — exactly the failure
-                            // that stranded the earlier test deposit. Report it to the escrow
-                            // journal so it surfaces instead of silently hanging.
+                            // deposit-fault detector: a deposit confirms in ~1-2 blocks (~75s), but
+                            // under load / mempool congestion it can take longer. We wait 8 min before
+                            // journaling a soft advisory (NOT a failure — the deposit is still tracked
+                            // and will credit whenever it confirms). The wording is deliberately calm:
+                            // an earlier alarming "flagged for review" message panicked players into
+                            // re-running DKG mid-deposit, which unwound an otherwise-healthy match.
                             setTimeout(() => {
                               const dep = seat === 0 ? depositA() : depositB()
                               if (dep < requiredDeposit()) {
-                                send({ type: 'EscrowFault', phase: 'deposit', detail: `deposit not credited after 4m: sent ${req} zat to ${myAddr}` })
-                                log('deposit not detected yet — flagged to escrow for review', 'c-zec-yellow')
+                                send({ type: 'EscrowFault', phase: 'deposit', detail: `deposit still confirming after 8m: sent ${req} zat to ${myAddr}` })
+                                log('still waiting for on-chain confirmation — this is normal, keep this tab open', 'c-zec-yellow')
                               }
-                            }, 240000)
+                            }, 480000)
                           } catch (e: any) { log(`zafu send failed: ${e?.message ?? e}`, 'c-red') }
                         }}
                       >{sendTriggered() && !myReady ? 'Deposit sent — confirming…' : `Send ${reqZec} ZEC with zafu`}</button>

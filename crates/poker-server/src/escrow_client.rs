@@ -289,11 +289,24 @@ pub struct SettleReq {
     pub player_b_sig: String,
 }
 
+/// Outcome of a co-signed `/settle` submission the escrow ACCEPTED (both sigs valid).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettleOutcome {
+    /// Both deposits are confirmed on-chain — the payout plan is recorded; drive it now.
+    Finalized,
+    /// Co-sign accepted and QUEUED because a deposit is not yet confirmed. This is NOT a failure:
+    /// the escrow's confirmed-deposit scanner builds the payout plan automatically once both
+    /// deposits confirm. The caller must not fail the room and must not drive the payout yet.
+    QueuedPendingConfirmation,
+}
+
 /// POST /room/{code}/settle — submit both seats' signatures over the agreed outcome. The
 /// escrow verifies each sig against the seat's on-chain-pinned identity key, checks the
-/// signed payout addresses match the pinned ones, and records the payout plan. On success
-/// the room is settled; the actual on-chain payout is then driven via `initiate_payout`.
-pub async fn settle(base_url: &str, code: &str, req: &SettleReq) -> Result<(), String> {
+/// signed payout addresses match the pinned ones, and records the payout plan. Returns
+/// `Finalized` when confirmed deposits let it settle immediately, or `QueuedPendingConfirmation`
+/// when the co-sign is accepted but a deposit is still confirming (auto-completed by the scanner).
+/// Only a real rejection (bad sig, address mismatch, transport error) is an `Err`.
+pub async fn settle(base_url: &str, code: &str, req: &SettleReq) -> Result<SettleOutcome, String> {
     let url = format!("{}/room/{}/settle", base_url.trim_end_matches('/'), code);
     let resp = reqwest::Client::new()
         .post(&url)
@@ -306,10 +319,16 @@ pub async fn settle(base_url: &str, code: &str, req: &SettleReq) -> Result<(), S
     if let Some(err) = v.get("error") {
         return Err(format!("escrow settle rejected: {}", err));
     }
-    if v.get("settled").and_then(|s| s.as_bool()) != Some(true) {
-        return Err(format!("escrow settle did not confirm: {}", v));
+    if v.get("settled").and_then(|s| s.as_bool()) == Some(true) {
+        return Ok(SettleOutcome::Finalized);
     }
-    Ok(())
+    // `settled:false` with this flag means "accepted, awaiting deposit confirmation" — a queued
+    // success, not an error. (Previously the caller treated any non-true `settled` as a hard
+    // failure, turning a temporary 0-conf timing gap into a terminal PayoutFailed → refund.)
+    if v.get("settle_pending_confirmation").and_then(|s| s.as_bool()) == Some(true) {
+        return Ok(SettleOutcome::QueuedPendingConfirmation);
+    }
+    Err(format!("escrow settle did not confirm: {}", v))
 }
 
 /// POST /room/{code}/fault — forward a client-detected escrow fault to the escrow's

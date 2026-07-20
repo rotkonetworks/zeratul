@@ -1942,12 +1942,31 @@ async fn handle_relay_socket(socket: WebSocket, state: AppState) {
                         let room_clone = room_arc.clone();
                         let rooms_clone = state.rooms.clone();
                         tokio::spawn(async move {
-                            if let Err(e) = escrow_client::settle(&escrow_url, &code, &settle_req).await {
-                                tracing::error!("settle {}: escrow rejected co-signed outcome: {}", code, e);
-                                let mut r = room_clone.lock().await;
-                                r.payout_triggered = false; // allow retry / Leave fallback
-                                r.broadcast(&ServerMsg::PayoutFailed { reason: format!("settle: {}", e) });
-                                return;
+                            match escrow_client::settle(&escrow_url, &code, &settle_req).await {
+                                Err(e) => {
+                                    tracing::error!("settle {}: escrow rejected co-signed outcome: {}", code, e);
+                                    let mut r = room_clone.lock().await;
+                                    r.payout_triggered = false; // allow retry / Leave fallback
+                                    r.broadcast(&ServerMsg::PayoutFailed { reason: format!("settle: {}", e) });
+                                    return;
+                                }
+                                Ok(escrow_client::SettleOutcome::QueuedPendingConfirmation) => {
+                                    // Co-sign accepted; a deposit is still confirming. The escrow's
+                                    // confirmed-deposit scanner will build + drive the payout the
+                                    // instant both deposits confirm — do NOT fail, do NOT double-drive.
+                                    // Keep payout_triggered = true so we never resubmit this outcome.
+                                    tracing::info!(
+                                        "settle {}: co-sign queued pending deposit confirmation; escrow completes on confirm",
+                                        code,
+                                    );
+                                    let r = room_clone.lock().await;
+                                    r.broadcast(&ServerMsg::Status {
+                                        phase: "settlement".into(),
+                                        message: "settlement agreed — waiting for on-chain deposit confirmation".into(),
+                                    });
+                                    return;
+                                }
+                                Ok(escrow_client::SettleOutcome::Finalized) => { /* deposits confirmed — drive payout below */ }
                             }
                             tracing::info!("settle {}: escrow accepted co-signed outcome; initiating winner payout", code);
                             // Settle-HIGH-1 fix: the server does NOT compute the winner split.

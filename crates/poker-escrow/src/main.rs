@@ -319,6 +319,32 @@ async fn create_room(
     State(state): State<AppState>,
     Json(req): Json<CreateRoomReq>,
 ) -> impl IntoResponse {
+    // IDEMPOTENCY GUARD. If this room code already exists, DO NOT re-provision. A fresh provision
+    // runs a new DKG, mints a new payout token, and overwrites the in-memory + persisted room —
+    // destroying key material and orphaning any deposit already sent to the old vault address.
+    // Tournament match codes are deterministic (`tourney-<tid>-m<id>`) and the poker-server room map
+    // is rebuilt empty on restart, so a restart mid-match re-hits this endpoint for a LIVE, funded
+    // room. Return the existing room's coordinates instead (mirrors the /settle idempotency). If DKG
+    // has since completed, `escrow_ua` is now the real address — even better for the caller.
+    {
+        let rooms = state.rooms.lock().await;
+        if let Some(room) = rooms.get(&req.code) {
+            tracing::info!("escrow create: room {} already exists — returning existing (idempotent)", req.code);
+            // Only the fields the caller (poker-server create_escrow) consumes: address, frost coords,
+            // payout token, mode. Legacy shim shares are echoed for the trusted-dealer client; the
+            // group pubkey is a curve Point (not serde) and is unused by the caller, so it's omitted.
+            return Json(serde_json::json!({
+                "escrow_address": room.escrow_ua,
+                "player_a_share": room.player_a_share_hex,
+                "player_b_share": room.player_b_share_hex,
+                "dkg_mode": state.use_dkg,
+                "frost_relay_url": room.frost_relay_url,
+                "frost_room_code": room.frost_room_code,
+                "payout_token": hex::encode(room.payout_token),
+            }));
+        }
+    }
+
     let (shim, a_share_hex, b_share_hex, pubkey_hex) = match make_legacy_osst(&req) {
         Ok(v) => v,
         Err(e) => return Json(serde_json::json!({"error": e})),
