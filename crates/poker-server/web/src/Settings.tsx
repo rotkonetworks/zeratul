@@ -100,7 +100,7 @@ export function Settings(props: { connected: boolean; onClose: () => void; onRen
               {props.mode === 'zafu' ? '💎 wallet' : 'anon'}
             </span>
             <span class="font-mono text-10px text-neutral-300 truncate flex-1">{props.pubkey}</span>
-            <span class="text-9px text-neutral-500 shrink-0">{copied() ? 'copied ✓' : 'copy'}</span>
+            <span class={`shrink-0 w-3.5 h-3.5 ${copied() ? 'i-lucide-check text-green-400' : 'i-lucide-copy text-neutral-500'}`} />
           </button>
           <p class="text-10px text-neutral-500 mt-1.5 mb-4">
             {props.mode === 'zafu'
