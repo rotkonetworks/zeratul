@@ -17,21 +17,39 @@ chacha20poly1305 = "0.10"
 # player settlement co-signing (Ed25519 session keys, matches WebCrypto 'Ed25519')
 ed25519-dalek = "2"
 
-# FROST + Orchard UA derivation (shared with zcli, zafu, zigner)
-frost-spend = { git = "https://github.com/rotkonetworks/zcli", branch = "staging" }
-zcash_address = "0.12"
-
+# FROST + Orchard UA derivation (shared with zcli, zafu, zigner).
+# Ironwood step 1: retargeted from zcli@staging (NU6.2) to the local
+# zcli-ironwood worktree so frost-spend + zecli link against the SAME
+# orchard/zcash_primitives fork revs as the direct deps below (path deps, not
+# git, so the sibling worktree's manifest/lock are used directly).
+#
+# RESOLVED: zecli was ported to the NU6.3 fork stack in zcli-ironwood
+# (f87adee) — the whole graph now resolves and poker-escrow builds with the
+# nu6.3 cfg. frost-spend's conradoplg orchard 0.10 + osst coexist with the
+# fork orchard 0.14 (no collision).
+frost-spend = { path = "../../../zcli-ironwood/crates/frost-spend" }
 # zidecar gRPC client + Orchard compact-block scanner (mirrors zcli/bin/license-server)
-zecli = { git = "https://github.com/rotkonetworks/zcli", branch = "staging" }
-# NU6.2 stack — must match zecli (orchard 0.14 fixed circuit, branch 0x5437F330)
-orchard = { version = "0.14", default-features = false, features = ["circuit"] }
+zecli = { path = "../../../zcli-ironwood/bin/zcli" }
+
+# ── NU6.3 / Ironwood zcash stack ──────────────────────────────────────────────
+# Retargeted from crates.io (NU6.2: orchard 0.14 / zcash_primitives 0.28 /
+# zcash_protocol 0.9 / pczt 0.7) to the valar NU6.3 fork — the SAME pins
+# zcli-ironwood/crates/zcash-wasm (zafu) uses. Build with:
+#   RUSTFLAGS='--cfg zcash_unstable="nu6.3"' cargo build -p poker-escrow
+#   orchard 0.14:            zcash/orchard   @ adam/qleak-dummy-ciphertexts-on-pr505 (rev 204d8ce9)
+#   librustzcash crates 0.x: valargroup fork @ adam/qleak-pr44-orchard-dummy-ciphertexts (rev 0c3ad735,
+#                            [patch]ed below to the branch-id-fixed vendored copy)
+orchard = { version = "0.14", git = "https://github.com/zcash/orchard", branch = "adam/qleak-dummy-ciphertexts-on-pr505", default-features = false, features = ["circuit"] }
+zcash_address = { version = "0.12", git = "https://github.com/valargroup/librustzcash", branch = "adam/qleak-pr44-orchard-dummy-ciphertexts", default-features = false }
+zcash_protocol = { version = "0.9", git = "https://github.com/valargroup/librustzcash", branch = "adam/qleak-pr44-orchard-dummy-ciphertexts", default-features = false }
+# zcash_note_encryption stays crates.io 0.4 — the fork's zcash_primitives/pczt
+# depend on 0.4.1 from crates.io too (see vendor/librustzcash/Cargo.toml).
 zcash_note_encryption = "0.4"
-zcash_protocol = { version = "0.9", default-features = false }
 blake2b_simd = "1"
 
-# PCZT standard pipeline — same versions as zcash-wasm / zafu / zigner (NU6.2 stack)
-zcash_primitives = { version = "0.28", default-features = false, features = ["non-standard-fees"] }
-pczt = { version = "0.7", default-features = false, features = ["orchard", "transparent", "sapling", "zcp-builder", "prover", "io-finalizer", "signer", "tx-extractor"] }
+# PCZT standard pipeline — same fork revs as zcash-wasm / zafu (NU6.3 stack).
+zcash_primitives = { version = "0.28", git = "https://github.com/valargroup/librustzcash", branch = "adam/qleak-pr44-orchard-dummy-ciphertexts", default-features = false, features = ["non-standard-fees"] }
+pczt = { version = "0.7", git = "https://github.com/valargroup/librustzcash", branch = "adam/qleak-pr44-orchard-dummy-ciphertexts", default-features = false, features = ["orchard", "transparent", "sapling", "zcp-builder", "prover", "io-finalizer", "signer", "tx-extractor"] }
 
 # web server
 axum = { version = "0.8", features = ["ws", "macros"] }
@@ -62,3 +80,27 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 clap = { version = "4", features = ["derive", "env"] }
 dotenvy = "0.15"
 
+# NU6.3 cfg is a first-class cfg for this crate's orchard/zcash_primitives fork.
+# Registering it here silences the `unexpected_cfgs` lint (mirrors zcash-wasm).
+[lints.rust]
+unexpected_cfgs = { level = "warn", check-cfg = ['cfg(zcash_unstable, values("nu6.3"))'] }
+
+# ── NU6.3 / Ironwood librustzcash [patch] ─────────────────────────────────────
+# Mirror of zcli-ironwood's workspace [patch]. The valargroup fork rev 0c3ad735
+# hardcodes the NU6.3 consensus branch id as a placeholder (0xffff_ffff) and
+# activation_height(Nu6_3) => None; the vendored copy under
+# zcli-ironwood/vendor/librustzcash carries the 3-line consensus patch that binds
+# the real branch id 0x37a5165b (activation height 3_428_143 on mainnet). We
+# [patch] every crate the lock pulls from that git source to the vendored,
+# branch-id-fixed copy so Cargo never mixes patched and unpatched sources.
+# (Only correctness-relevant for step 2 broadcast; already correct to depend on now.)
+[patch."https://github.com/valargroup/librustzcash"]
+equihash = { path = "../../../zcli-ironwood/vendor/librustzcash/components/equihash" }
+f4jumble = { path = "../../../zcli-ironwood/vendor/librustzcash/components/f4jumble" }
+pczt = { path = "../../../zcli-ironwood/vendor/librustzcash/pczt" }
+zcash_address = { path = "../../../zcli-ironwood/vendor/librustzcash/components/zcash_address" }
+zcash_encoding = { path = "../../../zcli-ironwood/vendor/librustzcash/components/zcash_encoding" }
+zcash_keys = { path = "../../../zcli-ironwood/vendor/librustzcash/zcash_keys" }
+zcash_primitives = { path = "../../../zcli-ironwood/vendor/librustzcash/zcash_primitives" }
+zcash_protocol = { path = "../../../zcli-ironwood/vendor/librustzcash/components/zcash_protocol" }
+zcash_transparent = { path = "../../../zcli-ironwood/vendor/librustzcash/zcash_transparent" }
