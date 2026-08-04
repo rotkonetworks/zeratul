@@ -19,7 +19,7 @@ ed25519-dalek = "2"
 
 # FROST + Orchard UA derivation (shared with zcli, zafu, zigner).
 # Ironwood step 1: retargeted from zcli@staging (NU6.2) to the local
-# zcli-ironwood worktree so frost-spend + zecli link against the SAME
+# rotkonetworks/zcli master @ f497a277 (ironwood merge) so frost-spend + zecli link against the SAME
 # orchard/zcash_primitives fork revs as the direct deps below (path deps, not
 # git, so the sibling worktree's manifest/lock are used directly).
 #
@@ -27,9 +27,9 @@ ed25519-dalek = "2"
 # (f87adee) — the whole graph now resolves and poker-escrow builds with the
 # nu6.3 cfg. frost-spend's conradoplg orchard 0.10 + osst coexist with the
 # fork orchard 0.14 (no collision).
-frost-spend = { path = "../../../zcli-ironwood/crates/frost-spend" }
+frost-spend = { git = "https://github.com/rotkonetworks/zcli.git", rev = "f497a277" }
 # zidecar gRPC client + Orchard compact-block scanner (mirrors zcli/bin/license-server)
-zecli = { path = "../../../zcli-ironwood/bin/zcli" }
+zecli = { git = "https://github.com/rotkonetworks/zcli.git", rev = "f497a277" }
 
 # ── NU6.3 / Ironwood zcash stack ──────────────────────────────────────────────
 # Retargeted from crates.io (NU6.2: orchard 0.14 / zcash_primitives 0.28 /
@@ -95,12 +95,12 @@ unexpected_cfgs = { level = "warn", check-cfg = ['cfg(zcash_unstable, values("nu
 # branch-id-fixed copy so Cargo never mixes patched and unpatched sources.
 # (Only correctness-relevant for step 2 broadcast; already correct to depend on now.)
 [patch."https://github.com/valargroup/librustzcash"]
-equihash = { path = "../../../zcli-ironwood/vendor/librustzcash/components/equihash" }
-f4jumble = { path = "../../../zcli-ironwood/vendor/librustzcash/components/f4jumble" }
-pczt = { path = "../../../zcli-ironwood/vendor/librustzcash/pczt" }
-zcash_address = { path = "../../../zcli-ironwood/vendor/librustzcash/components/zcash_address" }
-zcash_encoding = { path = "../../../zcli-ironwood/vendor/librustzcash/components/zcash_encoding" }
-zcash_keys = { path = "../../../zcli-ironwood/vendor/librustzcash/zcash_keys" }
-zcash_primitives = { path = "../../../zcli-ironwood/vendor/librustzcash/zcash_primitives" }
-zcash_protocol = { path = "../../../zcli-ironwood/vendor/librustzcash/components/zcash_protocol" }
-zcash_transparent = { path = "../../../zcli-ironwood/vendor/librustzcash/zcash_transparent" }
+equihash = { git = "https://github.com/rotkonetworks/zcli.git", rev = "f497a277" }
+f4jumble = { git = "https://github.com/rotkonetworks/zcli.git", rev = "f497a277" }
+pczt = { git = "https://github.com/rotkonetworks/zcli.git", rev = "f497a277" }
+zcash_address = { git = "https://github.com/rotkonetworks/zcli.git", rev = "f497a277" }
+zcash_encoding = { git = "https://github.com/rotkonetworks/zcli.git", rev = "f497a277" }
+zcash_keys = { git = "https://github.com/rotkonetworks/zcli.git", rev = "f497a277" }
+zcash_primitives = { git = "https://github.com/rotkonetworks/zcli.git", rev = "f497a277" }
+zcash_protocol = { git = "https://github.com/rotkonetworks/zcli.git", rev = "f497a277" }
+zcash_transparent = { git = "https://github.com/rotkonetworks/zcli.git", rev = "f497a277" }

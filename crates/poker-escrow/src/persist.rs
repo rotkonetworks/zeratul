@@ -574,6 +574,7 @@ mod tests {
                 rho: [0x88u8; 32],
                 rseed: [0x99u8; 32],
                 position: 7,
+                pool: crate::scanner::NotePool::Orchard,
             }],
             last_scanned_height: 100,
             payout_status: PayoutStatus::Pending { relay_room: "RELAY1".to_string() },
