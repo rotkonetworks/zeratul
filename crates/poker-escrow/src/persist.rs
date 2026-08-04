@@ -112,6 +112,9 @@ pub struct PersistedRoom {
     /// DKG errored — room is terminally unable to co-sign (FIX 3).
     #[serde(default)]
     pub dkg_failed: Option<String>,
+    /// player-filed dispute (open or resolved) — freezes money paths while open.
+    #[serde(default)]
+    pub dispute: Option<crate::DisputeRecord>,
 }
 
 // ---------------------------------------------------------------------------
@@ -211,6 +214,7 @@ impl PersistedRoom {
             settle_pending: r.settle_pending.clone(),
             evicted_shortfall: r.evicted_shortfall,
             dkg_failed: r.dkg_failed.clone(),
+            dispute: r.dispute.clone(),
         }
     }
 
@@ -281,6 +285,7 @@ impl PersistedRoom {
             settle_pending: self.settle_pending,
             evicted_shortfall: self.evicted_shortfall,
             dkg_failed: self.dkg_failed,
+            dispute: self.dispute,
         })
     }
 }
@@ -608,6 +613,7 @@ mod tests {
             settle_pending: None,
             evicted_shortfall: false,
             dkg_failed: None,
+            dispute: None,
         }
     }
 

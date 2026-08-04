@@ -103,6 +103,39 @@ pub enum PayoutStatus {
     Failed { reason: String },
 }
 
+
+/// A player-filed dispute. Filing requires an Ed25519 signature from the
+/// seat's on-chain-pinned identity key, so an outside griefer cannot freeze
+/// a table it isn't part of.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct DisputeRecord {
+    pub seat: u8,
+    pub reason: String,
+    /// the filer's view of the co-signed action-log hash, if any
+    pub log_hash: Option<String>,
+    /// the filer's claimed final stacks, if the dispute is about the outcome
+    pub claimed_a_stack: Option<u64>,
+    pub claimed_b_stack: Option<u64>,
+    pub opened_at: u64,
+    /// arbiter ruling that closed it ("pay_a" | "pay_b" | "refund" | "split");
+    /// None while open. postpone leaves it open.
+    pub resolved: Option<String>,
+    pub resolved_at: Option<u64>,
+}
+
+/// True while a dispute is open (filed, not yet ruled) — the state that
+/// freezes every automatic money path.
+fn dispute_open(dispute: &Option<DisputeRecord>) -> bool {
+    dispute.as_ref().is_some_and(|d| d.resolved.is_none())
+}
+
+/// Canonical byte string a seat signs to open a dispute. Versioned and
+/// field-delimited with newlines (reasons are length-capped and the other
+/// fields are code/hex/ints, so no delimiter ambiguity).
+fn dispute_sign_message(code: &str, seat: u8, reason: &str, log_hash: &str) -> Vec<u8> {
+    format!("zk.poker/dispute/v1\n{}\n{}\n{}\n{}", code, seat, reason, log_hash).into_bytes()
+}
+
 struct EscrowRoom {
     code: String,
     /// Orchard UA (`u1...`) — `Some` once derivation is done. In trusted-dealer mode this is
@@ -206,6 +239,10 @@ struct EscrowRoom {
     /// derive an escrow address / co-sign. Surfaced via `get_room` (`dkg_failed`) so the room can
     /// be shown as terminally failed instead of "setting up forever". Persisted.
     dkg_failed: Option<String>,
+    /// An open player dispute freezes the automatic money paths (/settle,
+    /// /payout/initiate, /cancel) until the operator rules via /arbitrate.
+    /// Kept after resolution as a durable record (resolved = Some(ruling)).
+    dispute: Option<DisputeRecord>,
 }
 
 /// A co-signed settlement recorded while a deposit is still unconfirmed (FIX 1). Captures exactly
@@ -412,6 +449,7 @@ async fn create_room_trusted_dealer(
         settle_pending: None,
         evicted_shortfall: false,
         dkg_failed: None,
+        dispute: None,
     };
 
     let payout_token_hex = hex::encode(room.payout_token);
@@ -517,6 +555,7 @@ async fn get_room(
             "rake_bps": room.rake_bps,
             "rake_paid": room.rake_paid,
             "game_active": room.game_active,
+            "dispute": room.dispute,
             "settled": room.payout_plan.is_some(),
             "both_deposited": room.player_a_deposit >= room.required_deposit
                 && room.player_b_deposit >= room.required_deposit,
@@ -597,6 +636,7 @@ async fn report_deposit(
             "player_b_deposit": room.player_b_deposit,
             "both_deposited": both,
             "game_active": room.game_active,
+            "dispute": room.dispute,
         }));
     }
 
@@ -626,6 +666,7 @@ async fn report_deposit(
         "player_b_deposit": room.player_b_deposit,
         "both_deposited": both,
         "game_active": room.game_active,
+            "dispute": room.dispute,
     }))
 }
 
@@ -1047,6 +1088,16 @@ async fn settle(
         return Json(serde_json::json!({"settled": true, "payout_plan": plan, "duplicate": true}));
     }
 
+    // ── dispute freeze ──────────────────────────────────────────────────────
+    // An open dispute means the seats do NOT agree on the outcome; accepting a
+    // co-signed plan now would race the operator's ruling. Fail closed.
+    if dispute_open(&room.dispute) {
+        return Json(serde_json::json!({
+            "error": "room is under dispute — settlement frozen until the operator rules via /arbitrate",
+            "dispute": room.dispute,
+        }));
+    }
+
     if !room.game_active && room.settle_pending.is_none() {
         return Json(serde_json::json!({"error": "game not active"}));
     }
@@ -1201,6 +1252,15 @@ async fn initiate_payout(
         ) {
             tracing::warn!("payout/initiate REJECTED for {}: {}", code, msg);
             return (status, Json(serde_json::json!({"error": msg}))).into_response();
+        }
+        // ── dispute freeze ─────────────────────────────────────────────────
+        // /arbitrate marks the dispute resolved BEFORE firing the payout, so
+        // an operator ruling passes; anything else waits for it.
+        if dispute_open(&room.dispute) {
+            return (axum::http::StatusCode::CONFLICT, Json(serde_json::json!({
+                "error": "room is under dispute — payout frozen until the operator rules via /arbitrate",
+                "dispute": room.dispute,
+            }))).into_response();
         }
         match &room.payout_status {
             PayoutStatus::Pending { relay_room } => {
@@ -1841,8 +1901,164 @@ async fn get_dispute(Path(code): Path<String>) -> axum::response::Html<String> {
 #[derive(Deserialize)]
 struct ArbitrateReq {
     pin: String,
-    /// "pay_a" | "pay_b" | "refund" | "postpone"
+    /// "pay_a" | "pay_b" | "refund" | "split" | "postpone"
     ruling: String,
+    /// split ruling only: proportional weights over the distributable pot
+    /// (same semantics as final stacks — e.g. 6000/4000 gives A 60%).
+    #[serde(default)]
+    a_stack: Option<u64>,
+    #[serde(default)]
+    b_stack: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct DisputeReq {
+    /// 0 = player A, 1 = player B
+    seat: u8,
+    /// human-readable claim; length-capped, journalled verbatim
+    reason: String,
+    #[serde(default)]
+    log_hash: Option<String>,
+    /// the filer's claimed final stacks, if the dispute is about the outcome
+    #[serde(default)]
+    claimed_a_stack: Option<u64>,
+    #[serde(default)]
+    claimed_b_stack: Option<u64>,
+    /// hex Ed25519 signature by the seat's on-chain-pinned identity key over
+    /// `dispute_sign_message(code, seat, reason, log_hash)`
+    sig: String,
+}
+
+/// POST /room/{code}/dispute — a PLAYER formally opens a dispute. Requires a
+/// signature from the seat's on-chain-pinned Ed25519 identity key (the same
+/// key that co-signs settlements), so only an actual seat can freeze its own
+/// table. While open: /settle, /payout/initiate and /cancel are frozen; the
+/// operator resolves via /arbitrate (pay_a | pay_b | refund | split), which
+/// records the ruling on the dispute and unfreezes the ruled payout.
+async fn open_dispute(
+    State(state): State<AppState>,
+    Path(code): Path<String>,
+    Json(req): Json<DisputeReq>,
+) -> axum::response::Response {
+    use axum::http::StatusCode;
+
+    if req.seat > 1 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "seat must be 0 or 1"}))).into_response();
+    }
+    if req.reason.trim().is_empty() || req.reason.len() > 2000 {
+        return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "reason required, max 2000 chars"}))).into_response();
+    }
+
+    let dispute = {
+        let mut rooms = state.rooms.lock().await;
+        let Some(room) = rooms.get_mut(&code) else {
+            return (StatusCode::NOT_FOUND, Json(serde_json::json!({"error": "room not found"}))).into_response();
+        };
+
+        // idempotency / single open dispute per room
+        if dispute_open(&room.dispute) {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({
+                "error": "a dispute is already open on this room",
+                "dispute": room.dispute,
+            }))).into_response();
+        }
+        // a payout that already broadcast cannot be frozen retroactively
+        if matches!(room.payout_status, PayoutStatus::Broadcast { .. }) {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({
+                "error": "payout already broadcast — nothing left to freeze; the journal (/audit) is the evidence record",
+            }))).into_response();
+        }
+
+        // AUTH: signature from the seat's on-chain-pinned identity key. Fail
+        // closed — a seat that never pinned an identity cannot file (its
+        // deposit memo carried no key; the operator can still act on /fault
+        // reports and journal evidence).
+        let Some(Some(pubkey)) = room.seat_identity_pubkey.get(req.seat as usize).cloned() else {
+            return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
+                "error": "seat identity key not pinned on-chain — cannot authenticate dispute; use the deposit memo id: segment",
+            }))).into_response();
+        };
+        let msg = dispute_sign_message(
+            &code,
+            req.seat,
+            &req.reason,
+            req.log_hash.as_deref().unwrap_or(""),
+        );
+        if !verify_settlement_sig(&pubkey, &msg, &req.sig) {
+            return (StatusCode::UNAUTHORIZED, Json(serde_json::json!({"error": "bad dispute signature"}))).into_response();
+        }
+
+        let d = DisputeRecord {
+            seat: req.seat,
+            reason: req.reason.clone(),
+            log_hash: req.log_hash.clone(),
+            claimed_a_stack: req.claimed_a_stack,
+            claimed_b_stack: req.claimed_b_stack,
+            opened_at: now_ms(),
+            resolved: None,
+            resolved_at: None,
+        };
+        room.dispute = Some(d.clone());
+        if let Some(s) = state.persist.as_ref() {
+            s.save_room(room);
+        }
+        d
+    };
+
+    journal::record(&code, "dispute_opened", serde_json::json!({
+        "seat": dispute.seat,
+        "reason": dispute.reason,
+        "log_hash": dispute.log_hash,
+        "claimed_a_stack": dispute.claimed_a_stack,
+        "claimed_b_stack": dispute.claimed_b_stack,
+    }));
+    notify::dispute_alert(
+        "⚖️ zk.poker dispute opened",
+        &format!("room {} — seat {} disputes: {}", code, dispute.seat, dispute.reason),
+        "rotating_light",
+        &code,
+    );
+
+    Json(serde_json::json!({
+        "ok": true,
+        "dispute": dispute,
+        "frozen": ["settle", "payout/initiate", "cancel"],
+        "resolution": "operator ruling via /arbitrate",
+    })).into_response()
+}
+
+/// GET /api/disputes — machine-readable dispute/attention list (the HTML
+/// twin is /disputes). Same read-token gate as the other sensitive reads.
+async fn api_disputes(
+    State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
+) -> axum::response::Response {
+    if let Err(resp) = check_read_token(&headers) {
+        return resp;
+    }
+    let rooms = state.rooms.lock().await;
+    let mut out = Vec::new();
+    for (code, room) in rooms.iter() {
+        let events = journal::read_room(code);
+        let status = dispute::classify(&events);
+        let open = dispute_open(&room.dispute);
+        if !open && !status.needs_attention() {
+            continue;
+        }
+        out.push(serde_json::json!({
+            "room": code,
+            "status": status.label(),
+            "dispute": room.dispute,
+            "dispute_open": open,
+            "game_active": room.game_active,
+            "player_a_deposit": room.player_a_deposit,
+            "player_b_deposit": room.player_b_deposit,
+            "required_deposit": room.required_deposit,
+            "payout_status": format!("{:?}", room.payout_status),
+            "audit": format!("/audit/{}", code),
+        }));
+    }
+    Json(serde_json::json!({ "disputes": out })).into_response()
 }
 
 /// POST /room/{code}/arbitrate — operator ruling on a dispute. PIN-gated (argon2 +
@@ -1903,13 +2119,24 @@ async fn arbitrate(
             "pay_a"  => (1u64, 0u64, true, false),
             "pay_b"  => (0, 1, false, true),
             "refund" => (room.player_a_deposit, room.player_b_deposit, true, true),
+            // operator-decided proportional split — for disputes where neither
+            // a clean win nor a full refund matches the evidence
+            "split" => {
+                let (Some(a), Some(b)) = (req.a_stack, req.b_stack) else {
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "split ruling requires a_stack and b_stack weights"}))).into_response();
+                };
+                if a + b == 0 {
+                    return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": "split weights must not both be zero"}))).into_response();
+                }
+                (a, b, a > 0, b > 0)
+            }
             other => return (StatusCode::BAD_REQUEST, Json(serde_json::json!({"error": format!("unknown ruling '{}'", other)}))).into_response(),
         };
         // 0-conf safety (defense-in-depth): pay_a/pay_b award the winner the whole confirmed
         // pot. If a deposit never confirmed, that pot is the OTHER seat's real money — paying it
         // to the winner is theft. Only 'refund' (each seat gets its own confirmed deposit back)
         // is safe under a shortfall. The automatic /settle path enforces the same invariant.
-        if (req.ruling == "pay_a" || req.ruling == "pay_b")
+        if (req.ruling == "pay_a" || req.ruling == "pay_b" || req.ruling == "split")
             && !both_deposits_satisfied(room.player_a_deposit, room.player_b_deposit, room.required_deposit) {
             return (StatusCode::BAD_REQUEST, Json(serde_json::json!({
                 "error": "a deposit is unconfirmed on-chain — pay_a/pay_b could pay the winner from \
@@ -1933,6 +2160,14 @@ async fn arbitrate(
             &state.house_address,
         );
         room.game_active = false;
+        // close the dispute (if any): the operator has ruled. Done BEFORE the
+        // payout fires so the dispute freeze on /payout/initiate passes.
+        if let Some(d) = room.dispute.as_mut() {
+            if d.resolved.is_none() {
+                d.resolved = Some(req.ruling.clone());
+                d.resolved_at = Some(now_ms());
+            }
+        }
         room.final_stacks = Some((payout_a, payout_b));
         let plan = PayoutPlan {
             room: code.clone(),
@@ -2017,6 +2252,16 @@ async fn cancel_room(
         ) {
             tracing::warn!("cancel REJECTED for {}: {}", code, msg);
             return (status, Json(serde_json::json!({"error": msg}))).into_response();
+        }
+        // ── dispute freeze ─────────────────────────────────────────────────
+        // cancel refunds each seat's own confirmed deposit — but a dispute may
+        // be exactly about which money is whose. The operator's 'refund' ruling
+        // reaches the same outcome under review.
+        if dispute_open(&room.dispute) {
+            return (StatusCode::CONFLICT, Json(serde_json::json!({
+                "error": "room is under dispute — cancel frozen until the operator rules via /arbitrate",
+                "dispute": room.dispute,
+            }))).into_response();
         }
 
         // IDEMPOTENCY: a plan already exists (settle / arbitrate / a prior cancel) → return it
@@ -2445,7 +2690,9 @@ async fn main() {
         .route("/room/{code}/sign", axum::routing::post(frost_sign))
         .route("/room/{code}/sign-round2", axum::routing::post(frost_sign_round2))
         .route("/room/{code}/fault", axum::routing::post(report_fault))
+        .route("/room/{code}/dispute", axum::routing::post(open_dispute))
         .route("/room/{code}/arbitrate", axum::routing::post(arbitrate))
+        .route("/api/disputes", axum::routing::get(api_disputes))
         .route("/room/{code}/cancel", axum::routing::post(cancel_room))
         .route("/audit/{code}", axum::routing::get(get_audit))
         .route("/accounting", axum::routing::get(get_accounting))
@@ -2468,6 +2715,62 @@ async fn main() {
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn dispute_sign_message_is_stable() {
+        // the wire contract clients sign against — changing it breaks every
+        // deployed signer, so pin it byte-for-byte
+        let m = dispute_sign_message("paw-rod-sum", 1, "b cheated on river", "abc123");
+        assert_eq!(
+            m,
+            b"zk.poker/dispute/v1\npaw-rod-sum\n1\nb cheated on river\nabc123".to_vec()
+        );
+    }
+
+    #[test]
+    fn dispute_open_semantics() {
+        assert!(!dispute_open(&None));
+        let mut d = DisputeRecord {
+            seat: 0,
+            reason: "r".into(),
+            log_hash: None,
+            claimed_a_stack: None,
+            claimed_b_stack: None,
+            opened_at: 1,
+            resolved: None,
+            resolved_at: None,
+        };
+        assert!(dispute_open(&Some(d.clone())));
+        d.resolved = Some("refund".into());
+        assert!(!dispute_open(&Some(d)));
+    }
+
+    #[test]
+    fn dispute_filing_signature_roundtrip() {
+        use ed25519_dalek::{Signer, SigningKey};
+        let sk = SigningKey::from_bytes(&[7u8; 32]);
+        let pk: [u8; 32] = sk.verifying_key().to_bytes();
+        let msg = dispute_sign_message("code", 0, "reason", "");
+        let sig = hex::encode(sk.sign(&msg).to_bytes());
+        assert!(verify_settlement_sig(&pk, &msg, &sig));
+        // signature over a different room must not verify
+        let other = dispute_sign_message("other", 0, "reason", "");
+        assert!(!verify_settlement_sig(&pk, &other, &sig));
+    }
+
+    #[test]
+    fn split_ruling_math_uses_weights_proportionally() {
+        // 60/40 split of a 1_000_000 pot minus the payout fee, no rake
+        let (outputs, a, b, rake) = compute_settlement_outputs(
+            "room", 1_000_000, 0, 6000, 4000, "addr_a", "addr_b", "unset",
+        );
+        let distributable = 1_000_000 - TX_PAYOUT_FEE_ZAT;
+        assert_eq!(a + b, distributable);
+        assert_eq!(rake, 0);
+        assert_eq!(a, distributable * 6000 / 10_000);
+        assert_eq!(outputs.len(), 2);
+    }
+
     use super::*;
     use axum::http::StatusCode;
     use std::collections::HashSet;
@@ -2846,6 +3149,7 @@ mod tests {
             }),
             evicted_shortfall: false,
             dkg_failed: None,
+            dispute: None,
         };
         (room, code)
     }

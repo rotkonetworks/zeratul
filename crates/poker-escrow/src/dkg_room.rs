@@ -637,6 +637,7 @@ pub fn empty_room(
         settle_pending: None,
         evicted_shortfall: false,
         dkg_failed: None,
+        dispute: None,
     }
 }
 
