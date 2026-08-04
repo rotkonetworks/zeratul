@@ -7,6 +7,8 @@
 //! poker-server doesn't know which — it calls `jury.sign(message)`.
 
 use async_trait::async_trait;
+use std::sync::Arc;
+use tokio::sync::Semaphore;
 use osst::curve::{OsstPoint, OsstScalar};
 use osst::frost;
 use osst::nested;
@@ -38,12 +40,48 @@ pub trait JuryService: Send + Sync {
 // LocalJury: all shares in-process (demo/testing)
 // ---------------------------------------------------------------------------
 
+/// Hard cap on jury signing sessions with nonces outstanding at any instant.
+///
+/// SECURITY (interim mitigation, not a fix): the nested construction currently
+/// presents a pre-bound single commitment to the outer protocol, so the jury's
+/// effective nonce is NOT coupled to the outer commitment set. That is the ROS
+/// setting — an outer signer who can hold ~log2(q) ≈ 256 honest nonces still
+/// while sweeping challenges can forge in polynomial time (Benhamouda et al.,
+/// 2020). Bounding concurrent sessions well below that threshold keeps the
+/// attack out of reach until the v2 protocol (`osst::nested::inner_sign_v2`,
+/// which restores outer binding) is reviewed and adopted.
+///
+/// Raise this ONLY after migrating to v2.
+const MAX_CONCURRENT_JURY_SESSIONS: usize = 4;
+
 pub struct LocalJury {
     pub shares: Vec<SecretShare<PallasScalar>>,
     pub threshold: u32,
     pub group_pubkey: PallasPoint,
     pub outer_group_pubkey: PallasPoint,
     pub outer_index: u32,
+    /// bounds concurrent signing sessions — see MAX_CONCURRENT_JURY_SESSIONS
+    pub session_limit: Arc<Semaphore>,
+}
+
+impl LocalJury {
+    /// Construct with the mandatory concurrency bound in place.
+    pub fn new(
+        shares: Vec<SecretShare<PallasScalar>>,
+        threshold: u32,
+        group_pubkey: PallasPoint,
+        outer_group_pubkey: PallasPoint,
+        outer_index: u32,
+    ) -> Self {
+        Self {
+            shares,
+            threshold,
+            group_pubkey,
+            outer_group_pubkey,
+            outer_index,
+            session_limit: Arc::new(Semaphore::new(MAX_CONCURRENT_JURY_SESSIONS)),
+        }
+    }
 }
 
 #[async_trait]
@@ -53,6 +91,21 @@ impl JuryService for LocalJury {
         message: &[u8],
         buyer_share: &SecretShare<PallasScalar>,
     ) -> Option<JurySignature> {
+        // Hold a permit for the ENTIRE session — from nonce generation through
+        // release of the signature shares. Dropping it earlier would let more
+        // than MAX_CONCURRENT_JURY_SESSIONS nonce sets be outstanding at once,
+        // which is precisely the quantity the ROS bound cares about.
+        let _permit = match self.session_limit.clone().try_acquire_owned() {
+            Ok(p) => p,
+            Err(_) => {
+                tracing::warn!(
+                    "jury signing refused: {} concurrent sessions already open (ROS bound)",
+                    MAX_CONCURRENT_JURY_SESSIONS
+                );
+                return None;
+            }
+        };
+
         let mut rng = rand::thread_rng();
         let active_indices: Vec<u32> = self.shares[..self.threshold as usize]
             .iter().map(|s| s.index).collect();
@@ -436,13 +489,7 @@ mod tests {
             redpallas::setup_escrow(JURY_N, JURY_T, &mut rng)
                 .expect("setup_escrow should succeed");
 
-        let jury = LocalJury {
-            shares: jury_network.node_shares,
-            threshold: JURY_T,
-            group_pubkey: jury_network.outer_verification_share,
-            outer_group_pubkey: jury_network.outer_group_pubkey,
-            outer_index: JURY_OUTER_INDEX,
-        };
+        let jury = LocalJury::new(jury_network.node_shares, JURY_T, jury_network.outer_verification_share, jury_network.outer_group_pubkey, JURY_OUTER_INDEX);
 
         let message = b"settlement: player A wins 500 chips";
         let result = jury.sign(message, &player_a_share).await;
@@ -459,13 +506,7 @@ mod tests {
             redpallas::setup_escrow(JURY_N, JURY_T, &mut rng)
                 .expect("setup_escrow should succeed");
 
-        let jury = LocalJury {
-            shares: jury_network.node_shares,
-            threshold: JURY_T,
-            group_pubkey: jury_network.outer_verification_share,
-            outer_group_pubkey: jury_network.outer_group_pubkey,
-            outer_index: JURY_OUTER_INDEX,
-        };
+        let jury = LocalJury::new(jury_network.node_shares, JURY_T, jury_network.outer_verification_share, jury_network.outer_group_pubkey, JURY_OUTER_INDEX);
 
         // sign two different messages — should produce different signatures
         let sig1 = jury.sign(b"hand 1: player A wins", &player_a_share).await.unwrap();
@@ -488,13 +529,7 @@ mod tests {
                 .expect("setup_escrow should succeed");
 
         // use as Arc<dyn JuryService> — same as poker-server does
-        let jury: std::sync::Arc<dyn JuryService> = std::sync::Arc::new(LocalJury {
-            shares: jury_network.node_shares,
-            threshold: JURY_T,
-            group_pubkey: jury_network.outer_verification_share,
-            outer_group_pubkey: jury_network.outer_group_pubkey,
-            outer_index: JURY_OUTER_INDEX,
-        });
+        let jury: std::sync::Arc<dyn JuryService> = std::sync::Arc::new(LocalJury::new(jury_network.node_shares, JURY_T, jury_network.outer_verification_share, jury_network.outer_group_pubkey, JURY_OUTER_INDEX));
 
         let result = jury.sign(b"dispute payload hash", &player_a_share).await;
         assert!(result.is_some());

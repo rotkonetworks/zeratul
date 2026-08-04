@@ -492,13 +492,13 @@ impl Room {
             }
             Err(_) => {
                 tracing::info!("room {}: using local jury (demo mode)", code);
-                Arc::new(jury::LocalJury {
-                    shares: jury_network.node_shares,
-                    threshold: JURY_T,
-                    group_pubkey: jury_network.outer_verification_share,
-                    outer_group_pubkey: jury_network.outer_group_pubkey,
-                    outer_index: JURY_OUTER_INDEX,
-                })
+                Arc::new(jury::LocalJury::new(
+                    jury_network.node_shares,
+                    JURY_T,
+                    jury_network.outer_verification_share,
+                    jury_network.outer_group_pubkey,
+                    JURY_OUTER_INDEX,
+                ))
             }
         };
 

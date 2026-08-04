@@ -223,7 +223,11 @@ impl<P: OsstPoint> SigningPackage<P> {
     /// Compute the binding factor for signer i.
     ///
     /// ρ_i = H("frost-binding-v1" || index || message || encoded_commitments)
-    fn binding_factor(&self, index: u32) -> P::Scalar {
+    /// Public so a nested (hierarchical) position can obtain the SAME outer
+    /// binding factor the flat protocol would apply to it — see
+    /// `nested::inner_sign_v2`. Exposing it is what lets the inner group bind
+    /// its nonces to the full outer commitment set.
+    pub fn binding_factor(&self, index: u32) -> P::Scalar {
         compute_binding_factor::<P::Scalar>(
             index,
             &self.message,
@@ -232,7 +236,10 @@ impl<P: OsstPoint> SigningPackage<P> {
     }
 
     /// Compute the group commitment R = Σ (D_i + ρ_i · E_i).
-    fn group_commitment(&self) -> P {
+    /// Public so a nested position's inner holders can INDEPENDENTLY recompute
+    /// the outer context (R_outer) from public data instead of trusting the
+    /// coordinator's word for it.
+    pub fn group_commitment(&self) -> P {
         let mut r = P::identity();
         for (_, c) in &self.commitments {
             let rho = self.binding_factor(c.index);
@@ -245,7 +252,10 @@ impl<P: OsstPoint> SigningPackage<P> {
     }
 
     /// Compute the Schnorr challenge c = H("frost-challenge-v1" || R || Y || m).
-    fn challenge(&self, group_commitment: &P, group_pubkey: &P) -> P::Scalar {
+    /// Public so a nested position's inner holders can INDEPENDENTLY recompute
+    /// the outer context (challenge) from public data instead of trusting the
+    /// coordinator's word for it.
+    pub fn challenge(&self, group_commitment: &P, group_pubkey: &P) -> P::Scalar {
         compute_challenge::<P>(group_commitment, group_pubkey, &self.message)
     }
 }

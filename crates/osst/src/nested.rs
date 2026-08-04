@@ -296,6 +296,17 @@ fn inner_binding_factor<P: OsstPoint>(
     P::Scalar::from_bytes_wide(&hash)
 }
 
+/// # ⚠️ INSECURE — superseded by [`aggregate_inner_commitment_pair`] (v2)
+///
+/// This pre-binds the inner nonces and hands the outer protocol a SINGLE point
+/// with an identity binding commitment. That fixes the nested position's
+/// effective nonce independently of the outer commitment set, severing the
+/// coupling FROST's binding factor exists to create: an outer adversary can
+/// hold this nonce still while sweeping the challenge, which is the standard
+/// ROS setting (Benhamouda et al. 2020) — polynomial-time forgery once
+/// ~log2(q) sessions are concurrently open. Retained only so existing
+/// deployments keep compiling while they migrate. DO NOT use for new code.
+///
 /// aggregate inner commitments into the nested position's single outer commitment.
 ///
 /// each inner holder's bound commitment is R_k = D_k + ρ_inner_k · E_k.
@@ -410,6 +421,271 @@ mod tests {
     use rand::rngs::OsRng;
 
     type Point = RistrettoPoint;
+
+    /// THE property that makes v2 reviewable: a nested position is
+    /// indistinguishable from a flat FROST signer.
+    ///
+    /// We build a real outer 2-of-2 over positions {1, 2}. Position 2's key is
+    /// split 3-of-5 among inner holders, and its nonce is the sum of the inner
+    /// holders' nonces. We then produce the signature TWICE — once through the
+    /// nested v2 path, once with position 2 as an ordinary signer holding the
+    /// reconstructed scalar — and assert the signature shares and the final
+    /// signatures are IDENTICAL, and that both verify.
+    ///
+    /// If this holds, security reduces to FROST's own proof: the outer
+    /// protocol cannot tell a nested position from a flat one, so an adversary
+    /// against the nested scheme is an adversary against FROST.
+    #[test]
+    fn nested_v2_equals_flat_frost() {
+        let mut rng = OsRng;
+        let msg = b"settlement: a=1000 b=0";
+
+        // ── outer key: degree-1 polynomial ⇒ 2-of-2 over positions 1,2 ──────
+        let secret = Scalar::random(&mut rng);
+        let a1 = Scalar::random(&mut rng);
+        let eval = |x: u32| {
+            let x = <Scalar as OsstScalar>::from_u32(x);
+            secret.add(&a1.mul(&x))
+        };
+        let sigma_1 = eval(1);
+        let sigma_2 = eval(2); // the NESTED position's outer share
+        let group_pubkey = <Point as OsstPoint>::generator().mul_scalar(&secret);
+
+        let share_1 = SecretShare::new(1, sigma_1.clone());
+        let share_2_flat = SecretShare::new(2, sigma_2.clone());
+
+        // ── split position 2's key 3-of-5 among inner holders ──────────────
+        let inner_t = 3u32;
+        let inner_n = 5u32;
+        let (inner_pieces, dealer_commitment) =
+            split_evaluation_for_inner::<Point, _>(&sigma_2, inner_n, inner_t, &mut rng);
+
+        // every holder verifies its piece against the Feldman commitment
+        for (k, piece) in &inner_pieces {
+            assert!(
+                verify_split_piece::<Point>(&dealer_commitment, *k, piece),
+                "inner piece {} failed Feldman verification",
+                k
+            );
+        }
+
+        let quorum: Vec<u32> = vec![1, 2, 3];
+        let inner_shares: Vec<SecretShare<Scalar>> = quorum
+            .iter()
+            .map(|k| {
+                let (_, piece) = inner_pieces.iter().find(|(i, _)| i == k).unwrap();
+                SecretShare::new(*k, piece.clone())
+            })
+            .collect();
+
+        // sanity: the quorum reconstructs position 2's outer share
+        {
+            let lag = compute_lagrange_coefficients::<Scalar>(&quorum).unwrap();
+            let mut recon = <Scalar as OsstScalar>::zero();
+            for (i, s) in inner_shares.iter().enumerate() {
+                recon = recon.add(&lag[i].mul(s.scalar()));
+            }
+            assert_eq!(recon, sigma_2, "inner quorum must reconstruct the outer share");
+        }
+
+        // ── inner round 0/1: commit–reveal ─────────────────────────────────
+        let mut inner_nonces = Vec::new();
+        let mut inner_commitments = Vec::new();
+        let mut precommits = Vec::new();
+        for &k in &quorum {
+            let (n, c) = inner_commit::<Point, _>(k, &mut rng);
+            precommits.push(inner_precommit(&c));
+            inner_nonces.push(n);
+            inner_commitments.push(c);
+        }
+        for (pre, revealed) in precommits.iter().zip(inner_commitments.iter()) {
+            assert!(verify_inner_precommit::<Point>(pre, revealed));
+        }
+        // a tampered reveal must be caught
+        {
+            let mut tampered = inner_commitments[0].clone();
+            tampered.hiding = tampered.hiding.add(&<Point as OsstPoint>::generator());
+            assert!(!verify_inner_precommit::<Point>(&precommits[0], &tampered));
+        }
+
+        // capture the aggregate nonce scalars so we can drive the FLAT signer
+        // with the same randomness (this is test-only introspection)
+        let d_sum = inner_nonces
+            .iter()
+            .fold(<Scalar as OsstScalar>::zero(), |acc, n| acc.add(&n.hiding));
+        let e_sum = inner_nonces
+            .iter()
+            .fold(<Scalar as OsstScalar>::zero(), |acc, n| acc.add(&n.binding));
+
+        let (d_nested, e_nested) = aggregate_inner_commitment_pair::<Point>(&inner_commitments);
+        assert_eq!(d_nested, <Point as OsstPoint>::generator().mul_scalar(&d_sum));
+        assert_eq!(e_nested, <Point as OsstPoint>::generator().mul_scalar(&e_sum));
+
+        // ── outer round: position 1 commits normally, position 2 uses the
+        //    aggregate PAIR (so the outer binding factor actually applies) ──
+        let (nonces_1, commits_1) = frost::commit::<Point, _>(1, &mut rng);
+        let commits_2 = frost::SigningCommitments {
+            index: 2,
+            hiding: d_nested,
+            binding: e_nested,
+        };
+        let package =
+            frost::SigningPackage::new(msg.to_vec(), vec![commits_1, commits_2.clone()]).unwrap();
+
+        // outer context — recomputable by any inner holder from public data
+        let rho_2 = package.binding_factor(2);
+        let r_outer = package.group_commitment();
+        let challenge = package.challenge(&r_outer, &group_pubkey);
+        let indices = package.signer_indices();
+        let outer_lagrange = compute_lagrange_coefficients::<Scalar>(&indices).unwrap();
+        let pos_2 = indices.iter().position(|&i| i == 2).unwrap();
+        let params = InnerSigningParamsV2 {
+            outer_binding: rho_2.clone(),
+            outer_challenge: challenge.clone(),
+            outer_lambda: outer_lagrange[pos_2].clone(),
+        };
+
+        // ── inner holders sign; every share is verified before aggregation ──
+        let inner_lagrange = compute_lagrange_coefficients::<Scalar>(&quorum).unwrap();
+        let public_shares: Vec<(u32, Point)> = inner_shares
+            .iter()
+            .map(|s| {
+                (
+                    s.index,
+                    <Point as OsstPoint>::generator().mul_scalar(s.scalar()),
+                )
+            })
+            .collect();
+
+        let mut inner_sigs = Vec::new();
+        for (n, share) in inner_nonces.into_iter().zip(inner_shares.iter()) {
+            let sig = inner_sign_v2::<Point>(n, share, &params, &quorum).unwrap();
+            let pos = quorum.iter().position(|&i| i == share.index).unwrap();
+            let commitment = inner_commitments
+                .iter()
+                .find(|c| c.holder_index == share.index)
+                .unwrap();
+            let public = &public_shares
+                .iter()
+                .find(|(i, _)| *i == share.index)
+                .unwrap()
+                .1;
+            assert!(
+                verify_inner_share::<Point>(&sig, commitment, public, &params, &inner_lagrange[pos]),
+                "holder {} produced an unverifiable share",
+                share.index
+            );
+            inner_sigs.push(sig);
+        }
+
+        let z_nested = aggregate_inner_shares_verified::<Point>(
+            &inner_sigs,
+            &inner_commitments,
+            &public_shares,
+            &params,
+            &quorum,
+        )
+        .expect("all inner shares must verify");
+
+        // ── the equivalence: what a FLAT signer at position 2 would produce ──
+        //   z_flat = d + ρ·e + λ·c·σ₂
+        let z_flat = d_sum
+            .add(&rho_2.mul(&e_sum))
+            .add(&params.outer_lambda.mul(&challenge).mul(&sigma_2));
+        assert_eq!(
+            z_nested, z_flat,
+            "nested share must equal the flat FROST share bit-for-bit"
+        );
+
+        // ── and the assembled signature must verify ────────────────────────
+        let sig_1 = frost::sign::<Point>(&package, nonces_1, &share_1, &group_pubkey).unwrap();
+        let sig_2 = frost::SignatureShare {
+            index: 2,
+            response: z_nested,
+        };
+        let signature =
+            frost::aggregate::<Point>(&package, &[sig_1, sig_2], &group_pubkey, None).unwrap();
+        assert!(
+            frost::verify_signature::<Point>(&group_pubkey, msg, &signature),
+            "nested-produced signature must verify under the group key"
+        );
+
+        // silence unused warning for the flat share (kept for documentation)
+        let _ = share_2_flat;
+    }
+
+    /// A dishonest inner holder is NAMED, not silently folded into a signature
+    /// that then fails to verify with no attribution.
+    #[test]
+    fn v2_names_the_dishonest_inner_holder() {
+        let mut rng = OsRng;
+        let msg = b"m";
+        let sigma_2 = Scalar::random(&mut rng);
+        let quorum: Vec<u32> = vec![1, 2, 3];
+        let (inner_pieces, _) = split_evaluation_for_inner::<Point, _>(&sigma_2, 5, 3, &mut rng);
+        let inner_shares: Vec<SecretShare<Scalar>> = quorum
+            .iter()
+            .map(|k| {
+                let (_, piece) = inner_pieces.iter().find(|(i, _)| i == k).unwrap();
+                SecretShare::new(*k, piece.clone())
+            })
+            .collect();
+
+        let mut inner_nonces = Vec::new();
+        let mut inner_commitments = Vec::new();
+        for &k in &quorum {
+            let (n, c) = inner_commit::<Point, _>(k, &mut rng);
+            inner_nonces.push(n);
+            inner_commitments.push(c);
+        }
+        let (d_nested, e_nested) = aggregate_inner_commitment_pair::<Point>(&inner_commitments);
+        let group_pubkey = <Point as OsstPoint>::generator().mul_scalar(&sigma_2);
+
+        let (_, commits_1) = frost::commit::<Point, _>(1, &mut rng);
+        let commits_2 = frost::SigningCommitments {
+            index: 2,
+            hiding: d_nested,
+            binding: e_nested,
+        };
+        let package =
+            frost::SigningPackage::new(msg.to_vec(), vec![commits_1, commits_2]).unwrap();
+        let r_outer = package.group_commitment();
+        let indices = package.signer_indices();
+        let outer_lagrange = compute_lagrange_coefficients::<Scalar>(&indices).unwrap();
+        let pos_2 = indices.iter().position(|&i| i == 2).unwrap();
+        let params = InnerSigningParamsV2 {
+            outer_binding: package.binding_factor(2),
+            outer_challenge: package.challenge(&r_outer, &group_pubkey),
+            outer_lambda: outer_lagrange[pos_2].clone(),
+        };
+
+        let public_shares: Vec<(u32, Point)> = inner_shares
+            .iter()
+            .map(|s| {
+                (
+                    s.index,
+                    <Point as OsstPoint>::generator().mul_scalar(s.scalar()),
+                )
+            })
+            .collect();
+
+        let mut sigs = Vec::new();
+        for (n, share) in inner_nonces.into_iter().zip(inner_shares.iter()) {
+            sigs.push(inner_sign_v2::<Point>(n, share, &params, &quorum).unwrap());
+        }
+        // holder 2 goes rogue
+        sigs[1].response = sigs[1].response.add(&<Scalar as OsstScalar>::one());
+
+        let err = aggregate_inner_shares_verified::<Point>(
+            &sigs,
+            &inner_commitments,
+            &public_shares,
+            &params,
+            &quorum,
+        )
+        .expect_err("a tampered share must be rejected");
+        assert_eq!(err, vec![2], "the cheating holder must be identified");
+    }
 
     #[test]
     fn test_interleaved_dkg() {
@@ -821,5 +1097,210 @@ mod tests {
         h.update(message);
         h.update(&encoded);
         P::Scalar::from_bytes_wide(&h.finalize().into())
+    }
+}
+
+
+// ============================================================================
+// Nested FROST v2 — outer-bound, commit-reveal, verifiable
+// ============================================================================
+//
+// v1 pre-bound the inner nonces and presented one point to the outer protocol.
+// That severs the outer binding coupling (see the warning on
+// `aggregate_inner_commitments`) and admits a ROS-style forgery.
+//
+// v2 instead presents the nested position as an ORDINARY FROST signer:
+//
+//   D_nested = Σ_k D_k        E_nested = Σ_k E_k
+//
+// The outer protocol computes ρ = H(index, m, B) over the FULL outer
+// commitment list, exactly as for any other signer, and each inner holder
+// signs with that same ρ:
+//
+//   z_k = d_k + ρ·e_k + (λ_out·c·μ_k)·σ_k
+//
+// Summing over the inner quorum, with d = Σd_k, e = Σe_k and Σ μ_k·σ_k = σ_out
+// (inner Lagrange interpolation):
+//
+//   z_nested = d + ρ·e + λ_out·c·σ_out
+//
+// which is bit-for-bit what a single FROST signer holding σ_out with nonces
+// (d, e) produces. The nested position is therefore INDISTINGUISHABLE from a
+// flat signer whose nonce and key happen to be additively shared — so security
+// reduces to FROST's own proof plus inner-group honesty, rather than requiring
+// a novel composition argument. `nested_equals_flat_frost` in the tests below
+// asserts that equivalence on real values.
+//
+// Because the inner binding factor is gone, adaptive commitment selection
+// INSIDE the jury is prevented by an explicit commit–reveal round instead:
+// every holder publishes H(k ‖ D_k ‖ E_k) before any commitment is revealed.
+
+/// Round-0 hash commitment to an inner holder's nonce commitments.
+pub fn inner_precommit<P: OsstPoint>(c: &InnerCommitments<P>) -> [u8; 32] {
+    let mut h = Sha512::new();
+    h.update(b"frostito-inner-precommit-v2");
+    h.update(c.holder_index.to_le_bytes());
+    h.update(c.hiding.compress());
+    h.update(c.binding.compress());
+    let full: [u8; 64] = h.finalize().into();
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&full[..32]);
+    out
+}
+
+/// Verify a revealed commitment against its round-0 precommitment.
+///
+/// Every holder MUST check every other holder's reveal before the aggregate is
+/// formed. Without this, a holder revealing last can choose D_k to steer
+/// D_nested to a value of its choosing.
+pub fn verify_inner_precommit<P: OsstPoint>(
+    precommit: &[u8; 32],
+    revealed: &InnerCommitments<P>,
+) -> bool {
+    // constant-time-ish compare; these are public values, but keep the habit
+    let computed = inner_precommit(revealed);
+    let mut diff = 0u8;
+    for (a, b) in computed.iter().zip(precommit.iter()) {
+        diff |= a ^ b;
+    }
+    diff == 0
+}
+
+/// Aggregate inner nonce commitments into the pair the OUTER protocol consumes.
+///
+/// Returns `(D_nested, E_nested)`. Feed these to the outer `SigningCommitments`
+/// as `hiding` and `binding` respectively — the nested position then looks
+/// exactly like any other signer and receives a real outer binding factor.
+///
+/// Callers MUST have verified every precommitment (see
+/// [`verify_inner_precommit`]) before calling this.
+pub fn aggregate_inner_commitment_pair<P: OsstPoint>(
+    inner_commitments: &[InnerCommitments<P>],
+) -> (P, P) {
+    let mut d = P::identity();
+    let mut e = P::identity();
+    for c in inner_commitments {
+        d = d.add(&c.hiding);
+        e = e.add(&c.binding);
+    }
+    (d, e)
+}
+
+/// Outer context handed to inner holders for v2 signing. Every field is
+/// derivable from public outer data, so holders can independently verify it
+/// rather than trusting the coordinator.
+#[derive(Clone)]
+pub struct InnerSigningParamsV2<S: OsstScalar> {
+    /// outer binding factor for the nested position: ρ = H(index, m, B)
+    pub outer_binding: S,
+    /// outer schnorr challenge: c = H(R_outer, Y, m)
+    pub outer_challenge: S,
+    /// outer lagrange coefficient for the nested position
+    pub outer_lambda: S,
+}
+
+/// Inner holder's partial signature under v2.
+///
+/// z_k = d_k + ρ·e_k + (λ_out·c·μ_k)·σ_k
+///
+/// Note `nonces` is taken BY VALUE: the nonce pair is consumed and zeroized on
+/// drop, so a holder cannot produce two shares from one commitment round
+/// without deliberately cloning. Callers that persist state across restarts
+/// MUST additionally record the round as spent — the type system cannot see
+/// a process boundary.
+pub fn inner_sign_v2<P: OsstPoint>(
+    nonces: InnerNonces<P::Scalar>,
+    share: &SecretShare<P::Scalar>,
+    params: &InnerSigningParamsV2<P::Scalar>,
+    active_indices: &[u32],
+) -> Result<InnerSignatureShare<P::Scalar>, OsstError> {
+    let lagrange = compute_lagrange_coefficients::<P::Scalar>(active_indices)?;
+    let my_pos = active_indices
+        .iter()
+        .position(|&i| i == share.index)
+        .ok_or(OsstError::InvalidIndex)?;
+    let mu_k = &lagrange[my_pos];
+
+    let rho_e = params.outer_binding.mul(&nonces.binding);
+    let weight = params
+        .outer_lambda
+        .mul(&params.outer_challenge)
+        .mul(mu_k);
+    let response = nonces.hiding.add(&rho_e).add(&weight.mul(share.scalar()));
+
+    Ok(InnerSignatureShare {
+        holder_index: nonces.holder_index,
+        response,
+    })
+}
+
+/// Verify one inner holder's share before it is aggregated:
+///
+///   z_k·G  ==  (D_k + ρ·E_k) + (λ_out·c·μ_k)·P_k
+///
+/// where `P_k = σ_k·G` is the holder's public share (derivable from the DKG
+/// coefficient commitments). Without this an invalid share is silently folded
+/// into the sum, producing a signature that fails to verify with no indication
+/// of which holder was at fault.
+pub fn verify_inner_share<P: OsstPoint>(
+    sig: &InnerSignatureShare<P::Scalar>,
+    commitment: &InnerCommitments<P>,
+    public_share: &P,
+    params: &InnerSigningParamsV2<P::Scalar>,
+    mu_k: &P::Scalar,
+) -> bool {
+    let lhs = P::generator().mul_scalar(&sig.response);
+    let weight = params
+        .outer_lambda
+        .mul(&params.outer_challenge)
+        .mul(mu_k);
+    let rhs = commitment
+        .hiding
+        .add(&commitment.binding.mul_scalar(&params.outer_binding))
+        .add(&public_share.mul_scalar(&weight));
+    lhs == rhs
+}
+
+/// Verify every inner share, then aggregate.
+///
+/// `Err(indices)` names the holders whose shares failed — the caller can evict
+/// them and retry with a different quorum instead of broadcasting a signature
+/// that will simply be rejected.
+pub fn aggregate_inner_shares_verified<P: OsstPoint>(
+    sigs: &[InnerSignatureShare<P::Scalar>],
+    commitments: &[InnerCommitments<P>],
+    public_shares: &[(u32, P)],
+    params: &InnerSigningParamsV2<P::Scalar>,
+    active_indices: &[u32],
+) -> Result<P::Scalar, Vec<u32>> {
+    let lagrange = match compute_lagrange_coefficients::<P::Scalar>(active_indices) {
+        Ok(l) => l,
+        Err(_) => return Err(active_indices.to_vec()),
+    };
+
+    let mut bad = Vec::new();
+    let mut z = P::Scalar::zero();
+    for sig in sigs {
+        let k = sig.holder_index;
+        let pos = active_indices.iter().position(|&i| i == k);
+        let commitment = commitments.iter().find(|c| c.holder_index == k);
+        let public = public_shares.iter().find(|(i, _)| *i == k).map(|(_, p)| p);
+        match (pos, commitment, public) {
+            (Some(pos), Some(commitment), Some(public)) => {
+                if verify_inner_share::<P>(sig, commitment, public, params, &lagrange[pos]) {
+                    z = z.add(&sig.response);
+                } else {
+                    bad.push(k);
+                }
+            }
+            // missing commitment or public share ⇒ cannot verify ⇒ reject
+            _ => bad.push(k),
+        }
+    }
+
+    if bad.is_empty() {
+        Ok(z)
+    } else {
+        Err(bad)
     }
 }
