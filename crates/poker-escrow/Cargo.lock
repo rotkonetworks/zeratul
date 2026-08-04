@@ -1207,8 +1207,7 @@ checksum = "34aa73646ffb006b8f5147f3dc182bd4bcb190227ce861fc4a4844bf8e3cb2c0"
 [[package]]
 name = "equihash"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "306286e8dcc39ab3dfceb74c792ce8baffdab90591321d3ffaae64829734c37f"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "blake2b_simd",
  "corez",
@@ -1233,8 +1232,7 @@ dependencies = [
 [[package]]
 name = "f4jumble"
 version = "0.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d42773cb15447644d170be20231a3268600e0c4cea8987d013b93ac973d3cf7"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "blake2b_simd",
 ]
@@ -1353,7 +1351,7 @@ dependencies = [
 [[package]]
 name = "frost-spend"
 version = "0.1.0"
-source = "git+https://github.com/rotkonetworks/zcli?branch=staging#5f863b72ea377d72d9df3d6af8c99bd4adc668cd"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "blake2b_simd",
  "ed25519-consensus",
@@ -2229,7 +2227,7 @@ checksum = "b6d2cec3eae94f9f509c767b45932f1ada8350c4bdb85af2fcab4a3c14807981"
 [[package]]
 name = "ligerito"
 version = "0.6.2"
-source = "git+https://github.com/rotkonetworks/zcli?branch=staging#5f863b72ea377d72d9df3d6af8c99bd4adc668cd"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "anyhow",
  "bincode",
@@ -2257,7 +2255,7 @@ dependencies = [
 [[package]]
 name = "ligerito-binary-fields"
 version = "0.6.2"
-source = "git+https://github.com/rotkonetworks/zcli?branch=staging#5f863b72ea377d72d9df3d6af8c99bd4adc668cd"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "bytemuck",
  "parity-scale-codec",
@@ -2270,7 +2268,7 @@ dependencies = [
 [[package]]
 name = "ligerito-merkle"
 version = "0.6.1"
-source = "git+https://github.com/rotkonetworks/zcli?branch=staging#5f863b72ea377d72d9df3d6af8c99bd4adc668cd"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "blake3",
  "bytemuck",
@@ -2283,7 +2281,7 @@ dependencies = [
 [[package]]
 name = "ligerito-reed-solomon"
 version = "0.6.2"
-source = "git+https://github.com/rotkonetworks/zcli?branch=staging#5f863b72ea377d72d9df3d6af8c99bd4adc668cd"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "ligerito-binary-fields",
  "rayon",
@@ -2606,8 +2604,7 @@ dependencies = [
 [[package]]
 name = "orchard"
 version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a54f8d29bfb1e76a9d4e868a1a08cce2e57dd2bdc66232982822ad3114b91ab3"
+source = "git+https://github.com/zcash/orchard?branch=adam%2Fqleak-dummy-ciphertexts-on-pr505#204d8ce99f2f35c01654694dd294e3a20ef882d5"
 dependencies = [
  "aes",
  "bitvec",
@@ -2824,8 +2821,7 @@ dependencies = [
 [[package]]
 name = "pczt"
 version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4712bd8688e1d1aa0eb0e78dc5c846bc2d70dcd1de544ecf053516df174c4fcd"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "blake2b_simd",
  "bls12_381",
@@ -5306,8 +5302,7 @@ dependencies = [
 [[package]]
 name = "zcash_address"
 version = "0.12.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "58342d0aaa8e2fa98849636f52800ac4bf020574c944c974742fc933db58cac2"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "bech32",
  "bs58",
@@ -5320,8 +5315,7 @@ dependencies = [
 [[package]]
 name = "zcash_encoding"
 version = "0.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1440921903cdb86133fb9e2fe800be488015db2939a30bedb413078a1acb0306"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "corez",
  "hex",
@@ -5331,8 +5325,7 @@ dependencies = [
 [[package]]
 name = "zcash_keys"
 version = "0.14.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2fbcdfbb5c8edb247439d72a397abaae9b7dd14a1c070e7e4fc3536924f9065f"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "bech32",
  "blake2b_simd",
@@ -5370,8 +5363,7 @@ dependencies = [
 [[package]]
 name = "zcash_primitives"
 version = "0.28.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c69e07f5eb3f682a6467b4b08ee4956f1acd1e886d70b21c4766953b3a1beba2"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "blake2b_simd",
  "block-buffer 0.11.0-rc.3",
@@ -5399,13 +5391,10 @@ dependencies = [
 [[package]]
 name = "zcash_protocol"
 version = "0.9.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5bec496a0bd62dae98c4b26f51c5dab112d0c5350bbc2ccfdfd05bb3454f714d"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "corez",
- "document-features",
  "hex",
- "memuse",
  "zcash_encoding",
 ]
 
@@ -5447,8 +5436,7 @@ dependencies = [
 [[package]]
 name = "zcash_transparent"
 version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15df1908b428d4edeb7c7caae5692e05e2e92e5c38007a40b20ac098efdffd96"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "bip32",
  "bs58",
@@ -5471,7 +5459,7 @@ dependencies = [
 [[package]]
 name = "zecli"
 version = "0.6.0"
-source = "git+https://github.com/rotkonetworks/zcli?branch=staging#5f863b72ea377d72d9df3d6af8c99bd4adc668cd"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "anyhow",
  "bip39",
@@ -5651,7 +5639,7 @@ checksum = "b8848ee67ecc8aedbaf3e4122217aff892639231befc6a1b58d29fff4c2cabaa"
 [[package]]
 name = "zoda-vss"
 version = "0.1.0"
-source = "git+https://github.com/rotkonetworks/zcli?branch=staging#5f863b72ea377d72d9df3d6af8c99bd4adc668cd"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "rand_core 0.6.4",
  "sha2 0.10.9",
@@ -5660,7 +5648,7 @@ dependencies = [
 [[package]]
 name = "zync-core"
 version = "0.6.1"
-source = "git+https://github.com/rotkonetworks/zcli?branch=staging#5f863b72ea377d72d9df3d6af8c99bd4adc668cd"
+source = "git+https://github.com/rotkonetworks/zcli.git?rev=f497a277#f497a2776040308c65bcfdedfdd22305c2509bab"
 dependencies = [
  "anyhow",
  "bincode",
