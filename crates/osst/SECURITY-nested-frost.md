@@ -28,6 +28,8 @@ comments. No production signer was found calling v1. That lowers the urgency
 but not the importance: the nested path is the intended production shape for
 position B, so it must be sound before it is wired in.
 
+![v1 vs v2](docs/nested-frost-v1-vs-v2.svg)
+
 ## 2. The vulnerability (v1)
 
 ### 2.1 Root cause
