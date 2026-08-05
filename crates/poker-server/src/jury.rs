@@ -499,6 +499,50 @@ mod tests {
         assert!(sig.verified, "signature must verify");
     }
 
+    /// How long does one full jury signing session actually take?
+    ///
+    /// This exists to answer a specific question: is
+    /// MAX_CONCURRENT_JURY_SESSIONS a *performance* limit? It is not — it is a
+    /// cryptographic bound (see the constant's docs). This measures the real
+    /// cost so the throughput implication of that bound is known rather than
+    /// assumed. Run with:
+    ///   cargo test --release -p poker-server jury_signing_cost -- --nocapture
+    #[tokio::test]
+    async fn jury_signing_cost() {
+        let mut rng = rand::thread_rng();
+        let (player_a_share, _b, jury_network, _g) =
+            redpallas::setup_escrow(JURY_N, JURY_T, &mut rng).expect("setup");
+        let jury = LocalJury::new(
+            jury_network.node_shares,
+            JURY_T,
+            jury_network.outer_verification_share,
+            jury_network.outer_group_pubkey,
+            JURY_OUTER_INDEX,
+        );
+
+        // warm up (first call pays lazy-init costs)
+        let _ = jury.sign(b"warmup", &player_a_share).await;
+
+        let iters = 50;
+        let start = std::time::Instant::now();
+        for i in 0..iters {
+            let msg = format!("settlement {}", i);
+            let sig = jury.sign(msg.as_bytes(), &player_a_share).await;
+            assert!(sig.expect("signature").verified);
+        }
+        let elapsed = start.elapsed();
+        let per = elapsed / iters;
+        let per_ms = per.as_secs_f64() * 1000.0;
+        println!(
+            "jury signing: {:?}/session ({:.3} ms) — with {} permits that is \
+             ~{:.0} settlements/sec",
+            per,
+            per_ms,
+            MAX_CONCURRENT_JURY_SESSIONS,
+            MAX_CONCURRENT_JURY_SESSIONS as f64 / per.as_secs_f64(),
+        );
+    }
+
     #[tokio::test]
     async fn test_local_jury_different_messages() {
         let mut rng = rand::thread_rng();
