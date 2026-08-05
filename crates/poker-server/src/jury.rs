@@ -42,16 +42,81 @@ pub trait JuryService: Send + Sync {
 
 /// Hard cap on jury signing sessions with nonces outstanding at any instant.
 ///
-/// SECURITY (interim mitigation, not a fix): the nested construction currently
-/// presents a pre-bound single commitment to the outer protocol, so the jury's
-/// effective nonce is NOT coupled to the outer commitment set. That is the ROS
-/// setting — an outer signer who can hold ~log2(q) ≈ 256 honest nonces still
-/// while sweeping challenges can forge in polynomial time (Benhamouda et al.,
-/// 2020). Bounding concurrent sessions well below that threshold keeps the
-/// attack out of reach until the v2 protocol (`osst::nested::inner_sign_v2`,
-/// which restores outer binding) is reviewed and adopted.
+/// # Why this exists (interim mitigation, NOT a fix)
 ///
-/// Raise this ONLY after migrating to v2.
+/// v1 of the nested construction presents a pre-bound single commitment to the
+/// outer protocol (`hiding = R_nested, binding = identity`), so the jury's
+/// effective nonce is NOT coupled to the outer commitment set: an outer
+/// adversary can hold it still while sweeping the challenge. That is the ROS
+/// setting. See `osst/SECURITY-nested-frost.md` for the full analysis.
+///
+/// # Why 4 and not more
+///
+/// ROS over `l` concurrent sessions is an `(l+1)`-sum problem, solved by
+/// Wagner's k-tree in time AND memory about
+///
+/// ```text
+///     2^( n / (1 + floor(log2 k)) )      k = l + 1,  n = 255 bits (Pallas)
+/// ```
+///
+/// The floor makes this a step function, so the naive reading is that
+/// everything from l=3..6 is identical:
+///
+/// ```text
+///     l = 1..2   k = 2..3    2^127     untouchable
+///     l = 3..6   k = 4..7    2^85      infeasible
+///     l = 7..14  k = 8..15   2^64      borderline — a funded actor's range
+///     l = 15..30 k = 16..31  2^51      broken
+///     l >= 255              polynomial trivially broken
+/// ```
+///
+/// That floor is an idealization: it is exact for the power-of-2 k-tree, which
+/// halves lists cleanly. Generalized variants handling non-power-of-2 k
+/// (Minder–Sinclair and later extended-k-tree work) interpolate between the
+/// steps, and under that smoother analysis 4 and 6 are NOT equivalent:
+///
+/// ```text
+///     l = 4  ->  k = 5  ->  255 / 3.32  ~=  2^77
+///     l = 6  ->  k = 7  ->  255 / 3.81  ~=  2^67
+/// ```
+///
+/// ~2^10 of margin, and 2^67 sits close enough to the borderline band that we
+/// do not want to be there — especially since the ROS applicability to this
+/// exact construction is a modelled estimate, not a proven reduction. The extra
+/// step is cheap insurance against the model being optimistic.
+///
+/// Note the security here comes from MEMORY, not work: Wagner needs ~2^77
+/// storage held simultaneously (~10^23 bytes, comparable to all storage
+/// manufactured on Earth). Raw work alone would be less comforting — the
+/// Bitcoin network does ~2^94 hashes/year — but those are cheap ASIC hashes,
+/// whereas k-tree steps are random access over enormous lists of 255-bit
+/// values. Do not reason about this from the work figure alone.
+///
+/// # Why raising it buys nothing
+///
+/// The cap is PER ROOM: every room runs its own `setup_escrow`, so each has an
+/// independent jury key and its own semaphore. ROS only composes across
+/// sessions sharing one key, so sessions in different rooms cannot be combined
+/// into one attack instance — this bound does not limit how many games can be
+/// hosted.
+///
+/// Within a room, settlement is sequential: real concurrency per key is 1,
+/// occasionally 2 if a hand settles while a prior payout is still finishing.
+/// `jury_signing_cost` measures a session at ~5.3 ms, so 4 permits sustain
+/// ~750 settlements/sec per room. There is no throughput pressure to trade
+/// margin against; raising to 6 would spend real (if modest) security margin
+/// on capacity that is demonstrably unused.
+///
+/// # When this goes away
+///
+/// v2 (`osst::nested::inner_sign_v2`) presents `(D_nested, E_nested)` as an
+/// ordinary FROST commitment pair, so the outer binding factor applies and the
+/// nested position becomes indistinguishable from a flat FROST signer
+/// (asserted by `nested_v2_equals_flat_frost`). A bound signer inherits FROST's
+/// concurrency security and this cap can be removed entirely.
+///
+/// Until then: raise ONLY after migrating to v2, and never past 6 — the cliff
+/// is at 7.
 const MAX_CONCURRENT_JURY_SESSIONS: usize = 4;
 
 pub struct LocalJury {
