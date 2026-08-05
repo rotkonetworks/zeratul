@@ -17,10 +17,16 @@ Deployed instances:
 | Component | Uses nested FROST? | Holds value? |
 |---|---|---|
 | `poker-escrow` payouts | **No** — plain FROST via `frost_spend::orchestrate` → ZF `reddsa` | Yes (mainnet) |
-| `frost-spend::hierarchical` (bridge custody) | **Yes** | Yes |
+| `frost-spend::hierarchical` (bridge custody) | **No** in the live path — it is 2-of-2 standard FROST; nested is referenced in its docs as the intended production shape for position B, but is not wired in | Yes |
+| `frost-spend::nested` (frostito, stake-weighted) | Yes — exercised by `bridge_e2e` | Not currently wired to a live signer |
 | `poker-server::jury` (`LocalJury`) | Yes | No — demo, all shares in one process |
 
-The poker money path does **not** depend on this construction. The bridge does.
+Correction (2026-08-05): an earlier revision of this note stated the bridge's
+live custody path used nested FROST. It does not — `hierarchical.rs` signs a
+flat 2-of-2 via `orchestrate` and only *describes* the nested position in
+comments. No production signer was found calling v1. That lowers the urgency
+but not the importance: the nested path is the intended production shape for
+position B, so it must be sound before it is wired in.
 
 ## 2. The vulnerability (v1)
 
