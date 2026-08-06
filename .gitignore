@@ -43,3 +43,9 @@ crates/zanchor/zombienet-*.toml
 
 # local toolchain
 .rustup/
+
+# vendored upstream benchmark checkouts — separate git repos, not submodules
+benchmarks/CryptoUtilities.jl/
+benchmarks/Ligerito.jl.upstream/
+benchmarks/ligerito-impl/
+benchmarks/ligerito-rust/
