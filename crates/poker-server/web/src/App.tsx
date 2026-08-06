@@ -1244,6 +1244,17 @@ export default function App() {
                     log(`invited ${contacts.map(c => c.displayName).join(', ')}`, 'c-zec-yellow')
                   }
                 }
+                // social invites: web share-intent URLs (open a prefilled compose window). Instagram
+                // has NO web share intent — it's covered by "send link" (the native share sheet on
+                // mobile) or copy-paste. These are the desktop-friendly one-click platforms.
+                const shareText = 'Join my table on zk.poker ♠'
+                const socials: { name: string; mk: (u: string) => string }[] = [
+                  { name: '𝕏', mk: u => `https://twitter.com/intent/tweet?text=${encodeURIComponent(shareText)}&url=${encodeURIComponent(u)}` },
+                  { name: 'facebook', mk: u => `https://www.facebook.com/sharer/sharer.php?u=${encodeURIComponent(u)}` },
+                  { name: 'whatsapp', mk: u => `https://wa.me/?text=${encodeURIComponent(shareText + ' ' + u)}` },
+                  { name: 'telegram', mk: u => `https://t.me/share/url?url=${encodeURIComponent(u)}&text=${encodeURIComponent(shareText)}` },
+                ]
+                const shareTo = (mk: (u: string) => string) => window.open(mk(link()), '_blank', 'noopener,noreferrer')
                 return (
                   <div class="mb-5">
                     <div class="text-neutral-500 text-11px uppercase tracking-wider mb-2">invite a player</div>
@@ -1258,6 +1269,17 @@ export default function App() {
                       <Show when={identity()?.pickContacts}>
                         <button class="btn text-11px px-4 py-1.5" onClick={inviteContacts}>contacts</button>
                       </Show>
+                    </div>
+                    {/* social invites — desktop one-click; on mobile "send link" opens the native
+                        sheet (Instagram, WhatsApp, everything). */}
+                    <div class="flex items-center gap-2 justify-center flex-wrap mt-2.5">
+                      <span class="text-9px text-neutral-600 uppercase tracking-wider">share to</span>
+                      <For each={socials}>{s => (
+                        <button
+                          class="text-10px px-2.5 py-1 rounded border border-white/12 text-neutral-400 hover:text-zec-yellow hover:border-zec-yellow/40"
+                          onClick={() => shareTo(s.mk)}
+                        >{s.name}</button>
+                      )}</For>
                     </div>
                   </div>
                 )
