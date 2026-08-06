@@ -44,6 +44,15 @@ jobs:
       - name: Install protobuf-compiler
         run: sudo apt-get update -qq && sudo apt-get install -y -qq protobuf-compiler
 
+      # Fail BEFORE the expensive halo2 build: a duplicated orchard/zcash_* crate
+      # means two incompatible type universes in one binary, which is how the
+      # ironwood trial-decryption bug reached prod. poker-escrow is a standalone
+      # manifest, so it needs its own check alongside the workspace's.
+      - name: Check Zcash stack resolves to a single version
+        run: |
+          ./scripts/check-zcash-stack-single-version.sh .
+          ./scripts/check-zcash-stack-single-version.sh crates/poker-escrow
+
       - name: Build poker-escrow (release)
         run: cargo build --release --manifest-path crates/poker-escrow/Cargo.toml --bin poker-escrow
 
