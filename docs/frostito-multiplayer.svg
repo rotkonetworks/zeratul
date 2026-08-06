@@ -1,0 +1,124 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 760 620" font-family="'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="arrow" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 z" fill="#8a8f98"/>
+    </marker>
+    <marker id="arrowY" markerWidth="10" markerHeight="10" refX="8" refY="3" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,3 L0,6 z" fill="#d9a441"/>
+    </marker>
+    <style>
+      .bg   { fill:#0f1115; }
+      .box  { fill:#181b22; stroke:#2c313c; stroke-width:1.5; rx:10; }
+      .accent { stroke:#d9a441; }
+      .t    { fill:#e6e8ec; font-size:14px; }
+      .tb   { fill:#e6e8ec; font-size:14px; font-weight:600; }
+      .s    { fill:#9aa0aa; font-size:11px; }
+      .g    { fill:#7bc47f; font-size:11px; }
+      .y    { fill:#d9a441; font-size:11px; }
+      .flow { stroke:#8a8f98; stroke-width:1.5; fill:none; marker-end:url(#arrow); }
+      .flowY{ stroke:#d9a441; stroke-width:1.6; fill:none; marker-end:url(#arrowY); }
+      .lbl  { fill:#8a8f98; font-size:10px; }
+      .title{ fill:#d9a441; font-size:19px; font-weight:700; }
+      .sub  { fill:#9aa0aa; font-size:12px; }
+    </style>
+  </defs>
+
+  <rect class="bg" x="0" y="0" width="760" height="620"/>
+  <text class="title" x="30" y="42">Frostito — a multiplayer table</text>
+  <text class="sub" x="30" y="63">heads-up stays pure P2P; more than two needs a blind committee — this is that committee</text>
+
+  <!-- ephemeral game log (dashed enclosure over the players) -->
+  <rect x="30" y="86" width="700" height="150" rx="12" fill="none" stroke="#3a4150" stroke-width="1.5" stroke-dasharray="6 5"/>
+  <text class="lbl" x="44" y="104">EPHEMERAL GAME LOG · run by the participants · orders bets, then dissolves</text>
+
+  <!-- players -->
+  <g>
+    <rect class="box" x="48" y="116" width="150" height="102" rx="10"/>
+    <text class="tb" x="60" y="140">Player · ZID</text>
+    <text class="s" x="60" y="160">free stack</text>
+    <text class="y" x="60" y="178">2-of-3 w/ committee</text>
+    <text class="s" x="60" y="196">committee can't</text>
+    <text class="s" x="60" y="210">take it — yours to leave</text>
+  </g>
+  <g>
+    <rect class="box" x="216" y="116" width="150" height="102" rx="10"/>
+    <text class="tb" x="228" y="140">Player · ZID</text>
+    <text class="s" x="228" y="160">free stack</text>
+    <text class="y" x="228" y="178">2-of-3 w/ committee</text>
+  </g>
+  <g>
+    <rect class="box" x="384" y="116" width="150" height="102" rx="10"/>
+    <text class="tb" x="396" y="140">Player · ZID</text>
+    <text class="s" x="396" y="160">free stack</text>
+    <text class="y" x="396" y="178">2-of-3 w/ committee</text>
+  </g>
+  <g>
+    <rect class="box" x="552" y="116" width="150" height="102" rx="10"/>
+    <text class="tb" x="564" y="140">Player · ZID</text>
+    <text class="s" x="564" y="160">free stack</text>
+    <text class="y" x="564" y="178">2-of-3 w/ committee</text>
+    <text class="s" x="564" y="196">…N seats</text>
+  </g>
+
+  <!-- committee -->
+  <rect class="box accent" x="210" y="300" width="340" height="128" rx="12"/>
+  <text class="title" x="230" y="330" font-size="16">FROSTITO committee</text>
+  <text class="g" x="230" y="352">blind · fundless · card-blind · slashable</text>
+  <text class="tb" x="230" y="380" font-size="13">Hat 1 — DEALER</text>
+  <text class="s" x="230" y="398">shuffle + proof;</text>
+  <text class="s" x="230" y="414">hole cards sealed to you</text>
+  <line x1="392" y1="368" x2="392" y2="418" stroke="#2c313c" stroke-width="1.2"/>
+  <text class="tb" x="406" y="380" font-size="13">Hat 2 — SETTLER</text>
+  <text class="s" x="406" y="398">releases the pot to the</text>
+  <text class="s" x="406" y="414">proven winner only</text>
+
+  <!-- pot -->
+  <rect class="box" x="596" y="312" width="132" height="104" rx="10"/>
+  <text class="tb" x="610" y="336">THE POT</text>
+  <text class="s" x="610" y="356">committed chips,</text>
+  <text class="s" x="610" y="372">pooled</text>
+  <text class="g" x="610" y="392">can't be welshed</text>
+  <text class="s" x="610" y="408">(committed at bet)</text>
+
+  <!-- anchor -->
+  <rect class="box" x="210" y="500" width="340" height="86" rx="12"/>
+  <text class="tb" x="230" y="526">DURABLE ANCHOR</text>
+  <text class="s" x="230" y="546">custody · one settlement per session · timeout-refund</text>
+  <text class="s" x="230" y="566">the money is never at the mercy of a browser tab</text>
+
+  <!-- reputation (separate, money-unlinked) -->
+  <rect class="box" x="30" y="300" width="150" height="128" rx="10"/>
+  <text class="tb" x="42" y="326">ZID reputation</text>
+  <text class="s" x="42" y="346">"pays dues,</text>
+  <text class="s" x="42" y="362">shows up,</text>
+  <text class="s" x="42" y="378">doesn't grief"</text>
+  <text class="y" x="42" y="402">money-UNLINKED</text>
+  <text class="s" x="42" y="420">positive-only track</text>
+
+  <!-- the "never touch" barrier -->
+  <line x1="195" y1="296" x2="195" y2="600" stroke="#5a3a3a" stroke-width="1.4" stroke-dasharray="3 4"/>
+  <text class="lbl" x="120" y="452" fill="#b56b6b" transform="rotate(-90 120 452)">money ✗ reputation — never touch</text>
+
+  <!-- flows -->
+  <!-- bets commit into the pot -->
+  <path class="flowY" d="M636 218 C 660 250, 662 280, 662 306"/>
+  <text class="y" x="666" y="264">bet =</text>
+  <text class="y" x="666" y="278">commit</text>
+
+  <!-- committee deals to players (sealed) -->
+  <path class="flow" d="M300 300 C 250 270, 200 250, 150 220"/>
+  <text class="lbl" x="150" y="262">sealed hole cards →</text>
+  <path class="flow" d="M360 300 C 340 275, 320 255, 300 220"/>
+  <path class="flow" d="M430 300 C 440 275, 450 255, 460 220"/>
+
+  <!-- pot settles via committee -->
+  <path class="flow" d="M596 372 L 552 372"/>
+  <text class="lbl" x="556" y="392">settle</text>
+
+  <!-- committee to anchor -->
+  <path class="flow" d="M380 428 L 380 500"/>
+  <text class="lbl" x="388" y="470">final payout</text>
+
+  <!-- footer note -->
+  <text class="s" x="30" y="606" fill="#6b7078">free-play strips the committee entirely — players run it all. real money keeps a blind 2-of-3 so "everyone colludes" can't peek or steal.</text>
+</svg>
