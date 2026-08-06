@@ -305,17 +305,65 @@ reputation, since a welsher just mints a fresh ZID and sheds the mark — quietl
 stops mattering. We are no longer asking reputation to prevent non-payment. A
 rotated identity is merely a **zero-history newcomer**: it can't welsh the pot
 (those chips already left its control) and it can't fake a positive history (you
-cannot inherit a track record). So keep only the half that survives free
-identities — the earned, positive, unforgeable half — and let commitment carry the
-rest. **A blacklist is worthless because you can walk away from it; a track record
-is trustworthy because you can't shortcut it.**
+cannot inherit a track record).
 
-The line to hold — the entire privacy stance in one sentence: **money is enforced,
-reputation is social, and the two are never allowed to touch.** Your standing
-follows your ZID in the open; your money moves in a separate channel the committee
-settles one ephemeral game at a time — building no dossier, and, if you want it
-shielded, unable to read the amounts at all. You trust the Tuesday-game guy's
-reputation. And you get paid whether he likes it or not.
+But "keep only the positive" is too weak, and sharpening it is the elegant part.
+Reputation isn't a one-way ratchet — it's **one score that rises on clean games and
+falls on proven faults** — and torching it *works* precisely because an established
+player has something to lose. Ten games of paid dues is **capital,** and that
+capital is exactly the un-sheddable stake a money bond was supposed to be — except
+it cost *time and games,* not a deposit, so it never links your name to your funds.
+Nuke it, and a veteran forfeits everything they built and starts over as a nobody.
+The asymmetry does the work: a fresh ZID has nothing to torch, but a fresh ZID is a
+zero-history stranger no good table will seat. **Newcomers are gated by the
+*absence* of standing; veterans are disciplined by its *loss.*** A blacklist is
+worthless because you walk away from it; a track record has teeth because rebuilding
+it is slow.
+
+One requirement keeps this honest rather than a mob: **the nuke fires on proof, not
+accusation.** The score falls only on a fault the committee or the game log can
+*attest* — a co-sign timeout with a signed record, a forced fallback, a fault
+proof. Grudges can't move it; only facts the protocol witnessed. And notice the pot
+was never at risk through any of it: even mid-nuke, the winner was already paid by
+commitment. **Commitment guarantees the money; reputation disciplines the conduct**
+— two jobs, finally with the right relationship.
+
+### Reputation you reveal, not reputation you broadcast
+
+There's one last turn, and it's the one that keeps this from becoming a public
+dossier. Your reputation does not have to be a scoreboard the whole world reads. It
+can be a **credential you hold** — a wallet of committee-signed attestations — that
+you reveal **on your own terms.** When you sit down at a table that asks for
+standing, you prove a *predicate in zero-knowledge:* "I hold at least ten clean
+games and I clear your bar." The table learns a single **yes** — not your history,
+not your exact score, not which games. The world learns nothing at all.
+
+The catch, and the trick that saves it: if *you* control disclosure, you'd just hide
+your faults and show only your wins. So the negative side has to live somewhere you
+*can't* edit — a **public revocation set.** A proven fault puts your credential on
+it, and every proof of good standing must *also* prove *"…and I am not revoked."*
+That yields a clean asymmetry: **you may hide your good games, but you cannot hide a
+bad one,** because you're forced to show you're not on the list. Positive is
+selectively revealed; negative is un-hideable.
+
+And you hold the last dial — **linkability.** Each showing can be *unlinkable* —
+prove your standing at two tables with no way to tie them to the same you — so you
+carry your reputation without carrying a trackable profile; or, when you *want* to
+be recognized, present under a persistent handle. Fully-unlinkable and
+recognized-across-time genuinely pull against each other — you can't be *nobody* and
+*somebody* at once — so it's a choice you make table by table, and the protocol
+serves either.
+
+Put together, reputation stops being surveillance and becomes something closer to
+manners: **you prove you're trustworthy without publishing your life, and you still
+can't quietly bury the night you welshed.**
+
+The line to hold — the whole stance in one sentence: **money is enforced, reputation
+is earned, and both stay private — the two never allowed to touch.** Your standing
+is a credential you reveal by choice; your money moves in a separate, shielded
+channel the committee settles one ephemeral game at a time, building no dossier. You
+prove you're the Tuesday-game regular to the table that asks — and to no one else —
+and you get paid whether anyone likes it or not.
 
 ---
 
