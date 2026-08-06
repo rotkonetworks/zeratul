@@ -4,6 +4,7 @@ import { Card } from './Card'
 import Lobby, { type Table } from './Lobby'
 import { Settings } from './Settings'
 import Tournaments, { reportTournamentResult } from './Tournaments'
+import Friends from './Friends'
 import { detectZafu } from './zid/provider'
 import { getPositionShort } from './positions'
 import { requestPokerDkg, requestDeletePokerMultisig, requestPokerSign } from './dkg'
@@ -1065,6 +1066,8 @@ export default function App() {
     <div class="h-[100dvh] flex flex-col bg-zec-dark font-sans text-white">
           {/* free chip-only tournaments — self-contained overlay, opens on #/tournaments */}
           <Tournaments />
+          {/* friends — Steam-style, opens on #/friends. gets the zid identity for invites/import */}
+          <Friends identity={identity()} />
           {/* titlebar \u2014 full-width top bar */}
           <div class="titlebar shrink-0">
             <span class="text-zec-yellow text-14px">{'\u2666'}</span>
@@ -1084,6 +1087,11 @@ export default function App() {
               title="tournaments"
               onClick={() => { history.pushState(null, '', '/t'); window.dispatchEvent(new PopStateEvent('popstate')) }}
             ><span class="i-lucide-trophy w-3.5 h-3.5" /></button>
+            <button
+              class="ml-1 text-11px text-neutral-500 hover:text-zec-yellow leading-none flex items-center"
+              title="friends"
+              onClick={() => { window.location.hash = '#/friends' }}
+            ><span class="i-lucide-users w-3.5 h-3.5" /></button>
             <button
               class="ml-1 text-11px text-neutral-500 hover:text-zec-yellow leading-none"
               title="relay settings"
