@@ -1,0 +1,12 @@
+/work/target-prod/release/deps/iroh_metrics-cef19e10301fe380.d: /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/lib.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/base.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/encoding.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/iterable.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/metrics.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/registry.rs
+
+/work/target-prod/release/deps/libiroh_metrics-cef19e10301fe380.rlib: /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/lib.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/base.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/encoding.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/iterable.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/metrics.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/registry.rs
+
+/work/target-prod/release/deps/libiroh_metrics-cef19e10301fe380.rmeta: /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/lib.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/base.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/encoding.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/iterable.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/metrics.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/registry.rs
+
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/lib.rs:
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/base.rs:
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/encoding.rs:
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/iterable.rs:
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/metrics.rs:
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/iroh-metrics-0.37.0/src/registry.rs:

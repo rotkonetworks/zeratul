@@ -1,0 +1,29 @@
+[package]
+name = "frost-spend"
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+description = "FROST threshold spend authorization for Zcash Orchard"
+
+[features]
+default = []
+# enable when orchard upstream merges from_sk_ak
+# until then we use conradoplg's fork
+wasm = ["getrandom/js"]
+
+[dependencies]
+# ZF FROST (RedPallas, rerandomized)
+reddsa = { git = "https://github.com/ZcashFoundation/reddsa.git", rev = "475a552", features = ["frost", "serde"] }
+ed25519-consensus = "2"
+rand_core = "0.6"
+
+# Orchard (conradoplg's fork with from_sk_ak for FROST FVK derivation)
+orchard = { git = "https://github.com/conradoplg/orchard.git", rev = "f0c88b78a1d70d55ce6bb480566d132e57d5607b", features = ["unstable-frost"] }
+
+# serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+hex = "0.4"
+
+# optional WASM support
+getrandom = { version = "0.2", optional = true }

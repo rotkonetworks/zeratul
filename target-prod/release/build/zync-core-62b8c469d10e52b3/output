@@ -1,0 +1,4 @@
+cargo:rerun-if-changed=proto/zidecar.proto
+cargo:rerun-if-changed=proto
+cargo:rerun-if-changed=proto/lightwalletd.proto
+cargo:rerun-if-changed=proto

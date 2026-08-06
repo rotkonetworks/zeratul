@@ -60,7 +60,11 @@ base64 = { version = "0.22", optional = true }
 serde_json = { version = "1.0", optional = true }
 
 # shielded chain scanning (optional)
-zync-core = { version = "0.6", default-features = false, optional = true }
+# crates.io zync-core 0.6.0 (Mar 2026) still pulls orchard 0.7 and with it
+# halo2_gadgets 0.3.1 (GHSA soundness). Track the zcli rev poker-escrow uses,
+# which is on released orchard 0.15.5. Optional dep behind the `zcash` feature,
+# which is NOT in default features.
+zync-core = { git = "https://github.com/rotkonetworks/zcli.git", rev = "4948e78", default-features = false, optional = true }
 
 # penumbra integration (optional)
 decaf377 = { version = "0.10", optional = true }

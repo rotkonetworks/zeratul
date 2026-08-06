@@ -14,7 +14,6 @@ members = [
     "crates/zeratul-p2p",
     "crates/zeratul-mvp",
     # Binaries
-    "crates/bin/zafu",
     "crates/bin/ibp-probe",
     # zync-core, zafu-wasm, zidecar moved to https://github.com/rotkonetworks/zcli
     # OSST (One-Step Schnorr Threshold)

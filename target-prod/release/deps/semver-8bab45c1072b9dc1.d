@@ -1,0 +1,13 @@
+/work/target-prod/release/deps/semver-8bab45c1072b9dc1.d: /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/lib.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/display.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/error.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/eval.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/identifier.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/impls.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/parse.rs
+
+/work/target-prod/release/deps/libsemver-8bab45c1072b9dc1.rlib: /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/lib.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/display.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/error.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/eval.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/identifier.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/impls.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/parse.rs
+
+/work/target-prod/release/deps/libsemver-8bab45c1072b9dc1.rmeta: /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/lib.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/display.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/error.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/eval.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/identifier.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/impls.rs /usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/parse.rs
+
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/lib.rs:
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/display.rs:
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/error.rs:
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/eval.rs:
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/identifier.rs:
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/impls.rs:
+/usr/local/cargo/registry/src/index.crates.io-1949cf8c6b5b557f/semver-1.0.27/src/parse.rs:

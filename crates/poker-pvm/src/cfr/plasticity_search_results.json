@@ -1,0 +1,622 @@
+{
+  "results": [
+    {
+      "epochs": 60,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.3,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.001030075307283506,
+      "best_loss": 1.8525159502029418,
+      "train_time": 29.44356393814087,
+      "per_opponent": {
+        "fold_river": 0.0006838069729121756,
+        "call_station": 0.0004845048658821639,
+        "overbluffer": 0.002951989390339684,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.7,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0005910446347172916,
+      "best_loss": 1.8773945927619935,
+      "train_time": 19.37903332710266,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0015823526907102826,
+        "overbluffer": 0.0007818258481588838,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 60,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.7,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.00031188744184377576,
+      "best_loss": 1.8670577585697175,
+      "train_time": 26.42353892326355,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0008104798327735039,
+        "overbluffer": 0.0004370699346015991,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.3,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0003454674082748625,
+      "best_loss": 1.8303454577922822,
+      "train_time": 19.428304433822632,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0008567969867114997,
+        "overbluffer": 9.042050643997864e-05,
+        "nit": 0.0004346521399479716
+      }
+    },
+    {
+      "epochs": 60,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.3,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0001997105522764962,
+      "best_loss": 1.8159873867034912,
+      "train_time": 27.89285135269165,
+      "per_opponent": {
+        "fold_river": 9.512947127995712e-05,
+        "call_station": 0.0003687722325168262,
+        "overbluffer": 2.3956165616796626e-05,
+        "nit": 0.0003109843396924049
+      }
+    },
+    {
+      "epochs": 60,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.0,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0009248645744137061,
+      "best_loss": 1.8116464662551879,
+      "train_time": 23.90000081062317,
+      "per_opponent": {
+        "fold_river": 0.0012906436023064382,
+        "call_station": 0.001980701798995011,
+        "overbluffer": 0.0002172702421455484,
+        "nit": 0.0002108426542078275
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 1.0,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.002294236276900446,
+      "best_loss": 2.0452085518836975,
+      "train_time": 19.010201692581177,
+      "per_opponent": {
+        "fold_river": 0.00266112707510731,
+        "call_station": 0.0002511197081314066,
+        "overbluffer": 0.006264698324363068,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 60,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.7,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 6.765388279781893e-05,
+      "best_loss": 1.8213506245613098,
+      "train_time": 28.5670108795166,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.00020213616792638035,
+        "overbluffer": 0.0,
+        "nit": 6.847936326489536e-05
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.3,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0002819810557185129,
+      "best_loss": 1.835467928647995,
+      "train_time": 19.02601909637451,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0006048167307809095,
+        "overbluffer": 7.799953111664456e-05,
+        "nit": 0.0004451079609764977
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 1.0,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.00026304119177515987,
+      "best_loss": 1.8863294196128846,
+      "train_time": 18.771390676498413,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.00018680060919556074,
+        "overbluffer": 0.0008653641579050787,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.7,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0001685333053977449,
+      "best_loss": 1.848740395307541,
+      "train_time": 18.78681254386902,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0,
+        "overbluffer": 0.00012209630520665748,
+        "nit": 0.000552036916384322
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.0,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 4.6699074761643383e-05,
+      "best_loss": 1.8958496761322021,
+      "train_time": 15.55490779876709,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 1.5244990226837027e-05,
+        "overbluffer": 0.0001715513088197365,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 60,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.7,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.001035590040883302,
+      "best_loss": 1.8565160322189331,
+      "train_time": 28.872174739837646,
+      "per_opponent": {
+        "fold_river": 0.003461590233275784,
+        "call_station": 0.0002984152286319047,
+        "overbluffer": 0.0003823547016255187,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 60,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 1.0,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 4.199914045824421e-05,
+      "best_loss": 1.8862574470043183,
+      "train_time": 27.905942916870117,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0001585600113483043,
+        "overbluffer": 0.0,
+        "nit": 9.43655048467257e-06
+      }
+    },
+    {
+      "epochs": 60,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 1.0,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 7.43310014230775e-05,
+      "best_loss": 2.1442808037996293,
+      "train_time": 27.357311010360718,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0001878977205945074,
+        "overbluffer": 0.0,
+        "nit": 0.00010942628509780256
+      }
+    },
+    {
+      "epochs": 60,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 1.0,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0004942202013399654,
+      "best_loss": 2.1327253085374833,
+      "train_time": 28.349257469177246,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.001473544274909938,
+        "overbluffer": 0.00042379719895005,
+        "nit": 7.953933149987344e-05
+      }
+    },
+    {
+      "epochs": 60,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 1.0,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.00021739796207941568,
+      "best_loss": 2.012904389500618,
+      "train_time": 27.392900705337524,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0003634278514825789,
+        "overbluffer": 0.0005061639968350839,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 60,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.3,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.00012231532632847814,
+      "best_loss": 1.8169545102119447,
+      "train_time": 28.210131883621216,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0001880464590778851,
+        "overbluffer": 8.614331937839238e-05,
+        "nit": 0.00021507152685763513
+      }
+    },
+    {
+      "epochs": 60,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.3,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0005421100936239655,
+      "best_loss": 1.8347076338529587,
+      "train_time": 28.316351175308228,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0,
+        "overbluffer": 0.002016910127230069,
+        "nit": 0.00015153024726579276
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.3,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0003343199893554984,
+      "best_loss": 1.8364269411563874,
+      "train_time": 18.048465490341187,
+      "per_opponent": {
+        "fold_river": 5.429648736524334e-05,
+        "call_station": 0.0005024895694941737,
+        "overbluffer": 0.0007804939005625764,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.7,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0003814473846712656,
+      "best_loss": 1.832864111661911,
+      "train_time": 17.389874935150146,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.001479150621130945,
+        "overbluffer": 4.663891755411734e-05,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 60,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.0,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0009860827356970327,
+      "best_loss": 1.8672986680269241,
+      "train_time": 26.167304515838623,
+      "per_opponent": {
+        "fold_river": 0.0014318460441343458,
+        "call_station": 0.0012351448696766162,
+        "overbluffer": 0.0012773400289771686,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.0,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0012687652403709756,
+      "best_loss": 1.8252453470230103,
+      "train_time": 17.17848539352417,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0007086546378696147,
+        "overbluffer": 0.004366406323614287,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.0,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0007197122832870154,
+      "best_loss": 1.8674180126190185,
+      "train_time": 16.649540424346924,
+      "per_opponent": {
+        "fold_river": 0.0019441959890396025,
+        "call_station": 0.0005015780057225063,
+        "overbluffer": 0.0004330751383859529,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 60,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.0,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0009558623110625473,
+      "best_loss": 1.8674602365493775,
+      "train_time": 24.627584218978882,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0,
+        "overbluffer": 0.0037186791626169064,
+        "nit": 0.00010477008163328294
+      }
+    },
+    {
+      "epochs": 60,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.7,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.00015511411810358074,
+      "best_loss": 1.8234370970726013,
+      "train_time": 28.252018213272095,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0003000446811176663,
+        "overbluffer": 0.00032041179129665666,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.3,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0008626355327593595,
+      "best_loss": 1.850242698788643,
+      "train_time": 18.987107038497925,
+      "per_opponent": {
+        "fold_river": 0.0004921987805971557,
+        "call_station": 0.00030435540733250407,
+        "overbluffer": 0.002653987943107778,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.7,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 7.136066239932225e-05,
+      "best_loss": 1.8230208241939545,
+      "train_time": 17.277594089508057,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0,
+        "overbluffer": 0.000285442649597289,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.0,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0012362353959553716,
+      "best_loss": 1.83408189535141,
+      "train_time": 15.577133893966675,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0004769375253909945,
+        "overbluffer": 0.004468004058430492,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 1.0,
+      "grad_clip": 0.5,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.00029719425706753786,
+      "best_loss": 2.012904389500618,
+      "train_time": 18.20003366470337,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 9.416871074146454e-05,
+        "overbluffer": 0.0010946083175286869,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 40,
+      "lr": 0.003,
+      "lr_schedule": "cosine",
+      "sync_ratio": 1.0,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.0003201640154703908,
+      "best_loss": 2.1327253085374833,
+      "train_time": 18.857848405838013,
+      "per_opponent": {
+        "fold_river": 0.0,
+        "call_station": 0.0010362477892633469,
+        "overbluffer": 0.00024440827261821646,
+        "nit": 0.0
+      }
+    },
+    {
+      "epochs": 60,
+      "lr": 0.001,
+      "lr_schedule": "cosine",
+      "sync_ratio": 0.0,
+      "grad_clip": 1.0,
+      "session_len": 20,
+      "warmup_hands": 10,
+      "status": "ok",
+      "plasticity": 0.000967322289533781,
+      "best_loss": 1.7978315126895905,
+      "train_time": 25.06406569480896,
+      "per_opponent": {
+        "fold_river": 0.0012225275844331565,
+        "call_station": 0.0020783622760926954,
+        "overbluffer": 0.00020646302381517525,
+        "nit": 0.00036193627379409697
+      }
+    }
+  ],
+  "best": {
+    "epochs": 40,
+    "lr": 0.001,
+    "lr_schedule": "cosine",
+    "sync_ratio": 1.0,
+    "grad_clip": 0.5,
+    "session_len": 20,
+    "warmup_hands": 10
+  },
+  "best_plasticity": 0.002294236276900446
+}

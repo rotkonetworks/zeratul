@@ -1,0 +1,15 @@
+cargo:warning=
+cargo:warning=╔═══════════════════════════════════════════════════════════════════╗
+cargo:warning=║  PERFORMANCE WARNING: SIMD instructions not enabled!             ║
+cargo:warning=║                                                                   ║
+cargo:warning=║  This build will be 5-6x slower than optimized builds.           ║
+cargo:warning=║                                                                   ║
+cargo:warning=║  For optimal performance, rebuild with:                          ║
+cargo:warning=║    RUSTFLAGS="-C target-cpu=native" cargo install ligerito      ║
+cargo:warning=║                                                                   ║
+cargo:warning=║  Or install from source:                                         ║
+cargo:warning=║    git clone https://github.com/rotkonetworks/zeratul            ║
+cargo:warning=║    cd zeratul                                                     ║
+cargo:warning=║    cargo install --path crates/ligerito                          ║
+cargo:warning=╚═══════════════════════════════════════════════════════════════════╝
+cargo:warning=

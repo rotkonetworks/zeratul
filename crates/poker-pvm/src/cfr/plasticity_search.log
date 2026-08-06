@@ -1,0 +1,52 @@
+Plasticity search: 32 experiments
+Output: plasticity_search_results.json
+
+[  1/32]  32.3s | plasticity=0.0010 | loss=1.853 | sync=0.3 lr=3e-03 clip=0.5 ep=60 sched=cosine sess=20 | ok ***NEW BEST***
+[  2/32]  21.8s | plasticity=0.0006 | loss=1.877 | sync=0.7 lr=3e-03 clip=1.0 ep=40 sched=cosine sess=20 | ok 
+[  3/32]  29.4s | plasticity=0.0003 | loss=1.867 | sync=0.7 lr=3e-03 clip=1.0 ep=60 sched=cosine sess=20 | ok 
+[  4/32]  21.8s | plasticity=0.0003 | loss=1.830 | sync=0.3 lr=1e-03 clip=1.0 ep=40 sched=cosine sess=20 | ok 
+[  5/32]  30.2s | plasticity=0.0002 | loss=1.816 | sync=0.3 lr=1e-03 clip=1.0 ep=60 sched=cosine sess=20 | ok 
+[  6/32]  26.2s | plasticity=0.0009 | loss=1.812 | sync=0.0 lr=1e-03 clip=0.5 ep=60 sched=cosine sess=20 | ok 
+[  7/32]  21.3s | plasticity=0.0023 | loss=2.045 | sync=1.0 lr=1e-03 clip=0.5 ep=40 sched=cosine sess=20 | ok ***NEW BEST***
+[  8/32]  31.6s | plasticity=0.0001 | loss=1.821 | sync=0.7 lr=1e-03 clip=0.5 ep=60 sched=cosine sess=20 | ok 
+[  9/32]  21.4s | plasticity=0.0003 | loss=1.835 | sync=0.3 lr=1e-03 clip=0.5 ep=40 sched=cosine sess=20 | ok 
+[ 10/32]  21.2s | plasticity=0.0003 | loss=1.886 | sync=1.0 lr=1e-03 clip=1.0 ep=40 sched=cosine sess=20 | ok 
+[ 11/32]  21.3s | plasticity=0.0002 | loss=1.849 | sync=0.7 lr=1e-03 clip=0.5 ep=40 sched=cosine sess=20 | ok 
+[ 12/32]  17.9s | plasticity=0.0000 | loss=1.896 | sync=0.0 lr=3e-03 clip=0.5 ep=40 sched=cosine sess=20 | ok 
+[ 13/32]  31.3s | plasticity=0.0010 | loss=1.857 | sync=0.7 lr=3e-03 clip=0.5 ep=60 sched=cosine sess=20 | ok 
+[ 14/32]  30.2s | plasticity=0.0000 | loss=1.886 | sync=1.0 lr=1e-03 clip=1.0 ep=60 sched=cosine sess=20 | ok 
+[ 15/32]  29.9s | plasticity=0.0001 | loss=2.144 | sync=1.0 lr=1e-03 clip=0.5 ep=60 sched=cosine sess=20 | ok 
+[ 16/32]  30.7s | plasticity=0.0005 | loss=2.133 | sync=1.0 lr=3e-03 clip=1.0 ep=60 sched=cosine sess=20 | ok 
+[ 17/32]  29.6s | plasticity=0.0002 | loss=2.013 | sync=1.0 lr=3e-03 clip=0.5 ep=60 sched=cosine sess=20 | ok 
+[ 18/32]  30.7s | plasticity=0.0001 | loss=1.817 | sync=0.3 lr=1e-03 clip=0.5 ep=60 sched=cosine sess=20 | ok 
+[ 19/32]  30.5s | plasticity=0.0005 | loss=1.835 | sync=0.3 lr=3e-03 clip=1.0 ep=60 sched=cosine sess=20 | ok 
+[ 20/32]  20.2s | plasticity=0.0003 | loss=1.836 | sync=0.3 lr=3e-03 clip=1.0 ep=40 sched=cosine sess=20 | ok 
+[ 21/32]  19.7s | plasticity=0.0004 | loss=1.833 | sync=0.7 lr=1e-03 clip=1.0 ep=40 sched=cosine sess=20 | ok 
+[ 22/32]  28.7s | plasticity=0.0010 | loss=1.867 | sync=0.0 lr=3e-03 clip=1.0 ep=60 sched=cosine sess=20 | ok 
+[ 23/32]  19.5s | plasticity=0.0013 | loss=1.825 | sync=0.0 lr=1e-03 clip=1.0 ep=40 sched=cosine sess=20 | ok 
+[ 24/32]  19.0s | plasticity=0.0007 | loss=1.867 | sync=0.0 lr=3e-03 clip=1.0 ep=40 sched=cosine sess=20 | ok 
+[ 25/32]  26.9s | plasticity=0.0010 | loss=1.867 | sync=0.0 lr=3e-03 clip=0.5 ep=60 sched=cosine sess=20 | ok 
+[ 26/32]  30.6s | plasticity=0.0002 | loss=1.823 | sync=0.7 lr=1e-03 clip=1.0 ep=60 sched=cosine sess=20 | ok 
+[ 27/32]  21.2s | plasticity=0.0009 | loss=1.850 | sync=0.3 lr=3e-03 clip=0.5 ep=40 sched=cosine sess=20 | ok 
+[ 28/32]  19.6s | plasticity=0.0001 | loss=1.823 | sync=0.7 lr=3e-03 clip=0.5 ep=40 sched=cosine sess=20 | ok 
+[ 29/32]  17.9s | plasticity=0.0012 | loss=1.834 | sync=0.0 lr=1e-03 clip=0.5 ep=40 sched=cosine sess=20 | ok 
+[ 30/32]  20.5s | plasticity=0.0003 | loss=2.013 | sync=1.0 lr=3e-03 clip=0.5 ep=40 sched=cosine sess=20 | ok 
+[ 31/32]  21.2s | plasticity=0.0003 | loss=2.133 | sync=1.0 lr=3e-03 clip=1.0 ep=40 sched=cosine sess=20 | ok 
+[ 32/32]  27.4s | plasticity=0.0010 | loss=1.798 | sync=0.0 lr=1e-03 clip=1.0 ep=60 sched=cosine sess=20 | ok 
+
+============================================================
+BEST PLASTICITY: 0.0023
+CONFIG: {'epochs': 40, 'lr': 0.001, 'lr_schedule': 'cosine', 'sync_ratio': 1.0, 'grad_clip': 0.5, 'session_len': 20, 'warmup_hands': 10}
+============================================================
+
+Top 10:
+  plasticity=0.0023 sync=1.0 lr=1e-03 clip=0.5 ep=40 sched=cosine sess=20
+  plasticity=0.0013 sync=0.0 lr=1e-03 clip=1.0 ep=40 sched=cosine sess=20
+  plasticity=0.0012 sync=0.0 lr=1e-03 clip=0.5 ep=40 sched=cosine sess=20
+  plasticity=0.0010 sync=0.7 lr=3e-03 clip=0.5 ep=60 sched=cosine sess=20
+  plasticity=0.0010 sync=0.3 lr=3e-03 clip=0.5 ep=60 sched=cosine sess=20
+  plasticity=0.0010 sync=0.0 lr=3e-03 clip=1.0 ep=60 sched=cosine sess=20
+  plasticity=0.0010 sync=0.0 lr=1e-03 clip=1.0 ep=60 sched=cosine sess=20
+  plasticity=0.0010 sync=0.0 lr=3e-03 clip=0.5 ep=60 sched=cosine sess=20
+  plasticity=0.0009 sync=0.0 lr=1e-03 clip=0.5 ep=60 sched=cosine sess=20
+  plasticity=0.0009 sync=0.3 lr=3e-03 clip=0.5 ep=40 sched=cosine sess=20

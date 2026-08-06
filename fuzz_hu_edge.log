@@ -1,0 +1,123 @@
+warning: unused import: `eval_5`
+  --> crates/poker-pvm/src/cfr/solver.rs:14:60
+   |
+14 | use crate::{GameState, Rules, Phase, Action, SignedAction, eval_5};
+   |                                                            ^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `super::strategy::*`
+  --> crates/poker-pvm/src/cfr/solver.rs:16:5
+   |
+16 | use super::strategy::*;
+   |     ^^^^^^^^^^^^^^^^^^
+
+warning: unused variable: `stack`
+   --> crates/poker-pvm/src/cfr/abstraction.rs:142:63
+    |
+142 | pub fn abstract_action(action: Action, amount: u32, pot: u32, stack: u32) -> u8 {
+    |                                                               ^^^^^ help: if this is intentional, prefix it with an underscore: `_stack`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: `poker-pvm` (lib) generated 3 warnings (run `cargo fix --lib -p poker-pvm` to apply 3 suggestions)
+warning: unused imports: `MAX_SEATS` and `Phase`
+   --> crates/poker-pvm/src/hand_tests.rs:242:39
+    |
+242 |         use crate::{GameState, Rules, Phase, MAX_SEATS};
+    |                                       ^^^^^  ^^^^^^^^^
+    |
+    = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `eval_5`
+  --> crates/poker-pvm/src/cfr/solver.rs:14:60
+   |
+14 | use crate::{GameState, Rules, Phase, Action, SignedAction, eval_5};
+   |                                                            ^^^^^^
+
+warning: variable `hands_played` is assigned to, but never used
+   --> crates/poker-pvm/src/fuzz.rs:102:13
+    |
+102 |         let mut hands_played = 0u32;
+    |             ^^^^^^^^^^^^^^^^
+    |
+    = note: consider using `_hands_played` instead
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable `showdowns` is assigned to, but never used
+   --> crates/poker-pvm/src/fuzz.rs:103:13
+    |
+103 |         let mut showdowns = 0u32;
+    |             ^^^^^^^^^^^^^
+    |
+    = note: consider using `_showdowns` instead
+
+warning: variable `folds` is assigned to, but never used
+   --> crates/poker-pvm/src/fuzz.rs:104:13
+    |
+104 |         let mut folds = 0u32;
+    |             ^^^^^^^^^
+    |
+    = note: consider using `_folds` instead
+
+warning: value assigned to `hands_played` is never read
+   --> crates/poker-pvm/src/fuzz.rs:117:13
+    |
+117 |             hands_played += 1;
+    |             ^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+    = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `showdowns` is never read
+   --> crates/poker-pvm/src/fuzz.rs:154:33
+    |
+154 | ...                   showdowns += 1;
+    |                       ^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `folds` is never read
+   --> crates/poker-pvm/src/fuzz.rs:156:33
+    |
+156 | ...                   folds += 1;
+    |                       ^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `stack`
+   --> crates/poker-pvm/src/cfr/abstraction.rs:142:63
+    |
+142 | pub fn abstract_action(action: Action, amount: u32, pot: u32, stack: u32) -> u8 {
+    |                                                               ^^^^^ help: if this is intentional, prefix it with an underscore: `_stack`
+
+warning: `poker-pvm` (lib test) generated 10 warnings (1 duplicate) (run `cargo fix --lib -p poker-pvm --tests` to apply 3 suggestions)
+    Finished `release` profile [optimized] target(s) in 0.28s
+     Running unittests src/lib.rs (/steam/rotko/zeratul/target/release/deps/poker_pvm-3be5c413639d5454)
+
+running 2 tests
+PASSED: edge case tests
+test fuzz::fuzz_tests::fuzz_edge_cases ... ok
+PASSED: 1000 heads-up sessions (500 no-rake + 500 with-rake)
+test fuzz::fuzz_tests::fuzz_headsup_sessions ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 46 filtered out; finished in 0.01s
+
+     Running unittests src/cfr/train.rs (/steam/rotko/zeratul/target/release/deps/cfr_train-2b4cb1f5ea297d6d)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running unittests src/guest.rs (/steam/rotko/zeratul/target/release/deps/poker_guest-369d7cfa5081155e)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests poker_pvm
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
