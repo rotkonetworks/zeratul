@@ -38,7 +38,7 @@ use std::io::Cursor;
 
 use orchard::keys::{FullViewingKey, PreparedIncomingViewingKey, Scope};
 use orchard::note::NoteVersion;
-use orchard::note_encryption::OrchardDomain;
+use orchard::note_encryption::{IronwoodDomain, OrchardDomain};
 use zcash_note_encryption::{
     try_compact_note_decryption, try_note_decryption, EphemeralKeyBytes, ShieldedOutput,
     COMPACT_NOTE_SIZE, ENC_CIPHERTEXT_SIZE,
@@ -155,7 +155,12 @@ struct CompactOutput {
     ct: [u8; 52],
 }
 
-impl ShieldedOutput<OrchardDomain, COMPACT_NOTE_SIZE> for CompactOutput {
+// Generic over the note-plaintext version so the SAME output type works with
+// both OrchardDomain (V2) and IronwoodDomain (V3).
+impl<V: orchard::note_encryption::DomainVersion>
+    ShieldedOutput<orchard::note_encryption::NoteEncryptionDomain<V>, COMPACT_NOTE_SIZE>
+    for CompactOutput
+{
     fn ephemeral_key(&self) -> EphemeralKeyBytes { EphemeralKeyBytes(self.epk) }
     fn cmstar_bytes(&self) -> [u8; 32] { self.cmx }
     fn enc_ciphertext(&self) -> &[u8; COMPACT_NOTE_SIZE] { &self.ct }
@@ -167,7 +172,10 @@ struct FullOutput {
     enc: [u8; ENC_CIPHERTEXT_SIZE],
 }
 
-impl ShieldedOutput<OrchardDomain, ENC_CIPHERTEXT_SIZE> for FullOutput {
+impl<V: orchard::note_encryption::DomainVersion>
+    ShieldedOutput<orchard::note_encryption::NoteEncryptionDomain<V>, ENC_CIPHERTEXT_SIZE>
+    for FullOutput
+{
     fn ephemeral_key(&self) -> EphemeralKeyBytes { EphemeralKeyBytes(self.epk) }
     fn cmstar_bytes(&self) -> [u8; 32] { self.cmx }
     fn enc_ciphertext(&self) -> &[u8; ENC_CIPHERTEXT_SIZE] { &self.enc }
@@ -391,7 +399,11 @@ async fn extract_deposit_from_action(
     let parsed_memo = match client.get_transaction(&action.txid).await {
         Ok(raw_tx) => extract_enc_ciphertext(&raw_tx, &action.cmx, &action.ephemeral_key).and_then(|enc| {
             let full = FullOutput { epk: action.ephemeral_key, cmx: action.cmx, enc };
-            try_note_decryption(&domain, ivk_ext, &full).and_then(|(_, _, memo)| parse_payout_memo(&memo))
+            match &domain {
+                PoolDomain::Orchard(d) => try_note_decryption(d, ivk_ext, &full),
+                PoolDomain::Ironwood(d) => try_note_decryption(d, ivk_ext, &full),
+            }
+            .and_then(|(_, _, memo)| parse_payout_memo(&memo))
         }),
         Err(e) => {
             tracing::warn!("scanner: get_transaction failed, leaving memo unparsed: {}", e);
@@ -410,6 +422,19 @@ async fn extract_deposit_from_action(
 /// `None` for the caller to fill from a full-tx re-decryption. Returns the note plus the
 /// `OrchardDomain` so the caller can reuse it for that memo decryption. `None` if the action
 /// is undecryptable, mis-versioned, cmx-mismatched, or lands on an unattributed diversifier.
+/// Note-encryption domain selected by pool.
+///
+/// Released orchard splits these: `OrchardDomain` accepts ONLY V2 note
+/// plaintexts (lead byte 0x02) and `IronwoodDomain` only V3 (lead byte 0x03),
+/// and they are distinct types. Using the orchard domain for an ironwood
+/// action silently fails to decrypt — i.e. a real deposit would never be
+/// credited — so the pool must choose the domain up front rather than
+/// decrypting first and checking the version after.
+enum PoolDomain {
+    Orchard(OrchardDomain),
+    Ironwood(IronwoodDomain),
+}
+
 fn decrypt_action_to_note(
     ivk_ext: &PreparedIncomingViewingKey,
     seat_addr_bytes: &[Option<[u8; 43]>],
@@ -417,7 +442,7 @@ fn decrypt_action_to_note(
     block_height: u32,
     position: u64,
     pool: NotePool,
-) -> Option<(DepositNote, OrchardDomain)> {
+) -> Option<(DepositNote, PoolDomain)> {
     if action.ciphertext.len() < 52 {
         return None;
     }
@@ -432,10 +457,22 @@ fn decrypt_action_to_note(
         EphemeralKeyBytes(action.ephemeral_key),
         ct,
     );
-    let domain = OrchardDomain::for_compact_action(&compact);
     let output = CompactOutput { epk: action.ephemeral_key, cmx: action.cmx, ct };
 
-    let (note, addr) = try_compact_note_decryption(&domain, ivk_ext, &output)?;
+    // Pick the domain from the pool we are scanning: the two domains accept
+    // different note-plaintext versions and are not interchangeable.
+    let (domain, note, addr) = match pool {
+        NotePool::Orchard => {
+            let d = OrchardDomain::for_compact_action(&compact);
+            let (note, addr) = try_compact_note_decryption(&d, ivk_ext, &output)?;
+            (PoolDomain::Orchard(d), note, addr)
+        }
+        NotePool::Ironwood => {
+            let d = IronwoodDomain::for_compact_action(&compact);
+            let (note, addr) = try_compact_note_decryption(&d, ivk_ext, &output)?;
+            (PoolDomain::Ironwood(d), note, addr)
+        }
+    };
 
     // Pool/version consistency: an Orchard-bundle action must decrypt to a V2 note and an
     // Ironwood-bundle action to a V3 note. If the recovered version disagrees with the pool
