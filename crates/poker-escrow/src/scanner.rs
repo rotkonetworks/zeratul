@@ -16,23 +16,29 @@
 //!     Orchard notes to the escrow, same seal) AND the escrow's own V6-payout change land
 //!     here as V3 Ironwood notes (see tx_build::build_pczt_v6_ironwood).
 //!
-//! Per the fork verdict (and the proven wasm scanner in
-//! `zcli-ironwood/crates/zcash-wasm/src/lib.rs`), Ironwood REUSES Orchard's key tree and
-//! note encryption: the SAME `OrchardDomain` trial-decrypts both pools — the note plaintext
-//! lead byte selects the version (`note.version()` → V2 / V3) and nullifier derivation
-//! follows the note's own version. There is no separate `IronwoodDomain`; the "pool" is a
-//! property of WHICH bundle in the tx the action came from, applied by the caller. So the
-//! escrow's own Orchard FVK/IVK derives ironwood-pool note detection unchanged.
+//! Ironwood reuses Orchard's KEY TREE — the escrow's own Orchard FVK/IVK detects
+//! ironwood-pool notes with no new key material. It does NOT reuse the note-encryption
+//! domain, and an earlier version of this comment claimed it did.
+//!
+//! Upstream orchard 0.15.5 splits the domain by note version and ENFORCES it:
+//! `OrchardDomain` is `NoteEncryptionDomain<OrchardVersion>` and accepts only V2
+//! plaintexts (lead byte `0x02`); `IronwoodDomain` accepts only V3 (`0x03`).
+//! `DomainPolicy::note_version` returns `None` on a mismatch, so `try_note_decryption`
+//! yields `None` — no error, no warning, just a note that is never seen. The forks this
+//! crate used to depend on had ONE permissive domain, which is where the old claim came
+//! from; it was correct then and silently wrong the moment the deps moved.
+//!
+//! So each pool is trial-decrypted with its OWN domain. That is sound here because the
+//! pool is unambiguous — it is a property of WHICH bundle the action came from, not of
+//! the ciphertext — unlike a bare compact action off the wire, where both must be tried.
 //!
 //! We tag every recovered note with its [`NotePool`] and thread that through `DepositNote`
 //! → `tx_build::reconstruct_note`, which restores the exact `NoteVersion` so a scanned
 //! Ironwood note reconstructs to the right commitment for spending.
 //!
-//! WIRE DEPENDENCY (see `ironwood_actions_of`): the ironwood action list is a SEPARATE
-//! field on the compact block (proto `CompactTx.ironwoodActions`, zidecar commit 4edd4f2).
-//! `zecli::client::CompactBlock` does not surface that field yet — until it does, the
-//! ironwood arm scans an empty list, so the dual-scan is correct-but-inert on that pool
-//! and lights up the moment zecli exposes ironwood actions. See the report / STOP note.
+//! The ironwood action list is a SEPARATE field on the compact block (proto
+//! `CompactTx.ironwoodActions`, zidecar commit 4edd4f2), surfaced by
+//! `zecli::client::CompactBlock::ironwood_actions`. See `ironwood_actions_of`.
 
 use std::io::Cursor;
 
@@ -285,12 +291,12 @@ pub async fn scan(
             }
 
             // ── IRONWOOD pool (NU6.3+, V3) ─────────────────────────────────────────────
-            // Same FVK/IVK + OrchardDomain; the note's own lead byte yields V3. Ironwood
-            // leaf positions index the ironwood tree, which zecli does not expose an
-            // offset/tree-state for yet — so confirmed ironwood notes are emitted with
-            // `NO_POSITION` and cannot yet build a payout witness (see report). They still
-            // credit the room deposit (pool-agnostic). Today `ironwood_actions_of` is empty
-            // until zecli surfaces `CompactTx.ironwoodActions`; this arm is a no-op until then.
+            // Same FVK/IVK, but the IRONWOOD domain — the two are not interchangeable
+            // upstream (V2 lead byte 0x02 vs V3 0x03), which `decrypt_action_to_note`
+            // dispatches on. Ironwood leaf positions index the ironwood tree, which zecli
+            // does not expose an offset/tree-state for yet — so confirmed ironwood notes
+            // are emitted with `NO_POSITION` and cannot yet build a payout witness (see
+            // report). They still credit the room deposit (pool-agnostic).
             for action in ironwood_actions_of(block) {
                 if let Some(note) = extract_deposit_from_action(
                     client, &ivk_ext, seat_addr_bytes, action, block.height, NO_POSITION,
@@ -310,18 +316,20 @@ pub async fn scan(
 /// bundle from Orchard (proto `CompactTx.ironwoodActions` = 9, zidecar commit 4edd4f2);
 /// the pool is a property of which bundle an action lives in, not of the ciphertext.
 ///
-/// `zecli::client::CompactBlock` does not yet carry an `ironwood_actions` field, so this
-/// returns an empty slice today — the dual-pool scan is structurally complete and inert on
-/// the Ironwood pool until zecli's `GetCompactBlocks` decode is extended to populate it
-/// (single-field addition: proto `repeated CompactAction ironwoodActions = 9` on
-/// `CompactBlock`/`CompactTx`, plumbed through `get_compact_blocks` exactly like `actions`).
-/// The moment that field exists, change this to `&block.ironwood_actions` and the ironwood
-/// deposit path is live with no other change here.
+/// `zecli::client::CompactBlock` carries this as a first-class field
+/// (`zcli/bin/zcli/src/client.rs:112`, populated at both decode sites), so the ironwood
+/// deposit path is LIVE.
+///
+/// It was not always. This function used to return an empty slice, with a note saying
+/// zecli did not surface the field yet. That was true of an older pin and stopped being
+/// true at zcli `4948e78`, which this crate now depends on. The stale note mattered more
+/// than an ordinary out-of-date comment: an escrow whose ironwood arm iterates an empty
+/// list cannot see a deposit into the only live pool, and — this is the trap — it passes
+/// exactly the same tests as a correct one, because an ironwood-blind scanner and a
+/// working scanner are indistinguishable when there is nothing to scan.
 #[inline]
-fn ironwood_actions_of(_block: &CompactBlock) -> &[zecli::client::CompactAction] {
-    // TODO(ironwood wire — zecli): return `&_block.ironwood_actions` once
-    // `zecli::client::CompactBlock` surfaces the proto `ironwoodActions` field.
-    &[]
+fn ironwood_actions_of(block: &CompactBlock) -> &[zecli::client::CompactAction] {
+    &block.ironwood_actions
 }
 
 /// Scan the current MEMPOOL (0-conf) for deposits to our seats via zidecar's
@@ -356,8 +364,7 @@ pub async fn scan_mempool(
                 found.push(note);
             }
         }
-        // Ironwood mempool actions (NU6.3+, V3) — same key material; empty until zecli
-        // surfaces the ironwood field (see `ironwood_actions_of`).
+        // Ironwood mempool actions (NU6.3+, V3) — same key material, ironwood domain.
         for action in ironwood_actions_of(block) {
             if let Some(note) = extract_deposit_from_action(
                 client, &ivk_ext, seat_addr_bytes, action, 0, NO_POSITION, NotePool::Ironwood,
@@ -541,6 +548,48 @@ mod tests {
     /// Mirrors orchard's own `note_encryption::testing::fake_compact_action`, but lets us pin
     /// the note version so we can exercise the ironwood (V3) path. Returns the action and the
     /// note it encodes (so a test can cross-check value/cmx).
+    /// The ironwood arm must actually be FED the block's ironwood actions.
+    ///
+    /// This is not a redundant test. `ironwood_actions_of` previously returned an empty
+    /// slice unconditionally, with a note claiming zecli did not surface the field — stale
+    /// by the time the dep pin moved. Every other test in this module still passed, because
+    /// they call `decrypt_action_to_note` directly: with nothing to scan, an
+    /// ironwood-blind scanner and a correct one are indistinguishable. An escrow in that
+    /// state cannot see a deposit into the only live pool, and credits nobody.
+    ///
+    /// So this pins the WIRING, not the decryption: the ironwood actions the block carries
+    /// are the ones the ironwood arm iterates, and the orchard arm is unaffected.
+    #[test]
+    fn ironwood_arm_is_fed_the_blocks_ironwood_actions() {
+        let (fvk, _seat0) = escrow_fvk_and_seat_addr();
+        let recipient = fvk.address_at(0u32, Scope::External);
+        let (orchard_action, _) = mk_compact_action(recipient, 111, NoteVersion::V2);
+        let (ironwood_action, _) = mk_compact_action(recipient, 222, NoteVersion::V3);
+
+        let block = CompactBlock {
+            height: 42,
+            hash: vec![0u8; 32],
+            actions: vec![orchard_action.clone()],
+            actions_root: [0u8; 32],
+            ironwood_actions: vec![ironwood_action.clone()],
+        };
+
+        let seen = ironwood_actions_of(&block);
+        assert_eq!(
+            seen.len(),
+            1,
+            "the ironwood arm must iterate the block's ironwood actions, not an empty slice"
+        );
+        assert_eq!(
+            seen[0].cmx, ironwood_action.cmx,
+            "the ironwood arm must see the IRONWOOD action, not the orchard one"
+        );
+        assert_ne!(
+            seen[0].cmx, orchard_action.cmx,
+            "the two pools' action lists must not be conflated"
+        );
+    }
+
     fn mk_compact_action(
         recipient: orchard::Address,
         value: u64,
@@ -598,8 +647,9 @@ mod tests {
     }
 
     /// STEP 3 core: a mocked IRONWOOD (V3) compact action addressed to the escrow is
-    /// trial-decrypted — through the SAME `OrchardDomain` + escrow IVK as the Orchard path —
-    /// into a `DepositNote` tagged `NotePool::Ironwood`, with the value/seat/cmx recovered.
+    /// trial-decrypted — through the IRONWOOD domain and the same escrow IVK (the key tree
+    /// is shared, the note-encryption domain is not) — into a `DepositNote` tagged
+    /// `NotePool::Ironwood`, with the value/seat/cmx recovered.
     /// This is the ironwood-deposit detection the escrow needs post-NU6.3.
     #[test]
     fn ironwood_v3_action_decrypts_to_deposit_note_with_ironwood_pool() {
