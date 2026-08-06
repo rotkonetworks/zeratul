@@ -154,6 +154,7 @@ async fn write_dkg_result(
         house_address,
         store.clone(),
         false, // fresh room: anchor the scan cursor at the current tip
+        network,
     ));
     // 0-conf watcher: lets the deal gate open on mempool-seen deposits (never touches money paths).
     tokio::spawn(run_mempool_watch(
@@ -208,6 +209,7 @@ pub fn resume_deposit_poll(
     seat_addr_bytes: Vec<Option<[u8; 43]>>,
     house_address: String,
     store: Option<crate::persist::Store>,
+    network: zcash_protocol::consensus::NetworkType,
 ) {
     tokio::spawn(run_deposit_poll(
         rooms.clone(),
@@ -218,8 +220,38 @@ pub fn resume_deposit_poll(
         house_address,
         store.clone(),
         true,
+        network,
     ));
     // 0-conf watcher rebuilds the ephemeral pending ledger from the live mempool after restart.
+    tokio::spawn(run_mempool_watch(rooms, code, zidecar_url, fvk_hex, seat_addr_bytes, store));
+}
+
+/// Fresh-room variant of [`resume_deposit_poll`]: anchors the scan cursor at the current tip
+/// (resume=false) rather than a persisted height. Used by trusted-dealer room creation, whose
+/// key material is minted synchronously (no DKG ceremony to await) — this is the trusted-dealer
+/// analogue of the DKG path's own `run_deposit_poll` spawn at ceremony completion. Without it,
+/// a trusted-dealer room never scans and no deposit is ever credited.
+pub fn start_deposit_poll(
+    rooms: Rooms,
+    code: String,
+    zidecar_url: String,
+    fvk_hex: String,
+    seat_addr_bytes: Vec<Option<[u8; 43]>>,
+    house_address: String,
+    store: Option<crate::persist::Store>,
+    network: zcash_protocol::consensus::NetworkType,
+) {
+    tokio::spawn(run_deposit_poll(
+        rooms.clone(),
+        code.clone(),
+        zidecar_url.clone(),
+        fvk_hex.clone(),
+        seat_addr_bytes.clone(),
+        house_address,
+        store.clone(),
+        false,
+        network,
+    ));
     tokio::spawn(run_mempool_watch(rooms, code, zidecar_url, fvk_hex, seat_addr_bytes, store));
 }
 
@@ -242,6 +274,7 @@ async fn run_deposit_poll(
     house_address: String,
     store: Option<crate::persist::Store>,
     resume: bool,
+    network: zcash_protocol::consensus::NetworkType,
 ) {
     let client = match ZidecarClient::connect(&zidecar_url).await {
         Ok(c) => c,
@@ -275,7 +308,7 @@ async fn run_deposit_poll(
             Some(r) => r.last_scanned_height,
             None => { tracing::info!("deposit poll {}: room gone, exiting", code); return; }
         };
-        match scanner::scan(&client, &fvk, last, &seat_addr_bytes).await {
+        match scanner::scan(&client, &fvk, last, &seat_addr_bytes, network).await {
             Ok((new_tip, notes)) => {
                 let mut rooms_lock = rooms.lock().await;
                 let Some(room) = rooms_lock.get_mut(&code) else { return; };

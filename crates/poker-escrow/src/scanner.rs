@@ -228,9 +228,19 @@ pub async fn scan(
     fvk: &FullViewingKey,
     last_height: u32,
     seat_addr_bytes: &[Option<[u8; 43]>],
+    network: zcash_protocol::consensus::NetworkType,
 ) -> Result<(u32, Vec<DepositNote>), String> {
     let (tip, _) = client.get_tip().await.map_err(|e| format!("get_tip: {}", e))?;
-    let start = last_height.saturating_add(1).max(ORCHARD_ACTIVATION_MAINNET);
+    // The Orchard-activation floor skips scanning ancient pre-Orchard blocks. It is a MAINNET
+    // height (~1.68M) and is a no-op there (rooms anchor at the current tip, far past it). On
+    // testnet/regtest — where NU5/NU6.3 are active from a low height and tips are small — applying
+    // the mainnet floor made `start > tip` ALWAYS, so scan() returned immediately having scanned
+    // nothing while still reporting `tip` as scanned: deposits were silently never seen.
+    let floor = match network {
+        zcash_protocol::consensus::NetworkType::Main => ORCHARD_ACTIVATION_MAINNET,
+        _ => 1,
+    };
+    let start = last_height.saturating_add(1).max(floor);
     if start > tip { return Ok((tip, vec![])); }
 
     let ivk_ext = PreparedIncomingViewingKey::new(&fvk.to_ivk(Scope::External));
@@ -283,11 +293,16 @@ pub async fn scan(
             // `NO_POSITION` and cannot yet build a payout witness (see report). They still
             // credit the room deposit (pool-agnostic). Today `ironwood_actions_of` is empty
             // until zecli surfaces `CompactTx.ironwoodActions`; this arm is a no-op until then.
-            for action in ironwood_actions_of(block) {
+            let iw_actions = ironwood_actions_of(block);
+            if !iw_actions.is_empty() {
+                tracing::debug!("scan {}: {} orchard, {} ironwood action(s)", block.height, block.actions.len(), iw_actions.len());
+            }
+            for action in iw_actions {
                 if let Some(note) = extract_deposit_from_action(
                     client, &ivk_ext, seat_addr_bytes, action, block.height, NO_POSITION,
                     NotePool::Ironwood,
                 ).await {
+                    tracing::debug!("scan {}: ironwood note attributed to seat {} ({} zat)", block.height, note.seat, note.value_zat);
                     found.push(note);
                 }
             }
@@ -302,18 +317,15 @@ pub async fn scan(
 /// bundle from Orchard (proto `CompactTx.ironwoodActions` = 9, zidecar commit 4edd4f2);
 /// the pool is a property of which bundle an action lives in, not of the ciphertext.
 ///
-/// `zecli::client::CompactBlock` does not yet carry an `ironwood_actions` field, so this
-/// returns an empty slice today — the dual-pool scan is structurally complete and inert on
-/// the Ironwood pool until zecli's `GetCompactBlocks` decode is extended to populate it
-/// (single-field addition: proto `repeated CompactAction ironwoodActions = 9` on
-/// `CompactBlock`/`CompactTx`, plumbed through `get_compact_blocks` exactly like `actions`).
-/// The moment that field exists, change this to `&block.ironwood_actions` and the ironwood
-/// deposit path is live with no other change here.
+/// `zecli::client::CompactBlock` (rev f497a277) carries this as a first-class field —
+/// `ironwood_actions`, populated by `convert_actions(block.ironwood_actions)` at both
+/// GetCompactBlocks decode sites (bin/zcli/src/client.rs). Post-NU6.3 the Orchard pool is
+/// sealed and every new deposit lands here, so an escrow whose ironwood arm iterated an empty
+/// slice was BLIND to real deposits while passing every unit test (in-process notes go through
+/// the orchard arm). This returns the block's real ironwood actions.
 #[inline]
-fn ironwood_actions_of(_block: &CompactBlock) -> &[zecli::client::CompactAction] {
-    // TODO(ironwood wire — zecli): return `&_block.ironwood_actions` once
-    // `zecli::client::CompactBlock` surfaces the proto `ironwoodActions` field.
-    &[]
+fn ironwood_actions_of(block: &CompactBlock) -> &[zecli::client::CompactAction] {
+    &block.ironwood_actions
 }
 
 /// Scan the current MEMPOOL (0-conf) for deposits to our seats via zidecar's

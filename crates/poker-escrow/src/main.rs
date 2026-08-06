@@ -328,6 +328,64 @@ fn derive_escrow_ua(network: zcash_protocol::consensus::NetworkType) -> Result<S
     orchard_ua::encode_unified(raw, network)
 }
 
+/// A coherent, SCANNABLE trusted-dealer key set. Unlike `derive_escrow_ua` — which called
+/// `derive_address_raw` and threw away a fresh-random FVK, leaving an address the escrow could
+/// neither scan nor spend — this rolls ONE Orchard `SpendingKey` and keeps it: its nk/rivk make
+/// the group `FullViewingKey` deterministic, so `sk_hex` (reconstruct notes) and `orchard_fvk_hex`
+/// (scan for deposits) are both persistable. Mirrors what the DKG path derives, minus the ceremony.
+/// Seat deposit addresses are diversifier indices 1 & 2; the room address is index 0 — identical to
+/// `dkg_room::derive_seat_addresses`, so the two modes agree on the address layout.
+struct TrustedDealerKeys {
+    escrow_ua: String,
+    sk_hex: String,
+    orchard_fvk_hex: String,
+    public_key_package_hex: String,
+    seat_uas: [String; 2],
+    seat_bytes: [[u8; 43]; 2],
+}
+
+fn derive_trusted_dealer_keys(
+    network: zcash_protocol::consensus::NetworkType,
+) -> Result<TrustedDealerKeys, String> {
+    use rand::RngCore;
+    let dealer = frost_spend::orchestrate::dealer_keygen(2, 3)
+        .map_err(|e| format!("dealer_keygen: {:?}", e))?;
+    let pubkeys: frost_spend::frost_keys::PublicKeyPackage =
+        frost_spend::orchestrate::from_hex(&dealer.public_key_package_hex)
+            .map_err(|e| format!("pubkeys parse: {:?}", e))?;
+
+    // One random Orchard SpendingKey supplies nk/rivk -> a deterministic, persistable group FVK.
+    let mut sk_bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut sk_bytes);
+    let fvk = frost_spend::keys::derive_fvk_from_sk(sk_bytes, &pubkeys)
+        .ok_or_else(|| "derive_fvk_from_sk failed (invalid sk)".to_string())?;
+    let orchard_fvk_hex = hex::encode(fvk.to_bytes());
+    let sk_hex = hex::encode(sk_bytes);
+
+    let addr = |idx: u32| -> Result<([u8; 43], String), String> {
+        let raw = frost_spend::orchestrate::derive_address_from_sk(
+            &dealer.public_key_package_hex,
+            sk_bytes,
+            idx,
+        )
+        .map_err(|e| format!("derive_address_from_sk idx {}: {:?}", idx, e))?;
+        let ua = orchard_ua::encode_unified(raw, network)?;
+        Ok((raw, ua))
+    };
+    let (_escrow_raw, escrow_ua) = addr(0)?;
+    let (s0_raw, s0_ua) = addr(1)?;
+    let (s1_raw, s1_ua) = addr(2)?;
+
+    Ok(TrustedDealerKeys {
+        escrow_ua,
+        sk_hex,
+        orchard_fvk_hex,
+        public_key_package_hex: dealer.public_key_package_hex,
+        seat_uas: [s0_ua, s1_ua],
+        seat_bytes: [s0_raw, s1_raw],
+    })
+}
+
 /// Build the osst-derived legacy bits (will be removed in Phase 2.4). Pure / sync /
 /// rng-not-Send — must run before any `.await`.
 fn make_legacy_osst(req: &CreateRoomReq) -> Result<(dkg_room::LegacyOsstShim, String, String, String), String> {
@@ -402,10 +460,11 @@ async fn create_room_trusted_dealer(
     b_share_hex: String,
     pubkey_hex: String,
 ) -> Json<serde_json::Value> {
-    let escrow_ua = match derive_escrow_ua(state.network) {
-        Ok(u) => u,
+    let keys = match derive_trusted_dealer_keys(state.network) {
+        Ok(k) => k,
         Err(e) => return Json(serde_json::json!({"error": e})),
     };
+    let escrow_ua = keys.escrow_ua.clone();
 
     let room = EscrowRoom {
         code: req.code.clone(),
@@ -413,12 +472,12 @@ async fn create_room_trusted_dealer(
         frost_relay_url: None,
         frost_room_code: None,
         dkg_key_package_hex: None,
-        dkg_public_key_package_hex: None,
-        dkg_orchard_fvk_hex: None,
-        dkg_sk_hex: None,
+        dkg_public_key_package_hex: Some(keys.public_key_package_hex.clone()),
+        dkg_orchard_fvk_hex: Some(keys.orchard_fvk_hex.clone()),
+        dkg_sk_hex: Some(keys.sk_hex.clone()),
         dkg_ephemeral_seed_hex: None,
-        seat_addresses: vec![None, None],
-        seat_addr_bytes: vec![None, None],
+        seat_addresses: vec![Some(keys.seat_uas[0].clone()), Some(keys.seat_uas[1].clone())],
+        seat_addr_bytes: vec![Some(keys.seat_bytes[0]), Some(keys.seat_bytes[1])],
         seat_payout_address: vec![None, None],
         seat_identity_pubkey: vec![None, None],
         notes: Vec::new(),
@@ -457,7 +516,24 @@ async fn create_room_trusted_dealer(
         s.save_room(&room);
     }
     state.rooms.lock().await.insert(req.code.clone(), room);
-    tracing::info!("escrow created (trusted-dealer): {} -> {}", req.code, &escrow_ua);
+    tracing::info!(
+        "escrow created (trusted-dealer): {} -> {} (seats {} / {})",
+        req.code, &escrow_ua, &keys.seat_uas[0], &keys.seat_uas[1],
+    );
+
+    // Trusted-dealer previously never scanned — the address was minted and forgotten. Now that the
+    // key material is real (persistable FVK + seat addresses), start the same deposit poller the DKG
+    // path spawns at completion, so deposits to either seat are actually detected + credited.
+    dkg_room::start_deposit_poll(
+        state.rooms.clone(),
+        req.code.clone(),
+        state.zidecar_url.clone(),
+        keys.orchard_fvk_hex.clone(),
+        vec![Some(keys.seat_bytes[0]), Some(keys.seat_bytes[1])],
+        state.house_address.clone(),
+        state.persist.clone(),
+        state.network,
+    );
 
     Json(serde_json::json!({
         "escrow_address": escrow_ua,
@@ -2672,6 +2748,7 @@ async fn main() {
                 seat_addr_bytes,
                 state.house_address.clone(),
                 state.persist.clone(),
+                state.network,
             );
         }
     }
