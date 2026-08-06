@@ -334,7 +334,7 @@ fn build_pczt_orchard_legacy(
     use pczt::roles::io_finalizer::IoFinalizer;
     use pczt::roles::prover::Prover;
     use pczt::roles::signer::Signer;
-    use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
+    use zcash_primitives::transaction::builder::{BuildConfig, Builder};
     use zcash_primitives::transaction::fees::fixed::FeeRule;
     use zcash_protocol::consensus::{MainNetwork, TestNetwork};
     use zcash_protocol::memo::MemoBytes;
@@ -347,9 +347,8 @@ fn build_pczt_orchard_legacy(
     let build_config = BuildConfig::Standard {
         sapling_anchor: None,
         orchard_anchor: Some(anchor),
+        #[cfg(zcash_unstable = "nu6.3")]
         ironwood_anchor: None,
-        orchard_padding: BundlePadding::DEFAULT,
-        ironwood_padding: BundlePadding::DEFAULT,
     };
     let fee = Zatoshis::from_u64(fee_zat).map_err(|e| format!("invalid fee: {:?}", e))?;
     let fee_rule = FeeRule::non_standard(fee);
@@ -412,9 +411,7 @@ fn build_pczt_orchard_legacy(
         .finalize_io()
         .map_err(|e| format!("finalize_io: {:?}", e))?;
 
-    let pczt_bytes = pczt
-        .serialize()
-        .map_err(|e| format!("pczt serialize: {:?}", e))?;
+    let pczt_bytes = pczt.serialize();
 
     let sighash = {
         let reparsed =
@@ -451,7 +448,7 @@ fn build_pczt_v6_ironwood(
     use pczt::roles::io_finalizer::IoFinalizer;
     use pczt::roles::prover::Prover;
     use pczt::roles::signer::Signer;
-    use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
+    use zcash_primitives::transaction::builder::{BuildConfig, Builder};
     use zcash_primitives::transaction::fees::fixed::FeeRule;
     use zcash_primitives::transaction::TxVersion;
     use zcash_protocol::consensus::{BranchId, MainNetwork, TestNetwork};
@@ -582,9 +579,7 @@ fn build_pczt_v6_ironwood(
         .map_err(|e| format!("create_ironwood_proof: {:?}", e))?
         .finish();
 
-    let pczt_bytes = pczt
-        .serialize()
-        .map_err(|e| format!("pczt serialize: {:?}", e))?;
+    let pczt_bytes = pczt.serialize();
 
     // The V6 sighash the FROST cohort signs. Same call as the legacy path — the underlying
     // sighash algorithm binds the V6 tx version + the real Nu6_3 branch id automatically.

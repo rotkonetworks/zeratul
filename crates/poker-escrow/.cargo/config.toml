@@ -1,0 +1,7 @@
+# NU6.3 / Ironwood is gated behind this unstable cfg. The escrow's V6 payout path
+# (tx_build::build_pczt_v6_ironwood) and its dual-pool scanner only compile with it.
+# Post-NU6.3 the legacy Orchard pool is sealed and V6 is the ONLY legal payout path,
+# so the deployed binary MUST contain it. Bake the flag here — every build, including
+# the release build we ship, carries the V6 path without needing RUSTFLAGS in the env.
+[build]
+rustflags = ['--cfg', 'zcash_unstable="nu6.3"']
