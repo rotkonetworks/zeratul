@@ -3054,6 +3054,7 @@ async fn create_room(
 async fn room_page(
     Path(code): Path<String>,
     State(state): State<AppState>,
+    headers: axum::http::HeaderMap,
 ) -> impl IntoResponse {
     // ignore non-room paths (favicon, assets, api, etc.)
     if code.contains('.') || code == "api" || code == "ws" || code == "new" || code == "health" {
@@ -3068,10 +3069,24 @@ async fn room_page(
         let room = Room::new(code.clone());
         state.rooms.lock().await.entry(code.clone()).or_insert_with(|| Arc::new(Mutex::new(room)));
     }
-    // serve index.html
+    // serve index.html with a per-room Open Graph card so a pasted table link previews as
+    // "join my table on zk.poker" in Discord/Twitter/Telegram/etc. (crawlers don't run the SPA, so
+    // the meta must be server-rendered). `code` is user-controlled → og_escape it. No og:image —
+    // there's no banner asset, and a broken image renders worse than a clean text (summary) card.
+    let host = headers.get(axum::http::header::HOST).and_then(|h| h.to_str().ok()).unwrap_or("zkbtc.org");
+    let og = format!(
+        "<meta property=\"og:title\" content=\"Join my table on zk.poker ♠\">\
+         <meta property=\"og:description\" content=\"Trustless heads-up hold'em on Zcash — sit down and play.\">\
+         <meta property=\"og:type\" content=\"website\"><meta property=\"og:site_name\" content=\"zk.poker\">\
+         <meta property=\"og:url\" content=\"https://{h}/{c}\">\
+         <meta name=\"twitter:card\" content=\"summary\">\
+         <meta name=\"twitter:title\" content=\"Join my table on zk.poker ♠\">\
+         <meta name=\"twitter:description\" content=\"Trustless heads-up hold'em on Zcash — sit down and play.\">",
+        h = og_escape(host), c = og_escape(&code),
+    );
     let index = std::path::PathBuf::from(&state.static_dir).join("index.html");
     match tokio::fs::read_to_string(&index).await {
-        Ok(html) => axum::response::Html(html).into_response(),
+        Ok(html) => axum::response::Html(html.replacen("<head>", &format!("<head>{}", og), 1)).into_response(),
         Err(_) => (axum::http::StatusCode::NOT_FOUND, "not found").into_response(),
     }
 }
