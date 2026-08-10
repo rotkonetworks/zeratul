@@ -669,6 +669,15 @@ pub fn parse_orchard_ua(ua: &str, mainnet: bool) -> Result<Address, String> {
 
 // ── tests ─────────────────────────────────────────────────────────────────────
 
+/// The REAL server-side tournament state machine, compiled straight from its own source in
+/// the (excluded-from-workspace) poker-server crate. It is pure logic (only `serde` + `std`),
+/// so including the file directly gives the harness the genuine bracket/eliminations logic
+/// without dragging in poker-server's transport dependencies (iroh/poker-p2p, which conflict
+/// with the zcash sha2 stack - the reason poker-server is excluded).
+#[cfg(test)]
+#[path = "../../poker-server/src/tournament.rs"]
+mod tournament;
+
 /// V6 payout builder test. Mirrors `zcli-ironwood/crates/zcash-wasm/tests/turnstile_v6.rs`:
 /// build a payout from a mocked Orchard deposit note + a payout plan, then extract a
 /// TxVersion::V6 tx whose consensus branch id is 0x37a5165b and that carries an Ironwood
@@ -1179,5 +1188,280 @@ mod v6_tests {
                  of the real FROST sig was a genuine rk/sighash verification, not vacuous"
             );
         }
+    }
+
+    // ════════════════════════════════════════════════════════════════════════════
+    // END-TO-END TOURNAMENT HARNESS
+    //
+    // Proves a COMPLETE paid tournament runs start-to-finish and settles on-chain:
+    //   1. Register N players into the REAL server tournament state machine
+    //      (poker-server/src/tournament.rs, included above as `super::tournament`).
+    //   2. Play every bracket match on the REAL poker-pvm game engine (real 7-card
+    //      hand evaluation, real chip movement) until one player busts, reporting
+    //      each winner back into the bracket until a champion is crowned.
+    //   3. Pay the pooled buy-ins out through the REAL Ironwood FROST 2-of-3 escrow:
+    //      the exact `build_pczt_v6_ironwood` + DKG + FROST co-sign + V6-extract path
+    //      proven by `frost_2of3_cosigns_v6_ironwood_payout_end_to_end` above.
+    //
+    // REAL vs SIMULATED
+    //   REAL: the tournament bracket / eliminations logic (verbatim server source);
+    //         every hand played on the poker-pvm engine; the 2-of-3 FROST DKG; the V6
+    //         Ironwood payout build; the FROST co-sign over the V6 sighash; the tx
+    //         extract + branch-id / value guards; the corrupted-sig non-vacuity reject.
+    //   SIMULATED: the on-chain DEPOSIT side. Each player's buy-in is not broadcast as
+    //         its own transaction; instead the pooled buy-ins are modeled as ONE
+    //         group-owned legacy-Orchard deposit note of value `pot_zat` (mocked witness,
+    //         single-leaf tree), exactly as the reference payout test mocks its deposit.
+    //         The PAYOUT is fully real.
+    // ════════════════════════════════════════════════════════════════════════════
+
+    use super::tournament::{Registry, TournState};
+    use poker_pvm::{Action, GameState, Phase, Rules, SignedAction};
+    use rand::rngs::StdRng;
+    use rand::seq::SliceRandom;
+    use rand::SeedableRng;
+
+    /// Play ONE heads-up match (2 players) on the poker-pvm engine until one player busts.
+    /// Strategy: the acting seat shoves all-in every hand - a decisive shove-fest so a whole
+    /// stack is at risk each hand and the match converges quickly, while the engine still
+    /// evaluates REAL 7-card poker hands to pick the winner. Seat 0 == player `a`, seat 1 == `b`.
+    /// Returns (winning_seat, hands_played). Asserts chip conservation every hand.
+    fn play_headsup_match(rng: &mut StdRng, buyin: u32, sb: u32, bb: u32, rake_bps: u16) -> (u8, u32) {
+        let rules = Rules {
+            buyin, small_blind: sb, big_blind: bb,
+            turn_timeout_blocks: 6, rake_bps, rake_cap: 0,
+        };
+        let mut st = GameState::new(rules, 2);
+        let total = 2u64 * buyin as u64;
+        let mut hands = 0u32;
+        loop {
+            if st.stacks[0] == 0 { return (1, hands); }
+            if st.stacks[1] == 0 { return (0, hands); }
+
+            // fresh shuffled 52-card deck: 2 hole each + 5 community, all distinct.
+            let mut deck = [0u8; 52];
+            for i in 0..52 { deck[i] = i as u8; }
+            deck.shuffle(rng);
+            let p0 = [deck[0], deck[1]];
+            let p1 = [deck[2], deck[3]];
+            let community = [deck[4], deck[5], deck[6], deck[7], deck[8]];
+            st.deal(&[p0, p1], community);
+            hands += 1;
+
+            // drive betting: the acting seat shoves until the hand leaves the betting phases.
+            let mut guard = 0;
+            while matches!(st.phase, Phase::Preflop | Phase::Flop | Phase::Turn | Phase::River) {
+                let seat = st.acting_seat;
+                let act = SignedAction {
+                    seat, action: Action::AllIn,
+                    amount: st.stacks[seat as usize], seq: 0, sig: [0u8; 64],
+                };
+                st.apply(&act).expect("all-in is always legal for the acting seat");
+                guard += 1;
+                assert!(guard < 12, "a heads-up all-in hand resolves in a few actions");
+            }
+            if st.phase == Phase::Showdown {
+                st.showdown();
+            }
+
+            // CHIP CONSERVATION: pot empty after a settled hand, and the two stacks plus the
+            // rake skimmed so far still equal the two starting buy-ins - the engine creates and
+            // destroys no chips, only the house rake leaves the table.
+            assert_eq!(st.pot, 0, "pot empty after showdown");
+            assert_eq!(
+                st.stacks[0] as u64 + st.stacks[1] as u64 + st.rake as u64,
+                total,
+                "chip conservation: stacks + rake == 2 * buyin"
+            );
+            assert!(hands < 100_000, "heads-up match must converge to a bust");
+        }
+    }
+
+    /// Drive the REAL tournament state machine to a champion, playing every bracket match on the
+    /// poker-pvm engine. Returns (champion, runner_up, elimination_order).
+    fn run_tournament_to_champion(
+        players: &[&str],
+        buyin_zat: u64,
+        chip_buyin: u32,
+        seed: u64,
+    ) -> (String, String, Vec<String>) {
+        let mut rng = StdRng::seed_from_u64(seed);
+        let mut reg = Registry::new();
+        let id = reg.create("E2E Ironwood Cup", "org", true, buyin_zat, None, 10000);
+        for p in players {
+            reg.join(&id, p.to_string()).expect("register player");
+        }
+        // organizer starts the bracket (paid tournaments require a power-of-two field).
+        reg.start(&id, "org").expect("organizer starts the bracket");
+        let total_rounds = reg.get(&id).unwrap().rounds;
+
+        let mut elimination_order: Vec<String> = Vec::new();
+        let mut final_loser: Option<String> = None;
+        let mut guard = 0;
+        while reg.get(&id).unwrap().state == TournState::Running {
+            let pending: Vec<(u32, String, String, u32)> = reg
+                .get(&id)
+                .unwrap()
+                .pending_matches()
+                .iter()
+                .map(|m| (m.id, m.a.clone().unwrap(), m.b.clone().unwrap(), m.round))
+                .collect();
+            assert!(!pending.is_empty(), "a running tournament always has a playable match");
+            for (mid, a, b, round) in pending {
+                let (winner_seat, hands) = play_headsup_match(&mut rng, chip_buyin, 5, 10, 50);
+                let (winner, loser) = if winner_seat == 0 {
+                    (a.clone(), b.clone())
+                } else {
+                    (b.clone(), a.clone())
+                };
+                println!(
+                    "  round {}/{} match {}: {} vs {} -> {} wins, {} busts (in {} hands)",
+                    round, total_rounds, mid, a, b, winner, loser, hands
+                );
+                elimination_order.push(loser.clone());
+                if round == total_rounds { final_loser = Some(loser.clone()); }
+                reg.report_winner(&id, mid, &winner).expect("report bracket winner");
+            }
+            guard += 1;
+            assert!(guard < 64, "bracket must converge");
+        }
+
+        let champion = reg.get(&id).unwrap().champion().cloned().expect("champion decided");
+        (champion, final_loser.expect("the final has a loser"), elimination_order)
+    }
+
+    /// FULL END-TO-END: 4-player paid tournament -> champion -> real Ironwood FROST payout.
+    #[test]
+    fn tournament_e2e_ironwood_payout() {
+        // ── TOURNAMENT (real bracket + real poker-pvm hands) ──
+        let players = ["alice", "bob", "carol", "dave"];
+        let buyin_zat = 250_000u64;   // each player's buy-in (zatoshi)
+        let chip_buyin = 1_000u32;    // in-game chip stack per heads-up match
+        let n = players.len() as u64;
+        let pot_zat = n * buyin_zat;  // 1_000_000 zat pooled in the escrow
+
+        println!(
+            "\n=== TOURNAMENT: {} players, {} zat buy-in each, {} zat prize pool ===",
+            n, buyin_zat, pot_zat
+        );
+        let (champion, runner_up, elim) =
+            run_tournament_to_champion(&players, buyin_zat, chip_buyin, 0xC0FFEE);
+        println!("champion  = {}", champion);
+        println!("runner-up = {}", runner_up);
+        println!("elimination order = {:?}", elim);
+
+        // ── TOURNAMENT INVARIANTS ──
+        assert_eq!(elim.len() as u64, n - 1, "single-elim eliminates exactly N-1 players");
+        assert!(!elim.contains(&champion), "the champion is never eliminated");
+        let mut uniq = elim.clone();
+        uniq.sort();
+        uniq.dedup();
+        assert_eq!(uniq.len(), elim.len(), "each eliminated player busts exactly once");
+        assert!(players.contains(&champion.as_str()), "champion is a registered player");
+        assert!(players.contains(&runner_up.as_str()), "runner-up is a registered player");
+        assert_eq!(&elim[elim.len() - 1], &runner_up, "last eliminated == runner-up (final loser)");
+
+        // ── PRIZE STRUCTURE (top-2 paid, whole pot distributed) ──
+        // pay the on-chain network fee first, then split 70/30 to 1st/2nd. change == 0: the
+        // escrow keeps nothing (non-custodial).
+        let fee_zat = 10_000u64;
+        let distributable = pot_zat - fee_zat;
+        let first_zat = distributable * 70 / 100;
+        let second_zat = distributable - first_zat;
+        assert_eq!(first_zat + second_zat + fee_zat, pot_zat, "payout + fee == pooled buy-ins");
+        println!(
+            "prize: 1st {} = {} zat, 2nd {} = {} zat, network fee = {} zat",
+            champion, first_zat, runner_up, second_zat, fee_zat
+        );
+
+        // ── REAL IRONWOOD ESCROW PAYOUT (2-of-3 FROST over the V6 sighash) ──
+        let group = escrow_2of3_dkg();
+        let (note, witness) = mock_group_deposit(&group.group_fvk, pot_zat);
+        let cmx: orchard::note::ExtractedNoteCommitment = note.commitment().into();
+        let anchor = witness.root(cmx);
+
+        // 1st + 2nd get their own cross-address Ironwood outputs (distinct from the escrow's
+        // own change address) - exactly what the sealed legacy pool forbids and Ironwood allows.
+        let first_fvk =
+            FullViewingKey::from(&orchard::keys::SpendingKey::from_bytes([31u8; 32]).unwrap());
+        let second_fvk =
+            FullViewingKey::from(&orchard::keys::SpendingKey::from_bytes([32u8; 32]).unwrap());
+        let first_addr = first_fvk.address_at(0u32, Scope::External);
+        let second_addr = second_fvk.address_at(0u32, Scope::External);
+
+        let change = pot_zat - first_zat - second_zat - fee_zat;
+        assert_eq!(change, 0, "the whole pot is distributed; the escrow keeps nothing");
+
+        let target_height = NU6_3_ACTIVATION_MAINNET + 500;
+        let built = build_pczt_v6_ironwood(
+            group.group_fvk.to_bytes(),
+            vec![(note, witness)],
+            vec![(first_addr, first_zat), (second_addr, second_zat)],
+            change,
+            anchor,
+            target_height,
+            fee_zat,
+            true, // mainnet params -> real 0x37a5165b branch id via Nu63Activated
+        )
+        .expect("build V6 Ironwood tournament payout PCZT");
+
+        // Build guards: V6 tx, real NU6.3 branch id, an Ironwood output bundle, 1:1 alphas.
+        let pczt = pczt::Pczt::parse(&built.pczt_bytes).expect("payout PCZT parses");
+        assert_eq!(
+            *pczt.global().tx_version(),
+            zcash_protocol::constants::V6_TX_VERSION,
+            "payout PCZT must be V6"
+        );
+        assert_eq!(
+            *pczt.global().consensus_branch_id(),
+            NU6_3_BRANCH_ID,
+            "payout PCZT binds the real NU6.3 branch id 0x37a5165b"
+        );
+        assert!(!pczt.ironwood().actions().is_empty(), "payout carries the Ironwood output bundle");
+        assert_eq!(built.alphas.len(), built.spend_indices.len(), "alphas and spend_indices are 1:1");
+        assert!(built.alphas.len() >= 1, "at least one orchard spend to FROST-cosign");
+
+        // Real 2-of-3 FROST co-sign per orchard spend over the V6 sighash.
+        let sighash = built.sighash;
+        let mut sigs: Vec<[u8; 64]> = Vec::with_capacity(built.alphas.len());
+        for alpha in &built.alphas {
+            sigs.push(frost_cosign_one(&group, 0, 1, &sighash, alpha));
+        }
+
+        // Apply the aggregated sigs + extract the V6 tx via the escrow's own completion path
+        // (apply_orchard_signature runs the redpallas rk/sighash verification per spend).
+        let tx_bytes = complete_payout_pczt(&built.pczt_bytes, &sigs, &built.spend_indices)
+            .expect("apply FROST sigs + extract V6 tournament-payout tx");
+
+        let tx = Transaction::read(&tx_bytes[..], BranchId::Nu6_3).expect("extracted tx parses");
+        assert_eq!(tx.version(), TxVersion::V6, "extracted payout tx is V6");
+        assert!(tx.orchard_bundle().is_some(), "orchard SPEND bundle present (the deposit spend)");
+        assert!(tx.ironwood_bundle().is_some(), "Ironwood OUTPUT bundle present (the winnings)");
+        assert_eq!(u32::from(BranchId::Nu6_3), NU6_3_BRANCH_ID, "branch id wired through");
+
+        // NON-VACUITY: a corrupted signature at the same spend index must be REJECTED, proving the
+        // accept above was a genuine rk/sighash verification and not a no-op.
+        {
+            use pczt::roles::signer::Signer as PcztSigner;
+            let mut bad = sigs[0];
+            bad[0] ^= 0xff;
+            let pczt_bad = pczt::Pczt::parse(&built.pczt_bytes).expect("reparse for reject check");
+            let mut signer = PcztSigner::new(pczt_bad).expect("signer for reject check");
+            let bad_sig = orchard::primitives::redpallas::Signature::<
+                orchard::primitives::redpallas::SpendAuth,
+            >::from(bad);
+            let res = signer.apply_orchard_signature(built.spend_indices[0], bad_sig);
+            assert!(res.is_err(), "corrupted signature must be rejected (verification is real)");
+        }
+
+        println!(
+            "PAYOUT: extracted a valid V6 Ironwood tx ({} bytes) binding branch id {:#010x}, \
+             FROST 2-of-3 co-signed over {} orchard spend(s).",
+            tx_bytes.len(), NU6_3_BRANCH_ID, built.alphas.len()
+        );
+        println!(
+            "SETTLED: {} zat pool -> 1st {} = {} zat, 2nd {} = {} zat, fee = {} zat, change = {} zat.",
+            pot_zat, champion, first_zat, runner_up, second_zat, fee_zat, change
+        );
     }
 }

@@ -80,3 +80,10 @@ dotenvy = "0.15"
 # zcash_protocol 0.10), so the `zcash_unstable = "nu6.3"` cfg and the librustzcash
 # [patch] block are no longer needed and have been removed.
 
+# ── harness: end-to-end tournament test (poker-pvm game engine) ──
+# poker-pvm is the deterministic game engine the tournament harness in tx_build.rs
+# (mod v6_tests, fn tournament_e2e_*) uses to play real hands. Dev-only: the escrow
+# service itself never plays hands, it only holds funds and co-signs payouts.
+[dev-dependencies]
+poker-pvm = { path = "../poker-pvm" }
+
