@@ -68,14 +68,12 @@ fn nu6_3_activation(mainnet: bool) -> u32 {
 /// if a caller passes a network whose base params don't yet know NU6.3. Mirrors the
 /// `Nu63Activated` wrapper in zcash-wasm. The fail-closed branch-id guard in
 /// `build_pczt_sync` still refuses unless the bound id equals `NU6_3_BRANCH_ID`.
-#[cfg(zcash_unstable = "nu6.3")]
 #[derive(Clone, Copy, Debug)]
 struct Nu63Activated<P> {
     inner: P,
     nu6_3_from: zcash_protocol::consensus::BlockHeight,
 }
 
-#[cfg(zcash_unstable = "nu6.3")]
 impl<P: zcash_protocol::consensus::Parameters> zcash_protocol::consensus::Parameters
     for Nu63Activated<P>
 {
@@ -165,11 +163,16 @@ pub async fn build_payout_pczt(
     let wallet_notes: Vec<WalletNote> = notes.iter().map(deposit_to_wallet_note).collect();
     let min_note_height = notes.iter().map(|n| n.block_height).min().unwrap_or(anchor_height);
     let sync_height = min_note_height.saturating_sub(1).max(1);
+    // The released zecli `build_witnesses` builds witnesses for a single note-commitment tree
+    // selected by `pool` (it asserts every note shares that pool) rather than taking `mainnet`
+    // (the network now comes from the client). Derive the pool from the deposit notes so the
+    // witnesses anchor into the correct pool's tree. `notes` is non-empty (checked above).
+    let pool = wallet_notes[0].pool;
     let (anchor, paths) = zecli::witness::build_witnesses(
         client,
         &wallet_notes,
         anchor_height,
-        mainnet,
+        pool,
         false,
         None,
         sync_height,
@@ -229,10 +232,7 @@ pub fn complete_payout_pczt(
     // Is this a V6 (orchard-spend → ironwood-output) payout? V6 bundles — both orchard and
     // ironwood — verify against the PostNu6_3 circuit. A V5 payout uses the historical
     // (InsecurePreNu6_2) circuit that matches the consensus branch it was proved on.
-    #[cfg(zcash_unstable = "nu6.3")]
     let is_v6 = *pczt.global().tx_version() == zcash_protocol::constants::V6_TX_VERSION;
-    #[cfg(not(zcash_unstable = "nu6.3"))]
-    let is_v6 = false;
 
     let orchard_cv = if is_v6 {
         OrchardCircuitVersion::PostNu6_3
@@ -260,16 +260,14 @@ pub fn complete_payout_pczt(
     }
 
     let signed = signer.finish();
-    let extractor = TransactionExtractor::new(signed).with_orchard(vk);
-    // V6 carries an Ironwood output bundle that must be verified with the PostNu6_3 VK.
-    #[cfg(zcash_unstable = "nu6.3")]
-    let extractor = if is_v6 {
-        static IW_VK: std::sync::OnceLock<VerifyingKey> = std::sync::OnceLock::new();
-        extractor.with_ironwood(IW_VK.get_or_init(|| VerifyingKey::build(OrchardCircuitVersion::PostNu6_3)))
-    } else {
-        extractor
-    };
-    let tx = extractor
+    // On the released pczt stack `with_orchard(vk)` verifies BOTH bundles of a V6 tx: the
+    // orchard SPEND bundle and the Ironwood OUTPUT bundle share the PostNu6_3 orchard circuit,
+    // so the single PostNu6_3 VK selected above covers the ironwood output proof too (the fork's
+    // separate `.with_ironwood(vk)` step is folded into `with_orchard` upstream). Mirrors
+    // zcash-wasm::extract_signed_tx_from_pczt_bytes, which extracts V6 txs with `with_orchard`
+    // alone.
+    let tx = TransactionExtractor::new(signed)
+        .with_orchard(vk)
         .extract()
         .map_err(|e| format!("tx extract: {:?}", e))?;
 
@@ -296,21 +294,9 @@ fn build_pczt_sync(
     // consensus-valid; at/above, the Orchard pool is sealed and we must emit a V6
     // Orchard-spend → Ironwood-output tx.
     if anchor_height >= nu6_3_activation(mainnet) {
-        #[cfg(zcash_unstable = "nu6.3")]
-        {
-            return build_pczt_v6_ironwood(
-                fvk_bytes, spends, outputs, change, anchor, anchor_height, fee_zat, mainnet,
-            );
-        }
-        #[cfg(not(zcash_unstable = "nu6.3"))]
-        {
-            return Err(format!(
-                "payout at height {} is at/above NU6.3 activation {} but this build lacks the \
-                 nu6.3 cfg — rebuild with RUSTFLAGS='--cfg zcash_unstable=\"nu6.3\"'",
-                anchor_height,
-                nu6_3_activation(mainnet)
-            ));
-        }
+        return build_pczt_v6_ironwood(
+            fvk_bytes, spends, outputs, change, anchor, anchor_height, fee_zat, mainnet,
+        );
     }
     build_pczt_orchard_legacy(
         fvk_bytes, spends, outputs, change, anchor, anchor_height, fee_zat, mainnet,
@@ -334,7 +320,7 @@ fn build_pczt_orchard_legacy(
     use pczt::roles::io_finalizer::IoFinalizer;
     use pczt::roles::prover::Prover;
     use pczt::roles::signer::Signer;
-    use zcash_primitives::transaction::builder::{BuildConfig, Builder};
+    use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
     use zcash_primitives::transaction::fees::fixed::FeeRule;
     use zcash_protocol::consensus::{MainNetwork, TestNetwork};
     use zcash_protocol::memo::MemoBytes;
@@ -344,11 +330,16 @@ fn build_pczt_orchard_legacy(
     let ovk_ext: OutgoingViewingKey = fvk.to_ovk(Scope::External);
     let ovk_int: OutgoingViewingKey = fvk.to_ovk(Scope::Internal);
 
+    // Pre-NU6.3 payout: legacy Orchard pool only, no Ironwood bundle. `ironwood_anchor` is now an
+    // unconditional field of `BuildConfig::Standard` on the released stack (was cfg-gated on the
+    // fork); `None` keeps the Ironwood builder off. `*_padding` are new required fields; DEFAULT
+    // preserves the fork's bundle-padding behavior.
     let build_config = BuildConfig::Standard {
         sapling_anchor: None,
         orchard_anchor: Some(anchor),
-        #[cfg(zcash_unstable = "nu6.3")]
         ironwood_anchor: None,
+        orchard_padding: BundlePadding::DEFAULT,
+        ironwood_padding: BundlePadding::DEFAULT,
     };
     let fee = Zatoshis::from_u64(fee_zat).map_err(|e| format!("invalid fee: {:?}", e))?;
     let fee_rule = FeeRule::non_standard(fee);
@@ -411,7 +402,7 @@ fn build_pczt_orchard_legacy(
         .finalize_io()
         .map_err(|e| format!("finalize_io: {:?}", e))?;
 
-    let pczt_bytes = pczt.serialize();
+    let pczt_bytes = pczt.serialize().map_err(|e| format!("pczt serialize: {:?}", e))?;
 
     let sighash = {
         let reparsed =
@@ -431,7 +422,6 @@ fn build_pczt_orchard_legacy(
 ///
 /// FROST is preserved: we still extract alphas + spend indices from the ORCHARD bundle
 /// spends, and `shielded_sighash()` now returns the V6 sighash the cohort signs.
-#[cfg(zcash_unstable = "nu6.3")]
 #[allow(clippy::too_many_arguments)]
 fn build_pczt_v6_ironwood(
     fvk_bytes: [u8; 96],
@@ -448,7 +438,7 @@ fn build_pczt_v6_ironwood(
     use pczt::roles::io_finalizer::IoFinalizer;
     use pczt::roles::prover::Prover;
     use pczt::roles::signer::Signer;
-    use zcash_primitives::transaction::builder::{BuildConfig, Builder};
+    use zcash_primitives::transaction::builder::{BuildConfig, Builder, BundlePadding};
     use zcash_primitives::transaction::fees::fixed::FeeRule;
     use zcash_primitives::transaction::TxVersion;
     use zcash_protocol::consensus::{BranchId, MainNetwork, TestNetwork};
@@ -470,6 +460,8 @@ fn build_pczt_v6_ironwood(
         sapling_anchor: None,
         orchard_anchor: Some(anchor),
         ironwood_anchor: Some(Anchor::empty_tree()),
+        orchard_padding: BundlePadding::DEFAULT,
+        ironwood_padding: BundlePadding::DEFAULT,
     };
 
     // Build over the Nu63Activated-wrapped params so `is_nu_active(Nu6_3, target)` is true
@@ -529,20 +521,25 @@ fn build_pczt_v6_ironwood(
                     .add_ironwood_output::<FeError>(Some(ovk_ext.clone()), *addr, zat, MemoBytes::empty())
                     .map_err(|e| format!("add_ironwood_output: {:?}", e))?;
             }
-            // CHANGE returns to the escrow's OWN internal Ironwood address.
+            // CHANGE returns to the escrow's OWN internal Ironwood address. The released stack has
+            // no `add_ironwood_change_output`: in the Ironwood pool cross-address transfers are
+            // permitted, so a wallet-controlled change output is just a normal owned output (no
+            // fabricated-spend pairing, unlike a sealed-Orchard change). `add_ironwood_output` to
+            // the escrow's own internal address with the internal OVK is the exact economic
+            // equivalent (same recipient, value, OVK, V3 note) and mirrors zcash-wasm's ironwood
+            // self-migration change path.
             if change > 0 {
                 let change_addr = fvk.address_at(0u64, Scope::Internal);
                 let change_zat = Zatoshis::from_u64(change)
                     .map_err(|e| format!("invalid change: {:?}", e))?;
                 builder
-                    .add_ironwood_change_output::<FeError>(
-                        fvk.clone(),
+                    .add_ironwood_output::<FeError>(
                         Some(ovk_int.clone()),
                         change_addr,
                         change_zat,
                         MemoBytes::empty(),
                     )
-                    .map_err(|e| format!("add_ironwood_change_output: {:?}", e))?;
+                    .map_err(|e| format!("add_ironwood_output (change): {:?}", e))?;
             }
             builder
                 .build_for_pczt(OsRng, &fee_rule)
@@ -579,7 +576,7 @@ fn build_pczt_v6_ironwood(
         .map_err(|e| format!("create_ironwood_proof: {:?}", e))?
         .finish();
 
-    let pczt_bytes = pczt.serialize();
+    let pczt_bytes = pczt.serialize().map_err(|e| format!("pczt serialize: {:?}", e))?;
 
     // The V6 sighash the FROST cohort signs. Same call as the legacy path — the underlying
     // sighash algorithm binds the V6 tx version + the real Nu6_3 branch id automatically.
@@ -675,9 +672,9 @@ pub fn parse_orchard_ua(ua: &str, mainnet: bool) -> Result<Address, String> {
 /// V6 payout builder test. Mirrors `zcli-ironwood/crates/zcash-wasm/tests/turnstile_v6.rs`:
 /// build a payout from a mocked Orchard deposit note + a payout plan, then extract a
 /// TxVersion::V6 tx whose consensus branch id is 0x37a5165b and that carries an Ironwood
-/// output bundle to the winner. Only meaningful with the nu6.3 cfg:
-///   RUSTFLAGS='--cfg zcash_unstable="nu6.3"' cargo test --release
-#[cfg(all(test, zcash_unstable = "nu6.3"))]
+/// output bundle to the winner. Runs on the released stack with a plain `cargo test`
+/// (NU6.3 / Ironwood is ungated upstream — no RUSTFLAGS needed).
+#[cfg(test)]
 mod v6_tests {
     use super::*;
     use pczt::roles::low_level_signer;
@@ -828,7 +825,7 @@ mod v6_tests {
         let low = low_level_signer::Signer::new(pczt);
         let low = low
             .sign_orchard_with(
-                |_pczt, bundle, _tx_modifiable| -> Result<(), pczt::orchard::BundleParseError> {
+                |_pczt, bundle, _tx_modifiable| -> Result<(), pczt::roles::low_level_signer::OrchardParseError> {
                     for action in bundle.actions_mut().iter_mut() {
                         match action.spend().verify_nullifier(Some(&fvk)) {
                             Ok(())
@@ -855,7 +852,7 @@ mod v6_tests {
         let signed = low.finish();
 
         // -- extract via the escrow's own completion path (V6 → PostNu6_3 VK + with_ironwood) --
-        let tx_bytes = complete_payout_pczt_from_signed(&signed.serialize())
+        let tx_bytes = complete_payout_pczt_from_signed(&signed.serialize().expect("serialize signed PCZT"))
             .expect("extract V6 tx");
 
         let tx = Transaction::read(&tx_bytes[..], BranchId::Nu6_3).expect("tx parses");
@@ -881,11 +878,11 @@ mod v6_tests {
         let pczt = pczt::Pczt::parse(pczt_bytes).map_err(|e| format!("pczt parse: {:?}", e))?;
         let is_v6 = *pczt.global().tx_version() == zcash_protocol::constants::V6_TX_VERSION;
         assert!(is_v6, "test PCZT should be V6");
+        // Released pczt: `with_orchard(PostNu6_3 VK)` verifies both the orchard SPEND bundle and
+        // the Ironwood OUTPUT bundle of a V6 tx (shared PostNu6_3 circuit).
         let vk = VerifyingKey::build(OrchardCircuitVersion::PostNu6_3);
-        let iw_vk = VerifyingKey::build(OrchardCircuitVersion::PostNu6_3);
         let tx = TransactionExtractor::new(pczt)
             .with_orchard(&vk)
-            .with_ironwood(&iw_vk)
             .extract()
             .map_err(|e| format!("tx extract: {:?}", e))?;
         let mut out = Vec::new();
