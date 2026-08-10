@@ -16,13 +16,17 @@
 //!     Orchard notes to the escrow, same seal) AND the escrow's own V6-payout change land
 //!     here as V3 Ironwood notes (see tx_build::build_pczt_v6_ironwood).
 //!
-//! Per the fork verdict (and the proven wasm scanner in
-//! `zcli-ironwood/crates/zcash-wasm/src/lib.rs`), Ironwood REUSES Orchard's key tree and
-//! note encryption: the SAME `OrchardDomain` trial-decrypts both pools — the note plaintext
-//! lead byte selects the version (`note.version()` → V2 / V3) and nullifier derivation
-//! follows the note's own version. There is no separate `IronwoodDomain`; the "pool" is a
-//! property of WHICH bundle in the tx the action came from, applied by the caller. So the
-//! escrow's own Orchard FVK/IVK derives ironwood-pool note detection unchanged.
+//! Per the proven wasm scanner in `zcli/crates/zcash-wasm/src/lib.rs`, Ironwood REUSES
+//! Orchard's key tree and address/IVK material, so the escrow's own Orchard FVK/IVK detects
+//! ironwood-pool notes unchanged. But on the RELEASED orchard stack the note-encryption
+//! domain is SPLIT BY NOTE VERSION and enforced: `OrchardDomain` accepts only V2 plaintexts
+//! (lead byte 0x02) and `IronwoodDomain` only V3 (0x03); a mismatched lead byte makes
+//! `try_*_note_decryption` return `None`. (The valar/qleak fork this crate used to build
+//! against had a single permissive domain, which is why one domain used to be enough.)
+//! So the scanner now trial-decrypts each action against the domain for the pool it came
+//! from: `OrchardDomain` for the Orchard bundle, `IronwoodDomain` for the Ironwood bundle.
+//! The pool is a property of WHICH bundle in the tx the action came from, applied by the
+//! caller; the key material is identical across both.
 //!
 //! We tag every recovered note with its [`NotePool`] and thread that through `DepositNote`
 //! → `tx_build::reconstruct_note`, which restores the exact `NoteVersion` so a scanned
@@ -38,7 +42,7 @@ use std::io::Cursor;
 
 use orchard::keys::{FullViewingKey, PreparedIncomingViewingKey, Scope};
 use orchard::note::NoteVersion;
-use orchard::note_encryption::OrchardDomain;
+use orchard::note_encryption::{DomainVersion, IronwoodDomain, NoteEncryptionDomain, OrchardDomain};
 use zcash_note_encryption::{
     try_compact_note_decryption, try_note_decryption, EphemeralKeyBytes, ShieldedOutput,
     COMPACT_NOTE_SIZE, ENC_CIPHERTEXT_SIZE,
@@ -155,7 +159,10 @@ struct CompactOutput {
     ct: [u8; 52],
 }
 
-impl ShieldedOutput<OrchardDomain, COMPACT_NOTE_SIZE> for CompactOutput {
+// Generic over the note-plaintext version so the SAME wrapper can be trial-decrypted against
+// `OrchardDomain` (V2) and `IronwoodDomain` (V3) — released orchard splits and enforces the
+// domain by version. Mirrors zcash-wasm's `CompactShieldedOutput` impl.
+impl<V: DomainVersion> ShieldedOutput<NoteEncryptionDomain<V>, COMPACT_NOTE_SIZE> for CompactOutput {
     fn ephemeral_key(&self) -> EphemeralKeyBytes { EphemeralKeyBytes(self.epk) }
     fn cmstar_bytes(&self) -> [u8; 32] { self.cmx }
     fn enc_ciphertext(&self) -> &[u8; COMPACT_NOTE_SIZE] { &self.ct }
@@ -167,10 +174,19 @@ struct FullOutput {
     enc: [u8; ENC_CIPHERTEXT_SIZE],
 }
 
-impl ShieldedOutput<OrchardDomain, ENC_CIPHERTEXT_SIZE> for FullOutput {
+impl<V: DomainVersion> ShieldedOutput<NoteEncryptionDomain<V>, ENC_CIPHERTEXT_SIZE> for FullOutput {
     fn ephemeral_key(&self) -> EphemeralKeyBytes { EphemeralKeyBytes(self.epk) }
     fn cmstar_bytes(&self) -> [u8; 32] { self.cmx }
     fn enc_ciphertext(&self) -> &[u8; ENC_CIPHERTEXT_SIZE] { &self.enc }
+}
+
+/// The note-encryption domain for a scanned action, carried from the compact-decrypt phase to
+/// the async full-ciphertext memo-decrypt phase. Released orchard makes `OrchardDomain` and
+/// `IronwoodDomain` distinct enforced types, so the pool's domain is threaded as an enum
+/// rather than a single concrete `OrchardDomain`.
+enum ScanDomain {
+    Orchard(OrchardDomain),
+    Ironwood(IronwoodDomain),
 }
 
 /// Locate the 580-byte enc_ciphertext for an action matching `(cmx, epk)` within a raw V5
@@ -403,7 +419,13 @@ async fn extract_deposit_from_action(
     let parsed_memo = match client.get_transaction(&action.txid).await {
         Ok(raw_tx) => extract_enc_ciphertext(&raw_tx, &action.cmx, &action.ephemeral_key).and_then(|enc| {
             let full = FullOutput { epk: action.ephemeral_key, cmx: action.cmx, enc };
-            try_note_decryption(&domain, ivk_ext, &full).and_then(|(_, _, memo)| parse_payout_memo(&memo))
+            // Full-ciphertext memo decryption must use the SAME enforced domain the compact
+            // decryption succeeded under (OrchardDomain for V2, IronwoodDomain for V3).
+            let decrypted = match &domain {
+                ScanDomain::Orchard(d) => try_note_decryption(d, ivk_ext, &full),
+                ScanDomain::Ironwood(d) => try_note_decryption(d, ivk_ext, &full),
+            };
+            decrypted.and_then(|(_, _, memo)| parse_payout_memo(&memo))
         }),
         Err(e) => {
             tracing::warn!("scanner: get_transaction failed, leaving memo unparsed: {}", e);
@@ -420,8 +442,9 @@ async fn extract_deposit_from_action(
 /// `pool` we scanned it from, verify the cmx (anti-malicious-zidecar), attribute a seat, and
 /// build a `DepositNote` whose memo fields (`payout_address` / `identity_pubkey`) are left
 /// `None` for the caller to fill from a full-tx re-decryption. Returns the note plus the
-/// `OrchardDomain` so the caller can reuse it for that memo decryption. `None` if the action
-/// is undecryptable, mis-versioned, cmx-mismatched, or lands on an unattributed diversifier.
+/// pool's `ScanDomain` (OrchardDomain for V2, IronwoodDomain for V3) so the caller can reuse
+/// it for that memo decryption. `None` if the action is undecryptable, mis-versioned,
+/// cmx-mismatched, or lands on an unattributed diversifier.
 fn decrypt_action_to_note(
     ivk_ext: &PreparedIncomingViewingKey,
     seat_addr_bytes: &[Option<[u8; 43]>],
@@ -429,7 +452,7 @@ fn decrypt_action_to_note(
     block_height: u32,
     position: u64,
     pool: NotePool,
-) -> Option<(DepositNote, OrchardDomain)> {
+) -> Option<(DepositNote, ScanDomain)> {
     if action.ciphertext.len() < 52 {
         return None;
     }
@@ -444,16 +467,32 @@ fn decrypt_action_to_note(
         EphemeralKeyBytes(action.ephemeral_key),
         ct,
     );
-    let domain = OrchardDomain::for_compact_action(&compact);
     let output = CompactOutput { epk: action.ephemeral_key, cmx: action.cmx, ct };
 
-    let (note, addr) = try_compact_note_decryption(&domain, ivk_ext, &output)?;
+    // Trial-decrypt against the domain for the POOL this action came from. Released orchard
+    // enforces the plaintext version per domain, so an Orchard-bundle action goes through
+    // `OrchardDomain` (V2) and an Ironwood-bundle action through `IronwoodDomain` (V3). The
+    // ScanDomain is carried out so the async caller can reuse it for full-ciphertext memo
+    // decryption. Mirrors zcash-wasm's per-pool `try_compact_decrypt_in`.
+    let (note, addr, domain) = match pool {
+        NotePool::Orchard => {
+            let d = OrchardDomain::for_compact_action(&compact);
+            let (note, addr) = try_compact_note_decryption(&d, ivk_ext, &output)?;
+            (note, addr, ScanDomain::Orchard(d))
+        }
+        NotePool::Ironwood => {
+            let d = IronwoodDomain::for_compact_action(&compact);
+            let (note, addr) = try_compact_note_decryption(&d, ivk_ext, &output)?;
+            (note, addr, ScanDomain::Ironwood(d))
+        }
+    };
 
     // Pool/version consistency: an Orchard-bundle action must decrypt to a V2 note and an
-    // Ironwood-bundle action to a V3 note. If the recovered version disagrees with the pool
-    // we scanned it from, the action was mis-bundled (or a malicious zidecar mixed pools) —
-    // skip it rather than persist a note whose stored pool would spend it via the wrong
-    // builder method later.
+    // Ironwood-bundle action to a V3 note. The enforced domain above already guarantees this,
+    // but the check stays as fail-closed defense-in-depth: if the recovered version disagrees
+    // with the pool we scanned it from, the action was mis-bundled (or a malicious zidecar
+    // mixed pools) — skip it rather than persist a note whose stored pool would spend it via
+    // the wrong builder method later.
     if note.version() != pool.note_version() {
         tracing::warn!(
             "scanner: note version {:?} does not match scanned pool {:?}, skipping action",
@@ -502,7 +541,7 @@ mod tests {
     use super::*;
     use orchard::keys::{OutgoingViewingKey, SpendingKey};
     use orchard::note::{NoteVersion, Rho};
-    use orchard::note_encryption::OrchardNoteEncryption;
+    use orchard::note_encryption::{IronwoodNoteEncryption, OrchardNoteEncryption};
     use orchard::value::NoteValue;
     use orchard::Note;
     // `epk_bytes` is a method on the `Domain` trait — bring it in scope so we can call
@@ -547,10 +586,22 @@ mod tests {
         ))
         .expect("note from_parts");
 
-        // No OVK → recipient-only; memo empty (compact scan ignores memo anyway).
-        let encryptor = OrchardNoteEncryption::new(None::<OutgoingViewingKey>, note, [0u8; 512]);
-        let epk = OrchardDomain::epk_bytes(encryptor.epk()).0;
-        let enc = encryptor.encrypt_note_plaintext();
+        // No OVK → recipient-only; memo empty (compact scan ignores memo anyway). Released
+        // orchard enforces the domain per note version, so encrypt V2 notes with the Orchard
+        // domain and V3 (Ironwood) notes with the Ironwood domain — exactly how a real wallet
+        // and the on-chain producer emit them. Encrypting a V3 note under the Orchard domain
+        // (as the fork permitted) would no longer round-trip through the scanner.
+        let (epk, enc) = match version {
+            NoteVersion::V2 => {
+                let e = OrchardNoteEncryption::new(None::<OutgoingViewingKey>, note, [0u8; 512]);
+                (OrchardDomain::epk_bytes(e.epk()).0, e.encrypt_note_plaintext())
+            }
+            NoteVersion::V3 => {
+                let e = IronwoodNoteEncryption::new(None::<OutgoingViewingKey>, note, [0u8; 512]);
+                (IronwoodDomain::epk_bytes(e.epk()).0, e.encrypt_note_plaintext())
+            }
+            other => panic!("mk_compact_action: unsupported note version {:?}", other),
+        };
         let cmx = orchard::note::ExtractedNoteCommitment::from(note.commitment()).to_bytes();
 
         let action = zecli::client::CompactAction {
@@ -670,7 +721,14 @@ mod tests {
             eprintln!("skipping — zero FVK is invalid (expected)");
             return;
         }
-        let _ = scan(&client, &fvk.unwrap(), tip.saturating_sub(3), &[None, None]).await;
+        let _ = scan(
+            &client,
+            &fvk.unwrap(),
+            tip.saturating_sub(3),
+            &[None, None],
+            zcash_protocol::consensus::NetworkType::Main,
+        )
+        .await;
     }
 
     /// Verify the deployed zidecar actually SERVES `GetMempoolStream` (it landed 2026-03-15;
