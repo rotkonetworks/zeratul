@@ -43,61 +43,75 @@ export interface HandLog {
 }
 
 export interface Transcript {
-  /** append an action to the CURRENT hand's log */
-  record: (entry: Omit<TranscriptEntry, 'localTs'>) => void
-  /** get the current hand's log */
+  /** append an action to a specific hand's log (the 1-based hand number). Keyed
+   *  by hand so a signature recorded LATE (signing is async) still lands in its
+   *  own hand, not whatever hand happens to be current when it resolves. */
+  record: (hand: number, entry: Omit<TranscriptEntry, 'localTs'>) => void
+  /** every action recorded so far, across all hands, in record order. */
   entries: () => readonly TranscriptEntry[]
-  /** finish the current hand: append {deal, entries} to the match and start a
-   *  fresh entry log for the next hand. */
-  finishHand: (deal: Deal) => void
-  /** all completed hands of the match so far (for a settle-by-replay). */
+  /** mark a hand complete and attach its revealed deal. Does NOT clear entries -
+   *  a late-arriving signature for this hand can still be recorded into it. */
+  finishHand: (hand: number, deal: Deal) => void
+  /** the completed hands of the match, in play order, each with entries sorted
+   *  by seq - the shape the escrow's settle-by-replay expects. */
   hands: () => readonly HandLog[]
-  /** hash of the current hand's log (for dispute) */
+  /** hash of the whole recorded log (for dispute) */
   hash: () => Promise<string>
-  /** reset everything for a brand-new MATCH (clears finished hands too) */
+  /** reset everything for a brand-new MATCH */
   reset: () => void
-  /** check if opponent exceeded timeout between last action and now */
+  /** check if opponent exceeded timeout between the last recorded action and now */
   checkTimeout: (timeoutMs: number) => { exceeded: boolean; elapsed: number; lastRelayTs: number }
 }
 
 export function createTranscript(): Transcript {
-  let log: TranscriptEntry[] = []
-  let matchHands: HandLog[] = []
+  // entries bucketed by hand number, so async-recorded signatures land in the
+  // right hand regardless of when they resolve.
+  let byHand = new Map<number, TranscriptEntry[]>()
+  let deals = new Map<number, Deal>()
+  let order: number[] = []            // hands in completion order
+  let last: TranscriptEntry | null = null // most recent record, for checkTimeout
 
-  function record(entry: Omit<TranscriptEntry, 'localTs'>) {
-    log.push({ ...entry, localTs: Date.now() })
+  function record(hand: number, entry: Omit<TranscriptEntry, 'localTs'>) {
+    const full = { ...entry, localTs: Date.now() }
+    let bucket = byHand.get(hand)
+    if (!bucket) { bucket = []; byHand.set(hand, bucket) }
+    bucket.push(full)
+    last = full
   }
 
   function entries(): readonly TranscriptEntry[] {
-    return log
+    return Array.from(byHand.values()).flat()
   }
 
-  function finishHand(deal: Deal) {
-    matchHands.push({ deal, entries: log })
-    log = []
+  function finishHand(hand: number, deal: Deal) {
+    deals.set(hand, deal)
+    if (!order.includes(hand)) order.push(hand)
   }
 
   function hands(): readonly HandLog[] {
-    return matchHands
+    return order.map(h => ({
+      deal: deals.get(h)!,
+      entries: (byHand.get(h) ?? []).slice().sort((a, b) => a.seq - b.seq),
+    }))
   }
 
   async function hash(): Promise<string> {
-    const data = JSON.stringify(log)
+    const data = JSON.stringify(entries())
     const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(data))
     return Array.from(new Uint8Array(buf)).map(b => b.toString(16).padStart(2, '0')).join('')
   }
 
   function reset() {
-    log = []
-    matchHands = []
+    byHand = new Map()
+    deals = new Map()
+    order = []
+    last = null
   }
 
-  /** check time since last action using relay timestamps */
+  /** check time since the last recorded action using relay timestamps */
   function checkTimeout(timeoutMs: number): { exceeded: boolean; elapsed: number; lastRelayTs: number } {
-    if (log.length === 0) return { exceeded: false, elapsed: 0, lastRelayTs: 0 }
-    const last = log[log.length - 1]!
+    if (!last) return { exceeded: false, elapsed: 0, lastRelayTs: 0 }
     const now = Date.now()
-    // use relay timestamp if available, fall back to local
     const lastTs = last.relayTs || last.localTs
     const elapsed = now - lastTs
     return { exceeded: elapsed > timeoutMs, elapsed, lastRelayTs: lastTs }

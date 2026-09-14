@@ -228,7 +228,7 @@ export function createGame(
     // its signed actions) so a settle-by-replay can adjudicate the whole match.
     const hole: [[number, number], [number, number]] =
       mySeat === 0 ? [myCards, oppCards] : [oppCards, myCards]
-    transcript.finishHand({ hole, community })
+    transcript.finishHand(handNum, { hole, community })
     // check if someone is busted using the last known stacks
     // (not engine stacks — guest engine doesn't call showdown)
     const [s0, s1] = lastStacks
@@ -438,7 +438,9 @@ export function createGame(
 
     if (identity) {
       signAction(identity, hand, mySeat, action, amount, seq).then(sig => {
-        transcript.record({ seq, seat: mySeat, action, amount, sig, sessionPub: identity.sessionPubKey, relayTs: 0 })
+        // keyed by the captured `hand`, so this late (async) signature lands in
+        // its own hand even if the next hand has already begun.
+        transcript.record(hand, { seq, seat: mySeat, action, amount, sig, sessionPub: identity.sessionPubKey, relayTs: 0 })
       })
     }
   }
@@ -505,7 +507,7 @@ export function createGame(
         clearOppTimer() // M4: only clear after valid action
         // transcript filter: record opponent's signed action
         if (d.sig && d.seq) {
-          transcript.record({ seq: d.seq, seat: oppSeat, action: d.action, amount: d.amount ?? 0, sig: d.sig, sessionPub: '', relayTs: msg.relayTs ?? 0 })
+          transcript.record(handNum, { seq: d.seq, seat: oppSeat, action: d.action, amount: d.amount ?? 0, sig: d.sig, sessionPub: '', relayTs: msg.relayTs ?? 0 })
         }
         dispatch(events, oppSeat)
         break
