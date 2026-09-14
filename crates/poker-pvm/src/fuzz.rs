@@ -95,6 +95,8 @@ mod fuzz_tests {
             turn_timeout_blocks: 6,
             rake_bps,
             rake_cap: 50,
+            level_hands: 0,
+            blind_growth_pct: 0,
         };
         let initial_total = rules.buyin * num_players as u32;
         let mut state = GameState::new(rules, num_players);
@@ -234,7 +236,7 @@ mod fuzz_tests {
 
         // very short stacks (1 BB each)
         for _ in 0..200 {
-            let rules = Rules { buyin: 10, small_blind: 5, big_blind: 10, turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0 };
+            let rules = Rules { buyin: 10, small_blind: 5, big_blind: 10, turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0, level_hands: 0, blind_growth_pct: 0 };
             let mut state = GameState::new(rules, 2);
             let initial = 20;
             let (cards, comm) = deal_random_cards(&mut rng, 2);
