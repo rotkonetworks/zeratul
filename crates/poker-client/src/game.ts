@@ -433,7 +433,7 @@ export function createGame(
     // M2: send wire message BEFORE dispatch to prevent reordering
     // dispatch is synchronous but signing is async — send unsigned first,
     // then record signed version in transcript when sig resolves
-    send({ t: 'action', d: { action, amount, seq } })
+    send({ t: 'action', d: { action, amount, seq, hand } })
     dispatch(events, mySeat)
 
     if (identity) {
@@ -441,6 +441,10 @@ export function createGame(
         // keyed by the captured `hand`, so this late (async) signature lands in
         // its own hand even if the next hand has already begun.
         transcript.record(hand, { seq, seat: mySeat, action, amount, sig, sessionPub: identity.sessionPubKey, relayTs: 0 })
+        // deliver the signature to the opponent AFTER the unsigned action, so a
+        // relay/server can build a verifiable signed transcript without ever
+        // reordering the action itself (which was sent above, before dispatch).
+        send({ t: 'action_sig', d: { hand, seq, sig } })
       })
     }
   }
@@ -505,11 +509,26 @@ export function createGame(
           break
         }
         clearOppTimer() // M4: only clear after valid action
-        // transcript filter: record opponent's signed action
-        if (d.sig && d.seq) {
-          transcript.record(handNum, { seq: d.seq, seat: oppSeat, action: d.action, amount: d.amount ?? 0, sig: d.sig, sessionPub: '', relayTs: msg.relayTs ?? 0 })
+        // transcript filter: record opponent's action. the signature arrives
+        // separately (t: 'action_sig'), so record with an empty sig now and let
+        // attachSig fill it in when it lands. bucket by the wire hand so the
+        // later action_sig lookup for (hand, seq) matches this entry.
+        if (typeof d.seq === 'number') {
+          const oppHand = typeof d.hand === 'number' ? d.hand : handNum
+          transcript.record(oppHand, { seq: d.seq, seat: oppSeat, action: d.action, amount: d.amount ?? 0, sig: '', sessionPub: '', relayTs: msg.relayTs ?? 0 })
         }
         dispatch(events, oppSeat)
+        break
+      }
+
+      case 'action_sig': {
+        // late-arriving signature for a previously recorded opponent action.
+        // find the entry for (hand, seq) and set its sig. no-op if missing -
+        // e.g. the action was rejected above and never recorded.
+        const d = msg.d as any
+        if (typeof d.hand === 'number' && typeof d.seq === 'number' && d.sig) {
+          transcript.attachSig(d.hand, d.seq, d.sig)
+        }
         break
       }
 

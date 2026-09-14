@@ -47,6 +47,12 @@ export interface Transcript {
    *  by hand so a signature recorded LATE (signing is async) still lands in its
    *  own hand, not whatever hand happens to be current when it resolves. */
   record: (hand: number, entry: Omit<TranscriptEntry, 'localTs'>) => void
+  /** attach a late-arriving signature to an already-recorded entry, matched by
+   *  (hand, seq). Signatures are computed and delivered asynchronously, after
+   *  the unsigned action, so an entry is often recorded with an empty sig first
+   *  and filled in here. No-op if no entry matches (e.g. a rejected action was
+   *  never recorded). */
+  attachSig: (hand: number, seq: number, sig: string) => void
   /** every action recorded so far, across all hands, in record order. */
   entries: () => readonly TranscriptEntry[]
   /** mark a hand complete and attach its revealed deal. Does NOT clear entries -
@@ -77,6 +83,13 @@ export function createTranscript(): Transcript {
     if (!bucket) { bucket = []; byHand.set(hand, bucket) }
     bucket.push(full)
     last = full
+  }
+
+  function attachSig(hand: number, seq: number, sig: string) {
+    const bucket = byHand.get(hand)
+    if (!bucket) return
+    const entry = bucket.find(e => e.seq === seq)
+    if (entry) entry.sig = sig
   }
 
   function entries(): readonly TranscriptEntry[] {
@@ -117,5 +130,5 @@ export function createTranscript(): Transcript {
     return { exceeded: elapsed > timeoutMs, elapsed, lastRelayTs: lastTs }
   }
 
-  return { record, entries, finishHand, hands, hash, reset, checkTimeout }
+  return { record, attachSig, entries, finishHand, hands, hash, reset, checkTimeout }
 }
