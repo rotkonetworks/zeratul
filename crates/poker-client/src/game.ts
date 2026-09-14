@@ -198,7 +198,9 @@ export function createGame(
     handNum++
     actionSeq = 0
     handGeneration++
-    transcript.reset()
+    // the match transcript accumulates every hand (for a whole-match settle-by
+    // -replay); only wipe it when a brand-new match begins (its first hand).
+    if (handNum === 1) transcript.reset()
     console.log('[deal] pre-deal stacks=', JSON.stringify(engineApi!.stacks()), 'btn=', engineApi!.button())
     engineApi!.deal(myCards, oppCards, community, isHost)
     console.log('[deal] post-deal stacks=', JSON.stringify(engineApi!.stacks()), 'pot=', engineApi!.pot())
@@ -222,6 +224,11 @@ export function createGame(
   function handComplete() {
     clearTurnTimer()
     clearOppTimer()
+    // seal this hand into the match transcript (seat-ordered revealed deal +
+    // its signed actions) so a settle-by-replay can adjudicate the whole match.
+    const hole: [[number, number], [number, number]] =
+      mySeat === 0 ? [myCards, oppCards] : [oppCards, myCards]
+    transcript.finishHand({ hole, community })
     // check if someone is busted using the last known stacks
     // (not engine stacks — guest engine doesn't call showdown)
     const [s0, s1] = lastStacks
@@ -421,6 +428,7 @@ export function createGame(
 
     actionSeq++
     const seq = actionSeq // capture before async
+    const hand = handNum // capture the hand this action belongs to
 
     // M2: send wire message BEFORE dispatch to prevent reordering
     // dispatch is synchronous but signing is async — send unsigned first,
@@ -429,7 +437,7 @@ export function createGame(
     dispatch(events, mySeat)
 
     if (identity) {
-      signAction(identity, mySeat, action, amount, seq).then(sig => {
+      signAction(identity, hand, mySeat, action, amount, seq).then(sig => {
         transcript.record({ seq, seat: mySeat, action, amount, sig, sessionPub: identity.sessionPubKey, relayTs: 0 })
       })
     }

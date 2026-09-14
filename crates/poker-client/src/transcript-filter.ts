@@ -28,14 +28,33 @@ export interface TranscriptEntry {
   relayTs: number
 }
 
+/** the revealed deal for one hand (seat-ordered hole cards + community), as
+ *  card indices 0..51 - the same encoding the engine and escrow use. */
+export interface Deal {
+  hole: [[number, number], [number, number]]
+  community: number[]
+}
+
+/** one played hand of a match: its deal + the signed action log for that hand.
+ *  Matches the escrow's HandLog (poker-escrow/src/transcript.rs). */
+export interface HandLog {
+  deal: Deal
+  entries: TranscriptEntry[]
+}
+
 export interface Transcript {
-  /** append an action to the log */
+  /** append an action to the CURRENT hand's log */
   record: (entry: Omit<TranscriptEntry, 'localTs'>) => void
-  /** get the full log */
+  /** get the current hand's log */
   entries: () => readonly TranscriptEntry[]
-  /** hash of the transcript (for dispute) */
+  /** finish the current hand: append {deal, entries} to the match and start a
+   *  fresh entry log for the next hand. */
+  finishHand: (deal: Deal) => void
+  /** all completed hands of the match so far (for a settle-by-replay). */
+  hands: () => readonly HandLog[]
+  /** hash of the current hand's log (for dispute) */
   hash: () => Promise<string>
-  /** reset for new hand */
+  /** reset everything for a brand-new MATCH (clears finished hands too) */
   reset: () => void
   /** check if opponent exceeded timeout between last action and now */
   checkTimeout: (timeoutMs: number) => { exceeded: boolean; elapsed: number; lastRelayTs: number }
@@ -43,6 +62,7 @@ export interface Transcript {
 
 export function createTranscript(): Transcript {
   let log: TranscriptEntry[] = []
+  let matchHands: HandLog[] = []
 
   function record(entry: Omit<TranscriptEntry, 'localTs'>) {
     log.push({ ...entry, localTs: Date.now() })
@@ -50,6 +70,15 @@ export function createTranscript(): Transcript {
 
   function entries(): readonly TranscriptEntry[] {
     return log
+  }
+
+  function finishHand(deal: Deal) {
+    matchHands.push({ deal, entries: log })
+    log = []
+  }
+
+  function hands(): readonly HandLog[] {
+    return matchHands
   }
 
   async function hash(): Promise<string> {
@@ -60,6 +89,7 @@ export function createTranscript(): Transcript {
 
   function reset() {
     log = []
+    matchHands = []
   }
 
   /** check time since last action using relay timestamps */
@@ -73,5 +103,5 @@ export function createTranscript(): Transcript {
     return { exceeded: elapsed > timeoutMs, elapsed, lastRelayTs: lastTs }
   }
 
-  return { record, entries, hash, reset, checkTimeout }
+  return { record, entries, finishHand, hands, hash, reset, checkTimeout }
 }
