@@ -2532,7 +2532,7 @@ async fn tournament_match_room(
     let sb = (bb / 2).max(1);
     // provision the per-match 2-of-3 FROST escrow (same path as a cash table). rake_bps = 0:
     // the org takes nothing — winner gets the pot minus only the network fee.
-    let escrow = remote_escrow_for(&state.escrow_url, &code, stake, 0).await;
+    let escrow = remote_escrow_for(&state.escrow_url, &code, stake, 0, sb, bb).await;
     if !escrow.is_staked() {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -2974,9 +2974,11 @@ async fn remote_escrow_for(
     code: &str,
     required_deposit: u64,
     rake_bps: u16,
+    sb: u64,
+    bb: u64,
 ) -> RemoteEscrow {
     let Some(url) = escrow_url.as_deref() else { return RemoteEscrow::default(); };
-    match escrow_client::create_escrow(url, code, required_deposit, rake_bps).await {
+    match escrow_client::create_escrow(url, code, required_deposit, rake_bps, sb, bb).await {
         Ok(setup) => {
             if setup.dkg_mode {
                 tracing::info!(
@@ -3036,7 +3038,7 @@ async fn create_room(
     let external_escrow = if bot_friendly {
         RemoteEscrow { address: Some(String::new()), ..Default::default() }
     } else {
-        remote_escrow_for(&state.escrow_url, &code, buyin, rake_bps).await
+        remote_escrow_for(&state.escrow_url, &code, buyin, rake_bps, sb, bb).await
     };
     // staked class is decided here from the escrow we actually got — if the escrow service was
     // unreachable, `external_escrow` is empty ⇒ non-staked ⇒ no deposit poller.
