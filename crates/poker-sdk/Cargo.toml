@@ -37,7 +37,8 @@ decaf377 = { version = "0.10", optional = true }
 decaf377-ka = { version = "2.1", optional = true }
 
 # proof generation
-ligerito = { path = "../../../zcli/crates/ligerito", default-features = false, optional = true }
+# ligerito moved out of zcli into its own repo (crates.io: ligerito 0.6.x)
+ligerito = { git = "https://github.com/rotkonetworks/ligerito", rev = "433c1f6f7ee3e48b0cff26a12c09539cc7c7663b", default-features = false, optional = true }
 
 # frostito: nested FROST + OSST for escrow
 osst = { path = "../osst", features = ["pallas"] }
