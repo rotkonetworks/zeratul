@@ -139,15 +139,21 @@ export async function createSessionIdentity(room: string): Promise<SessionIdenti
   }
 }
 
-/** sign a game action: seat|action|amount|seq → sig */
+/** sign a game action: hand|seat|action|amount|seq → sig.
+ *  `hand` is the 1-based hand number within the match; seq restarts at 1 each
+ *  hand, so binding the hand number stops a signature made in one hand from
+ *  being replayed as a valid action in another. Must stay byte-identical with
+ *  the escrow jury (poker-escrow/src/transcript.rs action_message) and the
+ *  poker-server audit hash. */
 export async function signAction(
   identity: SessionIdentity,
+  hand: number,
   seat: number,
   action: string,
   amount: number,
   seq: number,
 ): Promise<string> {
-  const msg = `${seat}|${action}|${amount}|${seq}`
+  const msg = `${hand}|${seat}|${action}|${amount}|${seq}`
   return identity.sign(new TextEncoder().encode(msg))
 }
 

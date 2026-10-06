@@ -349,19 +349,59 @@ pub async fn report_fault(base_url: &str, code: &str, seat: u8, phase: &str, det
     Ok(())
 }
 
-/// POST /room — ask poker-escrow to generate a fresh FROST escrow for a room.
+/// The agreed CHIP-level poker rules poker-server pins into the escrow at room creation, so a
+/// settle-by-replay adjudicates with the exact blinds (and tournament schedule) both seats
+/// consented to instead of trusting the transcript submitter. Serde keys MUST match the escrow's
+/// `transcript::RulesSpec`: buyin/sb/bb/levelHands/blindGrowthPct.
+#[derive(Debug, Clone, Serialize)]
+pub struct EscrowRulesSpec {
+    pub buyin: u64,
+    pub sb: u64,
+    pub bb: u64,
+    /// tournament blind schedule: hands per blind level (0 = fixed blinds).
+    #[serde(rename = "levelHands")]
+    pub level_hands: u32,
+    /// compounding blind growth per level in percent (0 = fixed blinds).
+    #[serde(rename = "blindGrowthPct")]
+    pub blind_growth_pct: u16,
+}
+
+/// Body for `POST /room` — provision a fresh FROST escrow for a room. `rules` is optional so old
+/// behavior (no pinned rules) is preserved when absent.
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateRoomReq {
+    pub code: String,
+    pub required_deposit: u64,
+    pub rake_bps: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rules: Option<EscrowRulesSpec>,
+}
+
+/// POST /room — ask poker-escrow to generate a fresh FROST escrow for a room. `sb`/`bb` are the
+/// negotiated table blinds; together with `required_deposit` (the chip buy-in) they are pinned as
+/// the escrow's agreed rules. poker-server tracks no tournament blind schedule, so `levelHands`
+/// and `blindGrowthPct` are 0 (fixed blinds).
 pub async fn create_escrow(
     base_url: &str,
     code: &str,
     required_deposit: u64,
     rake_bps: u16,
+    sb: u64,
+    bb: u64,
 ) -> Result<EscrowSetup, String> {
     let url = format!("{}/room", base_url.trim_end_matches('/'));
-    let body = serde_json::json!({
-        "code": code,
-        "required_deposit": required_deposit,
-        "rake_bps": rake_bps,
-    });
+    let body = CreateRoomReq {
+        code: code.to_string(),
+        required_deposit,
+        rake_bps,
+        rules: Some(EscrowRulesSpec {
+            buyin: required_deposit,
+            sb,
+            bb,
+            level_hands: 0,
+            blind_growth_pct: 0,
+        }),
+    };
     let resp = reqwest::Client::new()
         .post(&url)
         .json(&body)
@@ -422,5 +462,44 @@ mod tests {
         let body = serde_json::json!({ "relay_room": "abc123" });
         let resp: InitiatePayoutResp = serde_json::from_value(body).unwrap();
         assert_eq!(resp.relay_room.as_deref(), Some("abc123"));
+    }
+
+    // Contract lock: the create-room request pins the agreed CHIP-level rules under the EXACT keys
+    // the escrow's transcript::RulesSpec deserializes - buyin/sb/bb/levelHands/blindGrowthPct. A
+    // rename drift here would silently drop the pinned rules (serde(default) -> None on the escrow).
+    #[test]
+    fn create_room_req_pins_rules_with_escrow_serde_keys() {
+        let req = CreateRoomReq {
+            code: "ROOM1".to_string(),
+            required_deposit: 1000,
+            rake_bps: 250,
+            rules: Some(EscrowRulesSpec {
+                buyin: 1000,
+                sb: 5,
+                bb: 10,
+                level_hands: 0,
+                blind_growth_pct: 0,
+            }),
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        let rules = v.get("rules").expect("create-room req must carry a rules object");
+        assert_eq!(rules.get("buyin").and_then(|x| x.as_u64()), Some(1000));
+        assert_eq!(rules.get("sb").and_then(|x| x.as_u64()), Some(5));
+        assert_eq!(rules.get("bb").and_then(|x| x.as_u64()), Some(10));
+        assert_eq!(rules.get("levelHands").and_then(|x| x.as_u64()), Some(0));
+        assert_eq!(rules.get("blindGrowthPct").and_then(|x| x.as_u64()), Some(0));
+    }
+
+    // With no rules, the request omits the field entirely so legacy escrow behavior is unchanged.
+    #[test]
+    fn create_room_req_omits_rules_when_none() {
+        let req = CreateRoomReq {
+            code: "ROOM2".to_string(),
+            required_deposit: 1000,
+            rake_bps: 0,
+            rules: None,
+        };
+        let v = serde_json::to_value(&req).unwrap();
+        assert!(v.get("rules").is_none(), "None rules must not serialize a key at all");
     }
 }

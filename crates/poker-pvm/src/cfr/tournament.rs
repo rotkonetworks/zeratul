@@ -326,7 +326,8 @@ fn build_gs(stacks: &[u64; 2], bets: &[u64; 2], pot: u64, community: &[u8; 5],
         round_actions: 0, last_aggressor: 0, action_count: 0,
         last_action_hash: [0; 32], rake: 0,
         rules: Rules { buyin: 1000, small_blind: 5, big_blind: 10,
-                       turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0 },
+                       turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0,
+                       level_hands: 0, blind_growth_pct: 0 },
     }
 }
 

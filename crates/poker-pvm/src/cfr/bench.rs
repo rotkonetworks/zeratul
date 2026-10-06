@@ -265,6 +265,7 @@ fn play_match(
     let rules = Rules {
         buyin: 1000, small_blind: 5, big_blind: 10,
         turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0,
+        level_hands: 0, blind_growth_pct: 0,
     };
     let bb = rules.big_blind as i64;
     let mut total_profit: i64 = 0;
@@ -370,6 +371,7 @@ fn play_match_bot(
     let rules = Rules {
         buyin: 1000, small_blind: 5, big_blind: 10,
         turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0,
+        level_hands: 0, blind_growth_pct: 0,
     };
     let mut total_profit: i64 = 0;
     let mut stats = MatchStats { hands: 0, vpip: 0, pfr: 0, aggressive: 0, passive: 0, cfr_hits: 0, cfr_misses: 0 };

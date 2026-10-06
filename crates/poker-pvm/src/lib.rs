@@ -98,11 +98,78 @@ pub struct Rules {
     pub rake_bps: u16,
     /// max rake per pot (0 = unlimited)
     pub rake_cap: u32,
+    /// tournament blind schedule: number of hands per blind level. 0 = fixed
+    /// blinds (cash game / no schedule). When > 0, the small/big blind grow by
+    /// `blind_growth_pct` every `level_hands` hands - hand-count driven, not a
+    /// wall clock, so the escalation replays byte-identically on both engines.
+    pub level_hands: u32,
+    /// compounding blind growth per level, in percent (200 = double each level,
+    /// 150 = x1.5 "turbo"). 0 (with any level_hands) also means fixed blinds.
+    pub blind_growth_pct: u16,
 }
 
 impl Default for Rules {
     fn default() -> Self {
-        Self { buyin: 1000, small_blind: 5, big_blind: 10, turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0 }
+        Self {
+            buyin: 1000, small_blind: 5, big_blind: 10, turn_timeout_blocks: 6,
+            rake_bps: 0, rake_cap: 0, level_hands: 0, blind_growth_pct: 0,
+        }
+    }
+}
+
+impl Rules {
+    /// A standard turbo tournament, tuned for our short heads-up matches: start
+    /// small_blind/big_blind, then compound x1.5 every `level_hands` hands. This
+    /// is the "real poker world" turbo cadence with our deterministic touch -
+    /// levels tick by hand count so a replay lands on the exact same blinds.
+    pub const TURBO_GROWTH_PCT: u16 = 150;
+    /// A hyper-turbo: same table but blinds accelerate harder (double per level).
+    pub const HYPER_GROWTH_PCT: u16 = 200;
+
+    /// Effective (small_blind, big_blind) for `hand_number` (1-based, as set by
+    /// `deal()` before blinds are posted). Levels are 0-based: hands
+    /// 1..=level_hands are level 0 (the base blinds), the next block is level 1,
+    /// and each level multiplies both blinds by `blind_growth_pct`/100. Fixed
+    /// blinds when no schedule is configured. Pure + deterministic (integer only)
+    /// so host and peer, and any later replay, always agree.
+    pub fn effective_blinds(&self, hand_number: u32) -> (u32, u32) {
+        if self.level_hands == 0 || self.blind_growth_pct == 0 {
+            return (self.small_blind, self.big_blind);
+        }
+        let level = hand_number.saturating_sub(1) / self.level_hands;
+        let mut sb = self.small_blind as u64;
+        let mut bb = self.big_blind as u64;
+        // cap the compounding so a very long match can't overflow; by ~32 levels
+        // the blinds already dwarf any sane starting stack and every hand is an
+        // all-in, which is the intended "someone busts fast" endgame anyway.
+        for _ in 0..level.min(32) {
+            sb = sb.saturating_mul(self.blind_growth_pct as u64) / 100;
+            bb = bb.saturating_mul(self.blind_growth_pct as u64) / 100;
+        }
+        (sb.min(u32::MAX as u64) as u32, bb.min(u32::MAX as u64) as u32)
+    }
+
+    /// Standard heads-up tournament preset with our short-match tuning: a
+    /// `buyin` starting stack (1500 is our default tournament stack), base
+    /// blinds 10/20, and a turbo schedule (x1.5 every `level_hands` hands). At
+    /// ~15-25 big blinds of starting stack this forces a decisive endgame in a
+    /// couple dozen hands, which is what we want for a fast bracket.
+    pub fn tournament_turbo(buyin: u32, level_hands: u32) -> Self {
+        Self {
+            buyin, small_blind: 10, big_blind: 20,
+            turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0,
+            level_hands, blind_growth_pct: Self::TURBO_GROWTH_PCT,
+        }
+    }
+
+    /// Hyper-turbo preset: blinds double per level, so matches end soonest -
+    /// use the smallest `level_hands` for the fastest bracket.
+    pub fn tournament_hyper(buyin: u32, level_hands: u32) -> Self {
+        Self {
+            buyin, small_blind: 10, big_blind: 20,
+            turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0,
+            level_hands, blind_growth_pct: Self::HYPER_GROWTH_PCT,
+        }
     }
 }
 
@@ -605,11 +672,14 @@ impl GameState {
         // busted seats are skipped consistently on both sides.
         self.button = self.button_for_hand();
 
-        // post blinds
+        // post blinds. blinds come from the tournament schedule as a pure
+        // function of hand_number (fixed when no schedule is set), so both
+        // engines - and any later transcript replay - post the identical amounts.
+        let (level_sb, level_bb) = self.rules.effective_blinds(self.hand_number);
         let sb = self.sb_seat() as usize;
         let bb = self.bb_seat() as usize;
-        let sb_amount = self.rules.small_blind.min(self.stacks[sb]);
-        let bb_amount = self.rules.big_blind.min(self.stacks[bb]);
+        let sb_amount = level_sb.min(self.stacks[sb]);
+        let bb_amount = level_bb.min(self.stacks[bb]);
         self.stacks[sb] -= sb_amount;
         self.stacks[bb] -= bb_amount;
         self.bets[sb] = sb_amount;
@@ -618,7 +688,7 @@ impl GameState {
         self.contributed[bb] += bb_amount;
         self.pot = sb_amount + bb_amount;
         // the BB posting sets the min-raise baseline for the preflop round.
-        self.last_raise_size = self.rules.big_blind;
+        self.last_raise_size = level_bb;
         // a blind that empties a short stack is an all-in
         if self.stacks[sb] == 0 { self.seat_state[sb] = SeatState::AllIn; }
         if self.stacks[bb] == 0 { self.seat_state[bb] = SeatState::AllIn; }
@@ -744,7 +814,7 @@ impl GameState {
                         return Err("raise below minimum");
                     }
                     let min_delta = if max_bet == 0 {
-                        self.rules.big_blind
+                        self.rules.effective_blinds(self.hand_number).1
                     } else {
                         to_call + self.last_raise_size
                     };
@@ -934,7 +1004,7 @@ impl GameState {
         self.bets = [0; MAX_SEATS];
         self.round_actions = 0;
         self.last_aggressor = 255;
-        self.last_raise_size = self.rules.big_blind;
+        self.last_raise_size = self.rules.effective_blinds(self.hand_number).1;
 
         // how many players can still act?
         let active_with_chips = (0..self.num_players as usize)
@@ -1273,6 +1343,7 @@ mod wasm {
                 state: GameState::new(Rules {
                     buyin, small_blind, big_blind,
                     turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0,
+                    level_hands: 0, blind_growth_pct: 0,
                 }, 2),
             }
         }
@@ -1283,12 +1354,39 @@ mod wasm {
                 state: GameState::new(Rules {
                     buyin, small_blind, big_blind,
                     turn_timeout_blocks: 6, rake_bps, rake_cap,
+                    level_hands: 0, blind_growth_pct: 0,
                 }, num_players),
             }
         }
 
         pub fn new_with_rake(buyin: u32, small_blind: u32, big_blind: u32, rake_bps: u16, rake_cap: u32) -> Self {
             Self::new_table(2, buyin, small_blind, big_blind, rake_bps, rake_cap)
+        }
+
+        /// Create a heads-up tournament game with a hand-count blind schedule.
+        /// Blinds start at (small_blind, big_blind) and are multiplied by
+        /// `blind_growth_pct` percent every `level_hands` hands (0 = fixed).
+        /// Presets: 150 = turbo (x1.5/level), 200 = hyper (x2/level). This is
+        /// what a client uses to run a fast bracket; the schedule replays
+        /// deterministically for escrow adjudication.
+        pub fn new_tournament(
+            buyin: u32, small_blind: u32, big_blind: u32,
+            level_hands: u32, blind_growth_pct: u16,
+        ) -> Self {
+            Self {
+                state: GameState::new(Rules {
+                    buyin, small_blind, big_blind,
+                    turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0,
+                    level_hands, blind_growth_pct,
+                }, 2),
+            }
+        }
+
+        /// Effective (small_blind, big_blind) at the current hand - lets the UI
+        /// show the live blind level as a match progresses.
+        pub fn current_blinds(&self) -> Vec<u32> {
+            let (sb, bb) = self.state.rules.effective_blinds(self.state.hand_number);
+            vec![sb, bb]
         }
 
         /// deal for 2 players (backwards compatible)
@@ -1433,6 +1531,61 @@ mod tests {
     }
 
     #[test]
+    fn effective_blinds_fixed_without_schedule() {
+        let r = Rules::default(); // level_hands = 0
+        assert_eq!(r.effective_blinds(1), (5, 10));
+        assert_eq!(r.effective_blinds(100), (5, 10));
+        // a level_hands with 0 growth is still fixed
+        let r2 = Rules { level_hands: 4, blind_growth_pct: 0, ..Rules::default() };
+        assert_eq!(r2.effective_blinds(50), (5, 10));
+    }
+
+    #[test]
+    fn effective_blinds_turbo_escalates_by_hand_count() {
+        // 10/20 base, x2 every 4 hands.
+        let r = Rules {
+            small_blind: 10, big_blind: 20,
+            level_hands: 4, blind_growth_pct: 200, ..Rules::default()
+        };
+        // level 0: hands 1..=4
+        assert_eq!(r.effective_blinds(1), (10, 20));
+        assert_eq!(r.effective_blinds(4), (10, 20));
+        // level 1: hands 5..=8 -> doubled
+        assert_eq!(r.effective_blinds(5), (20, 40));
+        assert_eq!(r.effective_blinds(8), (20, 40));
+        // level 2: hands 9..=12
+        assert_eq!(r.effective_blinds(9), (40, 80));
+        // level 3
+        assert_eq!(r.effective_blinds(13), (80, 160));
+    }
+
+    #[test]
+    fn turbo_schedule_drives_up_blinds_across_dealt_hands() {
+        // deal several hands with a turbo schedule and confirm the pot posted at
+        // the start of each hand climbs with the level (this is the whole point:
+        // short heads-up matches that end fast because blinds outrun the stacks).
+        let rules = Rules {
+            buyin: 100_000, small_blind: 10, big_blind: 20,
+            level_hands: 2, blind_growth_pct: 200, ..Rules::default()
+        };
+        let mut state = GameState::new(rules, 2);
+        let mut last_pot = 0;
+        let mut seen_growth = false;
+        for h in 1..=6u32 {
+            state.deal(&[[0, 1], [2, 3]], [4, 5, 6, 7, 8]);
+            assert_eq!(state.hand_number, h);
+            let (sb, bb) = rules.effective_blinds(h);
+            // posted pot is sb + bb (both stacks are deep, no all-in clamp)
+            assert_eq!(state.pot, sb + bb, "hand {h} pot mismatches schedule");
+            if h > 1 && state.pot > last_pot { seen_growth = true; }
+            last_pot = state.pot;
+            // fold to end the hand so the next deal advances hand_number.
+            let _ = state.apply(&make_action(state.acting_seat, Action::Fold, 0, 0));
+        }
+        assert!(seen_growth, "blinds never grew across the turbo schedule");
+    }
+
+    #[test]
     fn test_fold() {
         let mut state = GameState::new(Rules::default(), 2);
         state.deal(&[[0, 1], [2, 3]], [4, 5, 6, 7, 8]);
@@ -1499,7 +1652,7 @@ mod tests {
     #[test]
     fn test_3player_side_pot() {
         // 3 players with different stacks go all-in
-        let rules = Rules { buyin: 1000, small_blind: 5, big_blind: 10, turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0 };
+        let rules = Rules { buyin: 1000, small_blind: 5, big_blind: 10, turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0, level_hands: 0, blind_growth_pct: 0 };
         let mut state = GameState::new(rules, 3);
         // give different stacks: seat 0 = 100, seat 1 = 500, seat 2 = 1000
         state.stacks[0] = 100;
@@ -1705,7 +1858,7 @@ mod tests {
         // Chip conservation must hold, and the short best hand must not scoop
         // more than the main pot.
         let rules = Rules { buyin: 1000, small_blind: 5, big_blind: 10,
-            turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0 };
+            turn_timeout_blocks: 6, rake_bps: 0, rake_cap: 0, level_hands: 0, blind_growth_pct: 0 };
         let mut state = GameState::new(rules, 3);
         state.stacks[0] = 100;
         state.stacks[1] = 500;

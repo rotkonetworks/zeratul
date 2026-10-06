@@ -429,6 +429,20 @@ struct PayoutSigningState {
     broadcast_at: tokio::time::Instant,
 }
 
+/// Does a reconnecting/rejoining party's presented identity match the identity a seat
+/// already holds? Name must match; if the seat registered a pubkey the pubkey must match
+/// too (anon/name-only seats accept a name-only match). Pure and value-based so both the
+/// custodial reconnect (`find_reconnect_seat`) and the /p2p relay bridge reuse one rule
+/// rather than reinventing seat-identity matching per handler.
+fn seat_identity_matches(
+    seat_name: &str,
+    seat_pubkey: Option<&str>,
+    name: &str,
+    pubkey: Option<&str>,
+) -> bool {
+    seat_name == name && (seat_pubkey.is_none() || seat_pubkey == pubkey)
+}
+
 impl Room {
     fn new(code: String) -> Self {
         Self::with_settings(code, 5, 10, 1000, 30, 2, TableAccess::Public, false, RemoteEscrow::default())
@@ -550,9 +564,8 @@ impl Room {
     fn find_reconnect_seat(&self, name: &str, pubkey: Option<&str>) -> Option<usize> {
         self.players.iter().position(|p| {
             matches!(p, Some(p) if
-                p.name == name &&
                 p.disconnected_at.is_some() &&
-                (p.pubkey.is_none() || p.pubkey.as_deref() == pubkey)
+                seat_identity_matches(&p.name, p.pubkey.as_deref(), name, pubkey)
             )
         })
     }
@@ -1740,6 +1753,27 @@ async fn handle_relay_socket(socket: WebSocket, state: AppState) {
                         let mut r = room_arc.lock().await;
                         // staked only: DKG-mode escrow => frost coords present.
                         if r.staked && r.frost_room_code.is_some() {
+                            // Identity-bind the reconnect BEFORE wiring up any sink/forwarder.
+                            // This /p2p bridge maps a peer to a Room seat positionally (relay
+                            // join order). If that slot is already held, only the party that
+                            // held it - same name, and same pubkey if the seat registered one -
+                            // may reclaim it. This stops a THIRD PARTY from inheriting a dropped
+                            // seat and acting as it (Leave/Settlement). Relay joins carry no
+                            // pubkey (name-only identity), so we present None; the seat's own
+                            // pubkey, if any, still gates. On mismatch reject and `break`: the
+                            // peer already holds a relay slot (pushed at join), so `break` runs
+                            // the normal cleanup that retains it out, whereas `continue` would
+                            // leave it wedged and shift other seats.
+                            if let Some(Some(p)) = r.players.get(seat as usize) {
+                                if !seat_identity_matches(&p.name, p.pubkey.as_deref(), &my_nick, None) {
+                                    drop(r);
+                                    let _ = tx.send(frame(serde_json::json!({
+                                        "t": "error",
+                                        "msg": "seat held by another player - reconnect with the original name",
+                                    })));
+                                    break;
+                                }
+                            }
                             // per-connection ServerMsg channel; the Room writes control
                             // frames here via broadcast()/send_to() and we forward them
                             // to the socket as `srv` frames.
@@ -2532,7 +2566,7 @@ async fn tournament_match_room(
     let sb = (bb / 2).max(1);
     // provision the per-match 2-of-3 FROST escrow (same path as a cash table). rake_bps = 0:
     // the org takes nothing — winner gets the pot minus only the network fee.
-    let escrow = remote_escrow_for(&state.escrow_url, &code, stake, 0).await;
+    let escrow = remote_escrow_for(&state.escrow_url, &code, stake, 0, sb, bb).await;
     if !escrow.is_staked() {
         return (
             axum::http::StatusCode::SERVICE_UNAVAILABLE,
@@ -2974,9 +3008,11 @@ async fn remote_escrow_for(
     code: &str,
     required_deposit: u64,
     rake_bps: u16,
+    sb: u64,
+    bb: u64,
 ) -> RemoteEscrow {
     let Some(url) = escrow_url.as_deref() else { return RemoteEscrow::default(); };
-    match escrow_client::create_escrow(url, code, required_deposit, rake_bps).await {
+    match escrow_client::create_escrow(url, code, required_deposit, rake_bps, sb, bb).await {
         Ok(setup) => {
             if setup.dkg_mode {
                 tracing::info!(
@@ -3036,7 +3072,7 @@ async fn create_room(
     let external_escrow = if bot_friendly {
         RemoteEscrow { address: Some(String::new()), ..Default::default() }
     } else {
-        remote_escrow_for(&state.escrow_url, &code, buyin, rake_bps).await
+        remote_escrow_for(&state.escrow_url, &code, buyin, rake_bps, sb, bb).await
     };
     // staked class is decided here from the escrow we actually got — if the escrow service was
     // unreachable, `external_escrow` is empty ⇒ non-staked ⇒ no deposit poller.
@@ -3253,6 +3289,27 @@ async fn handle_socket(socket: WebSocket, state: AppState, code: String) {
             }
         }
     });
+
+    // Refuse the custodial server-engine attach for a staked/ZK (FROST) room. Such a room is
+    // driven exclusively by the /p2p relay bridge (handle_relay_socket) and the escrow raw
+    // -outputs endpoints; its payout MUST only ever settle via FROST. If this custodial handler
+    // attached, it would spawn the abandonment/timeout watcher below and could drive
+    // /payout/initiate on a room that must never see it (and block a later legitimate /settle).
+    // A newly-created room here has frost_room_code == None, so normal custodial tables (and
+    // plain-escrow staked tables with no DKG) are unaffected - only an existing FROST room is
+    // refused, which is exactly the cross-handler attach we are closing.
+    {
+        let r = room.lock().await;
+        if r.frost_room_code.is_some() {
+            drop(r);
+            let _ = tx.send(ServerMsg::Error {
+                message: "this table uses P2P escrow signing - connect via the /p2p relay".into(),
+            });
+            // Returning drops `tx`; the send task drains the queued Error frame (mpsc yields
+            // buffered items before None) and then closes the socket. No watcher is spawned.
+            return;
+        }
+    }
 
     // send room info immediately
     {
@@ -4256,5 +4313,47 @@ mod tests {
         room.players[1] = Some(test_player("b", None, false));
         assert_eq!(room.player_count(), 1);
         assert_eq!(room.find_reconnect_seat("anon", None), Some(0));
+    }
+
+    #[test]
+    fn seat_identity_name_only_seat_matches_by_name() {
+        // an anon (no-pubkey) seat accepts a name match regardless of presented pubkey - this is
+        // the relay-bridge case, where /p2p joins carry only a nick and no pubkey.
+        assert!(seat_identity_matches("alice", None, "alice", None));
+        assert!(seat_identity_matches("alice", None, "alice", Some("whatever")));
+        assert!(!seat_identity_matches("alice", None, "eve", None));
+    }
+
+    #[test]
+    fn seat_identity_pubkey_bound_seat_requires_pubkey() {
+        // a seat that registered a pubkey rejects a name-only or wrong-pubkey reclaim, so a relay
+        // reconnect (which presents no pubkey) cannot reclaim a pubkey-bound seat.
+        assert!(seat_identity_matches("alice", Some("pk1"), "alice", Some("pk1")));
+        assert!(!seat_identity_matches("alice", Some("pk1"), "alice", Some("pk2")));
+        assert!(!seat_identity_matches("alice", Some("pk1"), "alice", None));
+        assert!(!seat_identity_matches("alice", Some("pk1"), "eve", Some("pk1")));
+    }
+
+    #[test]
+    fn relay_reconnect_gate_rejects_third_party_but_allows_original() {
+        // mirrors the /p2p bridge decision: a party may reclaim a Room seat only when its
+        // presented identity (relay: name only) matches the seat holder's.
+        let mut room = Room::new("t".into());
+        room.players[0] = Some(test_player("alice", None, true));
+        let held = room.players[0].as_ref().unwrap();
+        // eve cannot reclaim alice's dropped seat
+        assert!(!seat_identity_matches(&held.name, held.pubkey.as_deref(), "eve", None));
+        // alice reconnecting with her own nick can
+        assert!(seat_identity_matches(&held.name, held.pubkey.as_deref(), "alice", None));
+    }
+
+    #[test]
+    fn fresh_room_is_not_a_frost_room() {
+        // BUG 1 gate: the custodial /{code}/ws handler refuses attach only when frost_room_code
+        // is set. A newly-created room (the auto-insert path) and a plain non-staked table both
+        // have frost_room_code == None, so normal custodial tables are never refused.
+        let room = Room::new("t".into());
+        assert!(room.frost_room_code.is_none());
+        assert!(!room.staked);
     }
 }
